@@ -155,4 +155,15 @@ declare module "jazz-wasm" {
    * `self.onmessage` and asynchronously brings up the worker runtime.
    */
   export function runAsWorker(initMessage: unknown, pendingMessages: unknown[]): void;
+
+  /**
+   * Test helper: decode a postcard-encoded `MainToWorkerWire` payload back into
+   * a `{ type, ...fields }` JS object. Used by harnesses that intercept the
+   * bridge's outbound Uint8Array traffic to assert against the original wire.
+   * Not used in production code paths.
+   */
+  export function decodeMainToWorkerJs(bytes: Uint8Array): {
+    type: string;
+    [key: string]: unknown;
+  };
 }

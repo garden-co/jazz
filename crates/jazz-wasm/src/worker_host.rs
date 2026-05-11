@@ -81,7 +81,7 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
     // Parse the init message synchronously so we can fail fast.
     let init_payload = match parse_main_to_worker(&init_message) {
         Ok(MainToWorkerMessage::Init(payload)) => payload,
-        Ok(MainToWorkerMessage::Wire(wire)) => {
+        Ok(MainToWorkerMessage::Wire(wire)) | Ok(MainToWorkerMessage::WireJsObject(wire)) => {
             post_to_main(&WorkerToMainWire::Error {
                 message: format!("first message must be `init`, got {}", wire_type_str(&wire)),
             });
@@ -384,7 +384,7 @@ fn drain_pending_messages() {
 fn process_main_message(msg: MainToWorkerMessage) {
     let runtime = RUNTIME.with(|c| c.borrow().clone());
     let Some(runtime) = runtime else { return };
-    let wire = match msg {
+    let (wire, from_js_object) = match msg {
         MainToWorkerMessage::Init(_) => {
             post_to_main(&WorkerToMainWire::Error {
                 message: "ignoring duplicate init".into(),
@@ -395,12 +395,31 @@ fn process_main_message(msg: MainToWorkerMessage) {
             tracing::warn!("unknown main→worker JS object: {t}");
             return;
         }
-        MainToWorkerMessage::Wire(w) => w,
+        MainToWorkerMessage::Wire(w) => (w, false),
+        MainToWorkerMessage::WireJsObject(w) => (w, true),
     };
-    dispatch_wire(&runtime, wire);
+    dispatch_wire(&runtime, wire, from_js_object);
 }
 
-fn dispatch_wire(runtime: &Rc<WasmRuntime>, wire: MainToWorkerWire) {
+/// Post a JS-object response back to the main thread for test harnesses that
+/// dispatched a JS-object command and listen for `event.data.type`. Bridge
+/// dispatch treats unknown JS-object responses as a no-op.
+fn js_object_post(target_type: &str, fields: &[(&str, JsValue)]) {
+    let obj = Object::new();
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("type"),
+        &JsValue::from_str(target_type),
+    );
+    for (key, value) in fields {
+        let _ = Reflect::set(&obj, &JsValue::from_str(key), value);
+    }
+    if let Ok(global) = global_worker_scope() {
+        let _ = global.post_message(&obj.into());
+    }
+}
+
+fn dispatch_wire(runtime: &Rc<WasmRuntime>, wire: MainToWorkerWire, from_js_object: bool) {
     match wire {
         MainToWorkerWire::Sync { payloads } => {
             let main_client_id = PEER_ROUTING.with(|c| c.borrow().main_client_id.clone());
@@ -480,34 +499,44 @@ fn dispatch_wire(runtime: &Rc<WasmRuntime>, wire: MainToWorkerWire) {
                 perform_upstream_connect(runtime, &ws_url, &auth_json);
             }
         }
-        MainToWorkerWire::Shutdown => handle_shutdown(runtime, false),
-        MainToWorkerWire::SimulateCrash => handle_shutdown(runtime, true),
+        MainToWorkerWire::Shutdown => handle_shutdown(runtime, false, from_js_object),
+        MainToWorkerWire::SimulateCrash => handle_shutdown(runtime, true, from_js_object),
         MainToWorkerWire::AcknowledgeRejectedBatch { batch_id } => {
             let _ = runtime.acknowledge_rejected_batch(&batch_id);
         }
         MainToWorkerWire::DebugSchemaState => match runtime.debug_schema_state() {
             Ok(state) => {
                 let json = json_stringify(&state).unwrap_or_else(|| "{}".into());
+                if from_js_object {
+                    js_object_post("debug-schema-state-ok", &[("state", state.clone())]);
+                }
                 post_to_main(&WorkerToMainWire::DebugSchemaStateOk { state_json: json });
             }
             Err(err) => {
                 let v: JsValue = err.into();
-                post_to_main(&WorkerToMainWire::Error {
-                    message: format!("debug_schema_state: {}", js_error_message(&v)),
-                });
+                let message = format!("debug_schema_state: {}", js_error_message(&v));
+                if from_js_object {
+                    js_object_post("error", &[("message", JsValue::from_str(&message))]);
+                }
+                post_to_main(&WorkerToMainWire::Error { message });
             }
         },
         MainToWorkerWire::DebugSeedLiveSchema { schema_json } => {
             match runtime.debug_seed_live_schema(&schema_json) {
                 Ok(()) => {
                     runtime.flush_wal();
+                    if from_js_object {
+                        js_object_post("debug-seed-live-schema-ok", &[]);
+                    }
                     post_to_main(&WorkerToMainWire::DebugSeedLiveSchemaOk);
                 }
                 Err(err) => {
                     let v: JsValue = err.into();
-                    post_to_main(&WorkerToMainWire::Error {
-                        message: format!("debug_seed_live_schema: {}", js_error_message(&v)),
-                    });
+                    let message = format!("debug_seed_live_schema: {}", js_error_message(&v));
+                    if from_js_object {
+                        js_object_post("error", &[("message", JsValue::from_str(&message))]);
+                    }
+                    post_to_main(&WorkerToMainWire::Error { message });
                 }
             }
         }
@@ -534,7 +563,7 @@ fn ensure_peer_client(runtime: &WasmRuntime, peer_id: &str) -> String {
     cid
 }
 
-fn handle_shutdown(runtime: &Rc<WasmRuntime>, simulate_crash: bool) {
+fn handle_shutdown(runtime: &Rc<WasmRuntime>, simulate_crash: bool, from_js_object: bool) {
     HOST.with(|c| {
         if let Some(h) = c.borrow_mut().as_mut() {
             h.state = HostState::ShuttingDown;
@@ -558,6 +587,9 @@ fn handle_shutdown(runtime: &Rc<WasmRuntime>, simulate_crash: bool) {
     RUNTIME.with(|c| *c.borrow_mut() = None);
     PEER_ROUTING.with(|c| *c.borrow_mut() = PeerRouting::default());
 
+    if from_js_object {
+        js_object_post("shutdown-ok", &[]);
+    }
     post_to_main(&WorkerToMainWire::ShutdownOk);
     if let Ok(global) = global_worker_scope() {
         global.close();

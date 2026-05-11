@@ -182,6 +182,12 @@ pub enum WorkerToMainWire {
 pub enum MainToWorkerMessage {
     Init(Box<InitPayload>),
     Wire(MainToWorkerWire),
+    /// JS-object form of a wire command — accepted only for a small set of
+    /// commands that browser test harnesses send directly via `postMessage`
+    /// (bypassing the production bridge). The dispatcher uses this to also
+    /// emit the response in JS-object form so the harness's `event.data.type`
+    /// listener wakes up.
+    WireJsObject(MainToWorkerWire),
     Unknown(String),
 }
 
@@ -225,6 +231,9 @@ pub fn parse_main_to_worker(value: &JsValue) -> Result<MainToWorkerMessage, Stri
                 runtime_sources,
             })));
         }
+        if let Some(wire) = parse_js_object_test_command(value, &ty)? {
+            return Ok(MainToWorkerMessage::WireJsObject(wire));
+        }
         return Ok(MainToWorkerMessage::Unknown(ty));
     }
     if is_uint8_array(value) {
@@ -235,6 +244,29 @@ pub fn parse_main_to_worker(value: &JsValue) -> Result<MainToWorkerMessage, Stri
         return Ok(MainToWorkerMessage::Wire(wire));
     }
     Err("expected Uint8Array (binary) or `init` JS object".to_string())
+}
+
+/// Recognise the JS-object form of the small set of commands that browser
+/// test harnesses send directly via `worker.postMessage({type: ...})`.
+/// Production code always sends binary postcard.
+#[cfg(target_arch = "wasm32")]
+fn parse_js_object_test_command(
+    value: &JsValue,
+    ty: &str,
+) -> Result<Option<MainToWorkerWire>, String> {
+    match ty {
+        "simulate-crash" => Ok(Some(MainToWorkerWire::SimulateCrash)),
+        "shutdown" => Ok(Some(MainToWorkerWire::Shutdown)),
+        "debug-schema-state" => Ok(Some(MainToWorkerWire::DebugSchemaState)),
+        "debug-seed-live-schema" => {
+            let schema_json = Reflect::get(value, &JsValue::from_str("schemaJson"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| "debug-seed-live-schema: missing schemaJson".to_string())?;
+            Ok(Some(MainToWorkerWire::DebugSeedLiveSchema { schema_json }))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -287,6 +319,102 @@ pub fn encode_to_uint8array_with_transfer(bytes: &[u8]) -> (JsValue, Array) {
 pub fn main_to_worker_post(msg: &MainToWorkerWire) -> Result<(JsValue, Array), postcard::Error> {
     let bytes = encode_main_to_worker(msg)?;
     Ok(encode_to_uint8array_with_transfer(&bytes))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn js_set_in(obj: &js_sys::Object, key: &str, value: &JsValue) {
+    let _ = js_sys::Reflect::set(obj.as_ref(), &JsValue::from_str(key), value);
+}
+
+/// Decode a postcard-encoded `MainToWorkerWire` payload back into a JS object
+/// of the shape `{ type: "kebab-case", ...fields }`. Exposed as a test helper
+/// for harnesses that intercept the bridge's outbound `Uint8Array` traffic and
+/// need to assert against the original wire variant (the production protocol
+/// is binary-only after `init`).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = decodeMainToWorkerJs)]
+pub fn decode_main_to_worker_js(bytes: &Uint8Array) -> Result<JsValue, JsValue> {
+    let vec = bytes.to_vec();
+    let wire: MainToWorkerWire = postcard::from_bytes(&vec)
+        .map_err(|e| JsValue::from_str(&format!("postcard decode: {e}")))?;
+    let obj = js_sys::Object::new();
+    let payload_for_arr = |bufs: &[ByteBuf]| -> JsValue {
+        let arr = Array::new();
+        for b in bufs {
+            arr.push(&Uint8Array::from(b.as_ref()).into());
+        }
+        arr.into()
+    };
+    match wire {
+        MainToWorkerWire::Sync { payloads } => {
+            js_set_in(&obj, "type", &JsValue::from_str("sync"));
+            js_set_in(&obj, "payload", &payload_for_arr(&payloads));
+        }
+        MainToWorkerWire::PeerOpen { peer_id } => {
+            js_set_in(&obj, "type", &JsValue::from_str("peer-open"));
+            js_set_in(&obj, "peerId", &JsValue::from_str(&peer_id));
+        }
+        MainToWorkerWire::PeerSync {
+            peer_id,
+            term,
+            payloads,
+        } => {
+            js_set_in(&obj, "type", &JsValue::from_str("peer-sync"));
+            js_set_in(&obj, "peerId", &JsValue::from_str(&peer_id));
+            js_set_in(&obj, "term", &JsValue::from_f64(term as f64));
+            js_set_in(&obj, "payload", &payload_for_arr(&payloads));
+        }
+        MainToWorkerWire::PeerClose { peer_id } => {
+            js_set_in(&obj, "type", &JsValue::from_str("peer-close"));
+            js_set_in(&obj, "peerId", &JsValue::from_str(&peer_id));
+        }
+        MainToWorkerWire::LifecycleHint { event, sent_at_ms } => {
+            js_set_in(&obj, "type", &JsValue::from_str("lifecycle-hint"));
+            let kebab = match event {
+                WorkerLifecycleEvent::VisibilityHidden => "visibility-hidden",
+                WorkerLifecycleEvent::VisibilityVisible => "visibility-visible",
+                WorkerLifecycleEvent::Pagehide => "pagehide",
+                WorkerLifecycleEvent::Freeze => "freeze",
+                WorkerLifecycleEvent::Resume => "resume",
+            };
+            js_set_in(&obj, "event", &JsValue::from_str(kebab));
+            js_set_in(&obj, "sentAtMs", &JsValue::from_f64(sent_at_ms));
+        }
+        MainToWorkerWire::UpdateAuth { jwt_token } => {
+            js_set_in(&obj, "type", &JsValue::from_str("update-auth"));
+            if let Some(t) = jwt_token {
+                js_set_in(&obj, "jwtToken", &JsValue::from_str(&t));
+            }
+        }
+        MainToWorkerWire::DisconnectUpstream => {
+            js_set_in(&obj, "type", &JsValue::from_str("disconnect-upstream"));
+        }
+        MainToWorkerWire::ReconnectUpstream => {
+            js_set_in(&obj, "type", &JsValue::from_str("reconnect-upstream"));
+        }
+        MainToWorkerWire::Shutdown => {
+            js_set_in(&obj, "type", &JsValue::from_str("shutdown"));
+        }
+        MainToWorkerWire::SimulateCrash => {
+            js_set_in(&obj, "type", &JsValue::from_str("simulate-crash"));
+        }
+        MainToWorkerWire::AcknowledgeRejectedBatch { batch_id } => {
+            js_set_in(
+                &obj,
+                "type",
+                &JsValue::from_str("acknowledge-rejected-batch"),
+            );
+            js_set_in(&obj, "batchId", &JsValue::from_str(&batch_id));
+        }
+        MainToWorkerWire::DebugSchemaState => {
+            js_set_in(&obj, "type", &JsValue::from_str("debug-schema-state"));
+        }
+        MainToWorkerWire::DebugSeedLiveSchema { schema_json } => {
+            js_set_in(&obj, "type", &JsValue::from_str("debug-seed-live-schema"));
+            js_set_in(&obj, "schemaJson", &JsValue::from_str(&schema_json));
+        }
+    }
+    Ok(obj.into())
 }
 
 #[cfg(target_arch = "wasm32")]

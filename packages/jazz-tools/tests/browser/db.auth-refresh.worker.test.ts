@@ -32,6 +32,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { TestCleanup, uniqueDbName, withTimeout } from "./support.js";
+import { decodeMainToWorkerJs } from "jazz-wasm";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -103,9 +104,23 @@ function attachOutboundMessageProbe(db: Db): {
 
   const originalPostMessage = worker.postMessage.bind(worker);
   worker.postMessage = ((message: unknown, options?: unknown) => {
-    const typed = message as { type?: string } | undefined;
-    if (typed?.type) {
-      captured.push({ ...(typed as { type: string; [k: string]: unknown }) });
+    // Production bridge dispatches binary postcard. JS-object form survives
+    // only for the `init` handshake and a small set of test-only commands.
+    if (message instanceof Uint8Array) {
+      try {
+        const decoded = decodeMainToWorkerJs(message) as {
+          type: string;
+          [k: string]: unknown;
+        };
+        captured.push(decoded);
+      } catch {
+        // Probe must not interfere with the worker even if decode fails.
+      }
+    } else {
+      const typed = message as { type?: string } | undefined;
+      if (typed?.type) {
+        captured.push({ ...(typed as { type: string; [k: string]: unknown }) });
+      }
     }
     return originalPostMessage(message as never, options as never);
   }) as Worker["postMessage"];
