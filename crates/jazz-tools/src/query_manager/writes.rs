@@ -1033,10 +1033,52 @@ impl QueryManager {
         external_object_id: Option<ObjectId>,
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
-        let table_name = TableName::new(table);
         let write_schema = self.schema.clone();
+        self.insert_on_branch_with_schema_and_write_context_and_id(
+            storage,
+            table,
+            branch,
+            values,
+            external_object_id,
+            write_schema.as_ref(),
+            write_context,
+        )
+    }
+
+    pub fn insert_on_branch_with_schema_and_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        self.insert_on_branch_with_schema_and_write_context_and_id(
+            storage,
+            table,
+            branch,
+            values,
+            None,
+            write_schema,
+            write_context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_on_branch_with_schema_and_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        external_object_id: Option<ObjectId>,
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        let table_name = TableName::new(table);
         let table_write =
-            self.write_table_cache_entry_for_schema(branch, table_name, write_schema.as_ref())?;
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
         let descriptor = table_write.descriptor.as_ref();
         let insert_policy = table_write.insert_policy.as_deref();
 
@@ -1056,7 +1098,6 @@ impl QueryManager {
             table_write.indexed_columns.as_deref().map(Vec::as_slice),
         )?;
 
-        // Encode to binary
         let data =
             encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
         let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
@@ -1068,12 +1109,11 @@ impl QueryManager {
             && session.auth_mode == AuthMode::Anonymous
         {
             return Err(QueryError::AnonymousWriteDenied {
-                table: TableName::new(table),
+                table: table_name,
                 operation: Operation::Insert,
             });
         }
 
-        // Check INSERT WITH CHECK policy
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
@@ -1139,13 +1179,9 @@ impl QueryManager {
             }
         }
 
-        // Create row locator for the new row object
         self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
-        // Add commit with row data to specified branch
         let index_mutations = if Self::write_context_is_open_batch(write_context) {
-            // Writes made as part of batches/transactions do not modify indexes.
-            // Indexes are updated on commit.
             Vec::new()
         } else {
             Self::index_mutations_for_insert_on_branch_with_layout(
@@ -1179,172 +1215,6 @@ impl QueryManager {
                     descriptor: table_write.descriptor.clone(),
                 },
             )?;
-        self.maybe_track_local_pending_batch_overlay(
-            table,
-            RowBatchKey::new(object_id, branch_name, row_batch_id),
-            write_context,
-            false,
-            &visibility_change,
-        );
-        self.maybe_record_local_direct_settlement(
-            storage,
-            &branch_name,
-            object_id,
-            row_batch_id,
-            write_context,
-            &visibility_change,
-        )?;
-
-        if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_batch(storage, visibility_change)?;
-        }
-
-        Ok(InsertResult {
-            row_id: object_id,
-            batch_id: row_batch_id,
-            row_values: values.to_vec(),
-        })
-    }
-
-    pub fn insert_on_branch_with_schema_and_write_context<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        branch: &str,
-        values: &[Value],
-        write_schema: &Schema,
-        write_context: Option<&WriteContext>,
-    ) -> Result<InsertResult, QueryError> {
-        self.insert_on_branch_with_schema_and_write_context_and_id(
-            storage,
-            table,
-            branch,
-            values,
-            None,
-            write_schema,
-            write_context,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_on_branch_with_schema_and_write_context_and_id<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        branch: &str,
-        values: &[Value],
-        external_object_id: Option<ObjectId>,
-        write_schema: &Schema,
-        write_context: Option<&WriteContext>,
-    ) -> Result<InsertResult, QueryError> {
-        let table_name = TableName::new(table);
-        let table_write =
-            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
-        let descriptor = table_write.descriptor.as_ref();
-        let insert_policy = table_write.insert_policy.as_deref();
-
-        if values.len() != descriptor.columns.len() {
-            return Err(QueryError::ColumnCountMismatch {
-                expected: descriptor.columns.len(),
-                actual: values.len(),
-            });
-        }
-
-        self.validate_json_for_values(descriptor, values)?;
-        Self::validate_write_index_values_on_branch(
-            table,
-            branch,
-            values,
-            descriptor,
-            table_write.indexed_columns.as_deref().map(Vec::as_slice),
-        )?;
-
-        let data =
-            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
-        let timestamp = self.reserve_write_timestamp();
-        let provenance = self.row_provenance_for_insert(write_context, timestamp);
-
-        if let Some(session) = write_context.and_then(WriteContext::session) {
-            if let Some((auth_schema, auth_context)) =
-                self.local_write_authorization_context(branch, Some(session))
-            {
-                let allowed = auth_schema
-                    .get(&table_name)
-                    .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
-                    .map(|policy| {
-                        self.evaluate_current_authorization_policy_for_content(
-                            storage,
-                            object_id,
-                            branch,
-                            table_name,
-                            policy,
-                            &data,
-                            &provenance,
-                            session,
-                            Operation::Insert,
-                            &auth_schema,
-                            &auth_context,
-                        )
-                    })
-                    .unwrap_or_else(|| auth_schema.contains_key(&table_name));
-                if !allowed {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Insert,
-                    });
-                }
-            } else if let Some(policy) = insert_policy
-                && !self.evaluate_policy_for_content_with_context(
-                    storage,
-                    policy,
-                    &data,
-                    &provenance,
-                    descriptor,
-                    session,
-                    table,
-                    branch,
-                    Operation::Insert,
-                )
-            {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Insert,
-                });
-            }
-        }
-
-        self.persist_row_locator(storage, object_id, &table_write.row_locator);
-
-        let index_mutations = if Self::write_context_is_open_batch(write_context) {
-            Vec::new()
-        } else {
-            Self::index_mutations_for_insert_on_branch_with_layout(
-                table,
-                branch,
-                object_id,
-                &data,
-                descriptor,
-                table_write.indexed_columns.as_deref().map(Vec::as_slice),
-                &table_write.row_layout,
-            )
-        };
-        let row = self.authored_row_batch(
-            object_id,
-            branch,
-            vec![],
-            data.clone(),
-            self.row_batch_authoring(&provenance, None, write_context),
-        );
-        let branch_name = BranchName::new(branch);
-        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
-            storage,
-            table,
-            &branch_name,
-            object_id,
-            row,
-            &index_mutations,
-        )?;
         self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(object_id, branch_name, row_batch_id),
@@ -1520,36 +1390,6 @@ impl QueryManager {
                 source_branch_schema_map: &source_branch_schema_map,
                 operation,
             },
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn evaluate_policy_for_content_with_context<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        policy: &crate::query_manager::policy::PolicyExpr,
-        content: &[u8],
-        provenance: &RowProvenance,
-        descriptor: &RowDescriptor,
-        session: &Session,
-        table: &str,
-        branch: &str,
-        operation: Operation,
-    ) -> bool {
-        let mut visited = HashSet::new();
-        self.evaluate_policy_for_content_with_context_inner(
-            storage,
-            policy,
-            content,
-            provenance,
-            descriptor,
-            session,
-            table,
-            branch,
-            operation,
-            None,
-            0,
-            &mut visited,
         )
     }
 
