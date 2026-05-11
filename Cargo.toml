@@ -12,6 +12,3 @@ members = [
 ]
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }
-
-[patch."https://github.com/zaidoon1/rust-rocksdb.git"]
-rust-librocksdb-sys = { path = "dev/vendor/rust-librocksdb-sys" }
