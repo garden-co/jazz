@@ -3,6 +3,7 @@ import type {
   DirectInsertResult,
   DirectMutationResult,
   LocalBatchRecord,
+  MutationErrorEvent,
   Runtime,
 } from "../runtime/client.js";
 import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
@@ -42,7 +43,8 @@ export interface JazzRnRuntimeBinding {
   ): string;
   loadLocalBatchRecord?(batchId: string): string | null;
   loadLocalBatchRecords?(): string;
-  drainRejectedBatchIds?(): string[];
+  waitForBatch(batchId: string, tier: string): Promise<void>;
+  onMutationError(callback: { onError(eventJson: string): void }): void;
   onBatchedTickNeeded(
     callback:
       | {
@@ -79,7 +81,7 @@ export interface JazzRnRuntimeBinding {
     writeContextJson: string | undefined,
   ): string;
   acknowledgeRejectedBatch?(batchId: string): boolean;
-  sealBatch?(batchId: string): void;
+  sealBatch(batchId: string): void;
   uniffiDestroy?(): void;
 }
 
@@ -164,6 +166,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
+  async waitForBatch(batch_id: string, tier: string): Promise<void> {
+    try {
+      await this.binding.waitForBatch(batch_id, tier);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
   private requireWriteContextMethod<
     T extends "insertWithSession" | "updateWithSession" | "deleteWithSession",
   >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
@@ -175,12 +185,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   private requireBatchRecordMethod<
-    T extends
-      | "loadLocalBatchRecord"
-      | "loadLocalBatchRecords"
-      | "drainRejectedBatchIds"
-      | "acknowledgeRejectedBatch"
-      | "sealBatch",
+    T extends "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch",
   >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
     const runtimeMethod = this.binding[method];
     if (!runtimeMethod) {
@@ -281,14 +286,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
     try {
       const recordsJson = this.requireBatchRecordMethod("loadLocalBatchRecords")();
       return JSON.parse(recordsJson) as LocalBatchRecord[];
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  drainRejectedBatchIds(): string[] {
-    try {
-      return this.requireBatchRecordMethod("drainRejectedBatchIds")();
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
@@ -418,6 +415,19 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
+  onMutationError(callback: (event: MutationErrorEvent) => void): void {
+    if (this.closed) return;
+    this.binding.onMutationError({
+      onError: (eventJson: string) => {
+        try {
+          callback(JSON.parse(eventJson) as MutationErrorEvent);
+        } catch (error) {
+          swallowCallbackError("onMutationError", error);
+        }
+      },
+    });
+  }
+
   acknowledgeRejectedBatch(batch_id: string): boolean {
     try {
       return this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batch_id);
@@ -428,7 +438,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   sealBatch(batch_id: string): void {
     try {
-      this.requireBatchRecordMethod("sealBatch")(batch_id);
+      this.binding.sealBatch(batch_id);
     } catch (error) {
       throw normalizeJazzRnError(error);
     }

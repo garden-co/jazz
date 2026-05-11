@@ -28,7 +28,7 @@
 //! ```
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -49,6 +49,13 @@ use crate::row_histories::BatchId;
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationErrorEvent {
+    pub code: String,
+    pub reason: String,
+    pub batch: crate::batch_fate::LocalBatchRecord,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryLocalOverlay {
@@ -317,6 +324,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Recently mutated local batch records. Large direct batches append one
     /// member per write, so reloading the record from storage on every insert
     /// means repeatedly decoding the full accumulated member array.
+    /// Note: local_batch_record_cache is not authoritative after a batch has been sealed.
+    /// seal_batch writes the record to storage and also leaves a copy in the cache;
+    /// later incoming batch fate is applied to storage in apply_received_batch_fate,
+    /// but the cached copy is not updated.
     local_batch_record_cache: HashMap<BatchId, crate::batch_fate::LocalBatchRecord>,
 
     /// Label for tracing (e.g. "local", "edge", "client").
@@ -348,13 +359,36 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .scan_acknowledged_rejected_batch_fates()
             .map(|batch_ids| batch_ids.into_iter().collect())
             .unwrap_or_default();
-        let replayable_rejected_batch_ids: BTreeSet<BatchId> = rejected_batch_fates
-            .iter()
-            .filter_map(|fate| {
-                let batch_id = fate.batch_id();
-                (!acknowledged_rejected_batches.contains(&batch_id)).then_some(batch_id)
-            })
-            .collect();
+        let pending_mutation_error_events: BTreeMap<BatchId, MutationErrorEvent> =
+            rejected_batch_fates
+                .iter()
+                .filter_map(|fate| {
+                    let crate::batch_fate::BatchFate::Rejected {
+                        batch_id,
+                        code,
+                        reason,
+                    } = fate
+                    else {
+                        return None;
+                    };
+                    if acknowledged_rejected_batches.contains(batch_id) {
+                        return None;
+                    }
+                    Some((
+                        *batch_id,
+                        MutationErrorEvent {
+                            code: code.clone(),
+                            reason: reason.clone(),
+                            batch: crate::batch_fate::LocalBatchRecord::new(
+                                *batch_id,
+                                crate::batch_fate::BatchMode::Direct,
+                                true,
+                                Some(fate.clone()),
+                            ),
+                        },
+                    ))
+                })
+                .collect();
 
         let mut core = Self {
             schema_manager,
@@ -372,7 +406,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             next_subscription_handle: 0,
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
-            durability: DurabilityTracker::with_initial_rejections(replayable_rejected_batch_ids),
+            durability: DurabilityTracker::with_initial_mutation_error_events(
+                pending_mutation_error_events,
+            ),
             acknowledged_rejected_batches,
             local_batch_record_cache: HashMap::new(),
             tier_label: "unknown",

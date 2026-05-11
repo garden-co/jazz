@@ -66,7 +66,7 @@ interface WorkerBridgeState {
   localBatchRecordsSyncListener:
     | ((batches: LocalBatchRecordsSyncMessage["batches"]) => void)
     | null;
-  mutationErrorReplayListener: ((batch: MutationErrorReplayMessage["batch"]) => void) | null;
+  mutationErrorReplayListener: ((event: MutationErrorReplayMessage["event"]) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
   nextSyncAckId: number;
   pendingSyncAcks: Map<number, (ack: Extract<WorkerToMainMessage, { type: "sync-ack" }>) => void>;
@@ -139,7 +139,7 @@ export class WorkerBridge {
       } else if (msg.type === "local-batch-records-sync") {
         this.state.localBatchRecordsSyncListener?.(msg.batches);
       } else if (msg.type === "mutation-error-replay") {
-        this.state.mutationErrorReplayListener?.(msg.batch);
+        this.state.mutationErrorReplayListener?.(msg.event);
       } else if (msg.type === "sync-ack") {
         const resolver = this.state.pendingSyncAcks.get(msg.ackId);
         if (resolver) {
@@ -406,7 +406,7 @@ export class WorkerBridge {
     this.state.localBatchRecordsSyncListener = listener;
   }
 
-  onMutationErrorReplay(listener: (batch: MutationErrorReplayMessage["batch"]) => void): void {
+  onMutationErrorReplay(listener: (event: MutationErrorReplayMessage["event"]) => void): void {
     this.state.mutationErrorReplayListener = listener;
   }
 

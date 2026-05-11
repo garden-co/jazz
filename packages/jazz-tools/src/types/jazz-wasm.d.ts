@@ -1,4 +1,4 @@
-import type { LocalBatchRecord } from "../runtime/client.js";
+import type { LocalBatchRecord, MutationErrorEvent } from "../runtime/client.js";
 
 declare module "jazz-wasm" {
   type SyncOutboxCallbackArgs =
@@ -82,12 +82,13 @@ declare module "jazz-wasm" {
     loadLocalBatchRecordStorageRow(batchId: string): Uint8Array | null;
     hydrateLocalBatchRecordStorageRow(bytes: Uint8Array): void;
     loadLocalBatchRecords(): LocalBatchRecord[];
+    acknowledgeRejectedBatch(batchId: string): boolean;
+    onMutationError(callback: (event: MutationErrorEvent) => void): void;
     loadBatchFate(batchId: string): BatchFate | null;
     replayBatchRejection(batchId: string, code: string, reason: string): void;
-    drainRejectedBatchIds(): string[];
-    acknowledgeRejectedBatch(batchId: string): boolean;
     discardLocalBatch(batchId: string): boolean;
     sealBatch(batchId: string): void;
+    waitForBatch(batchId: string, tier: string): Promise<void>;
     retransmitLocalBatch(batchId: string): void;
     replayLocalBatchPayloads(batchId: string): Uint8Array[];
     reconcileLocalBatchWithServer(batchId: string): void;

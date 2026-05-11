@@ -66,7 +66,6 @@ let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init c
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
 let pendingSyncPayloadsForMain: (Uint8Array | string | SequencedSyncPayload)[] = [];
 let syncBatchFlushQueued = false;
-let rejectedBatchReplayQueued = false;
 let bootstrapCatalogueForwarding = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let peerRuntimeClientByPeerId = new Map<string, string>();
@@ -96,44 +95,6 @@ function attachEncodedLocalBatchRecord(batch: any): any {
   const encodedRecord = runtime.loadLocalBatchRecordStorageRow(batch.batchId);
   return encodedRecord ? { ...batch, encodedRecord } : batch;
 }
-
-function replayNewlyRejectedBatchesToMain(): void {
-  if (!runtime) {
-    return;
-  }
-  try {
-    const batchIds = runtime.drainRejectedBatchIds?.() ?? [];
-    for (const batchId of batchIds) {
-      const fate = runtime.loadBatchFate?.(batchId) ?? null;
-      if (fate?.kind !== "rejected") {
-        continue;
-      }
-      const batch = attachEncodedLocalBatchRecord(
-        runtime.loadLocalBatchRecord?.(batchId) ?? {
-          batchId,
-          mode: "direct",
-          sealed: true,
-          latestSettlement: fate,
-        },
-      );
-      post({ type: "mutation-error-replay", batch });
-    }
-  } catch (error) {
-    console.warn("[worker] drainRejectedBatchIds failed:", error);
-  }
-}
-
-function queueRejectedBatchReplayToMain(): void {
-  if (rejectedBatchReplayQueued) {
-    return;
-  }
-  rejectedBatchReplayQueued = true;
-  queueMicrotask(() => {
-    rejectedBatchReplayQueued = false;
-    replayNewlyRejectedBatchesToMain();
-  });
-}
-
 function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
   const origin = self.location?.origin;
   if (!origin) return null;
@@ -422,6 +383,12 @@ async function handleInit(msg: InitMessage): Promise<void> {
       post({ type: "auth-failed", reason: mapAuthReason(reason) });
     });
 
+    runtime.onMutationError?.((event: any) => {
+      queueMicrotask(() => {
+        post({ type: "mutation-error-replay", event });
+      });
+    });
+
     // Set up outbox routing — only the worker-bridge (client-bound) path.
     // Server sync is handled by the Rust-owned WebSocket transport below.
     runtime.onSyncMessageToSend(
@@ -437,7 +404,6 @@ async function handleInit(msg: InitMessage): Promise<void> {
           if (destinationClientId === mainClientId) {
             // Local main-thread client-bound payload.
             enqueueSyncMessageForMain(payload, sequence);
-            queueRejectedBatchReplayToMain();
             return;
           }
 
@@ -500,7 +466,6 @@ async function handleInit(msg: InitMessage): Promise<void> {
     }
 
     syncRetainedLocalBatchRecordsToMain();
-    replayNewlyRejectedBatchesToMain();
 
     post({ type: "init-ok", clientId: mainClientId! });
 
@@ -573,7 +538,6 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         }
         runtime.batchedTick?.();
         if (msg.ackId !== undefined) {
-          replayNewlyRejectedBatchesToMain();
           try {
             runtime.flushWal?.();
           } catch (error) {

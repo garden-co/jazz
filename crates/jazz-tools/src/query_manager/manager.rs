@@ -728,15 +728,6 @@ impl QueryManager {
         self.authorization_context_cache.clear();
     }
 
-    #[cfg(test)]
-    pub(crate) fn debug_authorization_state(&self) -> (RowPolicyMode, bool, bool) {
-        (
-            self.row_policy_mode,
-            self.authorization_schema_required,
-            self.authorization_schema.is_some(),
-        )
-    }
-
     /// Add a live schema (one we can read from but don't write to).
     ///
     /// Creates indices for the schema's branch.

@@ -7,28 +7,68 @@ use crate::object::BranchName;
 use crate::query_manager::types::SchemaHash;
 use crate::row_histories::BatchId;
 use crate::storage::StorageError;
-use crate::sync_manager::RowBatchKey;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
-    fn ack_watcher_key(
-        &self,
-        row_id: ObjectId,
-        batch_id: BatchId,
-        write_context: Option<&WriteContext>,
-    ) -> RowBatchKey {
-        let branch_name = write_context
-            .and_then(WriteContext::target_branch_name)
-            .map(BranchName::new)
-            .unwrap_or_else(|| self.schema_manager.branch_name());
-        RowBatchKey::new(row_id, branch_name, batch_id)
-    }
-
     fn local_write_confirmed_tier(&self) -> DurabilityTier {
         self.schema_manager
             .query_manager()
             .sync_manager()
             .max_local_durability_tier()
             .unwrap_or(DurabilityTier::Local)
+    }
+
+    fn completed_batch_wait_receiver(
+        outcome: PersistedWriteAck,
+    ) -> oneshot::Receiver<PersistedWriteAck> {
+        let (sender, receiver) = oneshot::channel();
+        let _ = sender.send(outcome);
+        receiver
+    }
+
+    fn batch_wait_outcome(
+        fate: Option<&BatchFate>,
+        tier: DurabilityTier,
+    ) -> Option<PersistedWriteAck> {
+        match fate {
+            Some(BatchFate::Rejected {
+                batch_id,
+                code,
+                reason,
+            }) => Some(Err(PersistedWriteRejection {
+                batch_id: *batch_id,
+                code: code.clone(),
+                reason: reason.clone(),
+            })),
+            Some(fate) => match fate.confirmed_tier() {
+                Some(confirmed_tier) if confirmed_tier >= tier => Some(Ok(())),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
+    fn local_batch_record_for_wait(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<LocalBatchRecord, RuntimeError> {
+        self.storage
+            .load_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
+            .or_else(|| self.local_batch_record_cache.get(&batch_id).cloned())
+            .ok_or_else(|| {
+                RuntimeError::WriteError(format!("missing local batch record for {batch_id:?}"))
+            })
+    }
+
+    fn register_batch_waiter(
+        &mut self,
+        batch_id: BatchId,
+        tier: DurabilityTier,
+    ) -> oneshot::Receiver<PersistedWriteAck> {
+        let (sender, receiver) = oneshot::channel();
+        self.durability
+            .register_batch_watcher(batch_id, tier, sender);
+        receiver
     }
 
     fn should_auto_seal_direct_write(
@@ -375,7 +415,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         object_id: ObjectId,
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("upsert", table, %object_id).entered();
         self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
@@ -388,17 +428,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 write_context,
             )
             .map_err(crate::runtime_core::write_error_from_query)?;
-        if write_context
+        let batch_mode = write_context
             .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct)
-            == BatchMode::Transactional
-        {
-            self.track_local_batch(object_id, batch_id, BatchMode::Transactional)?;
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(object_id, batch_id, batch_mode)?;
+
+        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
+            self.seal_batch(batch_id)?;
         }
 
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(())
+        Ok(batch_id)
     }
 
     /// Delete a row.
@@ -425,280 +466,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(batch_id)
-    }
-
-    // =========================================================================
-    // Persisted CRUD Operations
-    // =========================================================================
-
-    /// Insert a row and return a receiver that resolves when the requested
-    /// persistence tier (or higher) acknowledges.
-    pub fn insert_persisted(
-        &mut self,
-        table: &str,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<(InsertedRow, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        let (result, _batch_id, receiver) =
-            self.insert_persisted_with_batch_id(table, values, write_context, tier)?;
-        Ok((result, receiver))
-    }
-
-    /// Compatibility shim for callers that pass an explicit row id.
-    pub fn insert_persisted_with_id(
-        &mut self,
-        table: &str,
-        values: HashMap<String, Value>,
-        object_id: Option<ObjectId>,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<(InsertedRow, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        self.ensure_batch_is_writable(write_context)?;
-        let result = self
-            .schema_manager
-            .insert_with_write_context_and_id(
-                &mut self.storage,
-                table,
-                values,
-                object_id,
-                write_context,
-            )
-            .map_err(crate::runtime_core::write_error_from_query)?;
-        let row_id = result.row_id;
-        let batch_id = result.batch_id;
-        let row_values = result.row_values;
-        if write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct)
-            == BatchMode::Transactional
-        {
-            self.track_local_batch(row_id, batch_id, BatchMode::Transactional)?;
-        } else {
-            self.track_local_batch(row_id, batch_id, BatchMode::Direct)?;
-        }
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        let (sender, receiver) = oneshot::channel();
-        if self
-            .schema_manager
-            .query_manager()
-            .sync_manager()
-            .has_local_durability_at_least(tier)
-        {
-            let _ = sender.send(Ok(()));
-        } else {
-            let row_batch_key = self.ack_watcher_key(row_id, batch_id, write_context);
-            self.durability
-                .register_watcher(row_batch_key, tier, sender);
-        }
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
-        }
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
-        Ok(((row_id, row_values), receiver))
-    }
-
-    /// Insert a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
-    pub fn insert_persisted_with_batch_id(
-        &mut self,
-        table: &str,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<(InsertedRow, BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        self.ensure_batch_is_writable(write_context)?;
-        let result = self
-            .schema_manager
-            .insert_with_write_context(&mut self.storage, table, values, write_context)
-            .map_err(crate::runtime_core::write_error_from_query)?;
-        let row_id = result.row_id;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        let batch_id = result.batch_id;
-        let row_values = result.row_values;
-        self.track_local_batch(row_id, batch_id, batch_mode)?;
-
-        let (sender, receiver) = oneshot::channel();
-        if self
-            .schema_manager
-            .query_manager()
-            .sync_manager()
-            .has_local_durability_at_least(tier)
-        {
-            let _ = sender.send(Ok(()));
-        } else {
-            let row_batch_key = self.ack_watcher_key(row_id, batch_id, write_context);
-            self.durability
-                .register_watcher(row_batch_key, tier, sender);
-        }
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
-        }
-
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
-        Ok(((row_id, row_values), batch_id, receiver))
-    }
-
-    /// Update a row and return a receiver that resolves when the requested
-    /// persistence tier (or higher) acknowledges.
-    pub fn update_persisted(
-        &mut self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
-        let (_batch_id, receiver) =
-            self.update_persisted_with_batch_id(object_id, values, write_context, tier)?;
-        Ok(receiver)
-    }
-
-    /// Update a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
-    pub fn update_persisted_with_batch_id(
-        &mut self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        self.ensure_batch_is_writable(write_context)?;
-        let batch_id = self
-            .schema_manager
-            .update_with_write_context(&mut self.storage, object_id, &values, write_context)
-            .map_err(crate::runtime_core::write_error_from_query)?;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode)?;
-
-        let (sender, receiver) = oneshot::channel();
-        if self
-            .schema_manager
-            .query_manager()
-            .sync_manager()
-            .has_local_durability_at_least(tier)
-        {
-            let _ = sender.send(Ok(()));
-        } else {
-            let row_batch_key = self.ack_watcher_key(object_id, batch_id, write_context);
-            self.durability
-                .register_watcher(row_batch_key, tier, sender);
-        }
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
-        }
-
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
-        Ok((batch_id, receiver))
-    }
-
-    /// Delete a row and return a receiver that resolves when the requested
-    /// persistence tier (or higher) acknowledges.
-    pub fn delete_persisted(
-        &mut self,
-        object_id: ObjectId,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
-        let (_batch_id, receiver) =
-            self.delete_persisted_with_batch_id(object_id, write_context, tier)?;
-        Ok(receiver)
-    }
-
-    /// Compatibility shim for callers that expect explicit-id persisted upserts.
-    pub fn upsert_persisted_with_id(
-        &mut self,
-        table: &str,
-        object_id: ObjectId,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
-        self.ensure_batch_is_writable(write_context)?;
-        let batch_id = self
-            .schema_manager
-            .upsert_with_write_context_and_id(
-                &mut self.storage,
-                table,
-                object_id,
-                values,
-                write_context,
-            )
-            .map_err(crate::runtime_core::write_error_from_query)?;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode)?;
-
-        let (sender, receiver) = oneshot::channel();
-        if self
-            .schema_manager
-            .query_manager()
-            .sync_manager()
-            .has_local_durability_at_least(tier)
-        {
-            let _ = sender.send(Ok(()));
-        } else {
-            let row_batch_key = self.ack_watcher_key(object_id, batch_id, write_context);
-            self.durability
-                .register_watcher(row_batch_key, tier, sender);
-        }
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
-        }
-
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
-        Ok(receiver)
-    }
-
-    /// Delete a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
-    pub fn delete_persisted_with_batch_id(
-        &mut self,
-        object_id: ObjectId,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        self.ensure_batch_is_writable(write_context)?;
-        let handle = self
-            .schema_manager
-            .delete(&mut self.storage, object_id, write_context)
-            .map_err(crate::runtime_core::write_error_from_query)?;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        let batch_id = handle.batch_id;
-        self.track_local_batch(object_id, batch_id, batch_mode)?;
-
-        let (sender, receiver) = oneshot::channel();
-        if self
-            .schema_manager
-            .query_manager()
-            .sync_manager()
-            .has_local_durability_at_least(tier)
-        {
-            let _ = sender.send(Ok(()));
-        } else {
-            let row_batch_key = self.ack_watcher_key(object_id, batch_id, write_context);
-            self.durability
-                .register_watcher(row_batch_key, tier, sender);
-        }
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
-        }
-
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
-        Ok((batch_id, receiver))
     }
 
     /// Load one replayable local batch record by logical batch id.
@@ -886,6 +653,36 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| RuntimeError::WriteError(format!("load batch fate: {err}")))
     }
 
+    /// Wait for a batch to settle at `tier` or higher.
+    pub fn wait_for_batch(
+        &mut self,
+        batch_id: BatchId,
+        tier: DurabilityTier,
+    ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
+        let fate = self.batch_fate(batch_id)?;
+        if let Some(outcome) = Self::batch_wait_outcome(fate.as_ref(), tier) {
+            if outcome.is_err() {
+                self.durability.take_mutation_error_event(batch_id);
+            }
+            return Ok(Self::completed_batch_wait_receiver(outcome));
+        }
+
+        let record = self.local_batch_record_for_wait(batch_id)?;
+        if let Some(outcome) = Self::batch_wait_outcome(record.latest_fate.as_ref(), tier) {
+            if outcome.is_err() {
+                self.durability.take_mutation_error_event(batch_id);
+            }
+            return Ok(Self::completed_batch_wait_receiver(outcome));
+        }
+
+        Ok(self.register_batch_waiter(batch_id, tier))
+    }
+
+    /// Drain replayable mutation error events that should be surfaced by bindings.
+    pub fn drain_mutation_error_events(&mut self) -> Vec<MutationErrorEvent> {
+        self.durability.drain_mutation_error_events()
+    }
+
     pub fn hydrate_local_batch_record(
         &mut self,
         record: LocalBatchRecord,
@@ -926,16 +723,22 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| RuntimeError::WriteError(format!("persist batch fate: {err}")))?;
         self.mark_local_batch_rows_rejected(batch_id);
         if !already_rejected && !acknowledged {
-            self.durability.record_rejection(batch_id, code, reason);
+            let handled_by_waiter = self.durability.record_rejection(batch_id, code, reason);
+            if !handled_by_waiter {
+                let batch = self.local_batch_record(batch_id)?.unwrap_or_else(|| {
+                    LocalBatchRecord::new(batch_id, BatchMode::Direct, true, Some(fate.clone()))
+                });
+                self.durability
+                    .queue_mutation_error_event(MutationErrorEvent {
+                        code: code.to_string(),
+                        reason: reason.to_string(),
+                        batch,
+                    });
+            }
         }
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(())
-    }
-
-    /// Drain replayable rejected batch ids that should be surfaced by bindings.
-    pub fn drain_rejected_batch_ids(&mut self) -> Vec<BatchId> {
-        self.durability.drain_rejected()
     }
 
     /// Acknowledge a replayable rejected batch outcome and prune the local

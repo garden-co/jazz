@@ -89,7 +89,7 @@ function makeLocalBatchRecord(
 
 function makeHandleClient(mode: LocalBatchRecord["mode"] = "transactional", acknowledged = false) {
   return {
-    waitForPersistedBatch: vi.fn(async () => undefined),
+    waitForBatch: vi.fn(async () => undefined),
     localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, mode)),
     acknowledgeRejectedBatch: vi.fn(() => acknowledged),
   };
@@ -175,10 +175,7 @@ describe("Db transactions", () => {
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-tx");
     await expect(committed.wait({ tier: "global" })).resolves.toBeUndefined();
-    expect(committedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith(
-      "batch-tx",
-      "global",
-    );
+    expect(committedRuntime.client.waitForBatch).toHaveBeenCalledWith("batch-tx", "global");
     expect(runtimeTransaction.commit).toHaveBeenCalledWith();
     expect(tx.localBatchRecord()).toMatchObject({ batchId: "batch-tx" });
     expect(tx.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-tx")]);
@@ -318,7 +315,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      waitForPersistedBatch: vi.fn(async () => undefined),
+      waitForBatch: vi.fn(async () => undefined),
       beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -344,7 +341,7 @@ describe("Db transactions", () => {
       title: "Callback transaction",
       done: false,
     });
-    expect(client.waitForPersistedBatch).toHaveBeenCalledWith("batch-callback", "global");
+    expect(client.waitForBatch).toHaveBeenCalledWith("batch-callback", "global");
   });
 
   it("cannot commit a callback transaction by calling commit()", async () => {
@@ -565,7 +562,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      waitForPersistedBatch: vi.fn(async () => undefined),
+      waitForBatch: vi.fn(async () => undefined),
       beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -593,7 +590,7 @@ describe("Db transactions", () => {
       title: "Async callback transaction",
       done: false,
     });
-    expect(client.waitForPersistedBatch).toHaveBeenCalledWith("batch-async-callback", "global");
+    expect(client.waitForBatch).toHaveBeenCalledWith("batch-async-callback", "global");
   });
 
   it("rejects db transaction writes after commit", () => {
@@ -1026,10 +1023,7 @@ describe("Db transactions", () => {
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-direct");
     await expect(committed.wait({ tier: "global" })).resolves.toBeUndefined();
-    expect(committedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith(
-      "batch-direct",
-      "global",
-    );
+    expect(committedRuntime.client.waitForBatch).toHaveBeenCalledWith("batch-direct", "global");
     expect(runtimeBatch.commit).toHaveBeenCalledWith();
     expect(batch.localBatchRecord()).toMatchObject({
       batchId: "batch-direct",
@@ -1173,7 +1167,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      waitForPersistedBatch: vi.fn(async () => undefined),
+      waitForBatch: vi.fn(async () => undefined),
       beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -1199,7 +1193,7 @@ describe("Db transactions", () => {
       title: "Callback batch",
       done: false,
     });
-    expect(client.waitForPersistedBatch).toHaveBeenCalledWith("batch-direct-callback", "edge");
+    expect(client.waitForBatch).toHaveBeenCalledWith("batch-direct-callback", "edge");
   });
 
   it("does not commit a callback batch when the callback rejects", async () => {
@@ -1292,7 +1286,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      waitForPersistedBatch: vi.fn(async () => undefined),
+      waitForBatch: vi.fn(async () => undefined),
       beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -1320,10 +1314,7 @@ describe("Db transactions", () => {
       title: "Async callback batch",
       done: false,
     });
-    expect(client.waitForPersistedBatch).toHaveBeenCalledWith(
-      "batch-direct-async-callback",
-      "edge",
-    );
+    expect(client.waitForBatch).toHaveBeenCalledWith("batch-direct-async-callback", "edge");
   });
 
   it("throws when committing a db batch before any actions", () => {

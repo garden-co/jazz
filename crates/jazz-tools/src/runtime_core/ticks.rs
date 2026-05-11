@@ -238,7 +238,28 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .is_rejected_batch_acknowledged(batch_id)
                 .unwrap_or(false);
             if !acknowledged {
-                self.durability.record_rejection(batch_id, code, reason);
+                let handled_by_waiter = self.durability.record_rejection(batch_id, code, reason);
+                if !handled_by_waiter {
+                    let batch = self
+                        .local_batch_record(batch_id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| {
+                            crate::batch_fate::LocalBatchRecord::new(
+                                batch_id,
+                                crate::batch_fate::BatchMode::Direct,
+                                true,
+                                Some(fate.clone()),
+                            )
+                        });
+                    self.durability.queue_mutation_error_event(
+                        crate::runtime_core::MutationErrorEvent {
+                            code: code.clone(),
+                            reason: reason.clone(),
+                            batch,
+                        },
+                    );
+                }
             }
         } else if matches!(fate, crate::batch_fate::BatchFate::Missing { .. }) {
             self.retransmit_local_batch_to_servers(batch_id);

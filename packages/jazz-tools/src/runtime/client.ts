@@ -66,36 +66,17 @@ export interface Runtime {
   ): DirectMutationResult;
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
-  insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
-  insertPersistedWithSession?(
-    table: string,
-    values: InsertValues,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedInsertResult;
-  updatePersisted?(object_id: string, values: any, tier: string): PersistedMutationResult;
-  updatePersistedWithSession?(
-    object_id: string,
-    values: any,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedMutationResult;
-  deletePersisted?(object_id: string, tier: string): PersistedMutationResult;
-  deletePersistedWithSession?(
-    object_id: string,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedMutationResult;
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
   loadLocalBatchRecordStorageRow?(batch_id: string): Uint8Array | null;
   hydrateLocalBatchRecordStorageRow?(bytes: Uint8Array): void;
   loadLocalBatchRecords?(): LocalBatchRecord[];
+  acknowledgeRejectedBatch?(batch_id: string): boolean;
+  onMutationError(callback: (event: MutationErrorEvent) => void): void;
+  sealBatch(batch_id: string): void;
+  waitForBatch(batch_id: string, tier: string): Promise<void>;
   loadBatchFate?(batch_id: string): BatchFate | null;
   replayBatchRejection?(batch_id: string, code: string, reason: string): void;
-  drainRejectedBatchIds?(): string[];
-  acknowledgeRejectedBatch?(batch_id: string): boolean;
   discardLocalBatch?(batch_id: string): boolean;
-  sealBatch?(batch_id: string): void;
   retransmitLocalBatch?(batch_id: string): void;
   replayLocalBatchPayloads?(batch_id: string): Uint8Array[];
   reconcileLocalBatchWithServer?(batch_id: string): void;
@@ -306,15 +287,6 @@ interface WriteContextPayload {
   batch_mode?: BatchMode;
   batch_id?: string;
   target_branch_name?: string;
-}
-
-interface PersistedInsertResult {
-  batchId: string;
-  row: Row;
-}
-
-interface PersistedMutationResult {
-  batchId: string;
 }
 
 /**
@@ -764,6 +736,29 @@ function rejectionFromSettlement(
   return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
 }
 
+function rejectionFromRuntimeWaitError(
+  fallbackBatchId: string,
+  error: unknown,
+): PersistedWriteRejectedError | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+  const candidate = error as {
+    kind?: unknown;
+    batchId?: unknown;
+    code?: unknown;
+    reason?: unknown;
+  };
+  if (candidate.kind !== "rejected") {
+    return null;
+  }
+  if (typeof candidate.code !== "string" || typeof candidate.reason !== "string") {
+    return null;
+  }
+  const batchId = typeof candidate.batchId === "string" ? candidate.batchId : fallbackBatchId;
+  return new PersistedWriteRejectedError(batchId, candidate.code, candidate.reason);
+}
+
 /**
  * Error returned when a write fails to be persisted at a given durability tier.
  */
@@ -799,7 +794,7 @@ export class WriteHandle<T = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<T> {
-    return this.#client.waitForPersistedBatch(this.batchId, options.tier) as Promise<T>;
+    return this.#client.waitForBatch(this.batchId, options.tier) as Promise<T>;
   }
 
   protected client(): JazzClient {
@@ -1278,31 +1273,17 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   /**
-   * Promises created with {@link DirectBatch.wait} or {@TODO_link WriteHandle.wait}
-   * that are waiting for a batch to be settled.
-   */
-  private readonly pendingBatchWaiters = new Map<
-    string,
-    Array<{
-      tier: DurabilityTier;
-      resolve: () => void;
-      reject: (error: Error) => void;
-    }>
-  >();
-  /**
    * Listeners attached with {@link JazzClient.onMutationError} that are notified when a batch is rejected.
    */
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
+  private readonly waitHandledBatchIds = new Set<string>();
   private readonly replayedRejectedBatchRecords = new Map<string, LocalBatchRecord>();
   private readonly rejectedBatchRollbackRecords = new Map<string, LocalBatchRecord>();
   private readonly hydratedWorkerBatchIds = new Set<string>();
   private readonly completedEmptyBatchIds = new Set<string>();
-  private readonly pendingReplayedRejectedBatchIds = new Set<string>();
   private readonly onRejectedBatchAcknowledged?: (batchId: string) => void;
   private readonly onBeforeLocalBatchWait?: (batchId: string) => Promise<void>;
-  private pendingBatchWaitPollTimer: ReturnType<typeof setTimeout> | null = null;
-  private settlementPollTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private cachedRuntimeSchemaHash: string | null = null;
   private cachedRuntimeSchema: WasmSchema | null = null;
@@ -1344,7 +1325,7 @@ export class JazzClient {
     defaultDurabilityTier: DurabilityTier,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ) {
-    this.runtime = this.wrapRuntime(runtime);
+    this.runtime = runtime;
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
@@ -1358,28 +1339,9 @@ export class JazzClient {
         handler(mapAuthReason(reason));
       });
     }
-  }
 
-  private wrapRuntime(runtime: Runtime): Runtime {
-    return new Proxy(runtime, {
-      get: (target, property, receiver) => {
-        const value = Reflect.get(target, property, receiver);
-        if (property === "onSyncMessageReceived" && typeof value === "function") {
-          return (payload: Uint8Array | string, seq?: number | null) => {
-            const batchesWithPendingWaiters = new Set(this.pendingBatchWaiters.keys());
-            value.call(target, payload, seq);
-            this.flushPendingBatchWaiters();
-            this.flushUnhandledMutationErrors(
-              this.drainRejectedBatchIds(),
-              batchesWithPendingWaiters,
-            );
-          };
-        }
-        if (typeof value === "function") {
-          return value.bind(target);
-        }
-        return value;
-      },
+    this.runtime.onMutationError((event) => {
+      this.queueMutationError(event);
     });
   }
 
@@ -1575,6 +1537,10 @@ export class JazzClient {
     return runtimeRecord ?? replayedRecord ?? null;
   }
 
+  runtimeLocalBatchRecord(batchId: string): LocalBatchRecord | null {
+    return this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
+  }
+
   localBatchRecords(): LocalBatchRecord[] {
     const records = new Map(
       this.requireBatchRecordMethod("loadLocalBatchRecords")().map((record) => [
@@ -1646,15 +1612,18 @@ export class JazzClient {
     return this.hydratedWorkerBatchIds.has(batchId);
   }
 
+  hasAcknowledgedRejectedBatch(batchId: string): boolean {
+    return this.acknowledgedRejectedBatchErrors.has(batchId);
+  }
+
+  hasWaitHandlerForBatch(batchId: string): boolean {
+    return this.waitHandledBatchIds.has(batchId);
+  }
+
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
     this.mutationErrorListeners.add(listener);
-    this.flushUnhandledMutationErrors();
-    this.ensureSettlementPolling();
     return () => {
       this.mutationErrorListeners.delete(listener);
-      if (!this.shouldPollSettlements()) {
-        this.cancelSettlementPolling();
-      }
     };
   }
 
@@ -1664,7 +1633,6 @@ export class JazzClient {
       batchId,
     );
     const acknowledgedReplayed = this.replayedRejectedBatchRecords.delete(batchId);
-    this.pendingReplayedRejectedBatchIds.delete(batchId);
     const acknowledged = acknowledgedInRuntime || acknowledgedReplayed;
     if (acknowledged && rejection) {
       this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
@@ -1694,7 +1662,6 @@ export class JazzClient {
       this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
       if (publicRecord.latestSettlement?.kind === "rejected") {
         this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
-        this.pendingReplayedRejectedBatchIds.add(record.batchId);
       }
     }
   }
@@ -1708,7 +1675,6 @@ export class JazzClient {
     this.replayRejectedBatchRows(publicRecord);
     this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
     this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
-    this.pendingReplayedRejectedBatchIds.add(record.batchId);
   }
 
   private hydrateEncodedLocalBatchRecord(record: LocalBatchRecord): LocalBatchRecord {
@@ -1746,26 +1712,12 @@ export class JazzClient {
     }
   }
 
-  markReplayedRejectedBatchDelivered(batchId: string): void {
-    this.pendingReplayedRejectedBatchIds.delete(batchId);
-  }
-
   acknowledgeRejectedBatch(batchId: string): boolean {
-    const acknowledged = this.acknowledgeRejectedBatchInternal(batchId);
-    this.flushPendingBatchWaiters();
-    return acknowledged;
-  }
-
-  hasAcknowledgedRejectedBatch(batchId: string): boolean {
-    return this.acknowledgedRejectedBatchErrors.has(batchId);
-  }
-
-  hasPendingBatchWaiter(batchId: string): boolean {
-    return (this.pendingBatchWaiters.get(batchId)?.length ?? 0) > 0;
+    return this.acknowledgeRejectedBatchInternal(batchId);
   }
 
   sealBatch(batchId: string): WriteHandle {
-    this.requireBatchRecordMethod("sealBatch")(batchId);
+    this.runtime.sealBatch(batchId);
     return new WriteHandle(batchId, this);
   }
 
@@ -1886,7 +1838,6 @@ export class JazzClient {
       | "loadLocalBatchRecords"
       | "loadBatchFate"
       | "acknowledgeRejectedBatch"
-      | "sealBatch"
     >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
@@ -2605,151 +2556,42 @@ export class JazzClient {
     return { settled: false };
   }
 
-  private flushPendingBatchWaiters(): void {
-    if (this.pendingBatchWaiters.size === 0) {
+  private normalizeBatchWaitError(batchId: string, error: unknown): Error {
+    return (
+      this.acknowledgedRejectedBatchErrors.get(batchId) ??
+      rejectionFromSettlement(this.batchFate(batchId)) ??
+      rejectionFromRuntimeWaitError(batchId, error) ??
+      (error instanceof Error ? error : new Error(String(error)))
+    );
+  }
+
+  private queueMutationError(event: MutationErrorEvent): void {
+    setTimeout(() => {
+      this.deliverMutationError(event);
+    }, 0);
+  }
+
+  private deliverMutationError(event: MutationErrorEvent): void {
+    const batchId = event.batch.batchId;
+    if (this.acknowledgedRejectedBatchErrors.has(batchId)) {
+      return;
+    }
+    if (this.waitHandledBatchIds.has(batchId)) {
       return;
     }
 
-    const rejectedBatchIdsHandledByWaiters = new Set<string>();
-    for (const [batchId, waiters] of this.pendingBatchWaiters) {
-      const remaining: typeof waiters = [];
-      for (const waiter of waiters) {
-        const outcome = this.batchWaitOutcome(batchId, waiter.tier);
-        if (!outcome.settled) {
-          remaining.push(waiter);
-          continue;
-        }
-        if (outcome.error) {
-          this.replayRejectedBatchRowsById(batchId);
-          waiter.reject(outcome.error);
-          rejectedBatchIdsHandledByWaiters.add(batchId);
-        } else {
-          waiter.resolve();
-        }
+    if (this.mutationErrorListeners.size === 0) {
+      console.error("Unhandled Jazz mutation error", event);
+    } else {
+      for (const listener of this.mutationErrorListeners) {
+        listener(event);
       }
-      if (remaining.length > 0) {
-        this.pendingBatchWaiters.set(batchId, remaining);
-      } else {
-        this.pendingBatchWaiters.delete(batchId);
-      }
     }
 
-    for (const batchId of rejectedBatchIdsHandledByWaiters) {
-      this.acknowledgeRejectedBatchInternal(batchId);
-    }
+    this.acknowledgeRejectedBatchInternal(batchId);
   }
 
-  private ensurePendingBatchWaitPolling(): void {
-    if (this.pendingBatchWaitPollTimer !== null) {
-      return;
-    }
-    if (this.pendingBatchWaiters.size === 0) {
-      return;
-    }
-
-    // Rust-owned transports can settle batch records without routing through
-    // JS `onSyncMessageReceived`, so poll retained batch metadata while waits
-    // are outstanding.
-    this.pendingBatchWaitPollTimer = setTimeout(() => {
-      this.pendingBatchWaitPollTimer = null;
-      const batchesWithPendingWaiters = new Set(this.pendingBatchWaiters.keys());
-      this.flushPendingBatchWaiters();
-      this.flushUnhandledMutationErrors(this.drainRejectedBatchIds(), batchesWithPendingWaiters);
-
-      this.ensurePendingBatchWaitPolling();
-    }, 20);
-  }
-
-  private cancelPendingBatchWaitPolling(): void {
-    if (this.pendingBatchWaitPollTimer === null) {
-      return;
-    }
-
-    clearTimeout(this.pendingBatchWaitPollTimer);
-    this.pendingBatchWaitPollTimer = null;
-  }
-
-  private shouldPollSettlements(): boolean {
-    return this.pendingBatchWaiters.size > 0 || this.mutationErrorListeners.size > 0;
-  }
-
-  private ensureSettlementPolling(): void {
-    this.ensurePendingBatchWaitPolling();
-    if (this.settlementPollTimer !== null) {
-      return;
-    }
-    if (!this.shouldPollSettlements()) {
-      return;
-    }
-
-    // Rust-owned transports can settle batch records without routing through
-    // JS `onSyncMessageReceived`, so poll retained batch metadata while waits
-    // or mutation error listeners are outstanding.
-    this.settlementPollTimer = setTimeout(() => {
-      this.settlementPollTimer = null;
-      const batchesWithPendingWaiters = new Set(this.pendingBatchWaiters.keys());
-      this.flushPendingBatchWaiters();
-      this.flushUnhandledMutationErrors(this.drainRejectedBatchIds(), batchesWithPendingWaiters);
-
-      this.ensureSettlementPolling();
-    }, 20);
-  }
-
-  private cancelSettlementPolling(): void {
-    if (this.settlementPollTimer === null) {
-      return;
-    }
-
-    clearTimeout(this.settlementPollTimer);
-    this.settlementPollTimer = null;
-  }
-
-  private flushUnhandledMutationErrors(
-    rejectedBatchIds: readonly string[] = this.drainRejectedBatchIds(),
-    batchesHandledByLiveWaiters: ReadonlySet<string> = new Set<string>(),
-  ): void {
-    for (const batchId of rejectedBatchIds) {
-      const settlement = this.batchFate(batchId);
-      if (!settlement || settlement.kind !== "rejected") {
-        continue;
-      }
-      this.replayRejectedBatchRowsById(batchId);
-      if (batchesHandledByLiveWaiters.has(batchId)) {
-        continue;
-      }
-      if ((this.pendingBatchWaiters.get(batchId)?.length ?? 0) > 0) {
-        continue;
-      }
-
-      const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(settlement);
-      const event: MutationErrorEvent = {
-        code: settlement.code,
-        reason: settlement.reason,
-        batch,
-      };
-
-      if (this.mutationErrorListeners.size === 0) {
-        // If there are no listeners configured, we log the error to the console by default.
-        console.error("Unhandled Jazz mutation error", event);
-      } else {
-        for (const listener of this.mutationErrorListeners) {
-          listener(event);
-        }
-      }
-
-      this.acknowledgeRejectedBatchInternal(batchId);
-    }
-  }
-
-  private drainRejectedBatchIds(): string[] {
-    const drainRejectedBatchIds = this.runtime.drainRejectedBatchIds;
-    const runtimeBatchIds = drainRejectedBatchIds ? drainRejectedBatchIds.call(this.runtime) : [];
-    const replayedBatchIds = [...this.pendingReplayedRejectedBatchIds];
-    this.pendingReplayedRejectedBatchIds.clear();
-    return [...new Set([...runtimeBatchIds, ...replayedBatchIds])].sort();
-  }
-
-  async waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+  async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
     if (tier === "local" && this.onBeforeLocalBatchWait) {
       await this.onBeforeLocalBatchWait(batchId);
     }
@@ -2758,20 +2600,25 @@ export class JazzClient {
     if (outcome.settled) {
       if (outcome.error) {
         this.replayRejectedBatchRowsById(batchId);
-      }
-      if (outcome.error) {
         throw outcome.error;
       }
       return;
     }
 
-    return new Promise<void>((resolve, reject) => {
-      const waiters = this.pendingBatchWaiters.get(batchId) ?? [];
-      waiters.push({ tier, resolve, reject });
-      this.pendingBatchWaiters.set(batchId, waiters);
-      this.flushPendingBatchWaiters();
-      this.ensureSettlementPolling();
-    });
+    this.waitHandledBatchIds.add(batchId);
+
+    try {
+      await this.runtime.waitForBatch(batchId, tier);
+      this.waitHandledBatchIds.delete(batchId);
+    } catch (error) {
+      const normalizedError = this.normalizeBatchWaitError(batchId, error);
+      if (normalizedError instanceof PersistedWriteRejectedError) {
+        this.acknowledgeRejectedBatchInternal(batchId);
+      } else {
+        this.waitHandledBatchIds.delete(batchId);
+      }
+      throw normalizedError;
+    }
   }
 
   /**
@@ -2783,9 +2630,6 @@ export class JazzClient {
     }
 
     this.shutdownPromise = (async () => {
-      this.cancelSettlementPolling();
-      this.cancelPendingBatchWaitPolling();
-
       // Disconnect Rust-owned transport if present.
       this.runtime.disconnect?.();
 

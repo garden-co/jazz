@@ -24,11 +24,12 @@ export declare class NapiRuntime {
   deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
   loadLocalBatchRecord(batchId: string): any | null
   loadLocalBatchRecords(): any[]
-  loadBatchFate(batchId: string): any | null
-  drainRejectedBatchIds(): string[]
   acknowledgeRejectedBatch(batchId: string): boolean
+  onMutationError(callback: (event: any) => void): void
+  loadBatchFate(batchId: string): any | null
   discardLocalBatch(batchId: string): boolean
   sealBatch(batchId: string): void
+  waitForBatch(batchId: string, tier: string): Promise<void>
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
   subscribe(queryJson: string, onUpdate: (...args: any[]) => any, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   unsubscribe(handle: number): void

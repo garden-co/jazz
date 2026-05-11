@@ -1465,6 +1465,45 @@ fn user_insert_values(id: ObjectId, name: &str) -> HashMap<String, Value> {
     ])
 }
 
+fn insert_and_wait_for_batch<S: Storage, Sch: Scheduler>(
+    core: &mut RuntimeCore<S, Sch>,
+    table: &str,
+    values: HashMap<String, Value>,
+    write_context: Option<&WriteContext>,
+    tier: DurabilityTier,
+) -> std::result::Result<
+    (
+        InsertedRow,
+        futures::channel::oneshot::Receiver<PersistedWriteAck>,
+    ),
+    RuntimeError,
+> {
+    let (row, batch_id) = core.insert(table, values, write_context)?;
+    let receiver = core.wait_for_batch(batch_id, tier)?;
+    Ok((row, receiver))
+}
+
+fn update_and_wait_for_batch<S: Storage, Sch: Scheduler>(
+    core: &mut RuntimeCore<S, Sch>,
+    object_id: ObjectId,
+    values: Vec<(String, Value)>,
+    write_context: Option<&WriteContext>,
+    tier: DurabilityTier,
+) -> std::result::Result<futures::channel::oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
+    let batch_id = core.update(object_id, values, write_context)?;
+    core.wait_for_batch(batch_id, tier)
+}
+
+fn delete_and_wait_for_batch<S: Storage, Sch: Scheduler>(
+    core: &mut RuntimeCore<S, Sch>,
+    object_id: ObjectId,
+    write_context: Option<&WriteContext>,
+    tier: DurabilityTier,
+) -> std::result::Result<futures::channel::oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
+    let batch_id = core.delete(object_id, write_context)?;
+    core.wait_for_batch(batch_id, tier)
+}
+
 fn staged_user_row(
     row_id: ObjectId,
     batch_id: BatchId,

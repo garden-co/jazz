@@ -43,8 +43,6 @@ use crate::sync_manager::{
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
 type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>>;
 type DirectInsertResult = (ObjectId, Vec<Value>, BatchId);
-type PersistedWriteReceiver = oneshot::Receiver<crate::runtime_core::PersistedWriteAck>;
-type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteReceiver);
 
 /// Scheduler implementation for Tokio.
 ///
@@ -361,34 +359,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok((row_id, row_values, batch_id))
     }
 
-    /// Insert a row and return a receiver that resolves when the requested
-    /// durability tier (or higher) acknowledges.
-    pub fn insert_persisted(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        session: Option<&Session>,
-        tier: DurabilityTier,
-    ) -> Result<PersistedInsertResult, RuntimeError> {
-        self.insert_persisted_with_id(table, values, None, session, tier)
-    }
-
-    /// Insert a row with an optional external row id and durability tracking.
-    pub fn insert_persisted_with_id(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        object_id: Option<ObjectId>,
-        session: Option<&Session>,
-        tier: DurabilityTier,
-    ) -> Result<PersistedInsertResult, RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        let (result, receiver) =
-            core.insert_persisted_with_id(table, values, object_id, owned.as_ref(), tier)?;
-        Ok((result, receiver))
-    }
-
     /// Update a row (partial update by column name).
     pub fn update(
         &self,
@@ -408,43 +378,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         values: HashMap<String, Value>,
         session: Option<&Session>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        core.upsert_with_id(table, object_id, values, owned.as_ref())?;
-        Ok(())
-    }
-
-    /// Update a row and return a receiver that resolves when the requested
-    /// durability tier (or higher) acknowledges.
-    pub fn update_persisted(
-        &self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        session: Option<&Session>,
-        tier: DurabilityTier,
-    ) -> Result<PersistedWriteReceiver, RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        let receiver = core.update_persisted(object_id, values, owned.as_ref(), tier)?;
-        Ok(receiver)
-    }
-
-    /// Create or update a row and return a receiver that resolves when the
-    /// requested durability tier (or higher) acknowledges.
-    pub fn upsert_persisted_with_id(
-        &self,
-        table: &str,
-        object_id: ObjectId,
-        values: HashMap<String, Value>,
-        session: Option<&Session>,
-        tier: DurabilityTier,
-    ) -> Result<PersistedWriteReceiver, RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        let receiver =
-            core.upsert_persisted_with_id(table, object_id, values, owned.as_ref(), tier)?;
-        Ok(receiver)
+        Ok(core.upsert_with_id(table, object_id, values, owned.as_ref())?)
     }
 
     /// Delete a row.
@@ -458,18 +395,14 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.delete(object_id, owned.as_ref())?)
     }
 
-    /// Delete a row and return a receiver that resolves when the requested
-    /// durability tier (or higher) acknowledges.
-    pub fn delete_persisted(
+    /// Wait for a batch to settle at the requested durability tier.
+    pub fn wait_for_batch(
         &self,
-        object_id: ObjectId,
-        session: Option<&Session>,
+        batch_id: BatchId,
         tier: DurabilityTier,
-    ) -> Result<PersistedWriteReceiver, RuntimeError> {
+    ) -> Result<oneshot::Receiver<crate::runtime_core::PersistedWriteAck>, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        let receiver = core.delete_persisted(object_id, owned.as_ref(), tier)?;
-        Ok(receiver)
+        Ok(core.wait_for_batch(batch_id, tier)?)
     }
 
     /// Flush pending operations to storage.
