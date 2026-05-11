@@ -2156,196 +2156,33 @@ impl QueryManager {
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
         let _span = tracing::debug_span!("QM::delete", %id).entered();
-        // Check for hard delete first
-        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
-            return Err(QueryError::RowHardDeleted(id));
-        }
-
-        // Get table name from object metadata
         let table = self
             .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
-
-        let table_name = TableName::new(&table);
-
-        // Check if already soft-deleted
-        let current_branch = self.current_branch().to_string();
-        let staged_row = self.staged_row_for_write(storage, id, &current_branch, write_context);
-        if staged_row
-            .as_ref()
-            .map(QueryRowBatch::is_soft_deleted)
-            .unwrap_or_else(|| self.row_is_deleted(storage, &table, id))
-        {
-            return Err(QueryError::RowAlreadyDeleted(id));
-        }
-
-        // Get old data from the current visible row (for index removal and content preservation)
-        let current_row = staged_row
+        let branch = self.current_branch().as_str().to_string();
+        let current_row = self
+            .staged_row_for_write(storage, id, branch.as_str(), write_context)
             .or_else(|| {
-                self.load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+                self.load_visible_row_on_branch(storage, id, branch.as_str())
                     .map(|(_, row)| row)
             })
             .ok_or(QueryError::ObjectNotFound(id))?;
         let old_data = current_row.data.clone();
         let old_provenance = current_row.row_provenance();
         let write_schema = self.schema.clone();
-        let table_write = self.write_table_cache_entry_for_schema(
-            &current_branch,
-            table_name,
-            write_schema.as_ref(),
-        )?;
-        let descriptor = table_write.descriptor.as_ref();
-        let using_policy = table_write.delete_using_policy.as_deref();
 
-        // Deny anonymous writes before any policy evaluation.
-        if let Some(session) = write_context.and_then(WriteContext::session)
-            && session.auth_mode == AuthMode::Anonymous
-        {
-            return Err(QueryError::AnonymousWriteDenied {
-                table: table_name,
-                operation: Operation::Delete,
-            });
-        }
-
-        if let Some(session) = write_context.and_then(WriteContext::session) {
-            if let Some((auth_schema, auth_context)) =
-                self.local_write_authorization_context(&current_branch, Some(session))
-            {
-                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Delete,
-                    });
-                };
-                if self.row_policy_mode.denies_missing_explicit_policy()
-                    && auth_table_schema
-                        .policies
-                        .effective_delete_using()
-                        .is_none()
-                {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Delete,
-                    });
-                }
-
-                if let Some(policy) = auth_table_schema.policies.effective_delete_using()
-                    && !self.evaluate_current_authorization_policy_for_content(
-                        storage,
-                        id,
-                        &current_branch,
-                        table_name,
-                        policy,
-                        &old_data,
-                        &old_provenance,
-                        session,
-                        Operation::Delete,
-                        &auth_schema,
-                        &auth_context,
-                    )
-                {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Delete,
-                    });
-                }
-            } else {
-                if self.row_policy_mode.denies_missing_explicit_policy() && using_policy.is_none() {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Delete,
-                    });
-                }
-                if let Some(policy) = using_policy
-                    && {
-                        let mut visited = HashSet::new();
-                        !self.evaluate_policy_for_content_with_context_for_row(
-                            storage,
-                            policy,
-                            &old_data,
-                            &old_provenance,
-                            descriptor,
-                            session,
-                            &table,
-                            &current_branch,
-                            Operation::Delete,
-                            id,
-                            0,
-                            &mut visited,
-                        )
-                    }
-                {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Delete,
-                    });
-                }
-            }
-        }
-
-        // Get parent commit
-        let branch = self.current_branch();
-        let parents =
-            self.parent_ids_for_write(storage, &table, id, branch.as_str(), write_context);
-        let timestamp = self.resolve_update_timestamp(write_context);
-        let delete_provenance =
-            self.row_provenance_for_update(&old_provenance, write_context, timestamp);
-
-        // Add commit with preserved content + delete: soft metadata
-        // Content is copied from previous tip so soft-deleted rows can still be read
-        let delete_row = self.authored_row_batch(
-            id,
-            branch.as_str(),
-            parents,
-            old_data.to_vec(),
-            self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
-        );
-        let index_mutations = if Self::write_context_is_open_batch(write_context) {
-            Vec::new()
-        } else {
-            Self::index_mutations_for_soft_delete_on_branch(
-                &table,
-                branch.as_str(),
+        self.delete_existing_row_on_branch_with_schema_and_write_context(
+            storage,
+            RowBranchDelete {
+                table: &table,
+                branch: branch.as_str(),
                 id,
-                &old_data,
-                descriptor,
-                table_write.indexed_columns.as_deref().map(Vec::as_slice),
-            )
-        };
-        let branch_name = BranchName::new(branch.as_str());
-        let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
-            storage,
-            &table,
-            &branch_name,
-            id,
-            delete_row,
-            &index_mutations,
-        )?;
-        self.maybe_track_local_pending_batch_overlay(
-            &table,
-            RowBatchKey::new(id, branch_name, delete_batch_id),
+                old_data_for_policy: &old_data,
+                old_provenance_for_policy: &old_provenance,
+            },
+            write_schema.as_ref(),
             write_context,
-            true,
-            &visibility_change,
-        );
-        self.maybe_record_local_direct_settlement(
-            storage,
-            &branch_name,
-            id,
-            delete_batch_id,
-            write_context,
-            &visibility_change,
-        )?;
-
-        tracing::trace!(%id, ?delete_batch_id, "apply local soft delete");
-        if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_batch(storage, visibility_change)?;
-        }
-
-        Ok(DeleteHandle {
-            row_id: id,
-            batch_id: delete_batch_id,
-        })
+        )
     }
 
     pub fn delete_with_session<H: Storage>(
@@ -2402,6 +2239,17 @@ impl QueryManager {
         {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
+
+        // Deny anonymous writes before any policy evaluation.
+        if let Some(session) = write_context.and_then(WriteContext::session)
+            && session.auth_mode == AuthMode::Anonymous
+        {
+            return Err(QueryError::AnonymousWriteDenied {
+                table: table_name,
+                operation: Operation::Delete,
+            });
+        }
+
         let table_write =
             self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
         let descriptor = table_write.descriptor.as_ref();
@@ -2481,16 +2329,6 @@ impl QueryManager {
             }
         }
 
-        // Get old data from the current visible row on this branch
-        let old_branch_data = staged_branch_row
-            .as_ref()
-            .map(|row| row.data.clone())
-            .filter(|data| !data.is_empty())
-            .or_else(|| {
-                self.load_visible_row_on_branch(storage, id, branch)
-                    .map(|(_, row)| row.data)
-                    .filter(|data| !data.is_empty())
-            });
         let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
         let timestamp = self.resolve_update_timestamp(write_context);
         let delete_provenance =
@@ -2540,7 +2378,6 @@ impl QueryManager {
             &visibility_change,
         )?;
 
-        let _ = old_branch_data;
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
