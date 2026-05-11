@@ -94,55 +94,74 @@ fn initial_query_sync_prefers_authoritative_settlement_over_retained_client_loca
 }
 
 #[test]
-fn upstream_durability_ack_is_queued_once_per_replayed_batch() {
-    let mut sm = SyncManager::new();
+fn server_replay_does_not_send_local_durability_ack_upstream() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
     let server_id = ServerId::new();
-    let batch_id = BatchId::new();
-    let row_a = row_with_batch_state(
+    let row = row_with_batch_state(
         visible_row(ObjectId::new(), "main", Vec::new(), 1_000, b"alice"),
-        batch_id,
+        BatchId::new(),
         crate::row_histories::RowState::VisibleDirect,
-        Some(DurabilityTier::Local),
-    );
-    let row_b = row_with_batch_state(
-        visible_row(ObjectId::new(), "main", Vec::new(), 1_001, b"bob"),
-        batch_id,
-        crate::row_histories::RowState::VisibleDirect,
-        Some(DurabilityTier::Local),
+        None,
     );
 
-    sm.queue_batch_durability_ack_to_server(
+    seed_users_schema(&mut io);
+    add_server(&mut sm, &io, server_id);
+    sm.take_outbox();
+
+    sm.process_from_server(
+        &mut io,
         server_id,
-        DurabilityTier::Local,
-        &row_a,
-        BranchName::new("main"),
-    );
-    sm.queue_batch_durability_ack_to_server(
-        server_id,
-        DurabilityTier::Local,
-        &row_b,
-        BranchName::new("main"),
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
     );
 
-    let outbox = sm.take_outbox();
+    assert!(
+        sm.take_outbox().into_iter().all(|entry| !matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::BatchFate { .. },
+            } if id == server_id
+        )),
+        "lower-tier nodes must not turn server replay into upstream durability acknowledgements"
+    );
+}
+
+#[test]
+fn client_durability_ack_is_not_authoritative() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = BatchId::new();
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::BatchFate {
+            fate: BatchFate::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Local,
+            },
+        },
+    );
+
     assert_eq!(
-        outbox
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                OutboxEntry {
-                    destination: Destination::Server(id),
-                    payload: SyncPayload::BatchFate {
-                        fate: BatchFate::DurableDirect {
-                            batch_id: id_batch,
-                            confirmed_tier: DurabilityTier::Local,
-                        },
-                    },
-                } if *id == server_id && *id_batch == batch_id
-            ))
-            .count(),
-        1,
-        "a replay can process many rows from the same batch across ticks, but the upstream durability ack is batch-scoped"
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        None,
+        "clients must not be able to create authoritative durability settlements"
+    );
+    assert!(
+        sm.take_pending_batch_fates().is_empty(),
+        "ignored client acknowledgements must not be replayed through RuntimeCore"
     );
 }
 
