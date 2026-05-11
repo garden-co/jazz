@@ -27,70 +27,6 @@ enum SealedBatchMode {
 }
 
 impl SyncManager {
-    pub(super) fn queue_batch_durability_ack_to_server(
-        &mut self,
-        server_id: ServerId,
-        tier: DurabilityTier,
-        row: &StoredRowBatch,
-        _branch_name: BranchName,
-    ) {
-        if !row.state.is_visible() {
-            return;
-        }
-
-        let is_transactional = matches!(row.state, RowState::VisibleTransactional);
-        if !self.sent_server_batch_fate_acks.insert((
-            server_id,
-            row.batch_id,
-            tier,
-            is_transactional,
-        )) {
-            return;
-        }
-
-        for entry in self.outbox.iter_mut().rev() {
-            if entry.destination != Destination::Server(server_id) {
-                continue;
-            }
-            let SyncPayload::BatchFate { fate } = &mut entry.payload else {
-                continue;
-            };
-
-            match fate {
-                BatchFate::DurableDirect {
-                    batch_id,
-                    confirmed_tier,
-                } if !is_transactional && *batch_id == row.batch_id && *confirmed_tier == tier => {
-                    return;
-                }
-                BatchFate::AcceptedTransaction {
-                    batch_id,
-                    confirmed_tier,
-                } if is_transactional && *batch_id == row.batch_id && *confirmed_tier == tier => {
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        let fate = if is_transactional {
-            BatchFate::AcceptedTransaction {
-                batch_id: row.batch_id,
-                confirmed_tier: tier,
-            }
-        } else {
-            BatchFate::DurableDirect {
-                batch_id: row.batch_id,
-                confirmed_tier: tier,
-            }
-        };
-
-        self.outbox.push(OutboxEntry {
-            destination: Destination::Server(server_id),
-            payload: SyncPayload::BatchFate { fate },
-        });
-    }
-
     fn retain_client_batch_fate<H: Storage>(&mut self, storage: &mut H, fate: &BatchFate) -> bool {
         self.persist_authoritative_batch_fate(storage, fate).is_ok()
     }
@@ -1099,7 +1035,6 @@ impl SyncManager {
             | SyncPayload::RowBatchNeeded { metadata, row } => {
                 let object_id = row.row_id;
                 let branch_name = BranchName::new(&row.branch);
-                let incoming_confirmed_tier = row.confirmed_tier;
                 tracing::debug!(
                     %object_id,
                     %branch_name,
@@ -1108,19 +1043,6 @@ impl SyncManager {
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), true)
                 {
                     self.apply_authoritative_transaction_fate_for_row(storage, &applied.row);
-
-                    let local_tiers = self.my_tiers.iter().copied().collect::<Vec<_>>();
-                    for tier in local_tiers {
-                        if incoming_confirmed_tier.is_some_and(|confirmed| confirmed >= tier) {
-                            continue;
-                        }
-                        self.queue_batch_durability_ack_to_server(
-                            server_id,
-                            tier,
-                            &applied.row,
-                            branch_name,
-                        );
-                    }
 
                     if let Some(update) = applied.visibility_change {
                         self.pending_row_visibility_changes.push(update);
