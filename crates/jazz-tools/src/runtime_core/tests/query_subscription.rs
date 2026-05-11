@@ -424,6 +424,320 @@ fn rc_query_local_transaction_overlay_keeps_same_row_updates_isolated_by_batch()
 }
 
 #[test]
+fn rc_query_local_transaction_overlay_handles_indexed_insert_filters() {
+    let mut core =
+        create_runtime_with_schema(test_schema(), "query-local-transaction-index-insert");
+    let branch_name = core.schema_manager().branch_name();
+
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    let ((row_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "alice-draft"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    let query = QueryBuilder::new("users")
+        .filter_eq("name", Value::Text("alice-draft".into()))
+        .build();
+
+    let visible_rows = execute_runtime_query(&mut core, query.clone(), None);
+    assert_eq!(
+        visible_rows,
+        Vec::<(ObjectId, Vec<Value>)>::new(),
+        "ordinary indexed reads should not see staged transaction inserts"
+    );
+
+    let overlay_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        query,
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id,
+            branch_name,
+            row_ids: vec![row_id],
+        },
+    );
+
+    assert_eq!(overlay_rows.len(), 1);
+    assert_eq!(overlay_rows[0].0, row_id);
+    assert_eq!(overlay_rows[0].1[1], Value::Text("alice-draft".into()));
+}
+
+#[test]
+fn rc_query_local_transaction_overlay_handles_indexed_update_filters() {
+    let mut core =
+        create_runtime_with_schema(test_schema(), "query-local-transaction-index-update");
+    let branch_name = core.schema_manager().branch_name();
+
+    let ((row_id, _), _) = core
+        .insert("users", user_insert_values(ObjectId::new(), "shared"), None)
+        .unwrap();
+
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("alice-draft".into()))],
+        Some(&write_context),
+    )
+    .unwrap();
+
+    let draft_query = QueryBuilder::new("users")
+        .filter_eq("name", Value::Text("alice-draft".into()))
+        .build();
+    let shared_query = QueryBuilder::new("users")
+        .filter_eq("name", Value::Text("shared".into()))
+        .build();
+
+    assert_eq!(
+        execute_runtime_query(&mut core, draft_query.clone(), None),
+        Vec::<(ObjectId, Vec<Value>)>::new(),
+        "ordinary indexed reads should not see staged transaction updates"
+    );
+    assert_eq!(
+        core.storage().index_lookup(
+            "users",
+            "name",
+            branch_name.as_str(),
+            &Value::Text("alice-draft".into())
+        ),
+        Vec::<ObjectId>::new(),
+        "staged transaction updates should not update the branch index"
+    );
+    let shared_rows = execute_runtime_query(&mut core, shared_query.clone(), None);
+    assert_eq!(shared_rows.len(), 1);
+    assert_eq!(shared_rows[0].1[1], Value::Text("shared".into()));
+
+    let draft_overlay_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        draft_query,
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id,
+            branch_name: branch_name.clone(),
+            row_ids: vec![row_id],
+        },
+    );
+    assert_eq!(draft_overlay_rows.len(), 1);
+    assert_eq!(
+        draft_overlay_rows[0].1[1],
+        Value::Text("alice-draft".into())
+    );
+
+    let shared_overlay_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        shared_query,
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id,
+            branch_name,
+            row_ids: vec![row_id],
+        },
+    );
+    assert_eq!(
+        shared_overlay_rows,
+        Vec::<(ObjectId, Vec<Value>)>::new(),
+        "transaction indexed reads should use the staged value, not the branch index value"
+    );
+}
+
+#[test]
+fn rc_query_local_transaction_overlay_keeps_indexed_deletes_isolated() {
+    let mut core =
+        create_runtime_with_schema(test_schema(), "query-local-transaction-index-delete");
+    let branch_name = core.schema_manager().branch_name();
+
+    let ((row_id, _), _) = core
+        .insert("users", user_insert_values(ObjectId::new(), "shared"), None)
+        .unwrap();
+
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    core.delete(row_id, Some(&write_context)).unwrap();
+
+    let shared_query = QueryBuilder::new("users")
+        .filter_eq("name", Value::Text("shared".into()))
+        .build();
+
+    let visible_rows = execute_runtime_query(&mut core, shared_query.clone(), None);
+    assert_eq!(visible_rows.len(), 1);
+    assert_eq!(
+        visible_rows[0].0, row_id,
+        "ordinary indexed reads should still see the committed row while the delete is staged"
+    );
+    assert_eq!(
+        core.storage().index_lookup(
+            "users",
+            "name",
+            branch_name.as_str(),
+            &Value::Text("shared".into())
+        ),
+        vec![row_id],
+        "staged transaction deletes should not remove the branch index entry"
+    );
+
+    let overlay_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        shared_query,
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id,
+            branch_name,
+            row_ids: vec![row_id],
+        },
+    );
+    assert_eq!(
+        overlay_rows,
+        Vec::<(ObjectId, Vec<Value>)>::new(),
+        "transaction indexed reads should hide the row deleted by that transaction"
+    );
+}
+
+#[test]
+fn rc_query_local_direct_batch_overlay_handles_indexed_filters_until_commit() {
+    let mut core =
+        create_runtime_with_schema(test_schema(), "query-local-direct-batch-index-update");
+    let branch_name = core.schema_manager().branch_name();
+
+    let ((row_id, _), _) = core
+        .insert("users", user_insert_values(ObjectId::new(), "shared"), None)
+        .unwrap();
+
+    let batch_id = BatchId::new();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("alice-batch".into()))],
+        Some(&write_context),
+    )
+    .unwrap();
+
+    let batch_query = QueryBuilder::new("users")
+        .filter_eq("name", Value::Text("alice-batch".into()))
+        .build();
+    let shared_query = QueryBuilder::new("users")
+        .filter_eq("name", Value::Text("shared".into()))
+        .build();
+
+    assert_eq!(
+        execute_runtime_query(&mut core, batch_query.clone(), None),
+        Vec::<(ObjectId, Vec<Value>)>::new(),
+        "ordinary indexed reads should not see open direct batch updates"
+    );
+    assert_eq!(
+        core.storage().index_lookup(
+            "users",
+            "name",
+            branch_name.as_str(),
+            &Value::Text("alice-batch".into())
+        ),
+        Vec::<ObjectId>::new(),
+        "open direct batch updates should not update the branch index"
+    );
+
+    let batch_overlay_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        batch_query.clone(),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id,
+            branch_name: branch_name.clone(),
+            row_ids: vec![row_id],
+        },
+    );
+    assert_eq!(batch_overlay_rows.len(), 1);
+    assert_eq!(
+        batch_overlay_rows[0].1[1],
+        Value::Text("alice-batch".into())
+    );
+
+    let shared_overlay_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        shared_query,
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id,
+            branch_name,
+            row_ids: vec![row_id],
+        },
+    );
+    assert_eq!(
+        shared_overlay_rows,
+        Vec::<(ObjectId, Vec<Value>)>::new(),
+        "direct batch indexed reads should use the staged value while the batch is open"
+    );
+
+    core.seal_batch(batch_id).unwrap();
+
+    assert_eq!(
+        core.storage().index_lookup(
+            "users",
+            "name",
+            branch_name.as_str(),
+            &Value::Text("alice-batch".into())
+        ),
+        vec![row_id],
+        "sealing a direct batch should apply its index mutations"
+    );
+    assert_eq!(
+        core.storage().index_lookup(
+            "users",
+            "name",
+            branch_name.as_str(),
+            &Value::Text("shared".into())
+        ),
+        Vec::<ObjectId>::new(),
+        "sealing a direct batch should remove stale index entries"
+    );
+
+    let committed_rows = execute_runtime_query(&mut core, batch_query, None);
+    assert_eq!(committed_rows.len(), 1);
+    assert_eq!(committed_rows[0].1[1], Value::Text("alice-batch".into()));
+}
+
+#[test]
 fn rc_query_remote_tier_session_exists_rel_waits_without_permissions_head() {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "session-exists-rel-query");

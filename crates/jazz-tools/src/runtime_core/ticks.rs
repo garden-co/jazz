@@ -208,6 +208,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         {
             return None;
         }
+        if rows
+            .iter()
+            .any(|(_, _, row)| !matches!(row.state, crate::row_histories::RowState::VisibleDirect))
+        {
+            return None;
+        }
         Some(SealedBatchSubmission::new(
             batch_id,
             crate::batch_fate::BatchMode::Direct,
@@ -423,13 +429,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     );
                 }
             } else {
-                query_manager.retract_local_pending_transaction_row(
-                    &mut self.storage,
-                    &table,
-                    &branch,
-                    row_id,
-                    &row_data,
-                );
+                query_manager.clear_local_pending_row_overlay(&table, row_id);
             }
         }
     }

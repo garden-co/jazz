@@ -1734,7 +1734,6 @@ impl SchemaManager {
             .collect::<Vec<_>>();
 
         if let Some(existing_table) = write_context
-            .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
             .and_then(WriteContext::batch_id)
             .and_then(|batch_id| {
                 self.query_manager
@@ -1800,7 +1799,6 @@ impl SchemaManager {
             .collect::<Vec<_>>();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
             write_context
-                .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
                 .and_then(WriteContext::batch_id)
                 .and_then(|batch_id| {
                     self.query_manager
@@ -1902,7 +1900,6 @@ impl SchemaManager {
             .collect::<Vec<_>>();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
             write_context
-                .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
                 .and_then(WriteContext::batch_id)
                 .and_then(|batch_id| {
                     self.query_manager

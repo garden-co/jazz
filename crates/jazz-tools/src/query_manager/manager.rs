@@ -1508,7 +1508,22 @@ impl QueryManager {
                         )
                     };
 
-                subscription.graph.settle(storage_ref, row_loader)
+                let source_overlay_rows = if !subscription.local_overlay_rows.is_empty() {
+                    Some(&subscription.local_overlay_rows)
+                } else if subscription.local_updates == LocalUpdates::Immediate
+                    && subscription.sync_backed
+                    && subscription.durability_tier.is_some()
+                    && !self.pending_local_row_batches.is_empty()
+                {
+                    Some(&self.pending_local_row_batches)
+                } else {
+                    None
+                };
+                subscription.graph.settle_with_source_overlay(
+                    storage_ref,
+                    source_overlay_rows,
+                    row_loader,
+                )
             };
             subscription.needs_visibility_recompute = false;
             let new_schema_warnings = Self::finalize_schema_warnings(
@@ -2115,7 +2130,7 @@ impl QueryManager {
         }
     }
 
-    pub(super) fn handle_row_update(
+    pub(crate) fn handle_row_update(
         &mut self,
         storage: &mut dyn Storage,
         update: RowVisibilityChange,

@@ -1,9 +1,11 @@
 use ahash::{AHashMap, AHashSet};
 use smallvec::SmallVec;
+use std::collections::HashMap;
 
 use crate::object::ObjectId;
 use crate::query_manager::types::{LoadedRow, RowDelta, TableName, Tuple, TupleDelta};
 use crate::storage::Storage;
+use crate::sync_manager::RowBatchKey;
 
 use super::super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::{GraphNode, QueryGraph};
@@ -392,13 +394,28 @@ impl QueryGraph {
     where
         F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
+        self.settle_with_source_overlay(storage, None, &mut row_loader)
+    }
+
+    pub(crate) fn settle_with_source_overlay<F>(
+        &mut self,
+        storage: &dyn Storage,
+        local_overlay_rows: Option<&HashMap<ObjectId, RowBatchKey>>,
+        mut row_loader: F,
+    ) -> RowDelta
+    where
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {
             tracing::trace!(dirty_nodes = order.len(), table = %self.table, "settling query graph");
         }
         let mut tuple_deltas: AHashMap<NodeId, TupleDelta> = AHashMap::new();
 
-        let ctx = SourceContext { storage };
+        let ctx = SourceContext {
+            storage,
+            local_overlay_rows,
+        };
 
         for node_id in order {
             let node_type = match self.get_node(node_id) {

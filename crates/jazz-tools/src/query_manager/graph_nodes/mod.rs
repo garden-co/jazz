@@ -18,10 +18,14 @@ pub mod subgraph;
 pub mod tuple_delta;
 pub mod union;
 
+use std::collections::HashMap;
+
 use ahash::AHashSet;
 
 use super::types::{RowDescriptor, Tuple, TupleDelta};
+use crate::object::ObjectId;
 use crate::storage::Storage;
+use crate::sync_manager::RowBatchKey;
 
 /// Unique identifier for a node in the query graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,6 +34,7 @@ pub struct NodeId(pub u64);
 /// Context for source nodes that need external data.
 pub struct SourceContext<'a> {
     pub storage: &'a dyn Storage,
+    pub local_overlay_rows: Option<&'a HashMap<ObjectId, RowBatchKey>>,
 }
 
 // ============================================================================

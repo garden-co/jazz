@@ -525,17 +525,6 @@ impl QueryManager {
             .map_err(Self::map_index_storage_error)
     }
 
-    pub(crate) fn retract_local_pending_transaction_row(
-        &mut self,
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-        row_data: &[u8],
-    ) {
-        self.retract_local_rejected_row(storage, table, branch, row_id, row_data, false);
-    }
-
     pub(crate) fn retract_local_rejected_row(
         &mut self,
         storage: &mut dyn Storage,
