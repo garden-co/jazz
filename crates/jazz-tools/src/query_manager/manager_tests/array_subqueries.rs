@@ -1157,6 +1157,83 @@ fn array_subquery_with_select_columns() {
 }
 
 #[test]
+fn array_subquery_with_magic_timestamp_select_columns() {
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(100),
+            Value::Text("Post Title".into()),
+            Value::Integer(1),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts")
+                .correlate("author_id", "users.id")
+                .select(&["id", "title", "$createdAt", "$updatedAt"])
+        })
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have update");
+
+    let posts_row_desc = RowDescriptor::new(vec![
+        ColumnDescriptor::new("id", ColumnType::Integer),
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("$createdAt", ColumnType::Timestamp),
+        ColumnDescriptor::new("$updatedAt", ColumnType::Timestamp),
+    ]);
+    let output_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("id", ColumnType::Integer),
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new(
+            "posts",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
+        ),
+    ]);
+
+    let values = decode_row(&output_descriptor, &delta.added[0].data).expect("decode");
+    let posts = values[2].as_array().expect("posts array");
+
+    assert_eq!(posts.len(), 1, "Should have 1 post");
+    let post_row = posts[0].as_row().expect("post Row");
+    assert_eq!(
+        post_row.len(),
+        4,
+        "Post should include selected magic columns"
+    );
+    assert_eq!(post_row[0], Value::Integer(100));
+    assert_eq!(post_row[1], Value::Text("Post Title".into()));
+    assert!(matches!(post_row[2], Value::Timestamp(_)));
+    assert!(matches!(post_row[3], Value::Timestamp(_)));
+}
+
+#[test]
 fn array_subquery_nested() {
     // Test: nested array subqueries
     // users with_array(posts with_array(comments))
