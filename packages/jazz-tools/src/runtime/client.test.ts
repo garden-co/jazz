@@ -252,6 +252,7 @@ describe("JazzClient worker batch hydration", () => {
       }),
     ]);
 
+    // Current result: this still returns the runtime's older "local" settlement.
     expect(client.localBatchRecord(batchId)?.latestSettlement).toMatchObject({
       confirmedTier: "global",
     });
