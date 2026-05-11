@@ -295,6 +295,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Fallback outbox sender used when no `TransportHandle` is set (e.g. on
     /// the server side, where the runtime fans out via `ConnectionEventHub`
     /// instead of a WebSocket connection).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) sync_sender: Option<Box<dyn SyncSender>>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) sync_sender: Option<Box<dyn SyncSender + Send>>,
 
     /// Parked sync messages (from network).
@@ -636,6 +639,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Install a fallback sync sender used when no `TransportHandle` is set.
     /// On the server side, this is the bridge from the runtime's outbox into
     /// the per-connection `ConnectionEventHub` channels.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender>) {
+        self.sync_sender = Some(sender);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender + Send>) {
         self.sync_sender = Some(sender);
     }

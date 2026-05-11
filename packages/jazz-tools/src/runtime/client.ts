@@ -14,11 +14,7 @@ import type {
   WasmSchema,
 } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import {
-  applyUserAuthHeaders,
-  type AuthFailureReason,
-  type RuntimeSyncOutboxCallback,
-} from "./sync-transport.js";
+import { applyUserAuthHeaders, type AuthFailureReason } from "./sync-transport.js";
 import {
   resolveClientSessionStateSync,
   LOCAL_FIRST_JWT_ISSUER,
@@ -102,9 +98,9 @@ export interface Runtime {
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
-  /** Route outbox messages to the transport layer. Required for WASM worker-bridge; no-op for NAPI/RN (Rust owns the transport). */
-  onSyncMessageToSend?(callback: RuntimeSyncOutboxCallback): void;
   batchedTick?(): void;
+  /** Build a worker bridge that fans the runtime's outbox out to a dedicated `Worker`. WASM-only. */
+  createWorkerBridge?(worker: Worker, options: object): unknown;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   reconcileLocalBatchWithServer?(batch_id: string): void;
@@ -1618,6 +1614,11 @@ export class JazzClient {
 
   hasWaitHandlerForBatch(batchId: string): boolean {
     return this.waitHandledBatchIds.has(batchId);
+  }
+
+  /** Spec-aligned alias for {@link hasWaitHandlerForBatch}. */
+  hasPendingBatchWaiter(batchId: string): boolean {
+    return this.hasWaitHandlerForBatch(batchId);
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {

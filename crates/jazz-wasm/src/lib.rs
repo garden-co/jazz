@@ -53,12 +53,21 @@ pub mod query;
 pub mod runtime;
 pub mod types;
 #[cfg(target_arch = "wasm32")]
+pub mod worker_bridge;
+#[cfg(target_arch = "wasm32")]
+pub mod worker_host;
+pub mod worker_protocol;
+#[cfg(target_arch = "wasm32")]
 pub mod ws_stream;
 
 // Re-export main types for JavaScript
 pub use driver_bridge::JsStorageDriver;
 pub use query::WasmQueryBuilder;
 pub use runtime::WasmRuntime;
+#[cfg(target_arch = "wasm32")]
+pub use worker_bridge::WasmWorkerBridge;
+#[cfg(target_arch = "wasm32")]
+pub use worker_host::run_as_worker;
 
 use wasm_bindgen::prelude::*;
 

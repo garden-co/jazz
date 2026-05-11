@@ -1,23 +1,6 @@
 import type { LocalBatchRecord, MutationErrorEvent } from "../runtime/client.js";
 
 declare module "jazz-wasm" {
-  type SyncOutboxCallbackArgs =
-    | [
-        destinationKind: "server" | "client",
-        destinationId: string,
-        payload: string | Uint8Array,
-        isCatalogue: boolean,
-        sequence?: number | null,
-      ]
-    | [
-        err: unknown,
-        destinationKind: "server" | "client",
-        destinationId: string,
-        payload: string | Uint8Array,
-        isCatalogue: boolean,
-        sequence?: number | null,
-      ];
-  type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
   type InsertValues = Record<string, unknown>;
 
   export type WasmTraceEntry =
@@ -114,7 +97,7 @@ declare module "jazz-wasm" {
     ): number;
     unsubscribe(handle: number): void;
     onSyncMessageReceived(messageJson: string, seq?: number | null): void;
-    onSyncMessageToSend(callback: SyncOutboxCallback): void;
+    createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
     addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
     reconcileLocalBatchWithServer?(batchId: string): void;
@@ -139,4 +122,42 @@ declare module "jazz-wasm" {
     /** Get the Ed25519 public key as base64url from a base64url-encoded seed. */
     static getPublicKeyBase64url(seedB64: string): string;
   }
+
+  export interface WasmWorkerBridgeListeners {
+    onPeerSync?: (batch: { peerId: string; term: number; payload: Uint8Array[] }) => void;
+    onAuthFailure?: (reason: string) => void;
+    onLocalBatchRecordsSync?: (batches: LocalBatchRecord[]) => void;
+    onMutationErrorReplay?: (event: MutationErrorEvent) => void;
+  }
+
+  export class WasmWorkerBridge {
+    init(): Promise<{ clientId: string }>;
+    updateAuth(jwtToken?: string): void;
+    sendLifecycleHint(event: string): void;
+    openPeer(peerId: string): void;
+    sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void;
+    closePeer(peerId: string): void;
+    setServerPayloadForwarder(callback: ((payload: Uint8Array) => void) | null): void;
+    applyIncomingServerPayload(payload: Uint8Array): void;
+    waitForUpstreamServerConnection(): Promise<void>;
+    replayServerConnection(): void;
+    disconnectUpstream(): void;
+    reconnectUpstream(): void;
+    simulateCrash(): Promise<void>;
+    acknowledgeRejectedBatch(batchId: string): void;
+    setListeners(listeners: WasmWorkerBridgeListeners): void;
+    getWorkerClientId(): string | null;
+    shutdown(): Promise<void>;
+  }
+
+  /**
+   * Entry point invoked from the worker bootstrap shim. Installs
+   * `self.onmessage` and asynchronously brings up the worker runtime.
+   */
+  export function runAsWorker(initMessage: unknown, pendingMessages: unknown[]): void;
+
+  export function encodeMainToWorkerJs(value: unknown): Uint8Array;
+  export function encodeWorkerToMainJs(value: unknown): Uint8Array;
+  export function decodeMainToWorkerJs(bytes: Uint8Array): unknown;
+  export function decodeWorkerToMainJs(bytes: Uint8Array): unknown;
 }
