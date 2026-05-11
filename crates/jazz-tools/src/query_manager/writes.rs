@@ -986,193 +986,16 @@ impl QueryManager {
         values: &[Value],
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
-        self.insert_with_write_context_and_id(storage, table, values, None, write_context)
-    }
-
-    pub fn insert_with_write_context_and_id<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        values: &[Value],
-        external_object_id: Option<ObjectId>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<InsertResult, QueryError> {
         let _span = tracing::debug_span!("QM::insert", table).entered();
         let current_branch = self.current_branch().as_str().to_string();
-        let table_name = TableName::new(table);
-        let write_schema = self.schema.clone();
-        let table_write = self.write_table_cache_entry_for_schema(
-            &current_branch,
-            table_name,
-            write_schema.as_ref(),
-        )?;
-        let descriptor = table_write.descriptor.as_ref();
-        let insert_policy = table_write.insert_policy.as_deref();
-
-        if values.len() != descriptor.columns.len() {
-            return Err(QueryError::ColumnCountMismatch {
-                expected: descriptor.columns.len(),
-                actual: values.len(),
-            });
-        }
-
-        self.validate_json_for_values(descriptor, values)?;
-        Self::validate_write_index_values_on_branch(
-            table,
-            self.current_branch().as_str(),
-            values,
-            descriptor,
-            table_write.indexed_columns.as_deref().map(Vec::as_slice),
-        )?;
-
-        // Encode to binary
-        let data =
-            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
-        let timestamp = self.reserve_write_timestamp();
-        let provenance = self.row_provenance_for_insert(write_context, timestamp);
-
-        // Deny anonymous writes before any policy evaluation.
-        if let Some(session) = write_context.and_then(WriteContext::session)
-            && session.auth_mode == AuthMode::Anonymous
-        {
-            return Err(QueryError::AnonymousWriteDenied {
-                table: TableName::new(table),
-                operation: Operation::Insert,
-            });
-        }
-
-        // Check INSERT WITH CHECK policy
-        if let Some(session) = write_context.and_then(WriteContext::session) {
-            if let Some((auth_schema, auth_context)) =
-                self.local_write_authorization_context(&current_branch, Some(session))
-            {
-                let allowed = auth_schema
-                    .get(&table_name)
-                    .and_then(|table_schema| table_schema.policies.insert_policy())
-                    .map(|policy| {
-                        self.evaluate_current_authorization_policy_for_content(
-                            storage,
-                            object_id,
-                            &current_branch,
-                            table_name,
-                            policy,
-                            &data,
-                            &provenance,
-                            session,
-                            Operation::Insert,
-                            &auth_schema,
-                            &auth_context,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        !self.row_policy_mode.denies_missing_explicit_policy()
-                            && auth_schema.contains_key(&table_name)
-                    });
-                if !allowed {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Insert,
-                    });
-                }
-            } else {
-                if self.row_policy_mode.denies_missing_explicit_policy() && insert_policy.is_none()
-                {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Insert,
-                    });
-                }
-                if let Some(policy) = insert_policy {
-                    let mut visited = HashSet::new();
-                    if !self.evaluate_policy_for_content_with_context_for_row(
-                        storage,
-                        policy,
-                        &data,
-                        &provenance,
-                        descriptor,
-                        session,
-                        table,
-                        &current_branch,
-                        Operation::Insert,
-                        object_id,
-                        0,
-                        &mut visited,
-                    ) {
-                        return Err(QueryError::PolicyDenied {
-                            table: table_name,
-                            operation: Operation::Insert,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Create row locator for the new row object
-        self.persist_row_locator(storage, object_id, &table_write.row_locator);
-
-        // Add commit with row data
-        let index_mutations = if Self::write_context_is_open_batch(write_context) {
-            Vec::new()
-        } else {
-            Self::index_mutations_for_insert_on_branch_with_layout(
-                table,
-                &current_branch,
-                object_id,
-                &data,
-                descriptor,
-                table_write.indexed_columns.as_deref().map(Vec::as_slice),
-                &table_write.row_layout,
-            )
-        };
-        let row = self.authored_row_batch(
-            object_id,
-            &current_branch,
-            vec![],
-            data.clone(),
-            self.row_batch_authoring(&provenance, None, write_context),
-        );
-        let branch_name = BranchName::new(&current_branch);
-        let (row_batch_id, visibility_change) = self
-            .apply_local_row_history_write_with_prepared_context(
-                storage,
-                PreparedLocalRowHistoryWrite {
-                    table,
-                    branch_name: &branch_name,
-                    row_id: object_id,
-                    row,
-                    index_mutations: &index_mutations,
-                    row_locator: &table_write.row_locator,
-                    descriptor: table_write.descriptor.clone(),
-                },
-            )?;
-        self.maybe_track_local_pending_batch_overlay(
-            table,
-            RowBatchKey::new(object_id, branch_name, row_batch_id),
-            write_context,
-            false,
-            &visibility_change,
-        );
-        self.maybe_record_local_direct_settlement(
+        self.insert_on_branch_with_write_context_and_id(
             storage,
-            &branch_name,
-            object_id,
-            row_batch_id,
+            table,
+            &current_branch,
+            values,
+            None,
             write_context,
-            &visibility_change,
-        )?;
-
-        tracing::trace!(%object_id, ?row_batch_id, "apply local row insert");
-        if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_batch(storage, visibility_change)?;
-        }
-
-        tracing::debug!(%object_id, ?row_batch_id, branch = self.current_branch(), "row created");
-        Ok(InsertResult {
-            row_id: object_id,
-            batch_id: row_batch_id,
-            row_values: values.to_vec(),
-        })
+        )
     }
 
     pub fn insert_with_session<H: Storage>(
@@ -1257,6 +1080,16 @@ impl QueryManager {
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
+        // Deny anonymous writes before any policy evaluation.
+        if let Some(session) = write_context.and_then(WriteContext::session)
+            && session.auth_mode == AuthMode::Anonymous
+        {
+            return Err(QueryError::AnonymousWriteDenied {
+                table: TableName::new(table),
+                operation: Operation::Insert,
+            });
+        }
+
         // Check INSERT WITH CHECK policy
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
@@ -1328,6 +1161,8 @@ impl QueryManager {
 
         // Add commit with row data to specified branch
         let index_mutations = if Self::write_context_is_open_batch(write_context) {
+            // Writes made as part of batches/transactions do not modify indexes.
+            // Indexes are updated on commit.
             Vec::new()
         } else {
             Self::index_mutations_for_insert_on_branch_with_layout(
@@ -1348,14 +1183,19 @@ impl QueryManager {
             self.row_batch_authoring(&provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch);
-        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
-            storage,
-            table,
-            &branch_name,
-            object_id,
-            row,
-            &index_mutations,
-        )?;
+        let (row_batch_id, visibility_change) = self
+            .apply_local_row_history_write_with_prepared_context(
+                storage,
+                PreparedLocalRowHistoryWrite {
+                    table,
+                    branch_name: &branch_name,
+                    row_id: object_id,
+                    row,
+                    index_mutations: &index_mutations,
+                    row_locator: &table_write.row_locator,
+                    descriptor: table_write.descriptor.clone(),
+                },
+            )?;
         self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(object_id, branch_name, row_batch_id),
