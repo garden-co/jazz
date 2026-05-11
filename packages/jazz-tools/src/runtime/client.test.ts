@@ -100,6 +100,18 @@ function makeContext(): AppContext {
   };
 }
 
+function makeLocalBatchRecord(
+  batchId: string,
+  latestSettlement: LocalBatchRecord["latestSettlement"] = null,
+): LocalBatchRecord {
+  return {
+    batchId,
+    mode: "direct",
+    sealed: true,
+    latestSettlement,
+  };
+}
+
 describe("JazzClient onAuthFailure wiring", () => {
   it("registers runtimeOptions.onAuthFailure with runtime.onAuthFailure on construction", () => {
     const runtime = makeFakeRuntime();
@@ -211,6 +223,41 @@ describe("JazzClient.updateCookieSession", () => {
     expect(runtime.updateAuth).toHaveBeenCalledTimes(1);
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({ jwt_token: null });
+  });
+});
+
+describe("JazzClient worker batch hydration", () => {
+  it.fails("unblocks edge waits when the worker has a stronger durable settlement", async () => {
+    const batchId = "batch-chat";
+    const runtime = makeFakeRuntime();
+    const runtimeRecord = makeLocalBatchRecord(batchId, {
+      kind: "durableDirect",
+      batchId,
+      confirmedTier: "local",
+    });
+    runtime.loadLocalBatchRecord.mockImplementation((requestedBatchId: string) => {
+      if (requestedBatchId !== batchId) return null;
+      return runtimeRecord;
+    });
+    runtime.loadLocalBatchRecords.mockReturnValue([runtimeRecord]);
+    runtime.waitForBatch.mockImplementation(() => new Promise(() => {}));
+    delete (runtime as Partial<Runtime>).loadBatchFate;
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    client.hydrateLocalBatchRecords([
+      makeLocalBatchRecord(batchId, {
+        kind: "durableDirect",
+        batchId,
+        confirmedTier: "global",
+      }),
+    ]);
+
+    expect(client.localBatchRecord(batchId)?.latestSettlement).toMatchObject({
+      confirmedTier: "global",
+    });
+    expect(client.hasPendingHydratedBatchReconciliation("edge")).toBe(false);
+    await expect(client.waitForBatch(batchId, "edge")).resolves.toBeUndefined();
+    expect(runtime.waitForBatch).not.toHaveBeenCalled();
   });
 });
 
