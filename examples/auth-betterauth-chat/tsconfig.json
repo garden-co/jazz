@@ -26,10 +26,5 @@
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": [
-    "node_modules",
-    "schema/permissions.test.ts",
-    "vitest.config.browser.ts",
-    "tests/**"
-  ]
+  "exclude": ["node_modules", "schema/permissions.test.ts", "vitest.config.browser.ts", "tests/**"]
 }
