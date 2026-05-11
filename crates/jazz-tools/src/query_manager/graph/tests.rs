@@ -8,7 +8,7 @@ use crate::query_manager::relation_ir::{
     ProjectColumn, ProjectExpr, RelExpr, RowIdRef, ValueRef,
 };
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, RowDescriptor, RowPolicyMode, Schema, Value,
+    ColumnDescriptor, ColumnType, RowDescriptor, RowPolicyMode, Schema, TableSchema, Value,
 };
 use std::ops::Bound;
 
@@ -328,6 +328,66 @@ fn same_column_contradiction_elides_filter_with_empty_scan() {
         only_index_scan_condition(&graph),
         ScanCondition::Empty
     ));
+}
+
+#[test]
+fn same_column_unindexed_bounds_keep_filter_and_scan_id() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        TableSchema::builder("users")
+            .column("name", ColumnType::Text)
+            .column("score", ColumnType::Integer)
+            .index_only(["name"])
+            .build(),
+    );
+    let query = QueryBuilder::new("users")
+        .filter_gt("score", Value::Integer(10))
+        .filter_lt("score", Value::Integer(20))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+    let scan = only_index_scan(&graph);
+
+    assert_eq!(scan.column.as_str(), "_id");
+    assert!(matches!(&scan.condition, ScanCondition::All));
+    assert!(
+        has_filter_node(&graph),
+        "unindexed same-column bounds must remain as a residual predicate"
+    );
+}
+
+#[test]
+fn unindexed_eq_predicate_does_not_preempt_indexed_scan() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        TableSchema::builder("users")
+            .column("name", ColumnType::Text)
+            .column("score", ColumnType::Integer)
+            .index_only(["score"])
+            .build(),
+    );
+    let query = QueryBuilder::new("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+    let scan = only_index_scan(&graph);
+
+    assert_eq!(scan.column.as_str(), "score");
+    assert!(matches!(
+        &scan.condition,
+        ScanCondition::Range {
+            min: Bound::Excluded(Value::Integer(50)),
+            max: Bound::Unbounded,
+        }
+    ));
+    assert!(
+        has_filter_node(&graph),
+        "unindexed equality predicates must not be treated as index-covered"
+    );
 }
 
 #[test]

@@ -150,25 +150,6 @@ fn collect_magic_refs_from_disjuncts(
     refs
 }
 
-fn best_available_index_condition<'a>(
-    disjunct: &'a Conjunction,
-    table_schema: &crate::query_manager::types::TableSchema,
-) -> Option<&'a Condition> {
-    disjunct
-        .conditions
-        .iter()
-        .find(|condition| {
-            matches!(condition, Condition::Eq { .. })
-                && condition.is_index_scannable()
-                && table_schema.is_indexed_column(condition.column())
-        })
-        .or_else(|| {
-            disjunct.conditions.iter().find(|condition| {
-                condition.is_index_scannable() && table_schema.is_indexed_column(condition.column())
-            })
-        })
-}
-
 fn collect_magic_refs_from_project_columns(
     columns: Option<&[ProjectColumn]>,
 ) -> Vec<(Option<String>, MagicColumnKind)> {
@@ -578,7 +559,11 @@ impl QueryGraph {
         // For multi-branch queries, we create scans for each branch and union them
         // Column names are translated for old schema branches
         let mut phase1_outputs: Vec<NodeId> = Vec::new();
-        let scan_plans: Vec<_> = plan.disjuncts.iter().map(index_scan_plan).collect();
+        let scan_plans: Vec<_> = plan
+            .disjuncts
+            .iter()
+            .map(|disjunct| index_scan_plan(disjunct, table_schema))
+            .collect();
 
         for branch in &branches {
             // Get schema hash for this branch to determine if column translation is needed
@@ -591,18 +576,6 @@ impl QueryGraph {
             else {
                 continue;
             };
-
-//             for disjunct in &plan.disjuncts {
-//                 // Find best index condition for this disjunct
-//                 let (scan_column, scan_condition) =
-//                     if let Some(cond) = best_available_index_condition(disjunct, table_schema) {
-//                         let column = cond.column().to_string();
-//                         let scan_cond = condition_to_scan(cond);
-//                         (column, scan_cond)
-//                     } else {
-//                         // No index condition, use "_id" for full scan
-//                         ("_id".to_string(), ScanCondition::All)
-//                     };
             for scan_plan in &scan_plans {
                 let scan_column = &scan_plan.column;
 
@@ -2098,7 +2071,10 @@ impl Default for ScanIntersection {
     }
 }
 
-fn index_scan_plan(disjunct: &Conjunction) -> IndexScanPlan {
+fn index_scan_plan(
+    disjunct: &Conjunction,
+    table_schema: &crate::query_manager::types::TableSchema,
+) -> IndexScanPlan {
     if disjunct.conditions.is_empty() {
         return IndexScanPlan {
             column: "_id".to_string(),
@@ -2111,7 +2087,7 @@ fn index_scan_plan(disjunct: &Conjunction) -> IndexScanPlan {
     for condition in disjunct
         .conditions
         .iter()
-        .filter(|c| c.is_index_scannable())
+        .filter(|c| c.is_index_scannable() && table_schema.is_indexed_column(c.column()))
     {
         if !column_plans
             .iter()
