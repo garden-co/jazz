@@ -331,7 +331,12 @@ impl WasmWorkerBridge {
                 }
                 // Push any accumulated outbox traffic to the worker before
                 // posting the ack envelope so the ack covers the whole batch.
+                // `batched_tick` only drains the runtime's outbox into the
+                // sender's pending queue; `flush_now` is what synchronously
+                // postMessages it. Without the flush, the ack envelope posted
+                // below would race ahead of the writes it is meant to cover.
                 inner.runtime.batched_tick();
+                inner.sender.flush_now();
 
                 let payloads = collect_replay_payloads(&inner.runtime, batch_id.as_deref());
 
@@ -520,9 +525,17 @@ impl WasmWorkerBridge {
 // (e.g. a thrown exception during init). Spec lines 539–542.
 impl Drop for WasmWorkerBridge {
     fn drop(&mut self) {
-        if !self.inner.is_disposed_like() {
-            self.inner.dispose_internals();
+        // If `shutdown()` already ran, it has already installed the noop
+        // sender, removed the server edge, and cleared `onmessage`. Re-doing
+        // those here is not idempotent against the shared `WasmRuntime`: by
+        // the time wasm-bindgen's FinalizationRegistry fires `Drop` on a
+        // disposed bridge, the runtime may have been re-attached to a
+        // successor bridge (see `Db.restartWorkerWithCurrentDbName`), and
+        // clobbering its sender/server edge silently breaks outbox traffic.
+        if self.inner.is_disposed_like() {
+            return;
         }
+        self.inner.dispose_internals();
         // Detach: install the noop sender, drop the server-edge, clear the
         // worker's `onmessage` slot. We do *not* post `Shutdown` from `Drop` —
         // by the time `Drop` runs in an exception path, the receiver may be

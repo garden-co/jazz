@@ -892,3 +892,76 @@ async fn upstream_disconnected_rearms_wait() {
     fw.emit_wire(&WorkerToMainWire::UpstreamConnected);
     waiter.await.expect("re-arm resolves");
 }
+
+// =============================================================================
+// Drop after explicit shutdown
+// =============================================================================
+
+/// Regression test for a silent-failure path in `Db.restartWorkerWithCurrentDbName`:
+/// the wasm-bindgen wrapper for a shut-down bridge sticks around until
+/// `FinalizationRegistry` fires; if a successor bridge has been attached to
+/// the same `WasmRuntime` in the meantime, the old `Drop` impl must not
+/// reach back into the shared runtime and clobber the new sender / server
+/// edge.
+#[wasm_bindgen_test]
+async fn drop_after_shutdown_leaves_successor_bridge_intact() {
+    let runtime = fresh_runtime();
+
+    // Bridge A: attach, init, shutdown.
+    let fw_a = FakeWorker::new();
+    let bridge_a =
+        jazz_wasm::WasmWorkerBridge::attach(fw_a.worker(), &runtime, build_options(None))
+            .expect("attach A");
+    let init_a = bridge_a.init();
+    fw_a.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "c1".into(),
+    });
+    JsFuture::from(init_a).await.expect("init A");
+
+    let shutdown_a = bridge_a.shutdown();
+    fw_a.emit_wire(&WorkerToMainWire::ShutdownOk);
+    JsFuture::from(shutdown_a).await.expect("shutdown A");
+
+    // Bridge B: attach a fresh bridge on the SAME runtime with a different
+    // worker.
+    let fw_b = FakeWorker::new();
+    let bridge_b =
+        jazz_wasm::WasmWorkerBridge::attach(fw_b.worker(), &runtime, build_options(None))
+            .expect("attach B");
+    let init_b = bridge_b.init();
+    fw_b.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "c2".into(),
+    });
+    JsFuture::from(init_b).await.expect("init B");
+
+    // Sanity: B's sender is wired — server-bound traffic from
+    // `replay_server_connection` reaches B's worker.
+    let posted_b_baseline = fw_b.posted.borrow().len();
+    bridge_b.replay_server_connection();
+    yield_once().await;
+    assert!(
+        fw_b.posted.borrow().len() > posted_b_baseline,
+        "bridge B sender did not post after attach (test setup broken)"
+    );
+
+    // Now drop A. With the bug, A's Drop runs `install_noop_sync_sender` +
+    // `remove_server` on the shared runtime, silently replacing B's sender
+    // with a noop and tearing down B's server edge.
+    let posted_a_before_drop = fw_a.posted.borrow().len();
+    std::mem::drop(bridge_a);
+
+    // Trigger more outbox traffic via B. It must still flow to B's worker.
+    let posted_b_before_second = fw_b.posted.borrow().len();
+    bridge_b.replay_server_connection();
+    yield_once().await;
+    assert!(
+        fw_b.posted.borrow().len() > posted_b_before_second,
+        "after dropping the disposed bridge A, B's outbox stopped flowing — \
+         A's Drop clobbered the shared runtime's sender"
+    );
+    assert_eq!(
+        fw_a.posted.borrow().len(),
+        posted_a_before_drop,
+        "outbox traffic leaked to A's (shut-down) worker after B was attached"
+    );
+}
