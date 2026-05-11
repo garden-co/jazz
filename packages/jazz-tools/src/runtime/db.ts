@@ -1034,9 +1034,6 @@ export class Db {
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
-        onBeforeLocalBatchWait: async (batchId) => {
-          await this.workerBridge?.waitForLocalSyncFlush(batchId);
-        },
         onRejectedBatchAcknowledged: (batchId) => {
           this.workerBridge?.acknowledgeRejectedBatch(batchId);
         },
@@ -1104,9 +1101,8 @@ export class Db {
     }
     if (!options?.tier || options.tier === "local") {
       if (client?.hasPendingHydratedBatchReconciliation("edge")) {
-        await this.workerBridge.waitForLocalSyncFlush();
         await this.workerBridge.waitForUpstreamServerConnection();
-        this.workerBridge.replayWorkerUpstreamConnection();
+        this.workerBridge.reconnectUpstream();
         await this.waitForHydratedWorkerBatchReconciliation(client, "edge");
       }
       return;
@@ -1128,7 +1124,11 @@ export class Db {
         return;
       }
       for (const batchId of pendingBatchIds) {
-        await this.workerBridge?.waitForLocalSyncFlush(batchId);
+        try {
+          await client.waitForBatch(batchId, tier);
+        } catch {
+          // Best effort: wait errors fall through to the polling retry.
+        }
       }
       await sleep(20);
     }

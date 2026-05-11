@@ -160,29 +160,9 @@ export class WorkerBridge {
 
   /**
    * Reset the main-runtime server edge so a fresh catalogue exchange runs.
-   * Mirrors the legacy adapter; the new bridge offers `replayServerConnection`
-   * directly.
    */
   replayServerConnection(): void {
     this.bridge?.replayServerConnection();
-  }
-
-  /**
-   * Re-arm the worker's upstream WS. Today this is just `reconnectUpstream`;
-   * kept under the legacy name so existing callers in `db.ts` keep working
-   * without renames.
-   */
-  replayWorkerUpstreamConnection(): void {
-    this.bridge?.reconnectUpstream();
-  }
-
-  /**
-   * Legacy hook used to wait for the worker to durably persist a local batch.
-   * In the new architecture durability is handled inline by the worker host's
-   * `batched_tick` + `flush_wal`, so this resolves immediately.
-   */
-  async waitForLocalSyncFlush(_batchId?: string): Promise<void> {
-    // Intentionally no-op: durability is enforced inside the worker host.
   }
 
   disconnectUpstream(): void {
