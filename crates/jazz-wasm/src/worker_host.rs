@@ -231,7 +231,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
             });
         }
         let auth_json = serde_json::to_string(&auth_map).unwrap_or_else(|_| "{}".into());
-        let ws_url = http_url_to_ws(server_url, &f.app_id);
+        let ws_url = http_url_to_ws(server_url, &f.app_id)?;
         HOST.with(|c| {
             if let Some(h) = c.borrow_mut().as_mut() {
                 h.current_ws_url = Some(ws_url.clone());
@@ -301,13 +301,43 @@ fn perform_upstream_connect(runtime: &Rc<WasmRuntime>, ws_url: &str, auth_json: 
 }
 
 fn sync_retained_local_batch_records(runtime: &WasmRuntime) {
-    match runtime.load_local_batch_records() {
-        Ok(value) => {
-            let json = json_stringify(&value).unwrap_or_else(|| "[]".into());
-            post_to_main(&WorkerToMainWire::LocalBatchRecordsSync { batches_json: json });
+    // Drive the core directly so we can pair each batch with the encoded
+    // storage row bytes that the main thread needs to hydrate optimistic
+    // rows after a worker restart (the JSON-only path was a regression vs
+    // the legacy TS worker, which attached `encodedRecord` per batch).
+    let records = {
+        let core = runtime.core.borrow();
+        match core.local_batch_records_for_worker_sync() {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::warn!("local_batch_records_for_worker_sync failed: {err}");
+                return;
+            }
         }
-        Err(_) => tracing::warn!("load_local_batch_records failed"),
+    };
+
+    let mut encoded_records: Vec<Option<serde_bytes::ByteBuf>> = Vec::with_capacity(records.len());
+    for record in &records {
+        let encoded = match record.encode_storage_row() {
+            Ok(bytes) => Some(serde_bytes::ByteBuf::from(bytes)),
+            Err(err) => {
+                tracing::warn!(
+                    "encode_storage_row failed for batch {}: {err}",
+                    record.batch_id
+                );
+                None
+            }
+        };
+        encoded_records.push(encoded);
     }
+
+    let json_value = jazz_tools::binding_support::serialize_local_batch_records(&records);
+    let batches_json = serde_json::to_string(&json_value).unwrap_or_else(|_| "[]".into());
+
+    post_to_main(&WorkerToMainWire::LocalBatchRecordsSync {
+        batches_json,
+        encoded_records,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -504,14 +534,20 @@ fn ensure_peer_client(runtime: &WasmRuntime, peer_id: &str) -> String {
     cid
 }
 
-fn handle_shutdown(runtime: &Rc<WasmRuntime>, _simulate_crash: bool) {
+fn handle_shutdown(runtime: &Rc<WasmRuntime>, simulate_crash: bool) {
     HOST.with(|c| {
         if let Some(h) = c.borrow_mut().as_mut() {
             h.state = HostState::ShuttingDown;
         }
     });
 
-    runtime.batched_tick();
+    // simulate_crash leaves the WAL with unflushed outbox work — only the WAL
+    // buffer is forced to OPFS; the batched tick (which drains scheduled work
+    // + processes the outbox) is skipped so WAL-replay tests have unfinished
+    // state to recover.
+    if !simulate_crash {
+        runtime.batched_tick();
+    }
     runtime.flush_wal();
     runtime.install_noop_sync_sender();
 
@@ -526,7 +562,13 @@ fn handle_shutdown(runtime: &Rc<WasmRuntime>, _simulate_crash: bool) {
     if let Ok(global) = global_worker_scope() {
         global.close();
     }
-    HOST.with(|c| *c.borrow_mut() = None);
+    // Defer dropping HOST: we are still inside `on_message_closure`'s body,
+    // and `WorkerHost::on_message_closure` owns that closure's backing Box.
+    // Dropping it now would free the box while it is executing. Schedule the
+    // drop on the next microtask so the call frame unwinds first.
+    spawn_local(async {
+        HOST.with(|c| *c.borrow_mut() = None);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -578,24 +620,65 @@ fn make_on_main_sync_flushed() -> Function {
 // ---------------------------------------------------------------------------
 
 /// Normalise a server URL to a WebSocket URL with the app path appended.
-pub fn http_url_to_ws(server_url: &str, app_id: &str) -> String {
-    let lower = server_url.to_ascii_lowercase();
-    let (prefix_len, scheme): (usize, &str) = if lower.starts_with("https://") {
-        (8, "wss://")
-    } else if lower.starts_with("http://") {
-        (7, "ws://")
-    } else if lower.starts_with("wss://") {
-        (6, "wss://")
-    } else if lower.starts_with("ws://") {
-        (5, "ws://")
+///
+/// Mirrors the legacy TS `httpUrlToWs` semantics:
+/// - Trims surrounding whitespace.
+/// - Requires an `http://`, `https://`, `ws://`, or `wss://` scheme.
+/// - Rejects query strings and hash fragments.
+/// - Strips a trailing `/ws` from already-WS inputs so we don't double up.
+/// - Percent-encodes the `app_id` so unusual characters survive routing.
+pub fn http_url_to_ws(server_url: &str, app_id: &str) -> Result<String, String> {
+    let trimmed = server_url.trim();
+    let (scheme, rest, original_was_ws) = if let Some(r) = strip_prefix_ci(trimmed, "https://") {
+        ("wss://", r, false)
+    } else if let Some(r) = strip_prefix_ci(trimmed, "http://") {
+        ("ws://", r, false)
+    } else if let Some(r) = strip_prefix_ci(trimmed, "wss://") {
+        ("wss://", r, true)
+    } else if let Some(r) = strip_prefix_ci(trimmed, "ws://") {
+        ("ws://", r, true)
     } else {
-        (0, "ws://")
+        return Err(format!(
+            "Invalid server URL \"{server_url}\": expected http://, https://, ws://, or wss://"
+        ));
     };
-    let mut rest = &server_url[prefix_len..];
-    while rest.ends_with('/') {
-        rest = &rest[..rest.len() - 1];
+
+    if rest.contains('?') || rest.contains('#') {
+        return Err(format!(
+            "Invalid server URL \"{server_url}\": must not include query parameters or a hash fragment"
+        ));
     }
-    format!("{scheme}{rest}/apps/{app_id}/ws")
+
+    let mut path_part = rest.trim_end_matches('/');
+    if original_was_ws {
+        if let Some(without_ws) = path_part.strip_suffix("/ws") {
+            path_part = without_ws.trim_end_matches('/');
+        }
+    }
+
+    let encoded_app_id = percent_encode_path_segment(app_id);
+    Ok(format!("{scheme}{path_part}/apps/{encoded_app_id}/ws"))
+}
+
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&s[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn percent_encode_path_segment(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for b in input.bytes() {
+        // RFC 3986 unreserved characters: A-Z a-z 0-9 - _ . ~
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 pub fn map_auth_reason(reason: &str) -> &'static str {
@@ -725,7 +808,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn http_url_to_ws_normalises_https() {
         assert_eq!(
-            http_url_to_ws("https://example.test", "app-1"),
+            http_url_to_ws("https://example.test", "app-1").unwrap(),
             "wss://example.test/apps/app-1/ws"
         );
     }
@@ -733,7 +816,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn http_url_to_ws_normalises_http() {
         assert_eq!(
-            http_url_to_ws("http://localhost:4000", "xyz"),
+            http_url_to_ws("http://localhost:4000", "xyz").unwrap(),
             "ws://localhost:4000/apps/xyz/ws"
         );
     }
@@ -741,7 +824,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn http_url_to_ws_passes_wss_through() {
         assert_eq!(
-            http_url_to_ws("wss://relay.example", "x"),
+            http_url_to_ws("wss://relay.example", "x").unwrap(),
             "wss://relay.example/apps/x/ws"
         );
     }
@@ -749,7 +832,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn http_url_to_ws_passes_ws_through() {
         assert_eq!(
-            http_url_to_ws("ws://relay.example", "x"),
+            http_url_to_ws("ws://relay.example", "x").unwrap(),
             "ws://relay.example/apps/x/ws"
         );
     }
@@ -757,20 +840,69 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn http_url_to_ws_strips_trailing_slash() {
         assert_eq!(
-            http_url_to_ws("https://example.test/", "a"),
+            http_url_to_ws("https://example.test/", "a").unwrap(),
             "wss://example.test/apps/a/ws"
         );
         assert_eq!(
-            http_url_to_ws("https://example.test///", "a"),
+            http_url_to_ws("https://example.test///", "a").unwrap(),
             "wss://example.test/apps/a/ws"
         );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn http_url_to_ws_defaults_unknown_scheme_to_ws() {
+    fn http_url_to_ws_rejects_unknown_scheme() {
+        assert!(http_url_to_ws("example.test:4000", "a").is_err());
+        assert!(http_url_to_ws("ftp://example.test", "a").is_err());
+        assert!(http_url_to_ws("", "a").is_err());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn http_url_to_ws_strips_trailing_ws_on_ws_inputs() {
         assert_eq!(
-            http_url_to_ws("example.test:4000", "a"),
-            "ws://example.test:4000/apps/a/ws"
+            http_url_to_ws("ws://relay.example/ws", "x").unwrap(),
+            "ws://relay.example/apps/x/ws"
+        );
+        assert_eq!(
+            http_url_to_ws("wss://relay.example/ws/", "x").unwrap(),
+            "wss://relay.example/apps/x/ws"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn http_url_to_ws_rejects_query_and_hash() {
+        assert!(http_url_to_ws("https://example.test?q=1", "a").is_err());
+        assert!(http_url_to_ws("https://example.test#x", "a").is_err());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn http_url_to_ws_trims_whitespace() {
+        assert_eq!(
+            http_url_to_ws("  https://example.test\t", "a").unwrap(),
+            "wss://example.test/apps/a/ws"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn http_url_to_ws_percent_encodes_app_id() {
+        assert_eq!(
+            http_url_to_ws("https://example.test", "app id/with space").unwrap(),
+            "wss://example.test/apps/app%20id%2Fwith%20space/ws"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn http_url_to_ws_preserves_base_path() {
+        assert_eq!(
+            http_url_to_ws("https://example.test/jazz", "a").unwrap(),
+            "wss://example.test/jazz/apps/a/ws"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn http_url_to_ws_accepts_case_insensitive_scheme() {
+        assert_eq!(
+            http_url_to_ws("HTTPS://example.test", "a").unwrap(),
+            "wss://example.test/apps/a/ws"
         );
     }
 

@@ -230,8 +230,12 @@ impl WasmWorkerBridge {
             };
             match result {
                 Ok(client_id) => {
-                    inner_for_future.transition_init_ok(client_id.clone());
-                    inner_for_future.sender.open_init_gate_and_flush();
+                    if inner_for_future.transition_init_ok(client_id.clone()) {
+                        // Only release the init gate while the bridge is still
+                        // alive. After shutdown/dispose the noop sender is the
+                        // intended sink — re-flushing would contradict that.
+                        inner_for_future.sender.open_init_gate_and_flush();
+                    }
                     let obj = Object::new();
                     Reflect::set(
                         &obj,
@@ -505,13 +509,28 @@ impl BridgeInner {
         }
     }
 
-    fn transition_init_ok(&self, client_id: String) {
-        *self.worker_client_id.borrow_mut() = Some(client_id);
-        self.state.set(BridgeState::Ready);
+    /// Returns true if the transition fired; false if a terminal state
+    /// (Failed/ShuttingDown/Disposed) had already been entered, in which case
+    /// the caller must skip any follow-up side effects (e.g. reopening the
+    /// outbox init gate).
+    fn transition_init_ok(&self, client_id: String) -> bool {
+        match self.state.get() {
+            BridgeState::Idle | BridgeState::Initializing | BridgeState::Ready => {
+                *self.worker_client_id.borrow_mut() = Some(client_id);
+                self.state.set(BridgeState::Ready);
+                true
+            }
+            BridgeState::Failed | BridgeState::ShuttingDown | BridgeState::Disposed => false,
+        }
     }
 
     fn transition_init_failed(&self) {
-        self.state.set(BridgeState::Failed);
+        match self.state.get() {
+            BridgeState::Idle | BridgeState::Initializing | BridgeState::Ready => {
+                self.state.set(BridgeState::Failed);
+            }
+            BridgeState::Failed | BridgeState::ShuttingDown | BridgeState::Disposed => {}
+        }
     }
 
     fn transition_shutdown_called(&self) {
@@ -618,10 +637,14 @@ impl BridgeInner {
                     let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&reason));
                 }
             }
-            WorkerToMainWire::LocalBatchRecordsSync { batches_json } => {
+            WorkerToMainWire::LocalBatchRecordsSync {
+                batches_json,
+                encoded_records,
+            } => {
                 let listener = self.listeners.borrow().on_local_batch_records_sync.clone();
                 if let Some(cb) = listener {
                     if let Ok(value) = json_parse(&batches_json) {
+                        attach_encoded_records(&value, &encoded_records);
                         let _ = cb.call1(&JsValue::NULL, &value);
                     }
                 }
@@ -774,6 +797,32 @@ fn json_parse(s: &str) -> Result<JsValue, JsValue> {
     let json = Reflect::get(&global, &JsValue::from_str("JSON"))?;
     let parse: Function = Reflect::get(&json, &JsValue::from_str("parse"))?.dyn_into()?;
     parse.call1(&JsValue::NULL, &JsValue::from_str(s))
+}
+
+/// Walk a parsed `LocalBatchRecord` JS array and attach `encodedRecord`
+/// (as a `Uint8Array`) on each object whose matching `encoded_records`
+/// entry is present. Mirrors the legacy TS worker's `attachEncodedLocalBatchRecord`
+/// so the main runtime can hydrate optimistic rows after a worker restart.
+fn attach_encoded_records(value: &JsValue, encoded_records: &[Option<ByteBuf>]) {
+    let Some(arr) = value.dyn_ref::<Array>() else {
+        return;
+    };
+    let len = arr.length() as usize;
+    for (i, encoded) in encoded_records.iter().enumerate() {
+        if i >= len {
+            break;
+        }
+        let Some(bytes) = encoded else { continue };
+        let entry = arr.get(i as u32);
+        if !entry.is_object() {
+            continue;
+        }
+        let _ = Reflect::set(
+            &entry,
+            &JsValue::from_str("encodedRecord"),
+            &Uint8Array::from(bytes.as_ref()).into(),
+        );
+    }
 }
 
 fn sync_entry_to_runtime_payload(entry: SyncEntry) -> (JsValue, Option<f64>) {

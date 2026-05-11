@@ -862,7 +862,12 @@ mod outbox_sender_impl {
             };
 
             if destination_kind == "server" {
-                if let Some(fwd) = self.inner.server_payload_forwarder.borrow().as_ref() {
+                // Clone the Function out before invoking so the immutable
+                // borrow is released — a JS forwarder that reentrantly calls
+                // `setServerPayloadForwarder(...)` would otherwise panic with
+                // BorrowMutError.
+                let forwarder = self.inner.server_payload_forwarder.borrow().clone();
+                if let Some(fwd) = forwarder {
                     let js_payload = sync_entry_payload_js(&encoded);
                     let _ = fwd.call1(&JsValue::NULL, &js_payload);
                     return;

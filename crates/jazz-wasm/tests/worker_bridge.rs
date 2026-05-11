@@ -340,6 +340,43 @@ async fn shutdown_resolves_on_ack() {
 }
 
 // ---------------------------------------------------------------------------
+// 14.4.7b — InitOk arriving after shutdown does not regress bridge state
+// ---------------------------------------------------------------------------
+//
+// Regression for the race where `transition_init_ok` overwrote a `ShuttingDown`
+// state with `Ready` and re-opened the outbox init gate after the noop sync
+// sender had been installed.
+
+#[wasm_bindgen_test]
+async fn init_ok_after_shutdown_does_not_regress_state() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge =
+        WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None)).expect("attach");
+
+    let _init = bridge.init();
+    let shutdown = bridge.shutdown();
+
+    // InitOk races in before shutdown acks.
+    fw.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "raced".into(),
+    });
+    // Drain the init future onto the executor.
+    yield_once().await;
+    yield_once().await;
+
+    // Bridge must not have absorbed the raced client id.
+    let client_id = bridge.get_worker_client_id();
+    assert!(
+        client_id.is_null(),
+        "expected null worker_client_id after shutdown race, got {client_id:?}"
+    );
+
+    fw.emit_wire(&WorkerToMainWire::ShutdownOk);
+    JsFuture::from(shutdown).await.expect("shutdown ack");
+}
+
+// ---------------------------------------------------------------------------
 // 14.4.8 — lifecycle hint emits postcard binary
 // ---------------------------------------------------------------------------
 
@@ -653,6 +690,7 @@ fn local_batch_records_sync_listener_decodes_json() {
 
     fw.emit_wire(&WorkerToMainWire::LocalBatchRecordsSync {
         batches_json: r#"[{"batchId":"b1"}]"#.into(),
+        encoded_records: vec![None],
     });
     let captured = captured.borrow();
     let arr: &Array = captured
@@ -667,6 +705,60 @@ fn local_batch_records_sync_listener_decodes_json() {
         .as_string()
         .unwrap();
     assert_eq!(id, "b1");
+}
+
+// ---------------------------------------------------------------------------
+// 14.4.20b — encodedRecord attached on records sync when worker supplies it
+// ---------------------------------------------------------------------------
+
+#[wasm_bindgen_test]
+fn local_batch_records_sync_attaches_encoded_record() {
+    use serde_bytes::ByteBuf;
+
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge =
+        WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None)).expect("attach");
+    let captured: Rc<RefCell<Option<JsValue>>> = Rc::new(RefCell::new(None));
+    let captured_clone = Rc::clone(&captured);
+    let cb = Closure::<dyn FnMut(JsValue)>::new(move |value: JsValue| {
+        *captured_clone.borrow_mut() = Some(value);
+    });
+    let listeners = Object::new();
+    let _ = Reflect::set(
+        &listeners,
+        &"onLocalBatchRecordsSync".into(),
+        cb.as_ref().unchecked_ref(),
+    );
+    bridge.set_listeners(listeners.into());
+    cb.forget();
+
+    fw.emit_wire(&WorkerToMainWire::LocalBatchRecordsSync {
+        batches_json: r#"[{"batchId":"a"},{"batchId":"b"}]"#.into(),
+        encoded_records: vec![Some(ByteBuf::from(vec![1u8, 2, 3])), None],
+    });
+
+    let captured = captured.borrow();
+    let arr: &Array = captured
+        .as_ref()
+        .unwrap()
+        .dyn_ref::<Array>()
+        .expect("array");
+    assert_eq!(arr.length(), 2);
+
+    let a = arr.get(0);
+    let a_encoded = Reflect::get(&a, &"encodedRecord".into()).unwrap();
+    let a_bytes: js_sys::Uint8Array = a_encoded
+        .dyn_into()
+        .expect("encodedRecord should be Uint8Array");
+    assert_eq!(a_bytes.to_vec(), vec![1u8, 2, 3]);
+
+    let b = arr.get(1);
+    let b_encoded = Reflect::get(&b, &"encodedRecord".into()).unwrap();
+    assert!(
+        b_encoded.is_undefined(),
+        "missing encoded entries must leave field absent, got {b_encoded:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

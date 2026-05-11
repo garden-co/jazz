@@ -155,9 +155,4 @@ declare module "jazz-wasm" {
    * `self.onmessage` and asynchronously brings up the worker runtime.
    */
   export function runAsWorker(initMessage: unknown, pendingMessages: unknown[]): void;
-
-  export function encodeMainToWorkerJs(value: unknown): Uint8Array;
-  export function encodeWorkerToMainJs(value: unknown): Uint8Array;
-  export function decodeMainToWorkerJs(bytes: Uint8Array): unknown;
-  export function decodeWorkerToMainJs(bytes: Uint8Array): unknown;
 }
