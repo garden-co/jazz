@@ -1,8 +1,7 @@
 /**
  * `WorkerBridge` — thin TS adapter over the Rust-owned `WasmWorkerBridge`.
  *
- * Per `specs/todo/projects/rust-owned-worker-bridge/spec.md` Stage 3, the
- * bridge state machine, init/shutdown handshakes, listener slots, peer
+ * The bridge state machine, init/shutdown handshakes, listener slots, peer
  * routing, lifecycle hint forwarding, and outbox buffering all live in
  * `crates/jazz-wasm/src/worker_bridge.rs`. The Rust API takes options at
  * `attach()` time and `init()` is parameter-less. This adapter preserves
