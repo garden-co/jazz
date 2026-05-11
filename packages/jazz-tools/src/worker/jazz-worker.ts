@@ -1,9 +1,9 @@
 /**
  * Dedicated Worker entry point for Jazz — thin WASM-bootstrap shim.
  *
- * Per `specs/todo/projects/rust-owned-worker-bridge/spec.md`, the worker-side
- * runtime host now lives entirely in Rust (`crates/jazz-wasm/src/worker_host.rs`).
- * This file's only responsibility is the bootstrap-handoff dance:
+ * The worker-side runtime host lives entirely in Rust
+ * (`crates/jazz-wasm/src/worker_host.rs`). This file's only responsibility
+ * is the bootstrap-handoff dance:
  *
  *  1. Post `{type:"ready"}` so the main thread knows it can send the init.
  *  2. Buffer the first `init` message and any subsequent messages while WASM
