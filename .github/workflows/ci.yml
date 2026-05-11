@@ -146,7 +146,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: wasm-pack@0.13.1
 
       - name: Mount sccache sticky disk
         uses: useblacksmith/stickydisk@v1

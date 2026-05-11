@@ -521,7 +521,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: wasm-pack@0.13.1
 
       - uses: taiki-e/install-action@v2
         with:
