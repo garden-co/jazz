@@ -6,7 +6,7 @@ import { detectPackageManager } from "./detect-pm.js";
 import { runHostedInit } from "./cloud-init.js";
 import { writeBetterAuthSecret } from "./init-secret.js";
 
-type Framework = "next" | "sveltekit";
+type Framework = "next" | "sveltekit" | "ts";
 type Hosting = "hosted" | "selfhosted";
 type Auth = "localfirst" | "hybrid" | "betterauth";
 
@@ -22,6 +22,11 @@ const STARTERS: Record<Framework, Record<Auth, StarterName | null>> = {
     localfirst: "sveltekit-localfirst",
     hybrid: "sveltekit-hybrid",
     betterauth: "sveltekit-betterauth",
+  },
+  ts: {
+    localfirst: "ts-localfirst",
+    hybrid: "ts-hybrid",
+    betterauth: "ts-betterauth",
   },
 };
 
@@ -54,12 +59,19 @@ const ENV_KEYS_BY_FRAMEWORK: Record<Framework | "react", HostedEnvKeys> = {
     adminSecret: "JAZZ_ADMIN_SECRET",
     backendSecret: "BACKEND_SECRET",
   },
+  ts: {
+    appId: "VITE_JAZZ_APP_ID",
+    serverUrl: "VITE_JAZZ_SERVER_URL",
+    adminSecret: "JAZZ_ADMIN_SECRET",
+    backendSecret: "BACKEND_SECRET",
+  },
 };
 
 export function envKeysForStarter(starter: string): HostedEnvKeys | null {
   if (starter.startsWith("next-")) return ENV_KEYS_BY_FRAMEWORK.next;
   if (starter.startsWith("sveltekit-")) return ENV_KEYS_BY_FRAMEWORK.sveltekit;
   if (starter.startsWith("react-")) return ENV_KEYS_BY_FRAMEWORK.react;
+  if (starter.startsWith("ts-")) return ENV_KEYS_BY_FRAMEWORK.ts;
   return null;
 }
 
@@ -138,6 +150,7 @@ async function main() {
       options: [
         { value: "next", label: "React (Next.js)" },
         { value: "sveltekit", label: "Svelte (SvelteKit)" },
+        { value: "ts", label: "TypeScript (no framework)" },
       ],
     });
     if (isCancel(framework)) process.exit(0);
