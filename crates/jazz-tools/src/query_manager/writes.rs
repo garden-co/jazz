@@ -657,23 +657,6 @@ impl QueryManager {
             .unwrap_or_default()
     }
 
-    fn prepare_update_write<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        write: RowBranchWrite<'_>,
-        write_context: Option<&WriteContext>,
-        new_provenance: &RowProvenance,
-    ) -> Result<PreparedUpdateWrite, QueryError> {
-        let write_schema = self.schema.clone();
-        self.prepare_update_write_for_schema(
-            storage,
-            write,
-            write_schema.as_ref(),
-            write_context,
-            new_provenance,
-        )
-    }
-
     fn prepare_update_write_for_schema<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1979,31 +1962,18 @@ impl QueryManager {
         let table = self
             .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
-
-        // Deny anonymous writes before any policy evaluation.
-        if let Some(session) = write_context.and_then(WriteContext::session)
-            && session.auth_mode == AuthMode::Anonymous
-        {
-            return Err(QueryError::AnonymousWriteDenied {
-                table: TableName::new(&table),
-                operation: Operation::Update,
-            });
-        }
-
+        let branch = self.current_branch().as_str().to_string();
         let current_row = self
-            .staged_row_for_write(storage, id, self.current_branch().as_str(), write_context)
+            .staged_row_for_write(storage, id, branch.as_str(), write_context)
             .or_else(|| {
-                self.load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+                self.load_visible_row_on_branch(storage, id, branch.as_str())
                     .map(|(_, row)| row)
             })
             .ok_or(QueryError::ObjectNotFound(id))?;
         let old_data = current_row.data.clone();
         let old_provenance = current_row.row_provenance();
-        let branch = self.current_branch();
-        let timestamp = self.resolve_update_timestamp(write_context);
-        let new_provenance =
-            self.row_provenance_for_update(&old_provenance, write_context, timestamp);
-        let prepared = self.prepare_update_write(
+        let write_schema = self.schema.clone();
+        self.write_existing_row_on_branch_with_schema_and_write_context(
             storage,
             RowBranchWrite {
                 table: &table,
@@ -2013,36 +1983,9 @@ impl QueryManager {
                 old_data_for_policy: &old_data,
                 old_provenance_for_policy: &old_provenance,
             },
+            write_schema.as_ref(),
             write_context,
-            &new_provenance,
-        )?;
-        let index_mutations = if Self::write_context_is_open_batch(write_context) {
-            Vec::new()
-        } else {
-            Self::index_mutations_for_update_on_branch(
-                &table,
-                branch.as_str(),
-                id,
-                &old_data,
-                &prepared.new_data,
-                prepared.descriptor.as_ref(),
-                prepared.indexed_columns.as_deref().map(Vec::as_slice),
-            )
-        };
-        let batch_id = self.commit_prepared_update_write(
-            storage,
-            PreparedUpdateCommit {
-                table: &table,
-                branch: branch.as_str(),
-                id,
-                index_mutations: &index_mutations,
-            },
-            &prepared,
-            &new_provenance,
-            write_context,
-        )?;
-
-        Ok(batch_id)
+        )
     }
 
     pub fn update_with_session<H: Storage>(
@@ -2091,6 +2034,18 @@ impl QueryManager {
             old_data_for_policy: _old_data_for_policy,
             old_provenance_for_policy,
         } = write;
+        let table_name = TableName::new(table);
+
+        // Deny anonymous writes before any policy evaluation.
+        if let Some(session) = write_context.and_then(WriteContext::session)
+            && session.auth_mode == AuthMode::Anonymous
+        {
+            return Err(QueryError::AnonymousWriteDenied {
+                table: table_name,
+                operation: Operation::Update,
+            });
+        }
+
         let timestamp = self.resolve_update_timestamp(write_context);
         let new_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
