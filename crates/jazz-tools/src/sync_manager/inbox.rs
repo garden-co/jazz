@@ -27,8 +27,12 @@ enum SealedBatchMode {
 }
 
 impl SyncManager {
-    fn retain_client_batch_fate<H: Storage>(&mut self, storage: &mut H, fate: &BatchFate) -> bool {
-        self.persist_authoritative_batch_fate(storage, fate).is_ok()
+    fn retain_client_batch_fate(&mut self, fate: &BatchFate) -> bool {
+        tracing::debug!(
+            batch_id = ?fate.batch_id(),
+            "ignoring client-sent batch fate; authoritative fates are server-owned"
+        );
+        false
     }
 
     fn validate_sealed_batch_submission(
@@ -1440,7 +1444,7 @@ impl SyncManager {
                     });
             }
             SyncPayload::BatchFate { fate } => {
-                if self.retain_client_batch_fate(storage, fate) {
+                if self.retain_client_batch_fate(fate) {
                     self.pending_batch_fates.push(fate.clone());
                 }
             }
@@ -1590,7 +1594,7 @@ impl SyncManager {
                 );
             }
             SyncPayload::BatchFate { fate } => {
-                if self.retain_client_batch_fate(storage, &fate) {
+                if self.retain_client_batch_fate(&fate) {
                     self.pending_batch_fates.push(fate.clone());
                 }
             }

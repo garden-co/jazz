@@ -217,7 +217,7 @@ fn direct_batch_seal_promotes_existing_local_settlement_to_authority_tier() {
 }
 
 #[test]
-fn direct_client_settlement_retains_replayable_sealed_submission() {
+fn direct_client_settlement_is_not_authoritative() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
@@ -259,18 +259,15 @@ fn direct_client_settlement_retains_replayable_sealed_submission() {
 
     assert_eq!(
         io.load_authoritative_batch_fate(batch_id).unwrap(),
-        Some(BatchFate::DurableDirect {
-            batch_id,
-            confirmed_tier: DurabilityTier::Local,
-        }),
-        "direct client fate should be retained without rebuilding a local batch record"
+        None,
+        "direct client fate must not become an authoritative settlement"
     );
     assert_eq!(io.load_local_batch_record(batch_id).unwrap(), None);
     assert_eq!(io.load_sealed_batch_submission(batch_id).unwrap(), None);
 }
 
 #[test]
-fn direct_client_settlement_before_row_retains_replayable_sealed_submission_after_row() {
+fn direct_client_settlement_before_row_is_not_authoritative_after_row() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
@@ -314,10 +311,8 @@ fn direct_client_settlement_before_row_retains_replayable_sealed_submission_afte
 
     assert_eq!(
         io.load_authoritative_batch_fate(batch_id).unwrap(),
-        Some(BatchFate::DurableDirect {
-            batch_id,
-            confirmed_tier: DurabilityTier::Local,
-        }),
+        None,
+        "direct client fate must not become authoritative after the row arrives"
     );
     let outbox = sm.take_outbox();
     assert!(
@@ -369,10 +364,8 @@ fn direct_client_settlement_before_row_keeps_sealed_submission_without_server() 
 
     assert_eq!(
         io.load_authoritative_batch_fate(batch_id).unwrap(),
-        Some(BatchFate::DurableDirect {
-            batch_id,
-            confirmed_tier: DurabilityTier::Local,
-        }),
+        None,
+        "direct client fate must not become authoritative"
     );
     assert_eq!(
         io.load_sealed_batch_submission(batch_id).unwrap(),

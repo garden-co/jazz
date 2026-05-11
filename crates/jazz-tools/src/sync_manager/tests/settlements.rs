@@ -134,6 +134,38 @@ fn server_replay_does_not_send_local_durability_ack_upstream() {
 }
 
 #[test]
+fn client_durability_ack_is_not_authoritative() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = BatchId::new();
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::BatchFate {
+            fate: BatchFate::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Local,
+            },
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        None,
+        "clients must not be able to create authoritative durability settlements"
+    );
+    assert!(
+        sm.take_pending_batch_fates().is_empty(),
+        "ignored client acknowledgements must not be replayed through RuntimeCore"
+    );
+}
+
+#[test]
 fn initial_query_sync_sends_only_current_row_for_deep_history() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
