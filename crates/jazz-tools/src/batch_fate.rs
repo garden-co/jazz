@@ -2,6 +2,7 @@ use crate::digest::Digest32;
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::sync::OnceLock;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::SchemaHash;
@@ -150,7 +151,7 @@ impl BatchFate {
         };
 
         encode_row(
-            &batch_fate_storage_descriptor(),
+            batch_fate_storage_descriptor(),
             &[
                 Value::Text(kind.to_string()),
                 Value::BatchId(*self.batch_id().as_bytes()),
@@ -164,7 +165,7 @@ impl BatchFate {
     }
 
     pub fn decode_storage_row(bytes: &[u8]) -> Result<Self, String> {
-        let values = decode_row(&batch_fate_storage_descriptor(), bytes)
+        let values = decode_row(batch_fate_storage_descriptor(), bytes)
             .map_err(|err| format!("decode batch fate row: {err}"))?;
         let [
             kind,
@@ -224,6 +225,7 @@ pub struct LocalBatchRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealedBatchSubmission {
     pub batch_id: BatchId,
+    pub mode: BatchMode,
     pub target_branch_name: BranchName,
     pub batch_digest: Digest32,
     pub members: Vec<SealedBatchMember>,
@@ -560,6 +562,7 @@ impl SealedBatchSubmission {
 
     pub fn new(
         batch_id: BatchId,
+        mode: BatchMode,
         target_branch_name: BranchName,
         mut members: Vec<SealedBatchMember>,
         mut captured_frontier: Vec<CapturedFrontierMember>,
@@ -584,6 +587,7 @@ impl SealedBatchSubmission {
         captured_frontier.dedup();
         Self {
             batch_id,
+            mode,
             target_branch_name,
             batch_digest,
             members,
@@ -594,6 +598,7 @@ impl SealedBatchSubmission {
     pub fn encode_storage_row(&self) -> Result<Vec<u8>, String> {
         let values = vec![
             Value::Bytea(self.batch_id.as_bytes().to_vec()),
+            Value::Text(self.mode.as_str().to_string()),
             Value::Text(self.target_branch_name.as_str().to_string()),
             Value::Bytea(self.batch_digest.0.to_vec()),
             Value::Array(
@@ -631,6 +636,7 @@ impl SealedBatchSubmission {
             .map_err(|err| format!("decode sealed batch submission row: {err}"))?;
         let [
             batch_id,
+            mode,
             target_branch_name,
             batch_digest,
             members,
@@ -641,6 +647,10 @@ impl SealedBatchSubmission {
         };
 
         let batch_id = decode_batch_id_value(batch_id, "decode sealed batch submission batch id")?;
+        let mode = match mode {
+            Value::Text(raw) => BatchMode::parse(raw)?,
+            other => return Err(format!("expected sealed batch mode text, got {other:?}")),
+        };
         let target_branch_name = match target_branch_name {
             Value::Text(raw) => BranchName::new(raw),
             other => return Err(format!("expected target branch text, got {other:?}")),
@@ -747,7 +757,13 @@ impl SealedBatchSubmission {
             other => return Err(format!("expected captured frontier array, got {other:?}")),
         };
 
-        let submission = Self::new(batch_id, target_branch_name, members, captured_frontier);
+        let submission = Self::new(
+            batch_id,
+            mode,
+            target_branch_name,
+            members,
+            captured_frontier,
+        );
         if submission.batch_digest != batch_digest {
             return Err(format!(
                 "sealed batch submission batch digest mismatch: expected {batch_digest:?}, computed {:?}",
@@ -839,6 +855,7 @@ fn storage_descriptor() -> RowDescriptor {
 fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+        ColumnDescriptor::new("mode", ColumnType::Text),
         ColumnDescriptor::new("target_branch_name", ColumnType::Text),
         ColumnDescriptor::new("batch_digest", ColumnType::Bytea),
         ColumnDescriptor::new(
@@ -867,45 +884,48 @@ fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
     ])
 }
 
-fn batch_fate_storage_descriptor() -> RowDescriptor {
-    RowDescriptor::new(vec![
-        ColumnDescriptor::new(
-            "kind",
-            ColumnType::Enum {
-                variants: vec![
-                    "missing".to_string(),
-                    "rejected".to_string(),
-                    "durable_direct".to_string(),
-                    "accepted_transaction".to_string(),
-                ],
-            },
-        ),
-        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
-        ColumnDescriptor::new("code", ColumnType::Text).nullable(),
-        ColumnDescriptor::new("reason", ColumnType::Text).nullable(),
-        ColumnDescriptor::new(
-            "confirmed_tier",
-            ColumnType::Enum {
-                variants: vec![
-                    "local".to_string(),
-                    "edge".to_string(),
-                    "global".to_string(),
-                ],
-            },
-        )
-        .nullable(),
-        ColumnDescriptor::new(
-            "visible_members",
-            ColumnType::Array {
-                element: Box::new(ColumnType::Row {
-                    columns: Box::new(RowDescriptor::new(vec![
-                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
-                        ColumnDescriptor::new("branch_name", ColumnType::Text),
-                    ])),
-                }),
-            },
-        ),
-    ])
+fn batch_fate_storage_descriptor() -> &'static RowDescriptor {
+    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new(
+                "kind",
+                ColumnType::Enum {
+                    variants: vec![
+                        "missing".to_string(),
+                        "rejected".to_string(),
+                        "durable_direct".to_string(),
+                        "accepted_transaction".to_string(),
+                    ],
+                },
+            ),
+            ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+            ColumnDescriptor::new("code", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("reason", ColumnType::Text).nullable(),
+            ColumnDescriptor::new(
+                "confirmed_tier",
+                ColumnType::Enum {
+                    variants: vec![
+                        "local".to_string(),
+                        "edge".to_string(),
+                        "global".to_string(),
+                    ],
+                },
+            )
+            .nullable(),
+            ColumnDescriptor::new(
+                "visible_members",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Row {
+                        columns: Box::new(RowDescriptor::new(vec![
+                            ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                            ColumnDescriptor::new("branch_name", ColumnType::Text),
+                        ])),
+                    }),
+                },
+            ),
+        ])
+    })
 }
 
 #[cfg(test)]
@@ -1058,6 +1078,7 @@ mod tests {
         let mut record = LocalBatchRecord::new(batch_id, BatchMode::Transactional, false, None);
         record.mark_sealed(SealedBatchSubmission::new(
             batch_id,
+            BatchMode::Transactional,
             BranchName::new("dev-aaaaaaaaaaaa-main"),
             vec![SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(42)),
@@ -1083,6 +1104,7 @@ mod tests {
         let row_digest = Digest32([7; 32]);
         let submission = SealedBatchSubmission::new(
             batch_id,
+            BatchMode::Direct,
             BranchName::new("main"),
             vec![
                 SealedBatchMember {
@@ -1111,6 +1133,7 @@ mod tests {
             decoded,
             SealedBatchSubmission {
                 batch_id,
+                mode: BatchMode::Direct,
                 target_branch_name: BranchName::new("main"),
                 batch_digest: submission.batch_digest,
                 members: vec![SealedBatchMember {
@@ -1131,6 +1154,7 @@ mod tests {
         let object_id = ObjectId::from_uuid(uuid::Uuid::from_u128(11));
         let first = SealedBatchSubmission::new(
             BatchId::new(),
+            BatchMode::Direct,
             BranchName::new("main"),
             vec![SealedBatchMember {
                 object_id,
@@ -1140,6 +1164,7 @@ mod tests {
         );
         let second = SealedBatchSubmission::new(
             BatchId::new(),
+            BatchMode::Direct,
             BranchName::new("main"),
             vec![SealedBatchMember {
                 object_id,

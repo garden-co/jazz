@@ -26,6 +26,8 @@ export declare class NapiRuntime {
   loadLocalBatchRecords(): any[]
   acknowledgeRejectedBatch(batchId: string): boolean
   onMutationError(callback: (event: any) => void): void
+  loadBatchFate(batchId: string): any | null
+  discardLocalBatch(batchId: string): boolean
   sealBatch(batchId: string): void
   waitForBatch(batchId: string, tier: string): Promise<void>
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>

@@ -28,7 +28,7 @@
 //! ```
 
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -319,6 +319,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Per-batch durability bookkeeping: ack watchers + rejection set.
     pub(crate) durability: DurabilityTracker,
 
+    acknowledged_rejected_batches: HashSet<BatchId>,
+
     /// Recently mutated local batch records. Large direct batches append one
     /// member per write, so reloading the record from storage on every insert
     /// means repeatedly decoding the full accumulated member array.
@@ -344,36 +346,49 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
-        let pending_mutation_error_events: BTreeMap<BatchId, MutationErrorEvent> = storage
-            .scan_local_batch_records()
-            .map(|records| {
-                records
+        let rejected_batch_fates = storage
+            .scan_authoritative_batch_fates()
+            .map(|fates| {
+                fates
                     .into_iter()
-                    .filter_map(|record| {
-                        let Some(crate::batch_fate::BatchFate::Rejected { code, reason, .. }) =
-                            record.latest_fate.as_ref()
-                        else {
-                            return None;
-                        };
-                        let code = code.clone();
-                        let reason = reason.clone();
-
-                        Some((
-                            record.batch_id,
-                            MutationErrorEvent {
-                                code,
-                                reason,
-                                batch: record,
-                            },
-                        ))
-                    })
-                    .collect()
+                    .filter(|fate| matches!(fate, crate::batch_fate::BatchFate::Rejected { .. }))
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let rejected_batch_ids = pending_mutation_error_events
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
+        let acknowledged_rejected_batches: HashSet<BatchId> = storage
+            .scan_acknowledged_rejected_batch_fates()
+            .map(|batch_ids| batch_ids.into_iter().collect())
+            .unwrap_or_default();
+        let pending_mutation_error_events: BTreeMap<BatchId, MutationErrorEvent> =
+            rejected_batch_fates
+                .iter()
+                .filter_map(|fate| {
+                    let crate::batch_fate::BatchFate::Rejected {
+                        batch_id,
+                        code,
+                        reason,
+                    } = fate
+                    else {
+                        return None;
+                    };
+                    if acknowledged_rejected_batches.contains(batch_id) {
+                        return None;
+                    }
+                    Some((
+                        *batch_id,
+                        MutationErrorEvent {
+                            code: code.clone(),
+                            reason: reason.clone(),
+                            batch: crate::batch_fate::LocalBatchRecord::new(
+                                *batch_id,
+                                crate::batch_fate::BatchMode::Direct,
+                                true,
+                                Some(fate.clone()),
+                            ),
+                        },
+                    ))
+                })
+                .collect();
 
         let mut core = Self {
             schema_manager,
@@ -394,6 +409,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             durability: DurabilityTracker::with_initial_mutation_error_events(
                 pending_mutation_error_events,
             ),
+            acknowledged_rejected_batches,
             local_batch_record_cache: HashMap::new(),
             tier_label: "unknown",
             sync_tracer: None,
@@ -405,8 +421,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // rows would render on reload and then get retracted by the next
         // network-delivered settlement — a visible flash. Re-apply stored
         // rejections before any query can observe the visible region.
-        for batch_id in rejected_batch_ids {
-            core.mark_local_batch_rows_rejected(batch_id);
+        for fate in rejected_batch_fates {
+            core.mark_local_batch_rows_rejected(fate.batch_id());
         }
 
         core

@@ -21,6 +21,8 @@ use std::sync::Once;
 use jazz_tools::binding_support::parse_external_object_id;
 use js_sys::Function;
 use js_sys::Uint8Array;
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Object, Reflect};
 use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
 use tracing::warn;
@@ -81,20 +83,17 @@ pub fn subscribe_trace_entries(callback: Function) -> Function {
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use jazz_tools::batch_fate::LocalBatchRecord;
 use jazz_tools::binding_support::{
-    parse_batch_id_input, serialize_local_batch_record, serialize_local_batch_records,
-    serialize_mutation_error_event,
+    parse_batch_id_input, serialize_batch_fate, serialize_local_batch_record,
+    serialize_local_batch_records, serialize_mutation_error_event,
 };
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
-#[cfg(target_arch = "wasm32")]
-use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::manager::LocalUpdates;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
-#[cfg(target_arch = "wasm32")]
-use jazz_tools::query_manager::types::{Row, RowDescriptor};
 use jazz_tools::query_manager::types::{SchemaHash, Value};
 use jazz_tools::runtime_core::{
     QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
@@ -115,11 +114,6 @@ use jazz_tools::sync_manager::{
 
 use crate::query::parse_query;
 use crate::types::SubscriptionRow;
-#[cfg(target_arch = "wasm32")]
-use crate::types::{
-    SubscriptionRowAdded, SubscriptionRowChange, SubscriptionRowDelta, SubscriptionRowRemoved,
-    SubscriptionRowUpdated,
-};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -302,53 +296,88 @@ fn parse_subscription_inputs(
 #[cfg(target_arch = "wasm32")]
 fn make_subscription_callback(on_update: Function) -> impl Fn(SubscriptionDelta) + 'static {
     move |delta: SubscriptionDelta| {
-        let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
-            let values = decode_row(descriptor, &row.data)
-                .map(|vals| vals.into_iter().map(Value::from).collect::<Vec<_>>())
-                .unwrap_or_default();
-            SubscriptionRow {
-                id: row.id.uuid().to_string(),
-                values,
-            }
-        };
-
-        let descriptor = &delta.descriptor;
-        let wasm_delta = SubscriptionRowDelta(
-            delta
-                .ordered_delta
-                .removed
-                .iter()
-                .map(|change| {
-                    SubscriptionRowChange::Removed(SubscriptionRowRemoved {
-                        kind: 1,
-                        id: change.id.uuid().to_string(),
-                        index: change.index,
-                    })
-                })
-                .chain(delta.ordered_delta.updated.iter().map(|change| {
-                    SubscriptionRowChange::Updated(SubscriptionRowUpdated {
-                        kind: 2,
-                        id: change.id.uuid().to_string(),
-                        index: change.new_index,
-                        row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
-                    })
-                }))
-                .chain(delta.ordered_delta.added.iter().map(|change| {
-                    SubscriptionRowChange::Added(SubscriptionRowAdded {
-                        kind: 0,
-                        id: change.id.uuid().to_string(),
-                        index: change.index,
-                        row: row_to_wasm(&change.row, descriptor),
-                    })
-                }))
-                .collect::<Vec<_>>(),
-        );
-
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
+        let delta_value = native_subscription_delta_to_js(&delta);
+        if !delta_value.is_undefined() {
             let _ = on_update.call1(&JsValue::NULL, &delta_value);
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn push_u32(buffer: &mut Vec<u8>, value: usize) {
+    buffer.extend_from_slice(&(value as u32).to_le_bytes());
+}
+
+#[cfg(target_arch = "wasm32")]
+fn push_row_record(buffer: &mut Vec<u8>, id: ObjectId, index: usize, data: &[u8]) {
+    buffer.extend_from_slice(id.uuid().as_bytes());
+    push_u32(buffer, index);
+    push_u32(buffer, data.len());
+    buffer.extend_from_slice(data);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn set_property(object: &Object, key: &str, value: &JsValue) {
+    let _ = Reflect::set(object, &JsValue::from_str(key), value);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_subscription_delta_to_js(delta: &SubscriptionDelta) -> JsValue {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut updated = Vec::new();
+
+    for change in &delta.ordered_delta.added {
+        push_row_record(&mut added, change.id, change.index, &change.row.data);
+    }
+
+    for change in &delta.ordered_delta.removed {
+        removed.extend_from_slice(change.id.uuid().as_bytes());
+        push_u32(&mut removed, change.index);
+    }
+
+    for change in &delta.ordered_delta.updated {
+        updated.extend_from_slice(change.id.uuid().as_bytes());
+        push_u32(&mut updated, change.new_index);
+        match &change.row {
+            Some(row) => {
+                updated.push(1);
+                push_u32(&mut updated, row.data.len());
+                updated.extend_from_slice(&row.data);
+            }
+            None => updated.push(0),
+        }
+    }
+
+    let object = Object::new();
+    set_property(&object, "__jazzNativeRowDelta", &JsValue::from_bool(true));
+    set_property(&object, "added", &Uint8Array::from(added.as_slice()).into());
+    set_property(
+        &object,
+        "removed",
+        &Uint8Array::from(removed.as_slice()).into(),
+    );
+    set_property(
+        &object,
+        "updated",
+        &Uint8Array::from(updated.as_slice()).into(),
+    );
+    set_property(
+        &object,
+        "addedCount",
+        &JsValue::from_f64(delta.ordered_delta.added.len() as f64),
+    );
+    set_property(
+        &object,
+        "removedCount",
+        &JsValue::from_f64(delta.ordered_delta.removed.len() as f64),
+    );
+    set_property(
+        &object,
+        "updatedCount",
+        &JsValue::from_f64(delta.ordered_delta.updated.len() as f64),
+    );
+    object.into()
 }
 
 fn parse_node_durability_tiers(tier: Option<&str>) -> Result<Vec<DurabilityTier>, JsError> {
@@ -1195,7 +1224,7 @@ impl WasmRuntime {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let core = self.core.borrow();
         let record = core
-            .local_batch_record(batch_id)
+            .local_batch_record_for_rejection_replay(batch_id)
             .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
         match record {
             Some(record) => {
@@ -1209,11 +1238,72 @@ impl WasmRuntime {
         }
     }
 
+    #[wasm_bindgen(js_name = loadLocalBatchRecordStorageRow)]
+    pub fn load_local_batch_record_storage_row(&self, batch_id: &str) -> Result<JsValue, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let core = self.core.borrow();
+        let record = core
+            .local_batch_record(batch_id)
+            .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
+        match record {
+            Some(record) => {
+                let bytes = record
+                    .encode_storage_row()
+                    .map_err(|e| JsError::new(&format!("Encode local batch record failed: {e}")))?;
+                Ok(Uint8Array::from(bytes.as_slice()).into())
+            }
+            None => Ok(JsValue::null()),
+        }
+    }
+
+    #[wasm_bindgen(js_name = hydrateLocalBatchRecordStorageRow)]
+    pub fn hydrate_local_batch_record_storage_row(&self, bytes: Uint8Array) -> Result<(), JsError> {
+        let mut data = vec![0; bytes.length() as usize];
+        bytes.copy_to(&mut data);
+        let record = LocalBatchRecord::decode_storage_row(&data)
+            .map_err(|e| JsError::new(&format!("Decode local batch record failed: {e}")))?;
+        let mut core = self.core.borrow_mut();
+        core.hydrate_local_batch_record(record)
+            .map_err(|e| JsError::new(&format!("Hydrate local batch record failed: {e}")))
+    }
+
+    #[wasm_bindgen(js_name = loadBatchFate)]
+    pub fn load_batch_fate(&self, batch_id: &str) -> Result<JsValue, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let core = self.core.borrow();
+        let fate = core
+            .batch_fate(batch_id)
+            .map_err(|e| JsError::new(&format!("Load batch fate failed: {e}")))?;
+        match fate {
+            Some(fate) => {
+                let serializer =
+                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                serialize_batch_fate(&fate)
+                    .serialize(&serializer)
+                    .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+            }
+            None => Ok(JsValue::null()),
+        }
+    }
+
+    #[wasm_bindgen(js_name = replayBatchRejection)]
+    pub fn replay_batch_rejection(
+        &self,
+        batch_id: &str,
+        code: &str,
+        reason: &str,
+    ) -> Result<(), JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.replay_batch_rejection(batch_id, code, reason)
+            .map_err(|e| JsError::new(&format!("Replay batch rejection failed: {e}")))
+    }
+
     #[wasm_bindgen(js_name = loadLocalBatchRecords)]
     pub fn load_local_batch_records(&self) -> Result<JsValue, JsError> {
         let core = self.core.borrow();
         let records = core
-            .local_batch_records()
+            .local_batch_records_for_worker_sync()
             .map_err(|e| JsError::new(&format!("Load local batch records failed: {e}")))?;
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         serialize_local_batch_records(&records)
@@ -1229,12 +1319,54 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))
     }
 
+    #[wasm_bindgen(js_name = discardLocalBatch)]
+    pub fn discard_local_batch(&self, batch_id: &str) -> Result<bool, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.discard_local_batch(batch_id)
+            .map_err(|e| JsError::new(&format!("Discard local batch failed: {e}")))
+    }
+
     #[wasm_bindgen(js_name = sealBatch)]
     pub fn seal_batch(&self, batch_id: &str) -> Result<(), JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let mut core = self.core.borrow_mut();
         core.seal_batch(batch_id)
             .map_err(|e| JsError::new(&format!("Seal batch failed: {e}")))
+    }
+
+    #[wasm_bindgen(js_name = retransmitLocalBatch)]
+    pub fn retransmit_local_batch(&self, batch_id: &str) -> Result<(), JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.retransmit_local_batch_to_servers(batch_id);
+        core.batched_tick();
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = replayLocalBatchPayloads)]
+    pub fn replay_local_batch_payloads(&self, batch_id: &str) -> Result<js_sys::Array, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let core = self.core.borrow();
+        let array = js_sys::Array::new();
+
+        for payload in core.local_batch_replay_payloads(batch_id) {
+            let bytes = payload
+                .to_bytes()
+                .map_err(|e| JsError::new(&format!("Encode local batch replay failed: {e}")))?;
+            array.push(&Uint8Array::from(bytes.as_slice()));
+        }
+
+        Ok(array)
+    }
+
+    #[wasm_bindgen(js_name = reconcileLocalBatchWithServer)]
+    pub fn reconcile_local_batch_with_server(&self, batch_id: &str) -> Result<(), JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.reconcile_local_batch_with_server(batch_id);
+        core.batched_tick();
+        Ok(())
     }
 
     // =========================================================================
@@ -1358,9 +1490,17 @@ impl WasmRuntime {
         next_sync_seq: Option<f64>,
     ) -> Result<(), JsError> {
         let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
+        let transport_server_id = self
+            .core
+            .borrow()
+            .transport()
+            .map(|handle| handle.server_id);
         let server_id = {
             let mut slot = self.upstream_server_id.borrow_mut();
             if let Some(server_id) = *slot {
+                server_id
+            } else if let Some(server_id) = transport_server_id {
+                *slot = Some(server_id);
                 server_id
             } else {
                 let server_id = ServerId::new();
@@ -1726,9 +1866,16 @@ impl WasmRuntime {
         let tick = WasmTickNotifier { scheduler };
         let manager = {
             let mut core = self.core.borrow_mut();
-            jazz_tools::runtime_core::install_transport::<_, _, crate::ws_stream::WasmWsStream, _>(
-                &mut core, url, auth, tick,
-            )
+            let manager = jazz_tools::runtime_core::install_transport::<
+                _,
+                _,
+                crate::ws_stream::WasmWsStream,
+                _,
+            >(&mut core, url, auth, tick);
+            if let Some(handle) = core.transport() {
+                *self.upstream_server_id.borrow_mut() = Some(handle.server_id);
+            }
+            manager
         };
         wasm_bindgen_futures::spawn_local(manager.run());
         Ok(())

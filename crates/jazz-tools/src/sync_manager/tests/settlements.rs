@@ -94,6 +94,59 @@ fn initial_query_sync_prefers_authoritative_settlement_over_retained_client_loca
 }
 
 #[test]
+fn upstream_durability_ack_is_queued_once_per_replayed_batch() {
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    let batch_id = BatchId::new();
+    let row_a = row_with_batch_state(
+        visible_row(ObjectId::new(), "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::Local),
+    );
+    let row_b = row_with_batch_state(
+        visible_row(ObjectId::new(), "main", Vec::new(), 1_001, b"bob"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::Local),
+    );
+
+    sm.queue_batch_durability_ack_to_server(
+        server_id,
+        DurabilityTier::Local,
+        &row_a,
+        BranchName::new("main"),
+    );
+    sm.queue_batch_durability_ack_to_server(
+        server_id,
+        DurabilityTier::Local,
+        &row_b,
+        BranchName::new("main"),
+    );
+
+    let outbox = sm.take_outbox();
+    assert_eq!(
+        outbox
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(id),
+                    payload: SyncPayload::BatchFate {
+                        fate: BatchFate::DurableDirect {
+                            batch_id: id_batch,
+                            confirmed_tier: DurabilityTier::Local,
+                        },
+                    },
+                } if *id == server_id && *id_batch == batch_id
+            ))
+            .count(),
+        1,
+        "a replay can process many rows from the same batch across ticks, but the upstream durability ack is batch-scoped"
+    );
+}
+
+#[test]
 fn initial_query_sync_sends_only_current_row_for_deep_history() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();

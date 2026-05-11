@@ -71,10 +71,10 @@ pub(super) fn row_confirmed_tier_with_batch_fate<H: Storage + ?Sized>(
     storage: &H,
     row: &StoredRowBatch,
 ) -> Result<Option<DurabilityTier>, StorageError> {
-    Ok(storage
-        .load_authoritative_batch_fate(row.batch_id)?
-        .as_ref()
-        .and_then(|settlement| batch_fate_confirmed_tier_for_row(settlement, row)))
+    Ok(match storage.load_authoritative_batch_fate(row.batch_id)? {
+        Some(settlement) => batch_fate_confirmed_tier_for_row(&settlement, row),
+        None => row.confirmed_tier,
+    })
 }
 
 pub(super) fn apply_batch_fate_tiers_to_rows<H: Storage + ?Sized>(
@@ -93,9 +93,10 @@ pub(super) fn apply_batch_fate_tiers_to_rows<H: Storage + ?Sized>(
                 .expect("settlement cache should contain inserted batch")
         };
 
-        row.confirmed_tier = settlement
-            .as_ref()
-            .and_then(|settlement| batch_fate_confirmed_tier_for_row(settlement, row));
+        row.confirmed_tier = match settlement {
+            Some(settlement) => batch_fate_confirmed_tier_for_row(settlement, row),
+            None => row.confirmed_tier,
+        };
     }
     Ok(())
 }
@@ -155,6 +156,7 @@ const VISIBLE_ROW_TABLE_LOCATOR_TABLE: &str = "__visible_row_table_locator";
 const HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE: &str = "__history_row_batch_table_locator";
 const LOCAL_BATCH_RECORD_TABLE: &str = "__local_batch_record";
 const AUTHORITATIVE_BATCH_SETTLEMENT_TABLE: &str = "__authoritative_batch_settlement";
+const ACKNOWLEDGED_REJECTED_BATCH_TABLE: &str = "__acknowledged_rejected_batch";
 const SEALED_BATCH_SUBMISSION_TABLE: &str = "__sealed_batch_submission";
 const RAW_TABLE_HEADER_TABLE: &str = "__raw_table_header";
 const BRANCH_ORD_BY_NAME_TABLE: &str = "__branch_ord_by_name";
@@ -173,6 +175,7 @@ const BRANCH_NAME_BY_ORD_FORMAT_V1: i32 = 1;
 const BRANCH_ORD_META_FORMAT_V1: i32 = 1;
 const SEALED_BATCH_SUBMISSION_FORMAT_V2: i32 = 2;
 const AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2: i32 = 2;
+const ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1: i32 = 1;
 const LOCAL_BATCH_RECORD_FORMAT_V3: i32 = 3;
 
 pub type BranchOrd = i32;
@@ -185,6 +188,7 @@ const STORAGE_KIND_BRANCH_NAME_BY_ORD: &str = "branch_name_by_ord";
 const STORAGE_KIND_BRANCH_ORD_META: &str = "branch_ord_meta";
 const STORAGE_KIND_LOCAL_BATCH_RECORD: &str = "local_batch_record";
 const STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT: &str = "authoritative_batch_settlement";
+const STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH: &str = "acknowledged_rejected_batch";
 const STORAGE_KIND_SEALED_BATCH_SUBMISSION: &str = "sealed_batch_submission";
 const STORAGE_KIND_CATALOGUE: &str = "catalogue";
 #[cfg(feature = "sqlite")]
@@ -495,43 +499,36 @@ struct ResolvedRowTable {
 }
 
 #[derive(Clone)]
-pub(crate) struct PreparedRowWriteContext {
+pub(crate) struct PreparedRowTableContext {
     pub history_row_raw_table_id: RowRawTableId,
     pub visible_row_raw_table_id: RowRawTableId,
     pub user_descriptor: Arc<RowDescriptor>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedRowWriteContext {
+    pub table_context: Arc<PreparedRowTableContext>,
     pub needs_exact_locator: bool,
 }
 
-type RowRawTableIdCache = HashMap<(RowRawTableKind, String, SchemaHash), RowRawTableId>;
-type CatalogueUserDescriptorCache = HashMap<(usize, String, SchemaHash), Arc<RowDescriptor>>;
-
-fn row_raw_table_id_cache() -> &'static Mutex<RowRawTableIdCache> {
-    static CACHE: OnceLock<Mutex<RowRawTableIdCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn cached_row_raw_table_id(
-    kind: RowRawTableKind,
-    table: &str,
-    schema_hash: SchemaHash,
-) -> RowRawTableId {
-    let cache_key = (kind, table.to_string(), schema_hash);
-    if let Some(cached) = row_raw_table_id_cache()
-        .lock()
-        .expect("row raw table id cache poisoned")
-        .get(&cache_key)
-        .cloned()
-    {
-        return cached;
+impl PreparedRowWriteContext {
+    pub(crate) fn history_row_raw_table_id(&self) -> &RowRawTableId {
+        &self.table_context.history_row_raw_table_id
     }
 
-    let created = RowRawTableId::new(kind, table, schema_hash);
-    row_raw_table_id_cache()
-        .lock()
-        .expect("row raw table id cache poisoned")
-        .insert(cache_key, created.clone());
-    created
+    pub(crate) fn visible_row_raw_table_id(&self) -> &RowRawTableId {
+        &self.table_context.visible_row_raw_table_id
+    }
+
+    pub(crate) fn user_descriptor(&self) -> &Arc<RowDescriptor> {
+        &self.table_context.user_descriptor
+    }
 }
+
+type CatalogueUserDescriptorCache = HashMap<(usize, String, SchemaHash), Arc<RowDescriptor>>;
+type BranchSchemaHashCache = HashMap<(usize, String), Vec<SchemaHash>>;
+type TableCatalogueDescriptorCache =
+    HashMap<(usize, String), Vec<(SchemaHash, crate::query_manager::types::RowDescriptor)>>;
 
 fn row_raw_table_descriptor_cache() -> &'static Mutex<HashMap<String, Arc<RowDescriptor>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<RowDescriptor>>>> = OnceLock::new();
@@ -617,6 +614,32 @@ fn cache_row_descriptor(raw_table: &str, descriptor: Arc<RowDescriptor>) {
 fn catalogue_user_descriptor_cache() -> &'static Mutex<CatalogueUserDescriptorCache> {
     static CACHE: OnceLock<Mutex<CatalogueUserDescriptorCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn branch_schema_hash_cache() -> &'static Mutex<BranchSchemaHashCache> {
+    static CACHE: OnceLock<Mutex<BranchSchemaHashCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn table_catalogue_descriptor_cache() -> &'static Mutex<TableCatalogueDescriptorCache> {
+    static CACHE: OnceLock<Mutex<TableCatalogueDescriptorCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn invalidate_catalogue_lookup_caches_with_storage<H: Storage + ?Sized>(storage: &H) {
+    let namespace = storage.storage_cache_namespace();
+    catalogue_user_descriptor_cache()
+        .lock()
+        .expect("catalogue user descriptor cache poisoned")
+        .retain(|(cached_namespace, _, _), _| *cached_namespace != namespace);
+    branch_schema_hash_cache()
+        .lock()
+        .expect("branch schema hash cache poisoned")
+        .retain(|(cached_namespace, _), _| *cached_namespace != namespace);
+    table_catalogue_descriptor_cache()
+        .lock()
+        .expect("table catalogue descriptor cache poisoned")
+        .retain(|(cached_namespace, _), _| *cached_namespace != namespace);
 }
 
 fn cached_catalogue_user_descriptor_with_storage<H: Storage + ?Sized>(
@@ -772,7 +795,16 @@ fn history_row_batch_table_locator_key(
 }
 
 fn local_batch_record_key(batch_id: BatchId) -> String {
-    format!("batch:{}", hex::encode(batch_id.as_bytes()))
+    const PREFIX: &str = "batch:";
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    let mut key = String::with_capacity(PREFIX.len() + batch_id.as_bytes().len() * 2);
+    key.push_str(PREFIX);
+    for &byte in batch_id.as_bytes() {
+        key.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        key.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    key
 }
 
 fn decode_local_batch_record_key(key: &str) -> Result<BatchId, StorageError> {
@@ -1043,6 +1075,7 @@ fn supported_storage_format_version(storage_kind: &str) -> Result<i32, StorageEr
         STORAGE_KIND_LOCAL_BATCH_RECORD => Ok(LOCAL_BATCH_RECORD_FORMAT_V3),
         STORAGE_KIND_SEALED_BATCH_SUBMISSION => Ok(SEALED_BATCH_SUBMISSION_FORMAT_V2),
         STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT => Ok(AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2),
+        STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH => Ok(ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1),
         STORAGE_KIND_CATALOGUE => Ok(CATALOGUE_STORAGE_FORMAT_V1),
         "visible_rows" | "row_history" => Ok(ROW_STORAGE_FORMAT_V3),
         other => Err(StorageError::IoError(format!(
@@ -1145,11 +1178,11 @@ fn ensure_raw_table_header<H: Storage + ?Sized>(
 }
 
 fn history_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    cached_row_raw_table_id(RowRawTableKind::History, table, schema_hash)
+    RowRawTableId::new(RowRawTableKind::History, table, schema_hash)
 }
 
 fn visible_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    cached_row_raw_table_id(RowRawTableKind::Visible, table, schema_hash)
+    RowRawTableId::new(RowRawTableKind::Visible, table, schema_hash)
 }
 
 fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
@@ -1172,12 +1205,34 @@ fn prepared_row_write_context_for_descriptor(
     user_descriptor: Arc<RowDescriptor>,
     needs_exact_locator: bool,
 ) -> Result<PreparedRowWriteContext, StorageError> {
-    Ok(PreparedRowWriteContext {
+    let table_context =
+        prepared_row_table_context_for_descriptor(table_name, schema_hash, user_descriptor)?;
+    Ok(prepared_row_write_context_from_table_context(
+        table_context,
+        needs_exact_locator,
+    ))
+}
+
+pub(crate) fn prepared_row_table_context_for_descriptor(
+    table_name: &str,
+    schema_hash: SchemaHash,
+    user_descriptor: Arc<RowDescriptor>,
+) -> Result<Arc<PreparedRowTableContext>, StorageError> {
+    Ok(Arc::new(PreparedRowTableContext {
         history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
         visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
         user_descriptor,
+    }))
+}
+
+pub(crate) fn prepared_row_write_context_from_table_context(
+    table_context: Arc<PreparedRowTableContext>,
+    needs_exact_locator: bool,
+) -> PreparedRowWriteContext {
+    PreparedRowWriteContext {
+        table_context,
         needs_exact_locator,
-    })
+    }
 }
 
 pub(crate) fn prepared_row_write_context_for_known_exact_locator(
@@ -1205,6 +1260,15 @@ pub(crate) fn prepared_row_write_context_for_schema_hash_and_descriptor<H: Stora
         user_descriptor,
         needs_exact_locator,
     )
+}
+
+pub(crate) fn prepared_row_table_context_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+) -> Result<Arc<PreparedRowTableContext>, StorageError> {
+    let user_descriptor = load_user_descriptor_for_schema_hash(storage, table_name, schema_hash)?;
+    prepared_row_table_context_for_descriptor(table_name, schema_hash, user_descriptor)
 }
 
 fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
@@ -1562,6 +1626,7 @@ fn exact_visible_row_table_locator_for_delete<H: Storage + ?Sized>(
 fn sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+        ColumnDescriptor::new("mode", ColumnType::Text),
         ColumnDescriptor::new("target_branch_ord", ColumnType::Integer),
         ColumnDescriptor::new("batch_digest", ColumnType::Bytea),
         ColumnDescriptor::new(
@@ -1643,14 +1708,15 @@ fn load_history_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
     let Some(entry) = storage.load_catalogue_entry(schema_hash.to_object_id())? else {
         return Ok(None);
     };
-    let schema = crate::schema_manager::encoding::decode_schema(&entry.content)
-        .map_err(|err| StorageError::IoError(format!("decode schema for row history: {err}")))?;
-
-    let hinted_table_name = crate::query_manager::types::TableName::new(table_hint);
-    let Some(table_schema) = schema.get(&hinted_table_name) else {
+    let Some(descriptor) = crate::schema_manager::encoding::decode_table_descriptor_from_schema(
+        &entry.content,
+        table_hint,
+    )
+    .map_err(|err| StorageError::IoError(format!("decode schema for row history: {err}")))?
+    else {
         return Ok(None);
     };
-    let descriptor = Arc::new(table_schema.columns.clone());
+    let descriptor = Arc::new(descriptor);
     cache_catalogue_user_descriptor_with_storage(
         storage,
         table_hint,
@@ -1678,8 +1744,23 @@ fn schema_hashes_matching_branch<H: Storage + ?Sized>(
     storage: &H,
     branch: &str,
 ) -> Result<Vec<SchemaHash>, StorageError> {
+    let cache_key = (storage.storage_cache_namespace(), branch.to_string());
+    if let Some(cached) = branch_schema_hash_cache()
+        .lock()
+        .expect("branch schema hash cache poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
     let Some(composed) = ComposedBranchName::parse(&BranchName::new(branch)) else {
-        return Ok(Vec::new());
+        let hashes = Vec::new();
+        branch_schema_hash_cache()
+            .lock()
+            .expect("branch schema hash cache poisoned")
+            .insert(cache_key, hashes.clone());
+        return Ok(hashes);
     };
 
     let mut hashes = storage
@@ -1690,6 +1771,10 @@ fn schema_hashes_matching_branch<H: Storage + ?Sized>(
         .collect::<Vec<_>>();
     hashes.sort_by_key(|schema_hash| schema_hash.to_string());
     hashes.dedup();
+    branch_schema_hash_cache()
+        .lock()
+        .expect("branch schema hash cache poisoned")
+        .insert(cache_key, hashes.clone());
     Ok(hashes)
 }
 
@@ -1697,6 +1782,16 @@ fn catalogue_row_descriptors_for_table<H: Storage + ?Sized>(
     storage: &H,
     table_hint: &str,
 ) -> Result<Vec<(SchemaHash, crate::query_manager::types::RowDescriptor)>, StorageError> {
+    let cache_key = (storage.storage_cache_namespace(), table_hint.to_string());
+    if let Some(cached) = table_catalogue_descriptor_cache()
+        .lock()
+        .expect("table catalogue descriptor cache poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
     let table_name = crate::query_manager::types::TableName::new(table_hint);
     let mut candidates = Vec::new();
 
@@ -1713,6 +1808,10 @@ fn catalogue_row_descriptors_for_table<H: Storage + ?Sized>(
 
     candidates.sort_by_key(|(schema_hash, _)| schema_hash.to_string());
     candidates.dedup_by(|(left_hash, _), (right_hash, _)| left_hash == right_hash);
+    table_catalogue_descriptor_cache()
+        .lock()
+        .expect("table catalogue descriptor cache poisoned")
+        .insert(cache_key, candidates.clone());
     Ok(candidates)
 }
 
@@ -1820,16 +1919,16 @@ pub(crate) fn encode_history_row_bytes_with_context(
     row: &StoredRowBatch,
 ) -> Result<OwnedHistoryRowBytes, StorageError> {
     let bytes =
-        crate::row_histories::encode_flat_history_row(context.user_descriptor.as_ref(), row)
+        crate::row_histories::encode_flat_history_row(context.user_descriptor().as_ref(), row)
             .map_err(|err| StorageError::IoError(format!("encode flat history row: {err}")))?;
 
     Ok(OwnedHistoryRowBytes {
         row_raw_table: context
-            .history_row_raw_table_id
+            .history_row_raw_table_id()
             .raw_table_name()
             .to_string(),
-        row_raw_table_id: context.history_row_raw_table_id.clone(),
-        user_descriptor: context.user_descriptor.clone(),
+        row_raw_table_id: context.history_row_raw_table_id().clone(),
+        user_descriptor: context.user_descriptor().clone(),
         branch: row.branch.to_string(),
         row_id: row.row_id,
         batch_id: row.batch_id(),
@@ -1843,18 +1942,18 @@ pub(crate) fn encode_visible_row_bytes_with_context(
     entry: &VisibleRowEntry,
 ) -> Result<OwnedVisibleRowBytes, StorageError> {
     let bytes = crate::row_histories::encode_flat_visible_row_entry(
-        context.user_descriptor.as_ref(),
+        context.user_descriptor().as_ref(),
         entry,
     )
     .map_err(|err| StorageError::IoError(format!("encode flat visible row: {err}")))?;
 
     Ok(OwnedVisibleRowBytes {
         row_raw_table: context
-            .visible_row_raw_table_id
+            .visible_row_raw_table_id()
             .raw_table_name()
             .to_string(),
-        row_raw_table_id: context.visible_row_raw_table_id.clone(),
-        user_descriptor: context.user_descriptor.clone(),
+        row_raw_table_id: context.visible_row_raw_table_id().clone(),
+        user_descriptor: context.user_descriptor().clone(),
         branch: entry.current_row.branch.to_string(),
         row_id: entry.current_row.row_id,
         needs_exact_locator: context.needs_exact_locator,
@@ -2214,7 +2313,7 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
             continue;
         };
         if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
-            context.user_descriptor.as_ref(),
+            context.user_descriptor().as_ref(),
             &history_rows,
         )
         .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
@@ -2237,7 +2336,7 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
 
         if current.state.is_visible() {
             if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
-                context.user_descriptor.as_ref(),
+                context.user_descriptor().as_ref(),
                 &history_rows,
             )
             .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
@@ -2291,7 +2390,7 @@ pub(crate) fn patch_exact_row_batch_with_storage<H: Storage + ?Sized>(
     let context = resolve_history_row_write_context(storage, table, &row)?;
 
     let visible_entries = VisibleRowEntry::rebuild_with_descriptor(
-        context.user_descriptor.as_ref(),
+        context.user_descriptor().as_ref(),
         &patched_history,
     )
     .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
@@ -2373,6 +2472,7 @@ fn encode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         &sealed_batch_submission_storage_descriptor_with_branch_ords(),
         &[
             Value::BatchId(*submission.batch_id.as_bytes()),
+            Value::Text(encode_batch_mode(submission.mode).to_string()),
             Value::Integer(target_branch_ord),
             Value::Bytea(submission.batch_digest.0.to_vec()),
             Value::Array(member_values),
@@ -2393,6 +2493,7 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
     .map_err(|err| StorageError::IoError(format!("decode sealed batch submission: {err}")))?;
     let [
         batch_id,
+        mode,
         target_branch_ord,
         batch_digest,
         members,
@@ -2405,6 +2506,14 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
     };
 
     let batch_id = decode_storage_batch_id_value(batch_id, "decode sealed batch id")?;
+    let mode = match mode {
+        Value::Text(raw) => decode_batch_mode(raw)?,
+        other => {
+            return Err(StorageError::IoError(format!(
+                "expected sealed batch mode text, got {other:?}"
+            )));
+        }
+    };
     let target_branch_ord = match target_branch_ord {
         Value::Integer(raw) => *raw,
         other => {
@@ -2552,8 +2661,13 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         }
     };
 
-    let submission =
-        SealedBatchSubmission::new(batch_id, target_branch_name, members, captured_frontier);
+    let submission = SealedBatchSubmission::new(
+        batch_id,
+        mode,
+        target_branch_name,
+        members,
+        captured_frontier,
+    );
     if submission.batch_digest != batch_digest {
         return Err(StorageError::IoError(format!(
             "sealed batch digest mismatch: expected {batch_digest:?}, computed {:?}",

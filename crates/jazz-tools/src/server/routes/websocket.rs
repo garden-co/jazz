@@ -19,6 +19,8 @@ use crate::sync_manager::ClientId;
 
 use super::utils::connection_schema_diagnostics_from_handshake;
 
+const MAX_WS_SYNC_UPDATES_PER_FRAME: usize = 256;
+
 pub(super) async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
@@ -445,12 +447,12 @@ async fn handle_ws_connection(
             },
             update = sync_rx.recv() => {
                 let Some(u) = update else { break };
-                let mut updates = Vec::with_capacity(256);
+                let mut updates = Vec::with_capacity(MAX_WS_SYNC_UPDATES_PER_FRAME);
                 updates.push(crate::jazz_transport::SequencedSyncPayload {
                     seq: Some(u.seq),
                     payload: u.payload,
                 });
-                while updates.len() < 256 {
+                while updates.len() < MAX_WS_SYNC_UPDATES_PER_FRAME {
                     match sync_rx.try_recv() {
                         Ok(u) => updates.push(crate::jazz_transport::SequencedSyncPayload {
                             seq: Some(u.seq),
@@ -469,7 +471,7 @@ async fn handle_ws_connection(
                 } else {
                     crate::jazz_transport::ServerEvent::SyncUpdateBatch { updates }
                 };
-                let bytes = match serde_json::to_vec(&event) {
+                let bytes = match event.encode_payload() {
                     Ok(b) => b,
                     Err(_) => continue,
                 };
@@ -485,7 +487,7 @@ async fn handle_ws_connection(
             }
             _ = heartbeat.tick() => {
                 let event = crate::jazz_transport::ServerEvent::Heartbeat;
-                let Ok(bytes) = serde_json::to_vec(&event) else { continue };
+                let Ok(bytes) = event.encode_payload() else { continue };
                 if socket
                     .send(Message::Binary(
                         crate::transport_manager::frame_encode(&bytes),

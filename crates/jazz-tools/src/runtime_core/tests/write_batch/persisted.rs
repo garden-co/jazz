@@ -30,13 +30,10 @@ fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
             .unwrap();
     s.a.seal_batch(update_batch_id).unwrap();
 
-    let update_record =
-        s.a.storage()
-            .load_local_batch_record(update_batch_id)
-            .unwrap()
-            .expect("direct update should create a local batch record");
     assert_eq!(
-        update_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(update_batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id: update_batch_id,
             confirmed_tier: DurabilityTier::Local,
@@ -86,13 +83,10 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
     let delete_batch_id = s.a.delete(id, None).unwrap();
     s.a.seal_batch(delete_batch_id).unwrap();
 
-    let delete_record =
-        s.a.storage()
-            .load_local_batch_record(delete_batch_id)
-            .unwrap()
-            .expect("direct delete should create a local batch record");
     assert_eq!(
-        delete_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(delete_batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id: delete_batch_id,
             confirmed_tier: DurabilityTier::Local,
@@ -474,15 +468,10 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             .expect("insert should create one visible row");
     let batch_id = visible_row.batch_id;
 
-    let initial_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("persisted write should create a local batch record");
-    assert_eq!(initial_record.batch_id, batch_id);
-    assert_eq!(initial_record.mode, crate::batch_fate::BatchMode::Direct);
     assert_eq!(
-        initial_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
@@ -503,13 +492,10 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
 
     assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("settled local batch record should still be present");
     assert_eq!(
-        settled_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
@@ -596,13 +582,10 @@ fn rc_insert_persisted_retains_batch_after_edge_waiter_tier_is_met() {
         "edge confirmation should resolve the caller-facing wait"
     );
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("edge-accepted direct batch should stay retained");
     assert_eq!(
-        settled_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::EdgeServer,
@@ -661,13 +644,10 @@ fn rc_insert_persisted_terminal_direct_settlement_stops_reconciliation() {
     });
     s.a.immediate_tick();
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("terminally accepted direct batch should still be inspectable");
     assert_eq!(
-        settled_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
@@ -791,13 +771,10 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
         "reconnect should reconcile the still-pending batch from durable server truth"
     );
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("reconciled local batch record should still be present");
     assert_eq!(
-        settled_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::EdgeServer,
@@ -894,10 +871,8 @@ fn rc_missing_batch_fate_retransmits_original_captured_frontier() {
 
     let sealed_submission =
         s.a.storage()
-            .load_local_batch_record(batch_id)
+            .load_sealed_batch_submission(batch_id)
             .unwrap()
-            .expect("sealed batch should retain a local batch record")
-            .sealed_submission
             .expect("sealed batch should persist its original submission");
     assert_eq!(
         sealed_submission.captured_frontier,

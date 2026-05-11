@@ -9,4 +9,6 @@ export type {
   WasmSchema,
   WasmRow,
   RowDelta as WireRowDelta,
+  NativeRowDelta,
+  SubscriptionWireDelta,
 } from "./types.js";

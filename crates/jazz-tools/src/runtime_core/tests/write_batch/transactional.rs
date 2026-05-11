@@ -547,14 +547,10 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
     pump_b_to_a(&mut s);
     assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("accepted transactional batch record should still be present");
-    assert!(settled_record.sealed);
     assert_eq!(
-        settled_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
@@ -658,13 +654,10 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
         "reconnect should reconcile the accepted transactional batch from the server"
     );
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("reconciled transactional batch record should still be present");
     assert_eq!(
-        settled_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
@@ -747,12 +740,12 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
         other => panic!("expected accepted shared settlement, got {other:?}"),
     }
 
-    let local_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("alice should keep one accepted shared batch record");
-    match local_record.latest_fate {
+    match s
+        .a
+        .storage()
+        .load_authoritative_batch_fate(batch_id)
+        .unwrap()
+    {
         Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier,
@@ -868,14 +861,10 @@ fn rc_missing_batch_fate_retransmits_local_transactional_rows() {
         "expected replayed outbound seal after Missing settlement, got {replay_outbox:?}"
     );
 
-    let local_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("missing settlement should still retain the local batch record");
-    assert!(local_record.sealed);
     assert_eq!(
-        local_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Missing { batch_id })
     );
 }

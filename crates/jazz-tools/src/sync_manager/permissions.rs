@@ -1,10 +1,12 @@
 use super::*;
-use crate::batch_fate::{BatchFate, LocalBatchMember};
+use crate::batch_fate::BatchFate;
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
-use crate::row_histories::{BatchId, RowState, StoredRowBatch, patch_row_batch_state};
+use crate::row_histories::{
+    BatchId, RowState, RowVisibilityChange, StoredRowBatch, VisibleRowEntry, patch_row_batch_state,
+};
 use crate::storage::Storage;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 impl SyncManager {
     /// Take all pending permission checks for policy evaluation.
@@ -152,29 +154,63 @@ impl SyncManager {
         batch_id: BatchId,
         fallback_row: StoredRowBatch,
     ) -> Vec<StoredRowBatch> {
-        let mut rows = storage
-            .load_local_batch_record(batch_id)
-            .ok()
-            .flatten()
-            .map(|record| {
-                record
-                    .members
+        let mut row_ids = HashSet::new();
+        for key in self.row_batch_interest.keys() {
+            if key.batch_id == batch_id {
+                row_ids.insert(key.row_id);
+            }
+        }
+        for pending in &self.pending_permission_checks {
+            if let SyncPayload::RowBatchCreated { row, .. }
+            | SyncPayload::RowBatchNeeded { row, .. } = &pending.payload
+                && row.batch_id == batch_id
+            {
+                row_ids.insert(row.row_id);
+            }
+        }
+
+        let mut rows = row_ids
+            .into_iter()
+            .filter_map(|row_id| {
+                let table = storage.load_row_locator(row_id).ok().flatten()?.table;
+                storage
+                    .scan_history_row_batches(table.as_str(), row_id)
+                    .ok()?
                     .into_iter()
-                    .filter_map(|member: LocalBatchMember| {
-                        storage
-                            .load_history_row_batch_for_schema_hash(
-                                member.table_name.as_str(),
-                                member.schema_hash,
-                                member.branch_name.as_str(),
-                                member.object_id,
-                                batch_id,
-                            )
-                            .ok()
-                            .flatten()
-                    })
-                    .collect::<Vec<_>>()
+                    .find(|row| row.batch_id == batch_id)
             })
-            .unwrap_or_default();
+            .collect::<Vec<_>>();
+
+        rows.extend(
+            storage
+                .load_sealed_batch_submission(batch_id)
+                .ok()
+                .flatten()
+                .map(|submission| {
+                    submission
+                        .members
+                        .into_iter()
+                        .filter_map(|member| {
+                            let table = storage
+                                .load_row_locator(member.object_id)
+                                .ok()
+                                .flatten()?
+                                .table;
+                            storage
+                                .scan_history_row_batches(table.as_str(), member.object_id)
+                                .ok()?
+                                .into_iter()
+                                .find(|row| {
+                                    row.batch_id == batch_id
+                                        && row.branch.as_str()
+                                            == submission.target_branch_name.as_str()
+                                        && row.content_digest() == member.row_digest
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        );
 
         if !rows.iter().any(|row| {
             row.row_id == fallback_row.row_id
@@ -183,6 +219,19 @@ impl SyncManager {
         }) {
             rows.push(fallback_row);
         }
+        rows.sort_by(|left, right| {
+            left.row_id
+                .uuid()
+                .as_bytes()
+                .cmp(right.row_id.uuid().as_bytes())
+                .then_with(|| left.branch.as_str().cmp(right.branch.as_str()))
+                .then_with(|| left.batch_id.0.cmp(&right.batch_id.0))
+        });
+        rows.dedup_by(|left, right| {
+            left.row_id == right.row_id
+                && left.branch == right.branch
+                && left.batch_id == right.batch_id
+        });
         rows
     }
 
@@ -203,10 +252,6 @@ impl SyncManager {
             return;
         }
 
-        if let Ok(Some(mut record)) = storage.load_local_batch_record(batch_id) {
-            record.apply_fate(fate.clone());
-            let _ = storage.upsert_local_batch_record(&record);
-        }
         let _ = storage.delete_sealed_batch_submission(batch_id);
         self.pending_permission_checks.retain(|pending| {
             !matches!(
@@ -220,6 +265,7 @@ impl SyncManager {
 
         for row in self.local_batch_rows(storage, batch_id, fallback_row) {
             let branch_name = BranchName::new(&row.branch);
+            let was_visible_delete = row.state.is_visible() && row.delete_kind.is_some();
             let visibility_change = patch_row_batch_state(
                 storage,
                 row.row_id,
@@ -240,6 +286,19 @@ impl SyncManager {
                     origin_client_id,
                 );
             }
+            if was_visible_delete
+                && let Some(update) =
+                    self.restore_permission_rejected_delete_row(storage, row.clone())
+            {
+                let restored_branch_name = BranchName::new(&update.row.branch);
+                self.pending_row_visibility_changes.push(update.clone());
+                self.forward_update_to_clients_except_with_storage(
+                    storage,
+                    update.object_id,
+                    restored_branch_name,
+                    origin_client_id,
+                );
+            }
         }
 
         let mut clients = self.interested_clients_for_batch_fate(storage, &fate);
@@ -248,5 +307,53 @@ impl SyncManager {
         for client_id in clients {
             self.queue_batch_fate_to_client(client_id, fate.clone());
         }
+    }
+
+    fn restore_permission_rejected_delete_row<H: Storage>(
+        &self,
+        storage: &mut H,
+        rejected_delete_row: StoredRowBatch,
+    ) -> Option<RowVisibilityChange> {
+        let row_locator = storage
+            .load_row_locator(rejected_delete_row.row_id)
+            .ok()
+            .flatten()?;
+        let table = row_locator.table.to_string();
+        let mut restored_row = storage
+            .scan_history_row_batches(&table, rejected_delete_row.row_id)
+            .ok()?
+            .into_iter()
+            .filter(|row| {
+                row.branch == rejected_delete_row.branch
+                    && !matches!(row.state, RowState::Rejected)
+                    && row.delete_kind.is_none()
+            })
+            .max_by_key(|row| row.updated_at)?;
+
+        restored_row.state = RowState::VisibleDirect;
+        let visible_entry = VisibleRowEntry::new(restored_row.clone());
+        if let Err(error) = storage.apply_row_mutation(
+            &table,
+            std::slice::from_ref(&restored_row),
+            std::slice::from_ref(&visible_entry),
+            &[],
+        ) {
+            tracing::warn!(
+                table,
+                branch = restored_row.branch.as_str(),
+                object_id = %restored_row.row_id,
+                %error,
+                "failed to restore permission-rejected delete visible row"
+            );
+            return None;
+        }
+
+        Some(RowVisibilityChange {
+            object_id: restored_row.row_id,
+            row_locator,
+            row: restored_row,
+            previous_row: Some(rejected_delete_row),
+            is_new_object: false,
+        })
     }
 }

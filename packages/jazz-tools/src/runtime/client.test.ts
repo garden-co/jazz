@@ -65,6 +65,9 @@ function makeFakeRuntime() {
     loadLocalBatchRecords: vi.fn<() => ReturnType<NonNullable<Runtime["loadLocalBatchRecords"]>>>(
       () => [],
     ),
+    loadBatchFate: vi.fn<(batch_id: string) => ReturnType<NonNullable<Runtime["loadBatchFate"]>>>(
+      () => null,
+    ),
     acknowledgeRejectedBatch: vi.fn<(batch_id: string) => boolean>(() => false),
     onMutationError: vi.fn<(callback: (event: MutationErrorEvent) => void) => void>((callback) => {
       mutationErrorCallback = callback;

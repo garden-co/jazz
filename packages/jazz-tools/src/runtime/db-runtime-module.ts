@@ -16,6 +16,7 @@ export interface DbRuntimeClientContext<RuntimeConfig extends DbConfig = DbConfi
   hasWorker: boolean;
   useBinaryEncoding: boolean;
   onAuthFailure: (reason: AuthFailureReason) => void;
+  onBeforeLocalBatchWait?: (batchId: string) => Promise<void>;
   onRejectedBatchAcknowledged: (batchId: string) => void;
 }
 

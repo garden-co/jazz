@@ -68,10 +68,13 @@ interface WorkerBridgeState {
     | null;
   mutationErrorReplayListener: ((event: MutationErrorReplayMessage["event"]) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
+  nextSyncAckId: number;
+  pendingSyncAcks: Map<number, (ack: Extract<WorkerToMainMessage, { type: "sync-ack" }>) => void>;
 }
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
 const SHUTDOWN_ACK_TIMEOUT_MS = 5_000;
+const LOCAL_SYNC_ACK_TIMEOUT_MS = 2_000;
 
 function createDeferredPromise(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
@@ -113,6 +116,8 @@ export class WorkerBridge {
       localBatchRecordsSyncListener: null,
       mutationErrorReplayListener: null,
       serverPayloadForwarder: null,
+      nextSyncAckId: 1,
+      pendingSyncAcks: new Map(),
     };
 
     // Wire worker → main: incoming sync messages from worker
@@ -124,6 +129,7 @@ export class WorkerBridge {
           const sequence = isSequencedSyncPayload(entry) ? entry.sequence : undefined;
           this.runtime.onSyncMessageReceived(payload, sequence);
         }
+        this.runtime.batchedTick?.();
       } else if (msg.type === "upstream-connected") {
         this.markUpstreamServerConnected();
       } else if (msg.type === "upstream-disconnected") {
@@ -134,6 +140,12 @@ export class WorkerBridge {
         this.state.localBatchRecordsSyncListener?.(msg.batches);
       } else if (msg.type === "mutation-error-replay") {
         this.state.mutationErrorReplayListener?.(msg.event);
+      } else if (msg.type === "sync-ack") {
+        const resolver = this.state.pendingSyncAcks.get(msg.ackId);
+        if (resolver) {
+          this.state.pendingSyncAcks.delete(msg.ackId);
+          resolver(msg);
+        }
       } else if (msg.type === "peer-sync") {
         this.state.peerSyncListener?.({
           peerId: msg.peerId,
@@ -310,9 +322,49 @@ export class WorkerBridge {
     await this.state.upstreamServerReady;
   }
 
+  async waitForLocalSyncFlush(batchId?: string): Promise<void> {
+    if (this.isDisposedLike()) return;
+    await this.state.initPromise;
+    const deadline = Date.now() + LOCAL_SYNC_ACK_TIMEOUT_MS;
+
+    while (true) {
+      this.runtime.batchedTick?.();
+      this.flushPendingSyncToWorker();
+      if (this.isDisposedLike()) return;
+
+      const ackId = this.state.nextSyncAckId++;
+      const ackPromise = new Promise<Extract<WorkerToMainMessage, { type: "sync-ack" }>>(
+        (resolve) => {
+          this.state.pendingSyncAcks.set(ackId, resolve);
+        },
+      );
+      const payload = batchId ? (this.runtime.replayLocalBatchPayloads?.(batchId) ?? []) : [];
+      this.worker.postMessage({
+        type: "sync",
+        payload,
+        ackId,
+        ackBatchId: batchId,
+      });
+      const remainingMs = Math.max(0, deadline - Date.now());
+      const ack = await Promise.race([
+        ackPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), remainingMs)),
+      ]);
+      this.state.pendingSyncAcks.delete(ackId);
+      if (ack === null || this.isDisposedLike()) {
+        return;
+      }
+      if (!batchId || ack.batchReconciled === true || Date.now() >= deadline) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   applyIncomingServerPayload(payload: Uint8Array): void {
     if (this.isDisposedLike()) return;
     this.runtime.onSyncMessageReceived(payload);
+    this.runtime.batchedTick?.();
   }
 
   replayServerConnection(): void {
@@ -329,6 +381,10 @@ export class WorkerBridge {
   reconnectUpstream(): void {
     if (this.isDisposedLike()) return;
     this.worker.postMessage({ type: "reconnect-upstream" });
+  }
+
+  replayWorkerUpstreamConnection(): void {
+    this.reconnectUpstream();
   }
 
   acknowledgeRejectedBatch(batchId: string): void {

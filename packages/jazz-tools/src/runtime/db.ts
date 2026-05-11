@@ -10,7 +10,13 @@
  * - all/one are async (need storage I/O for queries)
  */
 
-import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
+import type {
+  ColumnDescriptor,
+  ColumnType,
+  WasmSchema,
+  WasmRow,
+  StorageDriver,
+} from "../drivers/types.js";
 import { getRuntimeSchemaCacheKey, normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
@@ -49,9 +55,16 @@ import {
   type FileWriteOptions,
 } from "./file-storage.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
+import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
-import { normalizeBuiltQuery, type BuiltRelation } from "./query-builder-shape.js";
+import {
+  normalizeBuiltQuery,
+  type BuiltRelation,
+  type NormalizedIncludeSpec,
+  type NormalizedBuiltQuery,
+} from "./query-builder-shape.js";
+import { resolveSelectedColumns } from "./select-projection.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
@@ -198,6 +211,10 @@ function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
   return { localUpdates: "deferred", ...options };
 }
 
+function queryUsesRelationTraversal(builtQuery: NormalizedBuiltQuery): boolean {
+  return builtQuery.hops.length > 0 || builtQuery.gather !== undefined;
+}
+
 export interface ActiveQuerySubscriptionTrace {
   id: string;
   query: string;
@@ -338,6 +355,67 @@ function resolveSchemaWithTable(
   }
 
   return typeof fallbackSchema === "function" ? fallbackSchema() : fallbackSchema;
+}
+
+function resolveOutputColumnDescriptor(
+  tableName: string,
+  schema: WasmSchema,
+  columnName: string,
+): ColumnDescriptor | undefined {
+  const magicType = magicColumnType(columnName);
+  if (magicType) {
+    return {
+      name: columnName,
+      column_type: magicType,
+      nullable: isPermissionIntrospectionColumn(columnName),
+    };
+  }
+
+  return schema[tableName]?.columns.find((column) => column.name === columnName);
+}
+
+function resolveNativeSubscriptionColumns(
+  tableName: string,
+  schema: WasmSchema,
+  includes: NormalizedIncludeSpec,
+  projection?: readonly string[],
+): ColumnDescriptor[] {
+  const columns = resolveSelectedColumns(tableName, schema, projection)
+    .map((columnName) => resolveOutputColumnDescriptor(tableName, schema, columnName))
+    .filter((column): column is ColumnDescriptor => column !== undefined);
+
+  if (Object.keys(includes).length === 0) {
+    return columns;
+  }
+
+  const relationsByTable = analyzeRelations(schema);
+  const relations = relationsByTable.get(tableName) ?? [];
+
+  for (const [relationName, include] of Object.entries(includes)) {
+    const relation = relations.find((candidate) => candidate.name === relationName);
+    if (!relation) {
+      throw new Error(`Unknown relation "${relationName}" on table "${tableName}"`);
+    }
+
+    const nestedColumns = resolveNativeSubscriptionColumns(
+      relation.toTable,
+      schema,
+      include.includes,
+      include.select.length > 0 ? include.select : undefined,
+    );
+    const columnType: ColumnType = {
+      type: "Array",
+      element: { type: "Row", columns: nestedColumns },
+    };
+
+    columns.push({
+      name: relationName,
+      column_type: columnType,
+      nullable: false,
+    });
+  }
+
+  return columns;
 }
 
 function createRuntimeSchemaResolver(getRuntimeSchema: () => WasmSchema): {
@@ -956,6 +1034,9 @@ export class Db {
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
+        onBeforeLocalBatchWait: async (batchId) => {
+          await this.workerBridge?.waitForLocalSyncFlush(batchId);
+        },
         onRejectedBatchAcknowledged: (batchId) => {
           this.workerBridge?.acknowledgeRejectedBatch(batchId);
         },
@@ -985,7 +1066,7 @@ export class Db {
    * {@link Db.mutationErrorListeners} are notified.
    */
   private attachMutationErrorHandler(client: JazzClient): void {
-    if (this.mutationErrorListeners.size === 0) {
+    if (this.mutationErrorListeners.size === 0 && !this.worker) {
       return;
     }
     if (this.clientMutationErrorUnsubscribers.has(client)) {
@@ -994,6 +1075,10 @@ export class Db {
     this.clientMutationErrorUnsubscribers.set(
       client,
       client.onMutationError((event) => {
+        if (this.mutationErrorListeners.size === 0) {
+          this.pendingWorkerMutationErrorEvents.push(event);
+          return;
+        }
         for (const listener of this.mutationErrorListeners) {
           listener(event);
         }
@@ -1019,7 +1104,9 @@ export class Db {
     }
     if (!options?.tier || options.tier === "local") {
       if (client?.hasPendingHydratedBatchReconciliation("edge")) {
+        await this.workerBridge.waitForLocalSyncFlush();
         await this.workerBridge.waitForUpstreamServerConnection();
+        this.workerBridge.replayWorkerUpstreamConnection();
         await this.waitForHydratedWorkerBatchReconciliation(client, "edge");
       }
       return;
@@ -1035,6 +1122,13 @@ export class Db {
     while (client.hasPendingHydratedBatchReconciliation(tier)) {
       if (Date.now() >= deadline) {
         return;
+      }
+      const pendingBatchIds = client.pendingHydratedBatchReconciliationIds(tier);
+      if (pendingBatchIds.length === 0) {
+        return;
+      }
+      for (const batchId of pendingBatchIds) {
+        await this.workerBridge?.waitForLocalSyncFlush(batchId);
       }
       await sleep(20);
     }
@@ -1868,7 +1962,17 @@ export class Db {
     const queryOptions = ordinaryDbQueryOptions(options);
     await this.ensureQueryReady(queryOptions, client);
     const wasmQuery = translateQuery(builderJson, planningSchema);
-    const rows = await client.query(wasmQuery, queryOptions);
+    const rows =
+      queryUsesRelationTraversal(builtQuery) &&
+      "queryInternal" in client &&
+      typeof client.queryInternal === "function"
+        ? await client.queryInternal(
+            wasmQuery,
+            undefined,
+            { ...queryOptions, runtimeSettledTier: null },
+            runtimeSchema.peek(),
+          )
+        : await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -1990,6 +2094,12 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    const nativeOutputColumns = resolveNativeSubscriptionColumns(
+      outputTable,
+      outputSchema,
+      outputIncludes,
+      builtQuery.select,
+    );
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
@@ -1997,9 +2107,19 @@ export class Db {
         outputTable === builtQuery.table ? query : {},
         transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
+    const nativeTransform =
+      Object.keys(outputIncludes).length === 0 && builtQuery.select.length === 0
+        ? (row: Record<string, unknown>): T =>
+            transformOutputRow(outputTable === builtQuery.table ? query : {}, row)
+        : undefined;
 
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
-      const typedDelta = manager.handleDelta(delta, transform);
+      const typedDelta = manager.handleDelta(
+        delta,
+        transform,
+        nativeOutputColumns,
+        nativeTransform,
+      );
       callback(typedDelta);
     };
 
@@ -2345,7 +2465,9 @@ class ClientBackedDb extends Db {
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,
-      queryOptions,
+      queryUsesRelationTraversal(builtQuery)
+        ? { ...queryOptions, runtimeSettledTier: null }
+        : queryOptions,
       runtimeSchema.peek(),
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
@@ -2386,6 +2508,12 @@ class ClientBackedDb extends Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    const nativeOutputColumns = resolveNativeSubscriptionColumns(
+      outputTable,
+      outputSchema,
+      outputIncludes,
+      builtQuery.select,
+    );
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
@@ -2393,12 +2521,22 @@ class ClientBackedDb extends Db {
         outputTable === builtQuery.table ? query : {},
         transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
+    const nativeTransform =
+      Object.keys(outputIncludes).length === 0 && builtQuery.select.length === 0
+        ? (row: Record<string, unknown>): T =>
+            transformOutputRow(outputTable === builtQuery.table ? query : {}, row)
+        : undefined;
     const queryOptions = ordinaryDbQueryOptions(options);
 
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,
       (delta) => {
-        const typedDelta = manager.handleDelta(delta, transform);
+        const typedDelta = manager.handleDelta(
+          delta,
+          transform,
+          nativeOutputColumns,
+          nativeTransform,
+        );
         callback(typedDelta);
       },
       this.session,
