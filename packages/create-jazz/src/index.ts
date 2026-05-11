@@ -6,7 +6,7 @@ import { detectPackageManager } from "./detect-pm.js";
 import { runHostedInit } from "./cloud-init.js";
 import { writeBetterAuthSecret } from "./init-secret.js";
 
-type Framework = "next" | "sveltekit" | "ts";
+type Framework = "next" | "react" | "sveltekit" | "ts";
 type Hosting = "hosted" | "selfhosted";
 type Auth = "localfirst" | "hybrid" | "betterauth";
 
@@ -17,6 +17,11 @@ const STARTERS: Record<Framework, Record<Auth, StarterName | null>> = {
     localfirst: "next-localfirst",
     hybrid: "next-hybrid",
     betterauth: "next-betterauth",
+  },
+  react: {
+    localfirst: "react-localfirst",
+    hybrid: "react-hybrid",
+    betterauth: "react-betterauth",
   },
   sveltekit: {
     localfirst: "sveltekit-localfirst",
@@ -40,7 +45,7 @@ interface HostedEnvKeys {
   backendSecret: string;
 }
 
-const ENV_KEYS_BY_FRAMEWORK: Record<Framework | "react", HostedEnvKeys> = {
+const ENV_KEYS_BY_FRAMEWORK: Record<Framework, HostedEnvKeys> = {
   next: {
     appId: "NEXT_PUBLIC_JAZZ_APP_ID",
     serverUrl: "NEXT_PUBLIC_JAZZ_SERVER_URL",
@@ -149,6 +154,7 @@ async function main() {
       message: "Framework",
       options: [
         { value: "next", label: "React (Next.js)" },
+        { value: "react", label: "React (Vite)" },
         { value: "sveltekit", label: "Svelte (SvelteKit)" },
         { value: "ts", label: "TypeScript (no framework)" },
       ],
