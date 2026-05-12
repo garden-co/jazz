@@ -2152,7 +2152,7 @@ mod tests {
         let connected_payload = crate::transport_manager::frame_decode(&connected_frame)
             .expect("decode ConnectedResponse frame");
         let connected_response: crate::transport_manager::ConnectedResponse =
-            serde_json::from_slice(connected_payload).expect("parse ConnectedResponse");
+            serde_json::from_slice(connected_payload.as_ref()).expect("parse ConnectedResponse");
         assert_eq!(
             connected_response.sync_protocol_version,
             crate::transport_manager::SYNC_PROTOCOL_VERSION
@@ -2217,7 +2217,7 @@ mod tests {
         let payload =
             crate::transport_manager::frame_decode(&error_frame).expect("decode error frame");
         let event: crate::jazz_transport::ServerEvent =
-            serde_json::from_slice(payload).expect("parse error event");
+            serde_json::from_slice(payload.as_ref()).expect("parse error event");
         match event {
             crate::jazz_transport::ServerEvent::Error { message, code } => {
                 assert_eq!(code, crate::jazz_transport::ErrorCode::BadRequest);

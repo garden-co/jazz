@@ -81,16 +81,15 @@ fn encode_session(session: &Session) -> String {
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
-/// Encode a 4-byte big-endian length-prefixed frame.
 fn frame_encode(payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + payload.len());
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
+    let compressed = lz4_flex::compress_prepend_size(payload);
+    let mut out = Vec::with_capacity(4 + compressed.len());
+    out.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+    out.extend_from_slice(&compressed);
     out
 }
 
-/// Decode a 4-byte big-endian length-prefixed frame.
-fn frame_decode(data: &[u8]) -> Option<&[u8]> {
+fn frame_decode(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < 4 {
         return None;
     }
@@ -98,7 +97,7 @@ fn frame_decode(data: &[u8]) -> Option<&[u8]> {
     if data.len() < 4 + len {
         return None;
     }
-    Some(&data[4..4 + len])
+    lz4_flex::decompress_size_prepended(&data[4..4 + len]).ok()
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -128,10 +127,10 @@ async fn ws_handshake_open(
     match ws.next().await {
         Some(Ok(Message::Binary(bytes))) => {
             let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(inner) {
+            if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(&inner) {
                 Ok((ws, connected))
             } else {
-                let msg = serde_json::from_slice::<serde_json::Value>(inner)
+                let msg = serde_json::from_slice::<serde_json::Value>(&inner)
                     .ok()
                     .and_then(|v| {
                         v.get("message")
@@ -173,7 +172,7 @@ async fn ws_recv_server_event(
     match message {
         Some(Ok(Message::Binary(bytes))) => {
             let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            jazz_tools::transport_protocol::ServerEvent::decode_payload(inner)
+            jazz_tools::transport_protocol::ServerEvent::decode_payload(&inner)
                 .map_err(|e| format!("invalid server event: {e}"))
         }
         Some(Ok(Message::Close(_))) | None => Err("server closed connection".to_string()),

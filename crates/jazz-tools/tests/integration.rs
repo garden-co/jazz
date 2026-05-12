@@ -3,7 +3,7 @@
 //! E2E integration tests for jazz-tools server.
 //!
 //! These tests spawn the actual `jazz-tools` binary and interact via HTTP
-//! and WebSocket with binary length-prefixed frames.
+//! and WebSocket with binary transport frames.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -32,16 +32,15 @@ fn mint_test_token(audience: &str) -> String {
     .unwrap()
 }
 
-/// Encode a 4-byte big-endian length-prefixed frame.
 fn frame_encode(payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + payload.len());
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
+    let compressed = lz4_flex::compress_prepend_size(payload);
+    let mut out = Vec::with_capacity(4 + compressed.len());
+    out.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+    out.extend_from_slice(&compressed);
     out
 }
 
-/// Decode a 4-byte big-endian length-prefixed frame, returning the payload slice.
-fn frame_decode(data: &[u8]) -> Option<&[u8]> {
+fn frame_decode(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < 4 {
         return None;
     }
@@ -49,7 +48,7 @@ fn frame_decode(data: &[u8]) -> Option<&[u8]> {
     if data.len() < 4 + len {
         return None;
     }
-    Some(&data[4..4 + len])
+    lz4_flex::decompress_size_prepended(&data[4..4 + len]).ok()
 }
 
 /// Perform a WS handshake against `ws://host/apps/<appId>/ws` using a local-first JWT token.
@@ -79,10 +78,10 @@ async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, S
     match ws.next().await {
         Some(Ok(Message::Binary(bytes))) => {
             let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(inner) {
+            if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(&inner) {
                 return Ok(connected);
             }
-            let msg = serde_json::from_slice::<serde_json::Value>(inner)
+            let msg = serde_json::from_slice::<serde_json::Value>(&inner)
                 .ok()
                 .and_then(|v| {
                     v.get("message")

@@ -506,20 +506,19 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     (handle, manager)
 }
 
-/// Encode a payload as a 4-byte big-endian length-prefixed frame.
 pub(crate) fn frame_encode(payload: &[u8]) -> Vec<u8> {
+    let compressed = lz4_flex::compress_prepend_size(payload);
     debug_assert!(
-        payload.len() <= u32::MAX as usize,
+        compressed.len() <= u32::MAX as usize,
         "frame payload exceeds u32 limit"
     );
-    let mut out = Vec::with_capacity(4 + payload.len());
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
+    let mut out = Vec::with_capacity(4 + compressed.len());
+    out.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+    out.extend_from_slice(&compressed);
     out
 }
 
-/// Decode a 4-byte big-endian length-prefixed frame, returning the payload slice.
-pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
+pub(crate) fn frame_decode(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < 4 {
         return None;
     }
@@ -527,7 +526,7 @@ pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
     if data.len() < 4 + len {
         return None;
     }
-    Some(&data[4..4 + len])
+    lz4_flex::decompress_size_prepended(&data[4..4 + len]).ok()
 }
 
 /// Outcome of the auth handshake.
@@ -662,7 +661,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         };
 
         // First try to parse as the success path.
-        if let Ok(resp) = serde_json::from_slice::<ConnectedResponse>(resp_payload) {
+        if let Ok(resp) = serde_json::from_slice::<ConnectedResponse>(&resp_payload) {
             if resp.sync_protocol_version != SYNC_PROTOCOL_VERSION {
                 return HandshakeResult::NetworkError(format!(
                     "incompatible Jazz sync protocol: server sent {}, client requires {}. Please update Jazz.",
@@ -673,10 +672,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         }
 
         // Fall back: check whether the server sent an explicit Error event.
-        let error_event = crate::transport_protocol::ServerEvent::decode_payload(resp_payload)
+        let error_event = crate::transport_protocol::ServerEvent::decode_payload(&resp_payload)
             .ok()
             .or_else(|| {
-                serde_json::from_slice::<crate::transport_protocol::ServerEvent>(resp_payload).ok()
+                serde_json::from_slice::<crate::transport_protocol::ServerEvent>(&resp_payload).ok()
             });
         if let Some(crate::transport_protocol::ServerEvent::Error { message, code }) = error_event {
             if code == crate::transport_protocol::ErrorCode::Unauthorized {
@@ -974,7 +973,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     match incoming {
                         Ok(Some(data)) => {
                             let Some(payload) = frame_decode(&data) else { continue; };
-                            let Ok(event) = crate::transport_protocol::ServerEvent::decode_payload(payload) else { continue; };
+                            let Ok(event) = crate::transport_protocol::ServerEvent::decode_payload(&payload) else { continue; };
                             self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return ConnectedExit::NetworkError,
@@ -1162,7 +1161,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     match incoming {
                         Ok(Some(data)) => {
                             let Some(payload) = frame_decode(&data) else { continue; };
-                            let Ok(event) = crate::transport_protocol::ServerEvent::decode_payload(payload) else { continue; };
+                            let Ok(event) = crate::transport_protocol::ServerEvent::decode_payload(&payload) else { continue; };
                             self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return WasmConnectedExit::NetworkError,
@@ -1494,7 +1493,7 @@ mod tests {
             .rev()
             .find_map(|f| {
                 let payload = frame_decode(f)?;
-                serde_json::from_slice::<AuthHandshake>(payload).ok()
+                serde_json::from_slice::<AuthHandshake>(payload.as_ref()).ok()
             })
             .expect("at least one AuthHandshake frame sent after update_auth");
         assert_eq!(
@@ -1560,7 +1559,7 @@ mod tests {
             .rev()
             .find_map(|f| {
                 let payload = frame_decode(f)?;
-                serde_json::from_slice::<AuthHandshake>(payload).ok()
+                serde_json::from_slice::<AuthHandshake>(payload.as_ref()).ok()
             })
             .expect("at least one AuthHandshake frame");
         assert_eq!(
@@ -1593,5 +1592,32 @@ mod tests {
             .await
             .expect("dropping the handle should shut down the manager")
             .unwrap();
+    }
+
+    #[test]
+    fn websocket_frames_compress_payload_inside_length_prefix() {
+        let payload = br#"{"type":"SyncUpdateBatch","updates":[{"payload":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#;
+
+        let frame = frame_encode(payload);
+        let compressed_len = u32::from_be_bytes(frame[0..4].try_into().unwrap()) as usize;
+        let decoded = frame_decode(&frame).expect("compressed frame should decode");
+
+        assert_eq!(frame.len(), 4 + compressed_len);
+        assert_ne!(&frame[4..], payload);
+        assert_eq!(decoded.as_slice(), payload);
+        assert!(
+            frame.len() < 4 + payload.len(),
+            "lz4 frame compression should reduce repetitive payload size"
+        );
+    }
+
+    #[test]
+    fn legacy_plain_length_prefixed_frames_are_rejected() {
+        let payload = br#"{"type":"Heartbeat"}"#;
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(payload);
+
+        assert!(frame_decode(&frame).is_none());
     }
 }
