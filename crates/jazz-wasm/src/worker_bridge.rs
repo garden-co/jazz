@@ -75,7 +75,7 @@ pub struct WasmWorkerBridge {
 impl WasmWorkerBridge {
     /// Attach a Rust bridge to an externally-constructed Worker.
     ///
-    /// Per spec, options are parsed at attach time. `init()` is parameter-less.
+    /// Options are parsed at attach time; `init()` is parameter-less.
     #[wasm_bindgen(js_name = attach)]
     pub fn attach(
         worker: Worker,
@@ -534,7 +534,7 @@ impl WasmWorkerBridge {
 }
 
 // Best-effort cleanup if the wrapper drops without an explicit `shutdown()`
-// (e.g. a thrown exception during init). Spec lines 539–542.
+// (e.g. a thrown exception during init).
 impl Drop for WasmWorkerBridge {
     fn drop(&mut self) {
         // If `shutdown()` already ran, it has already installed the noop
