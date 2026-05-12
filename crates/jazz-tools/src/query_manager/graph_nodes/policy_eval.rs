@@ -7,6 +7,7 @@ use crate::query_manager::policy::{
 };
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
+use crate::query_manager::server_queries::{InheritedRefCacheKey, PolicyEvalCache};
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
     ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Value,
@@ -20,6 +21,7 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     session: &'a Session,
     branch: &'a str,
     row_policy_mode: RowPolicyMode,
+    policy_eval_cache: Option<&'a mut PolicyEvalCache>,
 }
 
 impl<'a> PolicyContextEvaluator<'a> {
@@ -34,12 +36,21 @@ impl<'a> PolicyContextEvaluator<'a> {
             session,
             branch,
             row_policy_mode,
+            policy_eval_cache: None,
         }
+    }
+
+    pub(crate) fn with_policy_eval_cache(
+        mut self,
+        policy_eval_cache: Option<&'a mut PolicyEvalCache>,
+    ) -> Self {
+        self.policy_eval_cache = policy_eval_cache;
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn evaluate_row_access(
-        &self,
+        &mut self,
         operation: Operation,
         row: &Row,
         descriptor: &RowDescriptor,
@@ -55,17 +66,30 @@ impl<'a> PolicyContextEvaluator<'a> {
         }
 
         let table = TableName::new(table_name);
+        crate::query_manager::policy_counters::increment(
+            "row_access",
+            format!(
+                "table={} op={:?} depth={} row={}",
+                table_name, operation, depth, row.id
+            ),
+        );
+        crate::query_manager::policy_counters::increment(
+            "row_access_shape",
+            format!("table={} op={:?} depth={}", table_name, operation, depth),
+        );
         let key = (table, row.id, operation);
         if !visited_referencing.insert(key) {
             return false;
         }
 
-        let local_allow = local_policy_override
-            .or_else(|| self.policy_for_operation(table, operation))
-            .map(|policy| {
+        let local_policy = local_policy_override
+            .cloned()
+            .or_else(|| self.policy_for_operation(table, operation).cloned());
+        let local_allow = match local_policy {
+            Some(policy) => {
                 let mut visited_inherits = HashSet::new();
                 self.evaluate_expr_with_context(
-                    policy,
+                    &policy,
                     operation,
                     row,
                     descriptor,
@@ -76,15 +100,16 @@ impl<'a> PolicyContextEvaluator<'a> {
                     &mut visited_inherits,
                     visited_referencing,
                 )
-            })
-            .unwrap_or(!self.row_policy_mode.denies_missing_explicit_policy());
+            }
+            None => !self.row_policy_mode.denies_missing_explicit_policy(),
+        };
 
         visited_referencing.remove(&(table, row.id, operation));
         local_allow
     }
 
     fn policy_for_operation(
-        &self,
+        &mut self,
         table_name: TableName,
         operation: Operation,
     ) -> Option<&PolicyExpr> {
@@ -99,7 +124,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_inherits_referencing_with_context(
-        &self,
+        &mut self,
         operation: Operation,
         source_table: &str,
         via_column: &str,
@@ -185,7 +210,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_expr_with_context(
-        &self,
+        &mut self,
         expr: &PolicyExpr,
         operation: Operation,
         row: &Row,
@@ -303,7 +328,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_inherits_with_context(
-        &self,
+        &mut self,
         operation: Operation,
         via_column: &str,
         max_depth: Option<usize>,
@@ -343,6 +368,46 @@ impl<'a> PolicyContextEvaluator<'a> {
             _ => return false,
         };
 
+        let cache_key = if depth == 0 && visited.is_empty() {
+            Some(InheritedRefCacheKey {
+                table: *parent_table,
+                id: parent_id,
+                operation,
+                parent_eval_depth: depth + 1,
+            })
+        } else {
+            None
+        };
+
+        if let Some(cache_key) = &cache_key {
+            if let Some(result) = self
+                .policy_eval_cache
+                .as_ref()
+                .and_then(|cache| cache.inherited_ref_authorization_get(cache_key))
+            {
+                crate::query_manager::policy_counters::increment(
+                    "inherits_ref_cache",
+                    format!(
+                        "hit table={} op={:?} depth={}",
+                        cache_key.table.as_str(),
+                        operation,
+                        cache_key.parent_eval_depth
+                    ),
+                );
+                return result;
+            }
+
+            crate::query_manager::policy_counters::increment(
+                "inherits_ref_cache",
+                format!(
+                    "miss table={} op={:?} depth={}",
+                    cache_key.table.as_str(),
+                    operation,
+                    cache_key.parent_eval_depth
+                ),
+            );
+        }
+
         if visited.contains(&parent_id) {
             return false;
         }
@@ -377,7 +442,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             parent_row.batch_id,
             parent_row.row_provenance,
         );
-        self.evaluate_expr_with_context(
+        let result = self.evaluate_expr_with_context(
             parent_policy,
             operation,
             &parent_row,
@@ -388,12 +453,20 @@ impl<'a> PolicyContextEvaluator<'a> {
             depth + 1,
             visited,
             visited_referencing,
-        )
+        );
+
+        if let Some(cache_key) = cache_key
+            && let Some(cache) = self.policy_eval_cache.as_mut()
+        {
+            cache.inherited_ref_authorization_insert(cache_key, result);
+        }
+
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_exists_with_context(
-        &self,
+        &mut self,
         table: &str,
         condition: &PolicyExpr,
         operation: Operation,
@@ -428,7 +501,11 @@ impl<'a> PolicyContextEvaluator<'a> {
         };
 
         for _ in 0..100 {
-            if graph.settle(io, row_loader) {
+            if graph.settle_with_policy_eval_cache(
+                io,
+                self.policy_eval_cache.as_deref_mut(),
+                row_loader,
+            ) {
                 break;
             }
         }
@@ -438,7 +515,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_exists_rel_with_context(
-        &self,
+        &mut self,
         rel: &RelExpr,
         structural_scans: bool,
         row: &Row,
@@ -459,6 +536,20 @@ impl<'a> PolicyContextEvaluator<'a> {
             };
 
         let current_table = TableName::new(table_name);
+        crate::query_manager::policy_counters::increment(
+            "exists_rel",
+            format!(
+                "table={} row={} structural_scans={} rel={:?}",
+                table_name, row.id, structural_scans, bound_rel
+            ),
+        );
+        crate::query_manager::policy_counters::increment(
+            "exists_rel_shape",
+            format!(
+                "table={} structural_scans={} rel={:?}",
+                table_name, structural_scans, bound_rel
+            ),
+        );
         let mut graph = match PolicyGraph::for_exists_rel(
             &bound_rel,
             self.schema,
@@ -473,7 +564,11 @@ impl<'a> PolicyContextEvaluator<'a> {
         };
 
         for _ in 0..100 {
-            if graph.settle(io, row_loader) {
+            if graph.settle_with_policy_eval_cache(
+                io,
+                self.policy_eval_cache.as_deref_mut(),
+                row_loader,
+            ) {
                 break;
             }
         }

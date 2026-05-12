@@ -19,6 +19,7 @@ use super::index::ScanCondition;
 use super::policy::{Operation, PolicyExpr};
 use super::relation_ir::RelExpr;
 use super::relation_ir_query_plan::lower_relation_to_execution_plan;
+use super::server_queries::PolicyEvalCache;
 use super::session::Session;
 use super::types::ColumnName;
 use super::types::{LoadedRow, RowPolicyMode, Schema, TableName, TupleDescriptor, Value};
@@ -327,7 +328,20 @@ impl PolicyGraph {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
-        let _delta = self.graph.settle(io, &mut |id, hint| row_loader(id, hint));
+        self.settle_with_policy_eval_cache(io, None, row_loader)
+    }
+
+    pub(crate) fn settle_with_policy_eval_cache(
+        &mut self,
+        io: &dyn Storage,
+        policy_eval_cache: Option<&mut PolicyEvalCache>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    ) -> bool {
+        let _delta =
+            self.graph
+                .settle_with_policy_eval_cache(io, policy_eval_cache, &mut |id, hint| {
+                    row_loader(id, hint)
+                });
         true
     }
 

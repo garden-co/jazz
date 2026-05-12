@@ -384,7 +384,7 @@ impl MagicColumnsNode {
                     return Value::Null;
                 };
 
-                let evaluator = PolicyContextEvaluator::new(
+                let mut evaluator = PolicyContextEvaluator::new(
                     &self.schema,
                     session,
                     &self.branch,

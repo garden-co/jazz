@@ -26,6 +26,7 @@ use super::graph_nodes::output::QuerySubscriptionId;
 use super::policy::{Operation, PolicyExpr};
 use super::policy_graph::PolicyGraph;
 use super::query::Query;
+use super::server_queries::PolicyEvalCache;
 use super::session::Session;
 use super::types::{
     ColumnName, ComposedBranchName, LoadedRow, OrderedAdded, OrderedRowDelta, Row, RowDelta,
@@ -511,6 +512,9 @@ pub struct QueryManager {
     /// Server-side query subscriptions from downstream clients.
     /// Key is (client_id, query_id) to allow multiple queries per client.
     pub(super) server_subscriptions: HashMap<(ClientId, QueryId), ServerQuerySubscription>,
+    /// Policy evaluation reuse shared across a downstream client's active
+    /// server-side settlement generation.
+    pub(super) server_policy_eval_caches: HashMap<ClientId, PolicyEvalCache>,
 
     /// Schema context for multi-schema queries.
     /// Starts empty; initialized via set_current_schema().
@@ -651,6 +655,7 @@ impl QueryManager {
             failed_subscriptions: Vec::new(),
             active_policy_checks: HashMap::new(),
             server_subscriptions: HashMap::new(),
+            server_policy_eval_caches: HashMap::new(),
             schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
             pending_row_visibility_changes: Vec::new(),
@@ -1296,6 +1301,7 @@ impl QueryManager {
         }
         self.server_subscriptions
             .retain(|&(cid, _), _| cid != client_id);
+        self.server_policy_eval_caches.remove(&client_id);
         self.active_policy_checks
             .retain(|_, state| state.pending_check.client_id != client_id);
         true
@@ -1554,8 +1560,10 @@ impl QueryManager {
             let mut visible_tuples = if subscription.uses_explicit_authorization_filtering {
                 let auth_schema_context = self.schema_context.clone();
                 let auth_branch_schema_map = self.branch_schema_map.clone();
-                Cow::Owned(self.authorized_tuples_from_graph(
+                let mut policy_eval_cache = PolicyEvalCache::default();
+                Cow::Owned(self.authorized_tuples_from_graph_with_cache(
                     storage_ref,
+                    &mut policy_eval_cache,
                     &subscription.graph,
                     &auth_schema_context,
                     &auth_branch_schema_map,

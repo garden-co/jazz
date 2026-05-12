@@ -1683,6 +1683,7 @@ impl QueryManager {
                 auth_context,
                 source_branch_schema_map: &source_branch_schema_map,
                 operation,
+                policy_eval_cache: None,
             },
         )
     }

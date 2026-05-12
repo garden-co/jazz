@@ -15,6 +15,16 @@ fn owned_items_schema() -> Schema {
     schema
 }
 
+fn structural_items_schema() -> Schema {
+    let mut schema = Schema::new();
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    schema.insert(TableName::new("items"), TableSchema::new(descriptor));
+    schema
+}
+
 #[test]
 fn server_builds_query_graph_on_subscription() {
     use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
@@ -497,6 +507,119 @@ fn server_authorizes_subscription_sync_scope_without_rechecking_output_scope() {
         storage.visible_query_loads() <= 12,
         "server subscription should not re-run an extra output-scope authorization pass, got {} visible row loads",
         storage.visible_query_loads()
+    );
+}
+
+#[test]
+fn server_subscription_policy_eval_cache_is_cleared_after_initial_settlement_and_dirty_recompute() {
+    use crate::query_manager::policy::Operation;
+    use crate::query_manager::session::Session;
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
+    };
+
+    let mut server_qm = QueryManager::new(SyncManager::new());
+    server_qm.set_current_schema(structural_items_schema(), "dev", "main");
+    server_qm.set_authorization_schema(owned_items_schema());
+    let inner = seeded_memory_storage(&server_qm.schema_context().current_schema);
+    let mut storage = CountingCatalogueUpsertsStorage::with_inner(inner);
+
+    let alice_item = server_qm
+        .insert(
+            &mut storage,
+            "items",
+            &[
+                Value::Text("alice".to_string()),
+                Value::Text("Alice item".to_string()),
+            ],
+        )
+        .expect("insert alice item");
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId::new();
+    connect_client(&mut server_qm, &storage, client_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let query_id = QueryId(1);
+    let query = server_qm.query("items").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id,
+            query: Box::new(query),
+            session: Some(Session::new("alice")),
+            required_tier: None,
+            propagation: QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            crate::sync_manager::OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::QuerySettled { query_id: settled_query_id, .. },
+            } if *id == client_id && *settled_query_id == query_id
+        )),
+        "initial subscription should settle"
+    );
+    {
+        let sub = server_qm
+            .server_subscriptions
+            .get(&(client_id, query_id))
+            .expect("server subscription should exist after initial settlement");
+        assert!(sub.settled_once);
+        assert!(
+            server_qm.server_policy_eval_caches.contains_key(&client_id),
+            "initial settlement should retain a client policy cache for the active settlement generation"
+        );
+    }
+
+    let branch_name = server_qm.schema_context().branch_name();
+    {
+        server_qm
+            .server_policy_eval_caches
+            .entry(client_id)
+            .or_default()
+            .insert_row_authorization_for_test(
+                alice_item.row_id,
+                branch_name,
+                Operation::Select,
+                false,
+            );
+        assert!(
+            !server_qm.server_policy_eval_caches[&client_id].is_empty(),
+            "test setup should poison the existing generation cache"
+        );
+    }
+
+    server_qm
+        .insert(
+            &mut storage,
+            "items",
+            &[
+                Value::Text("bob".to_string()),
+                Value::Text("Bob item".to_string()),
+            ],
+        )
+        .expect("insert bob item");
+    server_qm.process(&mut storage);
+
+    let scope = server_qm
+        .sync_manager()
+        .get_client(client_id)
+        .expect("client should exist")
+        .queries
+        .get(&query_id)
+        .expect("query scope should still exist")
+        .scope
+        .clone();
+    assert!(
+        scope.contains(&(alice_item.row_id, branch_name)),
+        "dirty recompute must clear stale policy cache entries before filtering"
     );
 }
 

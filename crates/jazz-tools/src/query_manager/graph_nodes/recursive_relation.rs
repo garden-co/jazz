@@ -6,11 +6,14 @@
 //! - deterministic dedupe by normalized row content.
 
 use ahash::{AHashMap, AHashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use uuid::Uuid;
 
 use crate::metadata::{RowProvenance, SYSTEM_PRINCIPAL_ID};
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::server_queries::PolicyEvalCache;
 use crate::query_manager::types::{
     LoadedRow, Row, RowDescriptor, Schema, TableName, Tuple, TupleBatchProvenance, TupleDelta,
     TupleDescriptor, TupleElement, TupleProvenance, Value,
@@ -102,10 +105,11 @@ impl RecursiveRelationNode {
     }
 
     /// Process seed tuple deltas with query context.
-    pub fn process_with_context<F>(
+    pub(crate) fn process_with_context<F>(
         &mut self,
         input: TupleDelta,
         io: &dyn Storage,
+        policy_eval_cache: Option<&mut PolicyEvalCache>,
         mut row_loader: F,
     ) -> TupleDelta
     where
@@ -117,7 +121,7 @@ impl RecursiveRelationNode {
             return TupleDelta::default();
         }
 
-        let next = self.recompute(io, &mut row_loader);
+        let next = self.recompute(io, policy_eval_cache, &mut row_loader);
         let delta = diff_sets(&self.current_tuples, &next);
 
         self.current_tuples = next;
@@ -158,14 +162,16 @@ impl RecursiveRelationNode {
     fn recompute(
         &self,
         io: &dyn Storage,
+        policy_eval_cache: Option<&mut PolicyEvalCache>,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
         if self.hop.is_some() {
-            return self.recompute_with_hop(io, row_loader);
+            return self.recompute_with_hop(io, policy_eval_cache, row_loader);
         }
         if matches!(self.correlation_source, CorrelationSource::ObjectId) {
             return self.recompute_with_object_id(io, row_loader);
         }
+        self.count_recompute("plain");
 
         let mut seen_contents = AHashMap::<Vec<u8>, (TupleProvenance, TupleBatchProvenance)>::new();
         let mut frontier_contents = Vec::<(Vec<u8>, TupleProvenance, TupleBatchProvenance)>::new();
@@ -255,6 +261,7 @@ impl RecursiveRelationNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
+        self.count_recompute("object_id");
         let mut seen_rows = AHashMap::<
             ObjectId,
             (
@@ -444,8 +451,62 @@ impl RecursiveRelationNode {
     fn recompute_with_hop(
         &self,
         io: &dyn Storage,
+        policy_eval_cache: Option<&mut PolicyEvalCache>,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
+        let Some(cache) = policy_eval_cache else {
+            return self.recompute_with_hop_uncached(io, row_loader);
+        };
+        let key = self.recompute_cache_key("hop");
+        if let Some(cached) = cache.recursive_recompute_get(&key) {
+            crate::query_manager::policy_counters::increment(
+                "recursive_recompute_cache",
+                format!("hit kind=hop key={key:016x}"),
+            );
+            return cached;
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "recursive_recompute_cache",
+            format!("miss kind=hop key={key:016x}"),
+        );
+        let result = self.recompute_with_hop_uncached(io, row_loader);
+        cache.recursive_recompute_insert(key, result.clone());
+        result
+    }
+
+    fn recompute_cache_key(&self, kind: &'static str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        kind.hash(&mut hasher);
+        self.input_descriptor
+            .combined_descriptor()
+            .content_hash()
+            .hash(&mut hasher);
+        self.output_descriptor.content_hash().hash(&mut hasher);
+        self.max_depth.hash(&mut hasher);
+        format!("{:?}", self.correlation_source).hash(&mut hasher);
+        self.hop
+            .as_ref()
+            .map(|hop| hop.table.as_str())
+            .hash(&mut hasher);
+        self.hop
+            .as_ref()
+            .map(|hop| hop.step_column_index)
+            .hash(&mut hasher);
+
+        let mut seed_ids = self.seed_tuples.keys().copied().collect::<Vec<_>>();
+        seed_ids.sort_unstable();
+        seed_ids.hash(&mut hasher);
+
+        hasher.finish()
+    }
+
+    fn recompute_with_hop_uncached(
+        &self,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    ) -> AHashSet<Tuple> {
+        self.count_recompute("hop");
         let Some(hop) = &self.hop else {
             return AHashSet::new();
         };
@@ -720,6 +781,19 @@ impl RecursiveRelationNode {
         TupleProvenance,
         TupleBatchProvenance,
     )> {
+        crate::query_manager::policy_counters::increment(
+            "recursive_step",
+            format!(
+                "output_cols={} max_depth={} hop={} corr={:?}",
+                self.output_descriptor.columns.len(),
+                self.max_depth,
+                self.hop
+                    .as_ref()
+                    .map(|hop| hop.table.as_str())
+                    .unwrap_or("<none>"),
+                correlation_value
+            ),
+        );
         let mut instance = match self
             .step_template
             .instantiate(correlation_value.clone(), &self.schema)
@@ -752,6 +826,30 @@ impl RecursiveRelationNode {
                 ))
             })
             .collect()
+    }
+
+    fn count_recompute(&self, kind: &'static str) {
+        let mut seed_ids = self.seed_tuples.keys().copied().collect::<Vec<_>>();
+        seed_ids.sort_unstable();
+        let seed_ids = seed_ids
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        crate::query_manager::policy_counters::increment(
+            "recursive_recompute",
+            format!(
+                "kind={} output_cols={} max_depth={} hop={} seeds=[{}]",
+                kind,
+                self.output_descriptor.columns.len(),
+                self.max_depth,
+                self.hop
+                    .as_ref()
+                    .map(|hop| hop.table.as_str())
+                    .unwrap_or("<none>"),
+                seed_ids
+            ),
+        );
     }
 
     fn normalize_step_row(

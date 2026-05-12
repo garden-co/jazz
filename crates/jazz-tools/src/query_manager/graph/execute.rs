@@ -2,6 +2,7 @@ use ahash::{AHashMap, AHashSet};
 use smallvec::SmallVec;
 
 use crate::object::ObjectId;
+use crate::query_manager::server_queries::PolicyEvalCache;
 use crate::query_manager::types::{LoadedRow, RowDelta, TableName, Tuple, TupleDelta};
 use crate::storage::Storage;
 
@@ -392,6 +393,18 @@ impl QueryGraph {
     where
         F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
+        self.settle_with_policy_eval_cache(storage, None, &mut row_loader)
+    }
+
+    pub(crate) fn settle_with_policy_eval_cache<F>(
+        &mut self,
+        storage: &dyn Storage,
+        mut policy_eval_cache: Option<&mut PolicyEvalCache>,
+        mut row_loader: F,
+    ) -> RowDelta
+    where
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {
             tracing::trace!(dirty_nodes = order.len(), table = %self.table, "settling query graph");
@@ -555,6 +568,7 @@ impl QueryGraph {
                         let delta = recursive_node.process_with_context(
                             input_delta,
                             storage,
+                            policy_eval_cache.as_deref_mut(),
                             &mut |id, hint| row_loader(id, hint),
                         );
                         tracing::debug!(

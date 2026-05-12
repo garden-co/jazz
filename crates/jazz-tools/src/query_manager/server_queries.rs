@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
+use crate::query_manager::types::Tuple;
 use crate::row_histories::BatchId;
 use crate::schema_manager::LensTransformer;
 use crate::storage::Storage;
@@ -63,6 +64,83 @@ pub(crate) struct AuthorizationPolicyRequest<'a> {
     pub(crate) auth_context: &'a crate::schema_manager::SchemaContext,
     pub(crate) source_branch_schema_map: &'a std::collections::HashMap<String, SchemaHash>,
     pub(crate) operation: Operation,
+    pub(crate) policy_eval_cache: Option<&'a mut PolicyEvalCache>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct RowAuthorizationCacheKey {
+    object_id: ObjectId,
+    branch_name: BranchName,
+    operation: Operation,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct InheritedRefCacheKey {
+    pub(crate) table: TableName,
+    pub(crate) id: ObjectId,
+    pub(crate) operation: Operation,
+    pub(crate) parent_eval_depth: usize,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PolicyEvalCache {
+    row_authorization: HashMap<RowAuthorizationCacheKey, bool>,
+    inherited_ref_authorization: HashMap<InheritedRefCacheKey, bool>,
+    recursive_recompute: HashMap<u64, ahash::AHashSet<Tuple>>,
+}
+
+impl PolicyEvalCache {
+    pub(super) fn clear(&mut self) {
+        self.row_authorization.clear();
+        self.inherited_ref_authorization.clear();
+        self.recursive_recompute.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.row_authorization.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn insert_row_authorization_for_test(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        operation: Operation,
+        result: bool,
+    ) {
+        self.row_authorization.insert(
+            RowAuthorizationCacheKey {
+                object_id,
+                branch_name,
+                operation,
+            },
+            result,
+        );
+    }
+
+    pub(super) fn inherited_ref_authorization_get(
+        &self,
+        key: &InheritedRefCacheKey,
+    ) -> Option<bool> {
+        self.inherited_ref_authorization.get(key).copied()
+    }
+
+    pub(super) fn inherited_ref_authorization_insert(
+        &mut self,
+        key: InheritedRefCacheKey,
+        result: bool,
+    ) {
+        self.inherited_ref_authorization.insert(key, result);
+    }
+
+    pub(crate) fn recursive_recompute_get(&self, key: &u64) -> Option<ahash::AHashSet<Tuple>> {
+        self.recursive_recompute.get(key).cloned()
+    }
+
+    pub(crate) fn recursive_recompute_insert(&mut self, key: u64, value: ahash::AHashSet<Tuple>) {
+        self.recursive_recompute.insert(key, value);
+    }
 }
 
 struct UpdatePermissionRequest<'a> {
@@ -375,6 +453,7 @@ impl QueryManager {
             auth_context,
             source_branch_schema_map,
             operation,
+            policy_eval_cache,
         } = request;
 
         let Some(table_schema) = auth_schema.get(&table_name) else {
@@ -391,12 +470,13 @@ impl QueryManager {
             return false;
         };
 
-        let evaluator = PolicyContextEvaluator::new(
+        let mut evaluator = PolicyContextEvaluator::new(
             auth_schema,
             session,
             branch_name.as_str(),
             self.row_policy_mode,
-        );
+        )
+        .with_policy_eval_cache(policy_eval_cache);
         let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
@@ -426,6 +506,7 @@ impl QueryManager {
     pub(super) fn provenance_row_matches_current_select_policy(
         &mut self,
         storage: &dyn Storage,
+        policy_eval_cache: &mut PolicyEvalCache,
         object_id: ObjectId,
         branch_name: BranchName,
         session: Option<&Session>,
@@ -433,6 +514,22 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
+        let cache_key = session.map(|_| RowAuthorizationCacheKey {
+            object_id,
+            branch_name,
+            operation: Operation::Select,
+        });
+
+        if let Some(cache_key) = &cache_key
+            && let Some(result) = policy_eval_cache.row_authorization.get(cache_key).copied()
+        {
+            crate::query_manager::policy_counters::increment(
+                "row_authorization_cache",
+                "hit".to_string(),
+            );
+            return result;
+        }
+
         let branches = vec![branch_name.as_str().to_string()];
         let Some((table, row)) = self.load_best_visible_row_batch(
             storage,
@@ -442,9 +539,15 @@ impl QueryManager {
             auth_context,
             source_branch_schema_map,
         ) else {
+            if let Some(cache_key) = cache_key {
+                policy_eval_cache.row_authorization.insert(cache_key, false);
+            }
             return false;
         };
         if row.is_hard_deleted() {
+            if let Some(cache_key) = cache_key {
+                policy_eval_cache.row_authorization.insert(cache_key, false);
+            }
             return false;
         }
 
@@ -456,14 +559,24 @@ impl QueryManager {
             .get(&table_name)
             .and_then(|table_schema| table_schema.policies.select_policy())
         else {
-            return !self.row_policy_mode.denies_missing_explicit_policy()
+            let result = !self.row_policy_mode.denies_missing_explicit_policy()
                 && auth_schema.contains_key(&table_name);
+            if let Some(cache_key) = cache_key {
+                policy_eval_cache
+                    .row_authorization
+                    .insert(cache_key, result);
+            }
+            return result;
         };
         let Some(session) = session else {
             return false;
         };
 
-        self.evaluate_authorization_policy(
+        crate::query_manager::policy_counters::increment(
+            "row_authorization_cache",
+            format!("miss table={}", table_name.as_str()),
+        );
+        let result = self.evaluate_authorization_policy(
             storage,
             AuthorizationPolicyRequest {
                 object_id,
@@ -477,13 +590,21 @@ impl QueryManager {
                 auth_context,
                 source_branch_schema_map,
                 operation: Operation::Select,
+                policy_eval_cache: Some(policy_eval_cache),
             },
-        )
+        );
+        if let Some(cache_key) = cache_key {
+            policy_eval_cache
+                .row_authorization
+                .insert(cache_key, result);
+        }
+        result
     }
 
     fn authorized_tuples_from_graph_result(
         &mut self,
         storage: &dyn Storage,
+        policy_eval_cache: &mut PolicyEvalCache,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
@@ -527,6 +648,7 @@ impl QueryManager {
                                 .or_insert_with(|| {
                                     self.provenance_row_matches_current_select_policy(
                                         storage,
+                                        policy_eval_cache,
                                         object_id,
                                         branch_name,
                                         session,
@@ -542,9 +664,10 @@ impl QueryManager {
         )
     }
 
-    pub(super) fn authorized_tuples_from_graph(
+    pub(super) fn authorized_tuples_from_graph_with_cache(
         &mut self,
         storage: &dyn Storage,
+        policy_eval_cache: &mut PolicyEvalCache,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
@@ -552,6 +675,7 @@ impl QueryManager {
     ) -> Vec<super::types::Tuple> {
         match self.authorized_tuples_from_graph_result(
             storage,
+            policy_eval_cache,
             graph,
             schema_context,
             source_branch_schema_map,
@@ -565,6 +689,7 @@ impl QueryManager {
     fn authorized_scope_from_graph_if_available(
         &mut self,
         storage: &dyn Storage,
+        policy_eval_cache: &mut PolicyEvalCache,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
@@ -600,6 +725,7 @@ impl QueryManager {
                         .or_insert_with(|| {
                             self.provenance_row_matches_current_select_policy(
                                 storage,
+                                policy_eval_cache,
                                 object_id,
                                 branch_name,
                                 session,
@@ -962,6 +1088,10 @@ impl QueryManager {
             // locally, including any ordered prefix required by pagination.
             let policy_context_tables =
                 Self::merged_policy_context_tables(&graph, &sub.policy_context_tables);
+            let mut policy_eval_cache = self
+                .server_policy_eval_caches
+                .remove(&sub.client_id)
+                .unwrap_or_default();
             let scope = if self
                 .client_bypasses_authorization_filtering(sub.client_id, session_for_policy.as_ref())
             {
@@ -979,6 +1109,7 @@ impl QueryManager {
             } else {
                 self.authorized_scope_from_graph_if_available(
                     storage_ref,
+                    &mut policy_eval_cache,
                     &graph,
                     &subscription_context,
                     &branch_schema_map,
@@ -1057,6 +1188,8 @@ impl QueryManager {
             }
 
             // Store the server subscription for reactive updates
+            self.server_policy_eval_caches
+                .insert(sub.client_id, policy_eval_cache);
             self.server_subscriptions.insert(
                 (sub.client_id, sub.query_id),
                 ServerQuerySubscription {
@@ -1142,6 +1275,13 @@ impl QueryManager {
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let had_dirty_graph = sub.graph.has_dirty_nodes();
+            let mut policy_eval_cache = self
+                .server_policy_eval_caches
+                .remove(&client_id)
+                .unwrap_or_default();
+            if had_dirty_graph && sub.settled_once {
+                policy_eval_cache.clear();
+            }
 
             // Row loader for this subscription
             let new_scope: Option<Cow<'_, HashSet<(ObjectId, BranchName)>>> = {
@@ -1198,6 +1338,7 @@ impl QueryManager {
                 } else {
                     self.authorized_scope_from_graph_if_available(
                         storage,
+                        &mut policy_eval_cache,
                         &sub.graph,
                         &sub.schema_context,
                         &branch_schema_map,
@@ -1280,6 +1421,8 @@ impl QueryManager {
                 }
             }
 
+            self.server_policy_eval_caches
+                .insert(client_id, policy_eval_cache);
             self.server_subscriptions.insert((client_id, query_id), sub);
         }
 
@@ -1620,6 +1763,7 @@ impl QueryManager {
                 auth_context: &auth_context,
                 source_branch_schema_map: &source_branch_schema_map,
                 operation: check.operation,
+                policy_eval_cache: None,
             },
         ) {
             let reason = format!(
@@ -1748,6 +1892,7 @@ impl QueryManager {
                     auth_context,
                     source_branch_schema_map: &source_branch_schema_map,
                     operation: Operation::Update,
+                    policy_eval_cache: None,
                 },
             ) {
                 let reason = format!(
@@ -1799,6 +1944,7 @@ impl QueryManager {
                     auth_context,
                     source_branch_schema_map: &source_branch_schema_map,
                     operation: Operation::Update,
+                    policy_eval_cache: None,
                 },
             ) {
                 let reason = format!(
