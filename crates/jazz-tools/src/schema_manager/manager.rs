@@ -1698,6 +1698,7 @@ impl SchemaManager {
             object_id,
             target_schema,
             write_context,
+            false,
         )
     }
 
@@ -1862,6 +1863,7 @@ impl SchemaManager {
                 },
                 &target_schema,
                 write_context,
+                false,
             )?;
 
         Ok(batch_id)
@@ -1943,6 +1945,7 @@ impl SchemaManager {
                 },
                 &target_schema,
                 write_context,
+                false,
             )
     }
 

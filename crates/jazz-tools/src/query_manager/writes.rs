@@ -1043,6 +1043,7 @@ impl QueryManager {
             external_object_id,
             write_schema.as_ref(),
             write_context,
+            true,
         )
     }
 
@@ -1063,6 +1064,7 @@ impl QueryManager {
             None,
             write_schema,
             write_context,
+            false,
         )
     }
 
@@ -1076,6 +1078,7 @@ impl QueryManager {
         external_object_id: Option<ObjectId>,
         write_schema: &Schema,
         write_context: Option<&WriteContext>,
+        deny_anonymous_writes: bool,
     ) -> Result<InsertResult, QueryError> {
         let table_name = TableName::new(table);
         let table_write =
@@ -1106,7 +1109,8 @@ impl QueryManager {
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
         // Deny anonymous writes before any policy evaluation.
-        if let Some(session) = write_context.and_then(WriteContext::session)
+        if deny_anonymous_writes
+            && let Some(session) = write_context.and_then(WriteContext::session)
             && session.auth_mode == AuthMode::Anonymous
         {
             return Err(QueryError::AnonymousWriteDenied {
@@ -1826,6 +1830,7 @@ impl QueryManager {
             },
             write_schema.as_ref(),
             write_context,
+            true,
         )
     }
 
@@ -1857,6 +1862,7 @@ impl QueryManager {
             write,
             write_schema.as_ref(),
             write_context,
+            false,
         )
     }
 
@@ -1866,6 +1872,7 @@ impl QueryManager {
         write: RowBranchWrite<'_>,
         write_schema: &Schema,
         write_context: Option<&WriteContext>,
+        deny_anonymous_writes: bool,
     ) -> Result<BatchId, QueryError> {
         let RowBranchWrite {
             table,
@@ -1878,7 +1885,8 @@ impl QueryManager {
         let table_name = TableName::new(table);
 
         // Deny anonymous writes before any policy evaluation.
-        if let Some(session) = write_context.and_then(WriteContext::session)
+        if deny_anonymous_writes
+            && let Some(session) = write_context.and_then(WriteContext::session)
             && session.auth_mode == AuthMode::Anonymous
         {
             return Err(QueryError::AnonymousWriteDenied {
@@ -2023,6 +2031,7 @@ impl QueryManager {
             },
             write_schema.as_ref(),
             write_context,
+            true,
         )
     }
 
@@ -2048,6 +2057,7 @@ impl QueryManager {
             delete,
             write_schema.as_ref(),
             write_context,
+            false,
         )
     }
 
@@ -2057,6 +2067,7 @@ impl QueryManager {
         delete: RowBranchDelete<'_>,
         write_schema: &Schema,
         write_context: Option<&WriteContext>,
+        deny_anonymous_writes: bool,
     ) -> Result<DeleteHandle, QueryError> {
         let RowBranchDelete {
             table,
@@ -2082,7 +2093,8 @@ impl QueryManager {
         }
 
         // Deny anonymous writes before any policy evaluation.
-        if let Some(session) = write_context.and_then(WriteContext::session)
+        if deny_anonymous_writes
+            && let Some(session) = write_context.and_then(WriteContext::session)
             && session.auth_mode == AuthMode::Anonymous
         {
             return Err(QueryError::AnonymousWriteDenied {
