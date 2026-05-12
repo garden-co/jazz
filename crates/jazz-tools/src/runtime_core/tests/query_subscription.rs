@@ -629,6 +629,53 @@ fn rc_query_local_transaction_overlay_keeps_indexed_deletes_isolated() {
 }
 
 #[test]
+fn rc_query_local_transaction_overlay_include_deleted_returns_staged_delete() {
+    let mut core =
+        create_runtime_with_schema(test_schema(), "query-local-transaction-include-deleted");
+    let branch_name = core.schema_manager().branch_name();
+
+    let ((row_id, _), _) = core
+        .insert("users", user_insert_values(ObjectId::new(), "shared"), None)
+        .unwrap();
+
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    core.delete(row_id, Some(&write_context)).unwrap();
+
+    let deleted_query = QueryBuilder::new("users")
+        .filter_eq("name", Value::Text("shared".into()))
+        .include_deleted()
+        .build();
+
+    let overlay_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        deleted_query,
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id,
+            branch_name,
+            row_ids: vec![row_id],
+        },
+    );
+    assert_eq!(
+        overlay_rows.len(),
+        1,
+        "include_deleted transaction reads should include the row deleted by that transaction"
+    );
+    assert_eq!(overlay_rows[0].0, row_id);
+}
+
+#[test]
 fn rc_query_local_direct_batch_overlay_handles_indexed_filters_until_commit() {
     let mut core =
         create_runtime_with_schema(test_schema(), "query-local-direct-batch-index-update");

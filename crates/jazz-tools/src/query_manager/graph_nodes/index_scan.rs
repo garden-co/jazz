@@ -113,7 +113,9 @@ impl IndexScanNode {
             ) else {
                 continue;
             };
-            if row.is_soft_deleted() || row.is_hard_deleted() {
+            if self.column.as_str() == "_id_deleted" && row.is_soft_deleted() {
+                new_ids.insert(row_id);
+            } else if row.is_soft_deleted() || row.is_hard_deleted() {
                 new_ids.remove(&row_id);
             } else if self.overlay_value_matches_condition(row_id, &row.data) {
                 new_ids.insert(row_id);
