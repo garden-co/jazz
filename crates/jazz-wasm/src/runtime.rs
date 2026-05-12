@@ -1065,6 +1065,8 @@ impl WasmRuntime {
     ///            Set for server nodes to enable ack emission.
     /// * `use_binary_encoding` - Optional outgoing sync payload encoding mode.
     ///   `Some(true)` emits postcard bytes (`Uint8Array`), otherwise JSON strings.
+    /// * `non_durable_client` - Internal browser main-thread mode. When true,
+    ///   direct writes stay optimistic until a durable peer syncs `BatchFate`.
     #[wasm_bindgen(constructor)]
     pub fn new(
         schema_json: &str,
@@ -1073,6 +1075,7 @@ impl WasmRuntime {
         user_branch: &str,
         tier: Option<String>,
         use_binary_encoding: Option<bool>,
+        non_durable_client: Option<bool>,
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
@@ -1132,6 +1135,9 @@ impl WasmRuntime {
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
+        if non_durable_client.unwrap_or(false) {
+            core.set_non_durable_client_runtime();
+        }
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));

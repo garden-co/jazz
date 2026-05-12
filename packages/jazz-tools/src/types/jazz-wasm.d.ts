@@ -97,6 +97,7 @@ declare module "jazz-wasm" {
       userBranch: string,
       tier?: string,
       useBinaryEncoding?: boolean,
+      nonDurableClient?: boolean,
     );
     schedule?: (task: () => void) => void;
 

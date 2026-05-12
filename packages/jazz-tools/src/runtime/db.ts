@@ -1034,9 +1034,6 @@ export class Db {
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
-        onBeforeLocalBatchWait: async (batchId) => {
-          await this.workerBridge?.waitForLocalSyncFlush(batchId);
-        },
         onRejectedBatchAcknowledged: (batchId) => {
           this.workerBridge?.acknowledgeRejectedBatch(batchId);
         },
