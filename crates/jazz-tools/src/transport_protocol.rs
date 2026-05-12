@@ -7,15 +7,15 @@
 //! # Protocol Overview
 //!
 //! - Clients connect to `/ws` and authenticate via an initial `AuthHandshake` frame
-//! - Both directions use the same length-prefixed binary framing
+//! - Both directions send each WebSocket message as a length-prefixed LZ4 frame
 //! - Server → client frames carry [`ServerEvent`] values
 //! - Client → server frames carry [`SyncBatchRequest`] payloads
 //!
 //! # Wire Format
 //!
-//! Handshake frames are length-prefixed JSON so pre-versioned peers can report
-//! readable protocol errors. After both sides confirm `SYNC_PROTOCOL_VERSION`,
-//! sync transport frames are length-prefixed postcard payloads.
+//! Each WebSocket message is `[4 bytes: u32 big-endian compressed length][N bytes:
+//! LZ4-compressed payload]`. Handshake payloads are JSON before compression.
+//! Once both sides confirm `SYNC_PROTOCOL_VERSION`, sync payloads use postcard.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -547,16 +547,15 @@ impl ServerEvent {
         Ok(event)
     }
 
-    /// Test/helper convenience: encode as a length-prefixed post-handshake frame.
+    /// Test/helper convenience: encode as a compressed post-handshake frame.
     pub fn encode_frame(&self) -> Vec<u8> {
         crate::transport_manager::frame_encode(&self.encode_payload().unwrap_or_default())
     }
 
-    /// Test/helper convenience: decode a length-prefixed post-handshake frame.
-    pub fn decode_frame(buf: &[u8]) -> Option<(Self, usize)> {
+    /// Test/helper convenience: decode a compressed post-handshake frame.
+    pub fn decode_frame(buf: &[u8]) -> Option<Self> {
         let payload = crate::transport_manager::frame_decode(buf)?;
-        let event = Self::decode_payload(payload).ok()?;
-        Some((event, 4 + payload.len()))
+        Self::decode_payload(&payload).ok()
     }
 }
 
@@ -654,8 +653,7 @@ mod tests {
         let frame = event.encode_frame();
         assert!(frame.len() > 4);
 
-        let (decoded, consumed) = ServerEvent::decode_frame(&frame).unwrap();
-        assert_eq!(consumed, frame.len());
+        let decoded = ServerEvent::decode_frame(&frame).unwrap();
         match decoded {
             ServerEvent::Connected {
                 catalogue_state_hash,
@@ -672,8 +670,7 @@ mod tests {
         let event = ServerEvent::Heartbeat;
         let frame = event.encode_frame();
 
-        let (decoded, consumed) = ServerEvent::decode_frame(&frame).unwrap();
-        assert_eq!(consumed, frame.len());
+        let decoded = ServerEvent::decode_frame(&frame).unwrap();
         assert!(matches!(decoded, ServerEvent::Heartbeat));
     }
 

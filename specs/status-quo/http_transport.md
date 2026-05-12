@@ -25,13 +25,12 @@ carrying payloads such as:
 Every WebSocket message uses the same outer frame shape:
 
 ```text
-[4 bytes: u32 big-endian payload length][N bytes: payload]
+[4 bytes: u32 big-endian compressed payload length][N bytes: LZ4-compressed payload]
 ```
 
-The initial auth handshake payload is JSON. That keeps protocol-version and
-auth failures readable for older or mismatched peers. Once both sides confirm
-`SYNC_PROTOCOL_VERSION`, post-handshake sync transport payloads are binary
-postcard payloads:
+The initial auth handshake payload is JSON before compression. Once both sides
+confirm `SYNC_PROTOCOL_VERSION`, post-handshake sync transport payloads are
+binary postcard payloads:
 
 - client-to-server frames carry either a single outbox entry payload or a
   `SyncBatchRequest`
