@@ -60,24 +60,20 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
       } from 'jazz-tools/svelte';
       import TodoList from './TodoList.svelte';
 
-      let client = $state<ReturnType<typeof createJazzClient> | null>(null);
-
-      BrowserAuthSecretStore.getOrCreateSecret().then(async (secret) => {
-        client = await createJazzClient({ appId: '<your-app-id>', secret });
-      });
+      const client = BrowserAuthSecretStore.getOrCreateSecret().then(
+        (secret) => createJazzClient({ appId: '<your-app-id>', secret })
+      );
     </script>
 
-    {#if client}
-      <JazzSvelteProvider {client}>
-        {#snippet children()}
-          <h1>Todos</h1>
-          <TodoList />
-        {/snippet}
-        {#snippet fallback()}
-          <p>Loading...</p>
-        {/snippet}
-      </JazzSvelteProvider>
-    {/if}
+    <JazzSvelteProvider {client}>
+      {#snippet children()}
+        <h1>Todos</h1>
+        <TodoList />
+      {/snippet}
+      {#snippet fallback()}
+        <p>Loading...</p>
+      {/snippet}
+    </JazzSvelteProvider>
     ```
 
   </Tab>
