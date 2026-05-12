@@ -76,6 +76,7 @@ impl IndexScanNode {
         };
         match &self.condition {
             ScanCondition::All => true,
+            ScanCondition::Empty => false,
             ScanCondition::Eq(expected) => value == *expected || array_contains(&value, expected),
             ScanCondition::Range { min, max } => {
                 bound_matches(min, &value, true) && bound_matches(max, &value, false)
