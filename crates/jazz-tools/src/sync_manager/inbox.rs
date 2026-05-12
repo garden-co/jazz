@@ -20,6 +20,20 @@ struct AppliedRowBatch {
     visibility_change: Option<RowVisibilityChange>,
 }
 
+/// Whether applying a visible row should also record this server's
+/// authoritative fate for the row's batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AuthoritativeFateRecording {
+    Skip,
+    AcceptedByLocalAuthority,
+}
+
+impl AuthoritativeFateRecording {
+    fn should_record(self) -> bool {
+        matches!(self, Self::AcceptedByLocalAuthority)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SealedBatchMode {
     Direct,
@@ -322,7 +336,7 @@ impl SyncManager {
         storage: &mut H,
         metadata: Option<RowMetadata>,
         mut row: StoredRowBatch,
-        record_local_fate: bool,
+        fate_recording: AuthoritativeFateRecording,
     ) -> Option<AppliedRowBatch> {
         let authoritative_tier = match (row.confirmed_tier, self.max_local_durability_tier()) {
             (Some(incoming), Some(local)) => Some(incoming.max(local)),
@@ -382,7 +396,7 @@ impl SyncManager {
                     }
                 }
             };
-        if record_local_fate
+        if fate_recording.should_record()
             && let Some(confirmed_tier) = authoritative_tier
             && row.state.is_visible()
         {
@@ -1044,8 +1058,12 @@ impl SyncManager {
                     %branch_name,
                     "server→row-batch payload"
                 );
-                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), true)
-                {
+                if let Some(applied) = self.apply_row_updated(
+                    storage,
+                    metadata,
+                    row.clone(),
+                    AuthoritativeFateRecording::AcceptedByLocalAuthority,
+                ) {
                     self.apply_authoritative_transaction_fate_for_row(storage, &applied.row);
 
                     if let Some(update) = applied.visibility_change {
@@ -1184,7 +1202,12 @@ impl SyncManager {
                 let branch_name = BranchName::new("main");
                 match client.role {
                     ClientRole::Peer | ClientRole::Admin => {
-                        self.apply_payload_from_client(storage, client_id, payload, false);
+                        self.apply_payload_from_client(
+                            storage,
+                            client_id,
+                            payload,
+                            AuthoritativeFateRecording::Skip,
+                        );
                     }
                     ClientRole::Backend => {
                         self.outbox.push(OutboxEntry {
@@ -1209,7 +1232,12 @@ impl SyncManager {
                         if self.allow_unprivileged_schema_catalogue_writes
                             && entry.is_structural_schema_catalogue()
                         {
-                            self.apply_payload_from_client(storage, client_id, payload, false);
+                            self.apply_payload_from_client(
+                                storage,
+                                client_id,
+                                payload,
+                                AuthoritativeFateRecording::Skip,
+                            );
                             return;
                         }
                         self.outbox.push(OutboxEntry {
@@ -1228,7 +1256,12 @@ impl SyncManager {
                 let branch_name = BranchName::new(&row.branch);
                 match client.role {
                     ClientRole::Peer | ClientRole::Admin => {
-                        self.apply_payload_from_client(storage, client_id, payload, false);
+                        self.apply_payload_from_client(
+                            storage,
+                            client_id,
+                            payload,
+                            AuthoritativeFateRecording::Skip,
+                        );
                     }
                     ClientRole::Backend => {
                         if payload.is_catalogue() {
@@ -1241,7 +1274,12 @@ impl SyncManager {
                             });
                             return;
                         }
-                        self.apply_payload_from_client(storage, client_id, payload, false);
+                        self.apply_payload_from_client(
+                            storage,
+                            client_id,
+                            payload,
+                            AuthoritativeFateRecording::Skip,
+                        );
                     }
                     ClientRole::User => {
                         let Some(session) = &client.session else {
@@ -1258,7 +1296,12 @@ impl SyncManager {
                             if self.allow_unprivileged_schema_catalogue_writes
                                 && payload.is_structural_schema_catalogue()
                             {
-                                self.apply_payload_from_client(storage, client_id, payload, false);
+                                self.apply_payload_from_client(
+                                    storage,
+                                    client_id,
+                                    payload,
+                                    AuthoritativeFateRecording::Skip,
+                                );
                                 return;
                             }
                             self.outbox.push(OutboxEntry {
@@ -1347,7 +1390,12 @@ impl SyncManager {
                 }
             }
             SyncPayload::SealBatch { .. } => {
-                self.apply_payload_from_client(storage, client_id, payload, false);
+                self.apply_payload_from_client(
+                    storage,
+                    client_id,
+                    payload,
+                    AuthoritativeFateRecording::Skip,
+                );
             }
             // Handle query subscription with full Query struct
             // Queue for QueryManager to process (SyncManager doesn't know about QueryGraph)
@@ -1493,7 +1541,7 @@ impl SyncManager {
         storage: &mut H,
         client_id: ClientId,
         payload: SyncPayload,
-        _was_pending: bool,
+        fate_recording: AuthoritativeFateRecording,
     ) {
         match payload {
             SyncPayload::CatalogueEntryUpdated { entry } => {
@@ -1513,7 +1561,8 @@ impl SyncManager {
                     .or_default()
                     .insert(client_id);
 
-                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), false)
+                if let Some(applied) =
+                    self.apply_row_updated(storage, metadata, row.clone(), fate_recording)
                 {
                     self.forward_row_batch_to_servers(
                         storage,
