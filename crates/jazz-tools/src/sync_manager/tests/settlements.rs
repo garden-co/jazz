@@ -166,6 +166,157 @@ fn client_durability_ack_is_not_authoritative() {
 }
 
 #[test]
+fn sealed_direct_client_write_persists_authoritative_fate() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row = visible_row(ObjectId::new(), "main", Vec::new(), 1_000, b"alice");
+
+    seed_users_schema(&mut io);
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    );
+    assert_eq!(
+        io.load_authoritative_batch_fate(row.batch_id).unwrap(),
+        None,
+        "an unsealed direct batch should not become globally authoritative from row arrival alone"
+    );
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                row.batch_id,
+                "main",
+                vec![SealedBatchMember {
+                    object_id: row.row_id,
+                    row_digest: row.content_digest(),
+                }],
+                Vec::new(),
+            ),
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_fate(row.batch_id).unwrap(),
+        Some(BatchFate::DurableDirect {
+            batch_id: row.batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        }),
+        "an authoritative server that accepts a visible direct client write must persist its durable fate"
+    );
+}
+
+#[test]
+fn replayed_approved_user_write_returns_durable_fate_not_missing() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row = visible_row(ObjectId::new(), "main", Vec::new(), 1_000, b"alice");
+
+    seed_users_schema(&mut io);
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::User);
+    sm.set_client_session(
+        client_id,
+        crate::query_manager::session::Session::new("alice"),
+    );
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    );
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(
+        pending.len(),
+        1,
+        "first user write should wait for permission approval"
+    );
+    sm.approve_permission_check(&mut io, pending.into_iter().next().unwrap());
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                row.batch_id,
+                "main",
+                vec![SealedBatchMember {
+                    object_id: row.row_id,
+                    row_digest: row.content_digest(),
+                }],
+                Vec::new(),
+            ),
+        },
+    );
+    sm.take_outbox();
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    });
+    sm.process_inbox(&mut io);
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::BatchFate {
+                    fate: BatchFate::DurableDirect {
+                        batch_id,
+                        confirmed_tier: DurabilityTier::Local,
+                    },
+                },
+            } if *id == client_id && *batch_id == row.batch_id
+        )),
+        "idempotent replay should return the authoritative durable fate, got {outbox:?}"
+    );
+    assert!(
+        outbox.iter().all(|entry| !matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::BatchFate {
+                    fate: BatchFate::Missing { batch_id },
+                },
+            } if *id == client_id && *batch_id == row.batch_id
+        )),
+        "accepted client writes must not be reported as missing on replay, got {outbox:?}"
+    );
+}
+
+#[test]
 fn initial_query_sync_sends_only_current_row_for_deep_history() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
@@ -627,7 +778,7 @@ fn seal_batch_accepts_all_staged_transactional_rows_as_one_settlement() {
         &mut io,
         client_id,
         SyncPayload::SealBatch {
-            submission: sealed_submission(
+            submission: transactional_sealed_submission(
                 batch_id,
                 "main",
                 vec![

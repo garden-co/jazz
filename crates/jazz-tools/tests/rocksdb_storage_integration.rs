@@ -122,7 +122,7 @@ fn seed_rocksdb_sealed_batch_acceptance(
     storage
         .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
             batch_id,
-            BatchMode::Direct,
+            BatchMode::Transactional,
             BranchName::new("main"),
             vec![SealedBatchMember {
                 object_id: row_id,

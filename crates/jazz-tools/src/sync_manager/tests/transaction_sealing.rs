@@ -542,7 +542,7 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
         &mut io,
         client_id,
         SyncPayload::SealBatch {
-            submission: sealed_submission(
+            submission: transactional_sealed_submission(
                 batch_id,
                 "main",
                 vec![SealedBatchMember {
@@ -665,7 +665,7 @@ fn seal_batch_same_row_preserves_pre_transaction_parent_frontier() {
         &mut io,
         client_id,
         SyncPayload::SealBatch {
-            submission: sealed_submission(
+            submission: transactional_sealed_submission(
                 batch_id,
                 "main",
                 vec![SealedBatchMember {
@@ -736,7 +736,7 @@ fn seal_batch_waits_for_all_declared_rows_before_accepting() {
         &mut io,
         client_id,
         SyncPayload::SealBatch {
-            submission: sealed_submission(
+            submission: transactional_sealed_submission(
                 batch_id,
                 "main",
                 vec![
@@ -831,7 +831,7 @@ fn seal_batch_waits_for_declared_latest_row_batch_before_accepting() {
         &mut io,
         client_id,
         SyncPayload::SealBatch {
-            submission: sealed_submission(
+            submission: transactional_sealed_submission(
                 batch_id,
                 "main",
                 vec![SealedBatchMember {

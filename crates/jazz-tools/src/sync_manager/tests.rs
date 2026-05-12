@@ -284,6 +284,37 @@ fn sealed_submission(
     } else {
         crate::batch_fate::BatchMode::Transactional
     };
+    sealed_submission_with_mode(
+        batch_id,
+        mode,
+        target_branch_name,
+        members,
+        captured_frontier,
+    )
+}
+
+fn transactional_sealed_submission(
+    batch_id: BatchId,
+    target_branch_name: &str,
+    members: Vec<SealedBatchMember>,
+    captured_frontier: Vec<CapturedFrontierMember>,
+) -> SealedBatchSubmission {
+    sealed_submission_with_mode(
+        batch_id,
+        crate::batch_fate::BatchMode::Transactional,
+        target_branch_name,
+        members,
+        captured_frontier,
+    )
+}
+
+fn sealed_submission_with_mode(
+    batch_id: BatchId,
+    mode: crate::batch_fate::BatchMode,
+    target_branch_name: &str,
+    members: Vec<SealedBatchMember>,
+    captured_frontier: Vec<CapturedFrontierMember>,
+) -> SealedBatchSubmission {
     SealedBatchSubmission::new(
         batch_id,
         mode,
