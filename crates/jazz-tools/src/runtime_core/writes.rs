@@ -5,7 +5,7 @@ use crate::batch_fate::{
 };
 use crate::object::BranchName;
 use crate::query_manager::types::SchemaHash;
-use crate::row_histories::BatchId;
+use crate::row_histories::{BatchId, RowState, patch_row_batch_state};
 use crate::storage::StorageError;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -312,6 +312,66 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             members,
             captured_frontier,
         ))
+    }
+
+    fn publish_direct_batch_rows(&mut self, record: &LocalBatchRecord) -> Result<(), RuntimeError> {
+        let members = record.members.clone();
+        let mut visibility_changes = Vec::new();
+
+        for member in members {
+            let row = self
+                .storage
+                .load_history_row_batch_for_schema_hash(
+                    member.table_name.as_str(),
+                    member.schema_hash,
+                    member.branch_name.as_str(),
+                    member.object_id,
+                    record.batch_id,
+                )
+                .map_err(|err| RuntimeError::WriteError(format!("load direct batch row: {err}")))?
+                .or_else(|| {
+                    self.storage
+                        .scan_history_row_batches(member.table_name.as_str(), member.object_id)
+                        .ok()
+                        .and_then(|rows| {
+                            rows.into_iter().find(|row| {
+                                row.batch_id == record.batch_id
+                                    && row.branch.as_str() == member.branch_name.as_str()
+                            })
+                        })
+                });
+            let Some(row) = row else {
+                continue;
+            };
+
+            if !matches!(row.state, RowState::StagingPending) {
+                continue;
+            }
+
+            let visibility_change = patch_row_batch_state(
+                &mut self.storage,
+                member.object_id,
+                &member.branch_name,
+                record.batch_id,
+                Some(RowState::VisibleDirect),
+                None,
+            )
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("publish direct batch row: {err:?}"))
+            })?;
+
+            if let Some(visibility_change) = visibility_change {
+                visibility_changes.push(visibility_change);
+            }
+        }
+
+        for visibility_change in visibility_changes {
+            self.schema_manager
+                .query_manager_mut()
+                .handle_row_update(&mut self.storage, visibility_change);
+        }
+
+        Ok(())
     }
 
     // =========================================================================
@@ -835,6 +895,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.storage
                 .upsert_authoritative_batch_fate(&settlement)
                 .map_err(|err| RuntimeError::WriteError(format!("persist batch fate: {err}")))?;
+            self.publish_direct_batch_rows(&record)?;
         }
         self.storage
             .upsert_sealed_batch_submission(&submission)

@@ -29,7 +29,7 @@ use super::super::graph_nodes::subgraph::SubgraphTemplate;
 use super::super::graph_nodes::union::UnionNode;
 use super::super::graph_nodes::{NodeId, RowNode};
 use super::super::index::ScanCondition;
-use super::super::magic_columns::{MagicColumnKind, magic_column_kind};
+use super::super::magic_columns::{MagicColumnKind, magic_column_descriptor, magic_column_kind};
 use super::super::policy::PolicyExpr;
 use super::super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
@@ -256,6 +256,28 @@ fn project_columns_for_tuple_descriptor(tuple_descriptor: &TupleDescriptor) -> V
                 })
         })
         .collect()
+}
+
+fn selected_output_descriptor(
+    columns: &[ColumnDescriptor],
+    select_columns: Option<&[String]>,
+) -> RowDescriptor {
+    let Some(select_columns) = select_columns else {
+        return RowDescriptor::new(columns.to_vec());
+    };
+
+    RowDescriptor::new(
+        select_columns
+            .iter()
+            .filter_map(|name| {
+                columns
+                    .iter()
+                    .find(|column| column.name.as_str() == name)
+                    .cloned()
+                    .or_else(|| magic_column_kind(name).map(magic_column_descriptor))
+            })
+            .collect(),
+    )
 }
 
 impl QueryGraph {
@@ -1049,22 +1071,11 @@ impl QueryGraph {
 
         let combined_descriptor = RowDescriptor::new(combined_columns);
 
-        // Build output descriptor for inner query
-        let inner_output_descriptor = if let Some(cols) = &spec.select_columns {
-            let columns = cols
-                .iter()
-                .filter_map(|name| {
-                    combined_descriptor
-                        .columns
-                        .iter()
-                        .find(|c| c.name.as_str() == name)
-                        .cloned()
-                })
-                .collect();
-            RowDescriptor::new(columns)
-        } else {
-            combined_descriptor
-        };
+        // Build output descriptor for inner query, including requested magic columns.
+        let inner_output_descriptor = selected_output_descriptor(
+            &combined_descriptor.columns,
+            spec.select_columns.as_deref(),
+        );
 
         // Create subgraph template
         let subgraph_template = SubgraphTemplate::new(
@@ -1124,18 +1135,12 @@ impl QueryGraph {
             }
         }
 
-        // Apply select_columns if specified
-        let base_columns = if let Some(cols) = &spec.select_columns {
-            cols.iter()
-                .filter_map(|name| columns.iter().find(|c| c.name.as_str() == name).cloned())
-                .collect()
-        } else {
-            columns
-        };
-
         // Row id is carried in Value::Row { id: Some(...), .. } rather than
         // as a prepended column.
-        Some(RowDescriptor::new(base_columns))
+        Some(selected_output_descriptor(
+            &columns,
+            spec.select_columns.as_deref(),
+        ))
     }
 
     /// Compile a recursive relation specification into a RecursiveRelationNode.

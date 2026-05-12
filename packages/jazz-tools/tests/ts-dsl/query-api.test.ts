@@ -819,6 +819,77 @@ describe("TS Query API", () => {
       expect("project" in result.todosViaProject[0]!).toBe(false);
     });
 
+    it("include builders can project reverse relation magic timestamp columns", async () => {
+      const startedAt = Date.now();
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: todoId } = insertTodo(db, {
+        title: "Write tests",
+        done: false,
+        tags: ["dev"],
+        projectId,
+        assigneesIds: [],
+      });
+
+      const result = await db.one(
+        app.projects
+          .where({ id: { eq: projectId } })
+          .include({
+            todosViaProject: app.todos.limit(1).select("*", "$createdAt", "$updatedAt"),
+          })
+          .requireIncludes(),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.todosViaProject).toHaveLength(1);
+      const todo = result.todosViaProject[0];
+      assert(todo, "Included todo is not defined");
+      expect(todo.id).toBe(todoId);
+      expect(todo.title).toBe("Write tests");
+      expect(todo.$createdAt).toBeInstanceOf(Date);
+      expect(todo.$updatedAt).toBeInstanceOf(Date);
+      expect(todo.$createdAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
+      expect(todo.$updatedAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
+    });
+
+    it("include builders can project magic timestamp columns on nested array relations", async () => {
+      const startedAt = Date.now();
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: assigneeId } = insertUser(db, "Alice");
+      const { id: todoId } = insertTodo(db, {
+        title: "Write tests",
+        done: false,
+        tags: ["dev"],
+        projectId,
+        assigneesIds: [assigneeId],
+      });
+
+      const result = await db.one(
+        app.projects
+          .where({ id: { eq: projectId } })
+          .include({
+            todosViaProject: app.todos.select("title").include({
+              assignees: app.users.select("name", "$createdAt", "$updatedAt"),
+            }),
+          })
+          .requireIncludes(),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.todosViaProject).toHaveLength(1);
+      const todo = result.todosViaProject[0];
+      assert(todo, "Included todo is not defined");
+      expect(todo.id).toBe(todoId);
+      expect(todo.assignees).toHaveLength(1);
+      const assignee = todo.assignees[0];
+      assert(assignee, "Nested assignee is not defined");
+      expect(assignee.id).toBe(assigneeId);
+      expect(assignee.name).toBe("Alice");
+      expect(assignee.$createdAt).toBeInstanceOf(Date);
+      expect(assignee.$updatedAt).toBeInstanceOf(Date);
+      expect(assignee.$createdAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
+      expect(assignee.$updatedAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
+    });
+
     it("subscribeAll preserves projected root columns with includes", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);

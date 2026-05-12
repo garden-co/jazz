@@ -1,3 +1,4 @@
+use super::inbox::AuthoritativeFateRecording;
 use super::*;
 use crate::batch_fate::BatchFate;
 use crate::query_manager::policy::Operation;
@@ -42,7 +43,12 @@ impl SyncManager {
             self.queue_batch_fate_to_client(check.client_id, fate);
             return;
         }
-        self.apply_payload_from_client(storage, check.client_id, check.payload, true);
+        self.apply_payload_from_client(
+            storage,
+            check.client_id,
+            check.payload,
+            AuthoritativeFateRecording::Skip,
+        );
         if let Some(batch_id) = batch_id {
             self.try_accept_completed_sealed_batch_from_client(storage, check.client_id, batch_id);
         }

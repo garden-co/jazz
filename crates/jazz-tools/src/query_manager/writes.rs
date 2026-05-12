@@ -199,10 +199,18 @@ impl QueryManager {
         row_provenance_metadata(provenance, delete_kind)
     }
 
+    fn write_context_is_open_batch(write_context: Option<&WriteContext>) -> bool {
+        matches!(
+            write_context.map(WriteContext::batch_mode),
+            Some(BatchMode::Transactional)
+        ) || write_context.and_then(WriteContext::batch_id).is_some()
+    }
+
     fn resolve_write_row_state(write_context: Option<&WriteContext>) -> RowState {
-        match write_context.map(WriteContext::batch_mode) {
-            Some(BatchMode::Transactional) => RowState::StagingPending,
-            Some(BatchMode::Direct) | None => RowState::VisibleDirect,
+        if Self::write_context_is_open_batch(write_context) {
+            RowState::StagingPending
+        } else {
+            RowState::VisibleDirect
         }
     }
 
@@ -353,7 +361,7 @@ impl QueryManager {
             .map_err(|err| QueryError::EncodingError(format!("persist batch settlement: {err}")))
     }
 
-    fn maybe_track_local_pending_transaction_overlay(
+    fn maybe_track_local_pending_batch_overlay(
         &mut self,
         table: &str,
         row_batch_key: RowBatchKey,
@@ -361,12 +369,7 @@ impl QueryManager {
         deleted: bool,
         visibility_change: &Option<RowVisibilityChange>,
     ) {
-        if visibility_change.is_some()
-            || !matches!(
-                write_context.map(WriteContext::batch_mode),
-                Some(BatchMode::Transactional)
-            )
-        {
+        if visibility_change.is_some() || !Self::write_context_is_open_batch(write_context) {
             return;
         }
 
@@ -626,16 +629,14 @@ impl QueryManager {
         self.load_branch_tip_ids(storage, table, row_id, branch_name)
     }
 
-    fn transactional_staged_row_for_write(
+    fn staged_row_for_write(
         &self,
         storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
         write_context: Option<&WriteContext>,
     ) -> Option<QueryRowBatch> {
-        let batch_id = write_context
-            .filter(|ctx| ctx.batch_mode() == BatchMode::Transactional)
-            .and_then(WriteContext::batch_id)?;
+        let batch_id = write_context.and_then(WriteContext::batch_id)?;
         self.load_latest_transactional_staged_row_on_branch(storage, row_id, branch_name, batch_id)
             .map(|(_, row)| row)
     }
@@ -877,7 +878,7 @@ impl QueryManager {
             row,
             index_mutations,
         )?;
-        self.maybe_track_local_pending_transaction_overlay(
+        self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(id, branch_name, batch_id),
             write_context,
@@ -1111,15 +1112,19 @@ impl QueryManager {
         self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
         // Add commit with row data
-        let index_mutations = Self::index_mutations_for_insert_on_branch_with_layout(
-            table,
-            &current_branch,
-            object_id,
-            &data,
-            descriptor,
-            table_write.indexed_columns.as_deref().map(Vec::as_slice),
-            &table_write.row_layout,
-        );
+        let index_mutations = if Self::write_context_is_open_batch(write_context) {
+            Vec::new()
+        } else {
+            Self::index_mutations_for_insert_on_branch_with_layout(
+                table,
+                &current_branch,
+                object_id,
+                &data,
+                descriptor,
+                table_write.indexed_columns.as_deref().map(Vec::as_slice),
+                &table_write.row_layout,
+            )
+        };
         let row = self.authored_row_batch(
             object_id,
             &current_branch,
@@ -1141,7 +1146,7 @@ impl QueryManager {
                     descriptor: table_write.descriptor.clone(),
                 },
             )?;
-        self.maybe_track_local_pending_transaction_overlay(
+        self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(object_id, branch_name, row_batch_id),
             write_context,
@@ -1322,15 +1327,19 @@ impl QueryManager {
         self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
         // Add commit with row data to specified branch
-        let index_mutations = Self::index_mutations_for_insert_on_branch_with_layout(
-            table,
-            branch,
-            object_id,
-            &data,
-            descriptor,
-            table_write.indexed_columns.as_deref().map(Vec::as_slice),
-            &table_write.row_layout,
-        );
+        let index_mutations = if Self::write_context_is_open_batch(write_context) {
+            Vec::new()
+        } else {
+            Self::index_mutations_for_insert_on_branch_with_layout(
+                table,
+                branch,
+                object_id,
+                &data,
+                descriptor,
+                table_write.indexed_columns.as_deref().map(Vec::as_slice),
+                &table_write.row_layout,
+            )
+        };
         let row = self.authored_row_batch(
             object_id,
             branch,
@@ -1347,7 +1356,7 @@ impl QueryManager {
             row,
             &index_mutations,
         )?;
-        self.maybe_track_local_pending_transaction_overlay(
+        self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(object_id, branch_name, row_batch_id),
             write_context,
@@ -1484,15 +1493,19 @@ impl QueryManager {
 
         self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
-        let index_mutations = Self::index_mutations_for_insert_on_branch_with_layout(
-            table,
-            branch,
-            object_id,
-            &data,
-            descriptor,
-            table_write.indexed_columns.as_deref().map(Vec::as_slice),
-            &table_write.row_layout,
-        );
+        let index_mutations = if Self::write_context_is_open_batch(write_context) {
+            Vec::new()
+        } else {
+            Self::index_mutations_for_insert_on_branch_with_layout(
+                table,
+                branch,
+                object_id,
+                &data,
+                descriptor,
+                table_write.indexed_columns.as_deref().map(Vec::as_slice),
+                &table_write.row_layout,
+            )
+        };
         let row = self.authored_row_batch(
             object_id,
             branch,
@@ -1509,7 +1522,7 @@ impl QueryManager {
             row,
             &index_mutations,
         )?;
-        self.maybe_track_local_pending_transaction_overlay(
+        self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(object_id, branch_name, row_batch_id),
             write_context,
@@ -2138,12 +2151,7 @@ impl QueryManager {
         }
 
         let current_row = self
-            .transactional_staged_row_for_write(
-                storage,
-                id,
-                self.current_branch().as_str(),
-                write_context,
-            )
+            .staged_row_for_write(storage, id, self.current_branch().as_str(), write_context)
             .or_else(|| {
                 self.load_visible_row_on_branch(storage, id, self.current_branch().as_str())
                     .map(|(_, row)| row)
@@ -2168,15 +2176,19 @@ impl QueryManager {
             write_context,
             &new_provenance,
         )?;
-        let index_mutations = Self::index_mutations_for_update_on_branch(
-            &table,
-            branch.as_str(),
-            id,
-            &old_data,
-            &prepared.new_data,
-            prepared.descriptor.as_ref(),
-            prepared.indexed_columns.as_deref().map(Vec::as_slice),
-        );
+        let index_mutations = if Self::write_context_is_open_batch(write_context) {
+            Vec::new()
+        } else {
+            Self::index_mutations_for_update_on_branch(
+                &table,
+                branch.as_str(),
+                id,
+                &old_data,
+                &prepared.new_data,
+                prepared.descriptor.as_ref(),
+                prepared.indexed_columns.as_deref().map(Vec::as_slice),
+            )
+        };
         let batch_id = self.commit_prepared_update_write(
             storage,
             PreparedUpdateCommit {
@@ -2250,8 +2262,7 @@ impl QueryManager {
             &new_provenance,
         )?;
 
-        let staged_branch_row =
-            self.transactional_staged_row_for_write(storage, id, branch, write_context);
+        let staged_branch_row = self.staged_row_for_write(storage, id, branch, write_context);
         let existing_branch_data = staged_branch_row
             .as_ref()
             .map(|row| row.data.clone())
@@ -2265,7 +2276,9 @@ impl QueryManager {
             .as_ref()
             .map(QueryRowBatch::is_soft_deleted)
             .unwrap_or_else(|| self.row_is_deleted_on_branch(storage, table, branch, id));
-        let index_mutations = if was_soft_deleted {
+        let index_mutations = if Self::write_context_is_open_batch(write_context) {
+            Vec::new()
+        } else if was_soft_deleted {
             Self::index_mutations_for_undelete_on_branch(
                 table,
                 branch,
@@ -2362,8 +2375,7 @@ impl QueryManager {
 
         // Check if already soft-deleted
         let current_branch = self.current_branch().to_string();
-        let staged_row =
-            self.transactional_staged_row_for_write(storage, id, &current_branch, write_context);
+        let staged_row = self.staged_row_for_write(storage, id, &current_branch, write_context);
         if staged_row
             .as_ref()
             .map(QueryRowBatch::is_soft_deleted)
@@ -2493,14 +2505,18 @@ impl QueryManager {
             old_data.to_vec(),
             self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
         );
-        let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
-            &table,
-            branch.as_str(),
-            id,
-            &old_data,
-            descriptor,
-            table_write.indexed_columns.as_deref().map(Vec::as_slice),
-        );
+        let index_mutations = if Self::write_context_is_open_batch(write_context) {
+            Vec::new()
+        } else {
+            Self::index_mutations_for_soft_delete_on_branch(
+                &table,
+                branch.as_str(),
+                id,
+                &old_data,
+                descriptor,
+                table_write.indexed_columns.as_deref().map(Vec::as_slice),
+            )
+        };
         let branch_name = BranchName::new(branch.as_str());
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
@@ -2510,7 +2526,7 @@ impl QueryManager {
             delete_row,
             &index_mutations,
         )?;
-        self.maybe_track_local_pending_transaction_overlay(
+        self.maybe_track_local_pending_batch_overlay(
             &table,
             RowBatchKey::new(id, branch_name, delete_batch_id),
             write_context,
@@ -2581,8 +2597,7 @@ impl QueryManager {
             return Err(QueryError::RowHardDeleted(id));
         }
 
-        let staged_branch_row =
-            self.transactional_staged_row_for_write(storage, id, branch, write_context);
+        let staged_branch_row = self.staged_row_for_write(storage, id, branch, write_context);
         let table_name = TableName::new(table);
         // Check if already soft-deleted on this branch
         if staged_branch_row
@@ -2693,14 +2708,18 @@ impl QueryManager {
             old_data_for_policy.to_vec(),
             self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
         );
-        let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
-            table,
-            branch,
-            id,
-            old_data_for_policy,
-            descriptor,
-            table_write.indexed_columns.as_deref().map(Vec::as_slice),
-        );
+        let index_mutations = if Self::write_context_is_open_batch(write_context) {
+            Vec::new()
+        } else {
+            Self::index_mutations_for_soft_delete_on_branch(
+                table,
+                branch,
+                id,
+                old_data_for_policy,
+                descriptor,
+                table_write.indexed_columns.as_deref().map(Vec::as_slice),
+            )
+        };
         let branch_name = BranchName::new(branch);
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
@@ -2710,7 +2729,7 @@ impl QueryManager {
             delete_row,
             &index_mutations,
         )?;
-        self.maybe_track_local_pending_transaction_overlay(
+        self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(id, branch_name, delete_batch_id),
             write_context,
@@ -2839,7 +2858,7 @@ impl QueryManager {
             row,
             &index_mutations,
         )?;
-        self.maybe_track_local_pending_transaction_overlay(
+        self.maybe_track_local_pending_batch_overlay(
             &table,
             RowBatchKey::new(id, branch_name, row_batch_id),
             None,
@@ -2940,7 +2959,7 @@ impl QueryManager {
             delete_row,
             &index_mutations,
         )?;
-        self.maybe_track_local_pending_transaction_overlay(
+        self.maybe_track_local_pending_batch_overlay(
             &table,
             RowBatchKey::new(id, branch_name, delete_batch_id),
             None,

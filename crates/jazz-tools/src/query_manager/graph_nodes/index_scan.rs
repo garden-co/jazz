@@ -1,10 +1,12 @@
 use ahash::AHashSet;
+use std::ops::Bound;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::index::ScanCondition;
 use crate::query_manager::types::{
-    ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
+    ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor, Value,
 };
+use crate::row_format::decode_row;
 
 use super::{SourceContext, SourceNode};
 
@@ -19,6 +21,7 @@ pub struct IndexScanNode {
 
     /// Output tuple descriptor (single element, unmaterialized).
     output_descriptor: TupleDescriptor,
+    row_descriptor: RowDescriptor,
 
     /// Current set of tuples (length-1) matching the condition.
     current_tuples: AHashSet<Tuple>,
@@ -38,13 +41,14 @@ impl IndexScanNode {
         row_descriptor: RowDescriptor,
     ) -> Self {
         let table = table.into();
-        let output_descriptor = TupleDescriptor::single(table.as_str(), row_descriptor);
+        let output_descriptor = TupleDescriptor::single(table.as_str(), row_descriptor.clone());
         Self {
             table,
             column: column.into(),
             branch: branch.into(),
             condition,
             output_descriptor,
+            row_descriptor,
             current_tuples: AHashSet::new(),
             last_scanned_ids: AHashSet::new(),
             dirty: true,
@@ -65,11 +69,116 @@ impl IndexScanNode {
     pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
         &self.output_descriptor
     }
+
+    fn overlay_value_matches_condition(&self, row_id: ObjectId, data: &[u8]) -> bool {
+        let Some(value) = self.overlay_index_value(row_id, data) else {
+            return false;
+        };
+        match &self.condition {
+            ScanCondition::All => true,
+            ScanCondition::Eq(expected) => value == *expected || array_contains(&value, expected),
+            ScanCondition::Range { min, max } => {
+                bound_matches(min, &value, true) && bound_matches(max, &value, false)
+            }
+        }
+    }
+
+    fn overlay_index_value(&self, row_id: ObjectId, data: &[u8]) -> Option<Value> {
+        if self.column.as_str() == "_id" {
+            return Some(Value::Uuid(row_id));
+        }
+        if self.column.as_str() == "_id_deleted" {
+            return None;
+        }
+
+        let column_index = self.row_descriptor.column_index(self.column.as_str())?;
+        let values = decode_row(&self.row_descriptor, data).ok()?;
+        values.get(column_index).cloned()
+    }
+
+    fn apply_local_overlay_rows(&self, ctx: &SourceContext, new_ids: &mut AHashSet<ObjectId>) {
+        let Some(local_overlay_rows) = ctx.local_overlay_rows else {
+            return;
+        };
+
+        for (&row_id, row_batch_key) in local_overlay_rows {
+            if row_batch_key.branch_name.as_str() != self.branch {
+                continue;
+            }
+            let Ok(Some(row)) = ctx.storage.load_history_query_row_batch(
+                self.table.as_str(),
+                self.branch.as_str(),
+                row_id,
+                row_batch_key.batch_id,
+            ) else {
+                continue;
+            };
+            if self.column.as_str() == "_id_deleted" && row.is_soft_deleted() {
+                new_ids.insert(row_id);
+            } else if row.is_soft_deleted() || row.is_hard_deleted() {
+                new_ids.remove(&row_id);
+            } else if self.overlay_value_matches_condition(row_id, &row.data) {
+                new_ids.insert(row_id);
+            } else {
+                new_ids.remove(&row_id);
+            }
+        }
+    }
+}
+
+fn array_contains(value: &Value, expected: &Value) -> bool {
+    matches!(value, Value::Array(values) if values.iter().any(|value| value == expected))
+}
+
+fn compare_values_for_ordering(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    match (left, right) {
+        (Value::Integer(a), Value::Integer(b)) => Some(a.cmp(b)),
+        (Value::BigInt(a), Value::BigInt(b)) => Some(a.cmp(b)),
+        (Value::Double(a), Value::Double(b)) => Some(a.total_cmp(b)),
+        (Value::Boolean(a), Value::Boolean(b)) => Some(a.cmp(b)),
+        (Value::Text(a), Value::Text(b)) => Some(a.cmp(b)),
+        (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
+        (Value::Uuid(a), Value::Uuid(b)) => Some(a.cmp(b)),
+        (Value::Null, Value::Null) => Some(std::cmp::Ordering::Equal),
+        (Value::Null, _) => Some(std::cmp::Ordering::Less),
+        (_, Value::Null) => Some(std::cmp::Ordering::Greater),
+        _ => None,
+    }
+}
+
+fn bound_matches(bound: &Bound<Value>, value: &Value, is_lower: bool) -> bool {
+    match bound {
+        Bound::Unbounded => true,
+        Bound::Included(bound) => compare_values_for_ordering(value, bound)
+            .map(|ordering| {
+                if is_lower {
+                    matches!(
+                        ordering,
+                        std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                    )
+                } else {
+                    matches!(
+                        ordering,
+                        std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                    )
+                }
+            })
+            .unwrap_or(false),
+        Bound::Excluded(bound) => compare_values_for_ordering(value, bound)
+            .map(|ordering| {
+                if is_lower {
+                    ordering == std::cmp::Ordering::Greater
+                } else {
+                    ordering == std::cmp::Ordering::Less
+                }
+            })
+            .unwrap_or(false),
+    }
 }
 
 impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
-        let new_ids: AHashSet<ObjectId> = match &self.condition {
+        let mut new_ids: AHashSet<ObjectId> = match &self.condition {
             ScanCondition::Empty => AHashSet::new(),
             ScanCondition::All => ctx
                 .storage
@@ -101,6 +210,7 @@ impl SourceNode for IndexScanNode {
                     .collect()
             }
         };
+        self.apply_local_overlay_rows(ctx, &mut new_ids);
 
         // Diff against last scan
         let added: Vec<ObjectId> = new_ids
@@ -166,7 +276,10 @@ mod tests {
     use std::ops::Bound;
 
     fn make_ctx(storage: &dyn crate::storage::Storage) -> SourceContext<'_> {
-        SourceContext { storage }
+        SourceContext {
+            storage,
+            local_overlay_rows: None,
+        }
     }
 
     fn test_descriptor() -> RowDescriptor {
