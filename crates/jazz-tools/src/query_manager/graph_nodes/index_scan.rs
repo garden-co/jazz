@@ -4,7 +4,7 @@ use std::ops::Bound;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::index::ScanCondition;
 use crate::query_manager::types::{
-    ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor, Value,
+    ColumnName, ColumnType, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor, Value,
 };
 use crate::row_format::decode_row;
 
@@ -76,7 +76,8 @@ impl IndexScanNode {
         };
         match &self.condition {
             ScanCondition::All => true,
-            ScanCondition::Eq(expected) => value == *expected || array_contains(&value, expected),
+            ScanCondition::Eq(expected) => value == *expected,
+            ScanCondition::Contains(expected) => value_contains(&value, expected),
             ScanCondition::Range { min, max } => {
                 bound_matches(min, &value, true) && bound_matches(max, &value, false)
             }
@@ -124,10 +125,32 @@ impl IndexScanNode {
             }
         }
     }
+
+    fn contains_can_use_expanded_index(&self) -> bool {
+        let Some(column_index) = self.row_descriptor.column_index(self.column.as_str()) else {
+            return false;
+        };
+        let Some(column) = self.row_descriptor.columns.get(column_index) else {
+            return false;
+        };
+
+        column.references.is_some()
+            && matches!(
+                &column.column_type,
+                ColumnType::Array { element } if matches!(element.as_ref(), ColumnType::Uuid)
+            )
+    }
 }
 
-fn array_contains(value: &Value, expected: &Value) -> bool {
-    matches!(value, Value::Array(values) if values.iter().any(|value| value == expected))
+fn value_contains(value: &Value, expected: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(|value| value == expected),
+        Value::Text(text) => match expected {
+            Value::Text(substr) => text.contains(substr),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn compare_values_for_ordering(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
@@ -192,6 +215,21 @@ impl SourceNode for IndexScanNode {
                     &self.branch,
                     value,
                 )
+                .into_iter()
+                .collect(),
+            ScanCondition::Contains(value) if self.contains_can_use_expanded_index() => ctx
+                .storage
+                .index_lookup(
+                    self.table.as_str(),
+                    self.column.as_str(),
+                    &self.branch,
+                    value,
+                )
+                .into_iter()
+                .collect(),
+            ScanCondition::Contains(_) => ctx
+                .storage
+                .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
                 .into_iter()
                 .collect(),
             ScanCondition::Range { min, max } => {

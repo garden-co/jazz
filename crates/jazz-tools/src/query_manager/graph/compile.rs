@@ -167,6 +167,34 @@ fn best_available_index_condition<'a>(
                 condition.is_index_scannable() && table_schema.is_indexed_column(condition.column())
             })
         })
+        .or_else(|| {
+            disjunct.conditions.iter().find(|condition| {
+                condition_contains_can_use_expanded_index(condition, table_schema)
+                    && table_schema.is_indexed_column(condition.column())
+            })
+        })
+}
+
+fn condition_contains_can_use_expanded_index(
+    condition: &Condition,
+    table_schema: &crate::query_manager::types::TableSchema,
+) -> bool {
+    let Condition::Contains { value, .. } = condition else {
+        return false;
+    };
+    if value.is_null() {
+        return false;
+    }
+    let Some(column) = table_schema.columns.column(condition.column()) else {
+        return false;
+    };
+
+    column.references.is_some()
+        && matches!(
+            &column.column_type,
+            crate::query_manager::types::ColumnType::Array { element }
+                if matches!(element.as_ref(), crate::query_manager::types::ColumnType::Uuid)
+        )
 }
 
 fn collect_magic_refs_from_project_columns(
@@ -2103,6 +2131,7 @@ fn apply_condition_to_builder(mut builder: QueryBuilder, condition: &Condition) 
 fn condition_to_scan(cond: &Condition) -> ScanCondition {
     match cond {
         Condition::Eq { value, .. } => ScanCondition::Eq(value.clone()),
+        Condition::Contains { value, .. } => ScanCondition::Contains(value.clone()),
         Condition::Lt { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
             max: Bound::Excluded(value.clone()),

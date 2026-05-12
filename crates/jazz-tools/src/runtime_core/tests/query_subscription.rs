@@ -1,4 +1,5 @@
 use super::*;
+use crate::query_manager::types::{ColumnDescriptor, RowDescriptor};
 
 fn persist_direct_settlement_for_row(
     core: &mut TestCore,
@@ -563,6 +564,104 @@ fn rc_query_local_transaction_overlay_handles_indexed_update_filters() {
         shared_overlay_rows,
         Vec::<(ObjectId, Vec<Value>)>::new(),
         "transaction indexed reads should use the staged value, not the branch index value"
+    );
+}
+
+#[test]
+fn rc_query_local_transaction_overlay_uses_contains_not_eq_for_array_refs() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("file_parts"),
+        TableSchema::builder("file_parts")
+            .column("label", ColumnType::Text)
+            .build(),
+    );
+    schema.insert(
+        TableName::new("files"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new(
+                    "parts",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Uuid),
+                    },
+                )
+                .references("file_parts"),
+            ]),
+            indexed_columns: None,
+            policies: TablePolicies::default(),
+        },
+    );
+    let mut core = create_runtime_with_schema(schema, "query-local-overlay-array-refs");
+    let branch_name = core.schema_manager().branch_name();
+
+    let ((part_id, _), _) = core
+        .insert(
+            "file_parts",
+            HashMap::from([("label".to_string(), Value::Text("cover".into()))]),
+            None,
+        )
+        .unwrap();
+
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+    let ((file_id, _), _) = core
+        .insert(
+            "files",
+            HashMap::from([
+                ("title".to_string(), Value::Text("Launch plan".into())),
+                (
+                    "parts".to_string(),
+                    Value::Array(vec![Value::Uuid(part_id)]),
+                ),
+            ]),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    let contains_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        QueryBuilder::new("files")
+            .filter_contains("parts", Value::Uuid(part_id))
+            .build(),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id,
+            branch_name: branch_name.clone(),
+            row_ids: vec![file_id],
+        },
+    );
+    assert_eq!(contains_rows.len(), 1);
+    assert_eq!(contains_rows[0].0, file_id);
+
+    let eq_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        QueryBuilder::new("files")
+            .filter_eq("parts", Value::Uuid(part_id))
+            .build(),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id,
+            branch_name,
+            row_ids: vec![file_id],
+        },
+    );
+    assert_eq!(
+        eq_rows,
+        Vec::<(ObjectId, Vec<Value>)>::new(),
+        "array reference membership must not be folded into equality"
     );
 }
 
