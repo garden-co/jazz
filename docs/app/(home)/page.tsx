@@ -1,6 +1,11 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { pricingMeters } from "@/lib/home-pricing";
+
+export const metadata: Metadata = {
+  title: "Jazz - The database that syncs.",
+};
 
 const homepageSections = [
   {
