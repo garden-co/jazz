@@ -1,14 +1,16 @@
 //! Tests for QueryGraph compile and execute.
 
 use super::*;
+use crate::query_manager::index::ScanCondition;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::relation_ir::{
     ColumnRef, JoinCondition, KeyRef, OrderByExpr, OrderDirection, PredicateCmpOp, PredicateExpr,
     ProjectColumn, ProjectExpr, RelExpr, RowIdRef, ValueRef,
 };
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, RowDescriptor, RowPolicyMode, Schema, Value,
+    ColumnDescriptor, ColumnType, RowDescriptor, RowPolicyMode, Schema, TableSchema, Value,
 };
+use std::ops::Bound;
 
 fn test_schema() -> Schema {
     let mut schema = Schema::new();
@@ -159,6 +161,32 @@ fn has_filter_node(graph: &QueryGraph) -> bool {
         .any(|c| matches!(c.node, GraphNode::Filter(_)))
 }
 
+fn only_index_scan_condition(graph: &QueryGraph) -> &ScanCondition {
+    let scan_conditions: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter_map(|c| match &c.node {
+            GraphNode::IndexScan(scan) => Some(&scan.condition),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(scan_conditions.len(), 1);
+    scan_conditions[0]
+}
+
+fn only_index_scan(graph: &QueryGraph) -> &IndexScanNode {
+    let scans: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter_map(|c| match &c.node {
+            GraphNode::IndexScan(scan) => Some(scan),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(scans.len(), 1);
+    scans[0]
+}
+
 #[test]
 fn single_eq_condition_elides_filter() {
     let schema = test_schema();
@@ -209,6 +237,179 @@ fn single_between_condition_elides_filter() {
         "FilterNode should be elided for single Between condition"
     );
     assert_eq!(graph.nodes.len(), 4);
+}
+
+#[test]
+fn same_column_redundant_lower_bounds_elide_filter_with_strictest_scan() {
+    let schema = test_schema();
+    let query = QueryBuilder::new("users")
+        .filter_gt("score", Value::Integer(10))
+        .filter_ge("score", Value::Integer(5))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+    assert!(
+        !has_filter_node(&graph),
+        "redundant same-column lower bounds should be fully covered by the merged scan"
+    );
+    assert_eq!(graph.nodes.len(), 4);
+    assert!(matches!(
+        only_index_scan_condition(&graph),
+        ScanCondition::Range {
+            min: Bound::Excluded(Value::Integer(10)),
+            max: Bound::Unbounded,
+        }
+    ));
+}
+
+#[test]
+fn same_column_redundant_upper_bounds_elide_filter_with_strictest_scan() {
+    let schema = test_schema();
+    let query = QueryBuilder::new("users")
+        .filter_lt("score", Value::Integer(20))
+        .filter_le("score", Value::Integer(15))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+    assert!(
+        !has_filter_node(&graph),
+        "redundant same-column upper bounds should be fully covered by the merged scan"
+    );
+    assert_eq!(graph.nodes.len(), 4);
+    assert!(matches!(
+        only_index_scan_condition(&graph),
+        ScanCondition::Range {
+            min: Bound::Unbounded,
+            max: Bound::Included(Value::Integer(15)),
+        }
+    ));
+}
+
+#[test]
+fn same_column_eq_inside_range_elides_filter_with_eq_scan() {
+    let schema = test_schema();
+    let query = QueryBuilder::new("users")
+        .filter_eq("score", Value::Integer(10))
+        .filter_ge("score", Value::Integer(5))
+        .filter_lt("score", Value::Integer(20))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+    assert!(
+        !has_filter_node(&graph),
+        "an equality within same-column bounds should be fully covered by the eq scan"
+    );
+    assert_eq!(graph.nodes.len(), 4);
+    assert!(matches!(
+        only_index_scan_condition(&graph),
+        ScanCondition::Eq(Value::Integer(10))
+    ));
+}
+
+#[test]
+fn same_column_contradiction_elides_filter_with_empty_scan() {
+    let schema = test_schema();
+    let query = QueryBuilder::new("users")
+        .filter_eq("score", Value::Integer(10))
+        .filter_lt("score", Value::Integer(10))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+    assert!(
+        !has_filter_node(&graph),
+        "a proven same-column contradiction should scan no rows and need no residual filter"
+    );
+    assert_eq!(graph.nodes.len(), 4);
+    assert!(matches!(
+        only_index_scan_condition(&graph),
+        ScanCondition::Empty
+    ));
+}
+
+#[test]
+fn same_column_unindexed_bounds_keep_filter_and_scan_id() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        TableSchema::builder("users")
+            .column("name", ColumnType::Text)
+            .column("score", ColumnType::Integer)
+            .index_only(["name"])
+            .build(),
+    );
+    let query = QueryBuilder::new("users")
+        .filter_gt("score", Value::Integer(10))
+        .filter_lt("score", Value::Integer(20))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+    let scan = only_index_scan(&graph);
+
+    assert_eq!(scan.column.as_str(), "_id");
+    assert!(matches!(&scan.condition, ScanCondition::All));
+    assert!(
+        has_filter_node(&graph),
+        "unindexed same-column bounds must remain as a residual predicate"
+    );
+}
+
+#[test]
+fn unindexed_eq_predicate_does_not_preempt_indexed_scan() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        TableSchema::builder("users")
+            .column("name", ColumnType::Text)
+            .column("score", ColumnType::Integer)
+            .index_only(["score"])
+            .build(),
+    );
+    let query = QueryBuilder::new("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+    let scan = only_index_scan(&graph);
+
+    assert_eq!(scan.column.as_str(), "score");
+    assert!(matches!(
+        &scan.condition,
+        ScanCondition::Range {
+            min: Bound::Excluded(Value::Integer(50)),
+            max: Bound::Unbounded,
+        }
+    ));
+    assert!(
+        has_filter_node(&graph),
+        "unindexed equality predicates must not be treated as index-covered"
+    );
+}
+
+#[test]
+fn multi_column_conjunction_prefers_eq_scan_and_keeps_filter() {
+    let schema = test_schema();
+    let query = QueryBuilder::new("users")
+        .filter_ge("score", Value::Integer(50))
+        .filter_eq("name", Value::Text("Alice".into()))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+    let scan = only_index_scan(&graph);
+
+    assert_eq!(scan.column.as_str(), "name");
+    assert!(matches!(
+        &scan.condition,
+        ScanCondition::Eq(Value::Text(name)) if name == "Alice"
+    ));
+    assert!(
+        has_filter_node(&graph),
+        "score >= 50 must remain as a residual predicate after the name index scan"
+    );
 }
 
 #[test]
@@ -267,6 +468,25 @@ fn or_with_single_conditions_elides_filter() {
         "FilterNode should be elided when all disjuncts are fully covered"
     );
     assert_eq!(graph.nodes.len(), 6);
+}
+
+#[test]
+fn or_with_partial_disjunct_keeps_filter() {
+    let schema = test_schema();
+    let query = QueryBuilder::new("users")
+        .filter_eq("score", Value::Integer(50))
+        .or()
+        .filter_eq("score", Value::Integer(100))
+        .filter_eq("name", Value::Text("Alice".into()))
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+    assert_eq!(graph.index_scan_nodes.len(), 2);
+    assert!(
+        has_filter_node(&graph),
+        "mixed fully-covered and partial disjuncts need the full residual OR predicate"
+    );
 }
 
 // ========================================================================

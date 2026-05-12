@@ -76,6 +76,7 @@ impl IndexScanNode {
         };
         match &self.condition {
             ScanCondition::All => true,
+            ScanCondition::Empty => false,
             ScanCondition::Eq(expected) => value == *expected || array_contains(&value, expected),
             ScanCondition::Range { min, max } => {
                 bound_matches(min, &value, true) && bound_matches(max, &value, false)
@@ -179,6 +180,7 @@ fn bound_matches(bound: &Bound<Value>, value: &Value, is_lower: bool) -> bool {
 impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
         let mut new_ids: AHashSet<ObjectId> = match &self.condition {
+            ScanCondition::Empty => AHashSet::new(),
             ScanCondition::All => ctx
                 .storage
                 .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
