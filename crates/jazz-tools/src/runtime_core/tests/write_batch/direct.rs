@@ -167,7 +167,7 @@ fn rc_delete_sync() {
 }
 
 #[test]
-fn rc_same_row_direct_batch_overwrites_in_place() {
+fn rc_same_row_direct_batch_overwrites_staged_member_in_place() {
     let mut core = create_test_runtime();
     let batch_id = BatchId::new();
     let write_context = WriteContext::default().with_batch_id(batch_id);
@@ -200,13 +200,31 @@ fn rc_same_row_direct_batch_overwrites_in_place() {
     assert_eq!(history_rows[0].batch_id, batch_id);
     assert_eq!(history_rows[0].batch_id(), batch_id);
 
+    assert_eq!(
+        core.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap(),
+        None,
+        "open direct batch rows should stay staged until the batch is sealed"
+    );
+    assert_eq!(
+        history_rows[0].state,
+        crate::row_histories::RowState::StagingPending
+    );
+
+    core.seal_batch(batch_id).unwrap();
+
     let visible_row = core
         .storage()
         .load_visible_region_row("users", branch_name.as_str(), row_id)
         .unwrap()
-        .expect("direct batch row should stay visible");
+        .expect("sealed direct batch row should become visible");
     assert_eq!(visible_row.batch_id, batch_id);
     assert_eq!(visible_row.batch_id(), batch_id);
+    assert_eq!(
+        visible_row.state,
+        crate::row_histories::RowState::VisibleDirect
+    );
 }
 
 #[test]
@@ -445,7 +463,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
         .expect("restart should recover and settle completed sealed batch");
     assert!(matches!(
         settlement,
-        crate::batch_fate::BatchFate::AcceptedTransaction {
+        crate::batch_fate::BatchFate::DurableDirect {
             batch_id: settled_batch_id,
             confirmed_tier: DurabilityTier::Local,
         } if settled_batch_id == batch_id
@@ -455,11 +473,8 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
         .storage()
         .load_visible_region_row("users", "main", row_id)
         .unwrap()
-        .expect("restart recovery should publish the accepted row");
-    assert_eq!(
-        visible.state,
-        crate::row_histories::RowState::VisibleTransactional
-    );
+        .expect("restart recovery should publish the durable direct row");
+    assert_eq!(visible.state, crate::row_histories::RowState::VisibleDirect);
     assert_eq!(visible.batch_id, batch_id);
     assert_eq!(
         restarted

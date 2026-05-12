@@ -1,5 +1,5 @@
 use super::*;
-use crate::batch_fate::{BatchFate, SealedBatchSubmission};
+use crate::batch_fate::{BatchFate, BatchMode, SealedBatchSubmission};
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
@@ -110,7 +110,10 @@ impl SyncManager {
         for (_, row) in batch_rows {
             let row_mode = match row.state {
                 RowState::VisibleDirect => SealedBatchMode::Direct,
-                RowState::StagingPending => SealedBatchMode::Transactional,
+                RowState::StagingPending => match submission.mode {
+                    BatchMode::Direct => SealedBatchMode::Direct,
+                    BatchMode::Transactional => SealedBatchMode::Transactional,
+                },
                 _ => {
                     return Err(BatchFate::Rejected {
                         batch_id: submission.batch_id,
@@ -561,6 +564,66 @@ impl SyncManager {
     ) {
         let server_ids: Vec<_> = self.servers.keys().copied().collect();
         match fate {
+            BatchFate::DurableDirect { .. } => {
+                for (_table, row) in batch_rows {
+                    let row_id = row.row_id;
+                    let branch_name = BranchName::new(&row.branch);
+                    let mut direct_row = row.clone();
+                    direct_row.state = RowState::VisibleDirect;
+                    direct_row.confirmed_tier = None;
+                    let applied =
+                        apply_row_batch(storage, row_id, &branch_name, direct_row.clone(), &[])
+                            .ok();
+
+                    let metadata = storage
+                        .load_row_locator(row_id)
+                        .ok()
+                        .flatten()
+                        .map(|locator| metadata_from_row_locator(&locator));
+
+                    if let Some(metadata) = metadata {
+                        for server_id in &server_ids {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Server(*server_id),
+                                payload: SyncPayload::RowBatchNeeded {
+                                    metadata: Some(RowMetadata {
+                                        id: row_id,
+                                        metadata: metadata.clone(),
+                                    }),
+                                    row: direct_row.clone(),
+                                },
+                            });
+                        }
+                    }
+
+                    if let Some(applied) = applied
+                        && let Some(update) = applied.visibility_change
+                    {
+                        self.pending_row_visibility_changes.push(update);
+                        if let Some(client_id) = origin_client_id {
+                            self.forward_update_to_clients_except_with_storage(
+                                storage,
+                                row_id,
+                                branch_name,
+                                client_id,
+                            );
+                        } else {
+                            self.forward_update_to_clients_with_storage(
+                                storage,
+                                row_id,
+                                branch_name,
+                            );
+                        }
+                    }
+                }
+
+                for server_id in &server_ids {
+                    self.outbox.push(OutboxEntry {
+                        destination: Destination::Server(*server_id),
+                        payload: SyncPayload::BatchFate { fate: fate.clone() },
+                    });
+                }
+            }
             BatchFate::AcceptedTransaction { confirmed_tier, .. } => {
                 for (_table, row) in batch_rows {
                     let row_id = row.row_id;
@@ -655,7 +718,11 @@ impl SyncManager {
                     }
                 }
             }
-            BatchFate::DurableDirect { .. } | BatchFate::Missing { .. } => return,
+            BatchFate::Missing { .. } => return,
+        }
+
+        if matches!(fate, BatchFate::DurableDirect { .. }) {
+            return;
         }
 
         if let Some(client_id) = origin_client_id {
@@ -807,6 +874,20 @@ impl SyncManager {
         {
             tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
         }
+        let rows_to_patch: &[(String, StoredRowBatch)] = match fate {
+            BatchFate::DurableDirect { .. } | BatchFate::AcceptedTransaction { .. } => {
+                &declared_rows
+            }
+            BatchFate::Rejected { .. } => &batch_rows,
+            BatchFate::Missing { .. } => &[],
+        };
+        self.apply_transactional_batch_fate_to_rows(
+            storage,
+            origin_client_id,
+            &fate,
+            rows_to_patch,
+        );
+
         if matches!(fate, BatchFate::DurableDirect { .. }) {
             let mut interested_clients = self.interested_clients_for_batch_fate(storage, &fate);
             if let Some(client_id) = origin_client_id {
@@ -816,19 +897,7 @@ impl SyncManager {
             for client_id in interested_clients {
                 self.queue_batch_fate_to_client(client_id, fate.clone());
             }
-            return;
         }
-        let rows_to_patch: &[(String, StoredRowBatch)] = match fate {
-            BatchFate::AcceptedTransaction { .. } => &declared_rows,
-            BatchFate::Rejected { .. } => &batch_rows,
-            BatchFate::DurableDirect { .. } | BatchFate::Missing { .. } => &[],
-        };
-        self.apply_transactional_batch_fate_to_rows(
-            storage,
-            origin_client_id,
-            &fate,
-            rows_to_patch,
-        );
     }
 
     pub(super) fn try_accept_completed_sealed_batch_from_client<H: Storage>(

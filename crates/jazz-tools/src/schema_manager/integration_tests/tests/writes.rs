@@ -506,7 +506,7 @@ fn transactional_delete_uses_frozen_target_branch_schema() {
         .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
         .with_target_branch_name(v1_branch.clone());
 
-    manager
+    let delete = manager
         .delete(&mut storage, row_id, Some(&write_context))
         .expect("frozen-target delete should use the target branch schema");
 
@@ -528,11 +528,16 @@ fn transactional_delete_uses_frozen_target_branch_schema() {
             .build(),
     );
     assert_eq!(current_rows.len(), 1);
-    assert!(
-        manager
-            .query_manager()
-            .row_is_deleted_on_branch(&storage, "users", &v1_branch, row_id),
-        "target branch should carry the delete marker"
+    let target_delete = storage
+        .scan_history_row_batches("users", row_id)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.batch_id() == delete.batch_id && row.branch.as_str() == v1_branch)
+        .expect("target branch should carry the staged delete marker");
+    assert!(target_delete.is_soft_deleted());
+    assert_eq!(
+        target_delete.state,
+        crate::row_histories::RowState::StagingPending
     );
     assert!(
         !manager.query_manager().row_is_deleted_on_branch(

@@ -778,7 +778,7 @@ fn seal_batch_accepts_all_staged_transactional_rows_as_one_settlement() {
         &mut io,
         client_id,
         SyncPayload::SealBatch {
-            submission: sealed_submission(
+            submission: transactional_sealed_submission(
                 batch_id,
                 "main",
                 vec![
