@@ -83,8 +83,6 @@ describe("jazzSvelteKit", () => {
     expect(arrayResult.ssr.external).toContain("other-pkg");
 
     const externaliseAll = plugin.config({ ssr: { external: true } });
-    // `true` must be preserved verbatim — coercing to an array would lose the
-    // "externalise everything" semantics Vite expects.
     expect(externaliseAll.ssr.external).toBe(true);
   });
 
