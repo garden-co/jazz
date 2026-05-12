@@ -97,6 +97,20 @@ describe("db transaction reads browser integration", () => {
     });
   });
 
+  it("keeps staged deletes isolated to the transaction that issued them", async () => {
+    const { value: todo } = db.insert(todos, { title: "Shared", done: false });
+    const tx = db.beginTransaction();
+
+    tx.delete(todos, todo.id);
+
+    expect(await db.one<Todo>(makeTodoQuery())).toEqual(todo);
+    expect(await tx.one<Todo>(makeTodoQuery())).toBeNull();
+
+    tx.commit();
+
+    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+  });
+
   it("makes transaction writes visible globally once the transaction commits and the authority accepts the transaction", async () => {
     const tx = db.beginTransaction();
     const insertedTodo = tx.insert(todos, { title: "Batch", done: false });
@@ -219,15 +233,49 @@ describe("db transaction reads browser integration", () => {
       expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
     });
 
-    it("does not commit changes if the callback rejects", async () => {
-      expect(() =>
-        db.transaction((tx) => {
-          tx.insert(todos, { title: "Batch", done: false });
-          throw new Error("callback failed");
-        }),
-      ).toThrow("callback failed");
+    describe("rolls back changes if the callback rejects", () => {
+      it("insert", async () => {
+        await expect(() =>
+          db.transaction(async (tx) => {
+            const todo = tx.insert(todos, { title: "Todo", done: false });
+            expect(await tx.one(makeTodoQuery())).toEqual(todo);
+            expect(await db.one(makeTodoQuery())).toBeNull();
+            throw new Error("callback failed");
+          }),
+        ).rejects.toThrow("callback failed");
 
-      expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+        expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+      });
+
+      it("update", async () => {
+        const { value: todo } = db.insert(todos, { title: "Todo", done: false });
+
+        await expect(() =>
+          db.transaction(async (tx) => {
+            tx.update(todos, todo.id, { title: "Updated todo" });
+            expect((await tx.one(makeTodoQuery()))?.title).toEqual("Updated todo");
+            expect((await db.one(makeTodoQuery()))?.title).toEqual("Todo");
+            throw new Error("callback failed");
+          }),
+        ).rejects.toThrow("callback failed");
+
+        expect((await db.one(makeTodoQuery()))?.title).toEqual("Todo");
+      });
+
+      it("delete", async () => {
+        const { value: todo } = db.insert(todos, { title: "Todo", done: false });
+
+        await expect(() =>
+          db.transaction(async (tx) => {
+            tx.delete(todos, todo.id);
+            expect(await tx.one(makeTodoQuery())).toBeNull();
+            expect(await db.one(makeTodoQuery())).toEqual(todo);
+            throw new Error("callback failed");
+          }),
+        ).rejects.toThrow("callback failed");
+
+        expect(await db.one(makeTodoQuery())).toEqual(todo);
+      });
     });
   });
 });
@@ -341,15 +389,49 @@ describe("db batch reads browser integration", () => {
       expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
     });
 
-    it("rolls back changes if the callback rejects", async () => {
-      expect(() =>
-        db.batch((batch) => {
-          batch.insert(todos, { title: "Batch", done: false });
-          throw new Error("callback failed");
-        }),
-      ).toThrow("callback failed");
+    describe("rolls back changes if the callback rejects", () => {
+      it("insert", async () => {
+        await expect(() =>
+          db.batch(async (batch) => {
+            const todo = batch.insert(todos, { title: "Batch", done: false });
+            expect(await batch.one(makeTodoQuery())).toEqual(todo);
+            expect(await db.one(makeTodoQuery())).toBeNull();
+            throw new Error("callback failed");
+          }),
+        ).rejects.toThrow("callback failed");
 
-      expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+        expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+      });
+
+      it("update", async () => {
+        const { value: todo } = db.insert(todos, { title: "Todo", done: false });
+
+        await expect(() =>
+          db.batch(async (batch) => {
+            batch.update(todos, todo.id, { title: "Updated todo" });
+            expect((await batch.one(makeTodoQuery()))?.title).toEqual("Updated todo");
+            expect((await db.one(makeTodoQuery()))?.title).toEqual("Todo");
+            throw new Error("callback failed");
+          }),
+        ).rejects.toThrow("callback failed");
+
+        expect((await db.one(makeTodoQuery()))?.title).toEqual("Todo");
+      });
+
+      it("delete", async () => {
+        const { value: todo } = db.insert(todos, { title: "Todo", done: false });
+
+        await expect(() =>
+          db.batch(async (batch) => {
+            batch.delete(todos, todo.id);
+            expect(await batch.one(makeTodoQuery())).toBeNull();
+            expect(await db.one(makeTodoQuery())).toEqual(todo);
+            throw new Error("callback failed");
+          }),
+        ).rejects.toThrow("callback failed");
+
+        expect(await db.one(makeTodoQuery())).toEqual(todo);
+      });
     });
   });
 });
