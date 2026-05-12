@@ -63,6 +63,16 @@ jobs:
         with:
           toolchain: 1.93.1
 
+      - name: Install libtinfo5 (LLVM 18 runtime dep)
+        run: |
+          set -euo pipefail
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y libtinfo5 \
+              || sudo ln -sf "$(ldconfig -p | awk '/libtinfo.so.6/ {print $NF; exit}')" \
+                              /usr/lib/x86_64-linux-gnu/libtinfo.so.5
+          fi
+
       - name: Install LLVM/Clang for bindgen
         uses: KyleMayes/install-llvm-action@v2
         with:
@@ -239,6 +249,16 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
+
+      - name: Install libtinfo5 (LLVM 18 runtime dep)
+        run: |
+          set -euo pipefail
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y libtinfo5 \
+              || sudo ln -sf "$(ldconfig -p | awk '/libtinfo.so.6/ {print $NF; exit}')" \
+                              /usr/lib/x86_64-linux-gnu/libtinfo.so.5
+          fi
 
       - name: Install LLVM/Clang for bindgen
         uses: KyleMayes/install-llvm-action@v2
