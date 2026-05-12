@@ -227,7 +227,7 @@ describe("JazzClient.updateCookieSession", () => {
 });
 
 describe("JazzClient worker batch hydration", () => {
-  it.fails("unblocks edge waits when the worker has a stronger durable settlement", async () => {
+  it("unblocks edge waits when the worker has a stronger durable settlement", async () => {
     const batchId = "batch-chat";
     const runtime = makeFakeRuntime();
     const runtimeRecord = makeLocalBatchRecord(batchId, {
@@ -257,6 +257,43 @@ describe("JazzClient worker batch hydration", () => {
       confirmedTier: "global",
     });
     expect(client.hasPendingHydratedBatchReconciliation("edge")).toBe(false);
+    await expect(client.waitForBatch(batchId, "edge")).resolves.toBeUndefined();
+    expect(runtime.waitForBatch).not.toHaveBeenCalled();
+  });
+
+  it("merges hydrated worker settlement with runtime batch fate", async () => {
+    const batchId = "batch-chat-fate";
+    const runtime = makeFakeRuntime();
+    runtime.loadBatchFate.mockImplementation((requestedBatchId: string) => {
+      if (requestedBatchId !== batchId) return null;
+      return {
+        kind: "durableDirect",
+        batchId,
+        confirmedTier: "local",
+      };
+    });
+    runtime.loadLocalBatchRecord.mockReturnValue(
+      makeLocalBatchRecord(batchId, {
+        kind: "durableDirect",
+        batchId,
+        confirmedTier: "local",
+      }),
+    );
+    runtime.waitForBatch.mockImplementation(() => new Promise(() => {}));
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    client.hydrateLocalBatchRecords([
+      makeLocalBatchRecord(batchId, {
+        kind: "durableDirect",
+        batchId,
+        confirmedTier: "global",
+      }),
+    ]);
+
+    expect(client.batchFate(batchId)).toMatchObject({
+      kind: "durableDirect",
+      confirmedTier: "global",
+    });
     await expect(client.waitForBatch(batchId, "edge")).resolves.toBeUndefined();
     expect(runtime.waitForBatch).not.toHaveBeenCalled();
   });

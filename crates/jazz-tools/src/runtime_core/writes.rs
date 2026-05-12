@@ -9,12 +9,18 @@ use crate::row_histories::{BatchId, RowState, patch_row_batch_state};
 use crate::storage::StorageError;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
-    fn local_write_confirmed_tier(&self) -> DurabilityTier {
-        self.schema_manager
-            .query_manager()
-            .sync_manager()
-            .max_local_durability_tier()
-            .unwrap_or(DurabilityTier::Local)
+    fn local_write_confirmed_tier(&self) -> Option<DurabilityTier> {
+        if !self.synthesize_direct_write_fate {
+            return None;
+        }
+
+        Some(
+            self.schema_manager
+                .query_manager()
+                .sync_manager()
+                .max_local_durability_tier()
+                .unwrap_or(DurabilityTier::Local),
+        )
     }
 
     fn completed_batch_wait_receiver(
@@ -886,15 +892,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         record.mark_sealed(submission.clone());
         if record.mode == BatchMode::Direct {
-            let confirmed_tier = self.local_write_confirmed_tier();
-            let settlement = BatchFate::DurableDirect {
-                batch_id,
-                confirmed_tier,
-            };
-            record.apply_fate(settlement.clone());
-            self.storage
-                .upsert_authoritative_batch_fate(&settlement)
-                .map_err(|err| RuntimeError::WriteError(format!("persist batch fate: {err}")))?;
+            if let Some(confirmed_tier) = self.local_write_confirmed_tier() {
+                let settlement = BatchFate::DurableDirect {
+                    batch_id,
+                    confirmed_tier,
+                };
+                record.apply_fate(settlement.clone());
+                self.storage
+                    .upsert_authoritative_batch_fate(&settlement)
+                    .map_err(|err| {
+                        RuntimeError::WriteError(format!("persist batch fate: {err}"))
+                    })?;
+            }
             self.publish_direct_batch_rows(&record)?;
         }
         self.storage

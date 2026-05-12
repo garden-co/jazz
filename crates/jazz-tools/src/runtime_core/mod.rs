@@ -341,6 +341,13 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Label for tracing (e.g. "local", "edge", "client").
     tier_label: &'static str,
 
+    /// Whether direct local writes should synthesize a local durable fate when sealed.
+    ///
+    /// Browser main-thread runtimes are optimistic peers in front of the durable
+    /// worker runtime, so they must wait for worker-originated `BatchFate`
+    /// instead of self-confirming.
+    synthesize_direct_write_fate: bool,
+
     /// Optional sync-message tracer used by tests to record outgoing/incoming
     /// payloads under a human-readable participant name. `None` in production.
     pub(crate) sync_tracer: Option<(crate::sync_tracer::SyncTracer, String)>,
@@ -427,6 +434,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             acknowledged_rejected_batches,
             local_batch_record_cache: HashMap::new(),
             tier_label: "unknown",
+            synthesize_direct_write_fate: true,
             sync_tracer: None,
             auth_failure_callback: None,
         }
@@ -435,6 +443,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Set the tier label used in tracing spans.
     pub fn set_tier_label(&mut self, label: &'static str) {
         self.tier_label = label;
+    }
+
+    /// Mark this runtime as an optimistic client whose direct writes are not
+    /// durable until a tiered peer returns a `BatchFate`.
+    pub fn set_non_durable_client_runtime(&mut self) {
+        self.synthesize_direct_write_fate = false;
     }
 
     /// Register a callback that fires when the transport receives an auth failure
