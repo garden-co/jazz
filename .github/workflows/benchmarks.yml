@@ -63,15 +63,18 @@ jobs:
         with:
           toolchain: 1.93.1
 
-      - name: Install libtinfo5 (LLVM 18 runtime dep)
+      - name: Shim libtinfo.so.5 (LLVM 18 runtime dep, no-sudo)
         run: |
           set -euo pipefail
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y libtinfo5 \
-              || sudo ln -sf "$(ldconfig -p | awk '/libtinfo.so.6/ {print $NF; exit}')" \
-                              /usr/lib/x86_64-linux-gnu/libtinfo.so.5
+          shim_dir="${RUNNER_TEMP}/libs"
+          mkdir -p "${shim_dir}"
+          tinfo6="$(ldconfig -p | awk '/libtinfo.so.6/ {print $NF; exit}')"
+          if [ -z "${tinfo6}" ]; then
+            echo "libtinfo.so.6 not found on runner; cannot shim libtinfo.so.5" >&2
+            exit 1
           fi
+          ln -sf "${tinfo6}" "${shim_dir}/libtinfo.so.5"
+          echo "LD_LIBRARY_PATH=${shim_dir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       - name: Install LLVM/Clang for bindgen
         uses: KyleMayes/install-llvm-action@v2
@@ -250,15 +253,18 @@ jobs:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
 
-      - name: Install libtinfo5 (LLVM 18 runtime dep)
+      - name: Shim libtinfo.so.5 (LLVM 18 runtime dep, no-sudo)
         run: |
           set -euo pipefail
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y libtinfo5 \
-              || sudo ln -sf "$(ldconfig -p | awk '/libtinfo.so.6/ {print $NF; exit}')" \
-                              /usr/lib/x86_64-linux-gnu/libtinfo.so.5
+          shim_dir="${RUNNER_TEMP}/libs"
+          mkdir -p "${shim_dir}"
+          tinfo6="$(ldconfig -p | awk '/libtinfo.so.6/ {print $NF; exit}')"
+          if [ -z "${tinfo6}" ]; then
+            echo "libtinfo.so.6 not found on runner; cannot shim libtinfo.so.5" >&2
+            exit 1
           fi
+          ln -sf "${tinfo6}" "${shim_dir}/libtinfo.so.5"
+          echo "LD_LIBRARY_PATH=${shim_dir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       - name: Install LLVM/Clang for bindgen
         uses: KyleMayes/install-llvm-action@v2
