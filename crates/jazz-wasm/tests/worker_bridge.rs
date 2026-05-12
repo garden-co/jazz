@@ -498,6 +498,21 @@ async fn yield_once() {
     JsFuture::from(promise).await.expect("yield");
 }
 
+/// Resolve with the sentinel string `"deadline"` after `ms` so a `Promise::race`
+/// can tell whether the racee settled before the deadline.
+fn deadline_marker(ms: i32) -> js_sys::Promise {
+    js_sys::Promise::new(&mut |resolve, _reject| {
+        let global = js_sys::global();
+        let set_timeout: Function = Reflect::get(&global, &"setTimeout".into())
+            .unwrap()
+            .unchecked_into();
+        let cb = Closure::once_into_js(move || {
+            let _ = resolve.call1(&JsValue::NULL, &JsValue::from_str("deadline"));
+        });
+        let _ = set_timeout.call2(&JsValue::NULL, &cb, &JsValue::from_f64(ms as f64));
+    })
+}
+
 // =============================================================================
 // Wire-format trio for the peer-channel API
 // =============================================================================
@@ -919,6 +934,34 @@ async fn wait_for_local_sync_flush_does_not_hang_when_ack_is_dropped() {
     JsFuture::from(bridge.wait_for_local_sync_flush(None))
         .await
         .expect("wait_for_local_sync_flush resolves on dropped ack");
+}
+
+/// Regression: after init has failed, `wait_for_local_sync_flush` must settle
+/// promptly rather than spending the full `LOCAL_SYNC_ACK_TIMEOUT_MS` posting
+/// to a worker that already errored. Pre-fix the bridge's `is_disposed_like`
+/// only covered `Disposed | ShuttingDown`, so `Failed` slipped through and the
+/// call hung ~2s on every invocation.
+#[wasm_bindgen_test]
+async fn wait_for_local_sync_flush_returns_promptly_after_failed_init() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    let init = bridge.init();
+    fw.emit_wire(&WorkerToMainWire::Error {
+        message: "boom".into(),
+    });
+    let init_result = JsFuture::from(init).await;
+    assert!(init_result.is_err(), "init should reject");
+
+    let flush = bridge.wait_for_local_sync_flush(None);
+    let race = js_sys::Promise::race(&js_sys::Array::of2(&flush, &deadline_marker(500)));
+    let outcome = JsFuture::from(race).await.expect("race resolves");
+    assert!(
+        outcome.as_string().as_deref() != Some("deadline"),
+        "wait_for_local_sync_flush did not settle within 500ms after Failed state"
+    );
 }
 
 #[wasm_bindgen_test]

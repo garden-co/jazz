@@ -197,7 +197,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = updateAuth)]
     pub fn update_auth(&self, jwt_token: Option<String>) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         post_wire(
@@ -208,7 +208,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = sendLifecycleHint)]
     pub fn send_lifecycle_hint(&self, event: &str) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         let Some(parsed) = parse_lifecycle_event(event) else {
@@ -226,7 +226,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = openPeer)]
     pub fn open_peer(&self, peer_id: &str) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         post_wire(
@@ -239,7 +239,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = sendPeerSync)]
     pub fn send_peer_sync(&self, peer_id: &str, term: u32, payload: Array) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         if payload.length() == 0 {
@@ -266,7 +266,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = closePeer)]
     pub fn close_peer(&self, peer_id: &str) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         post_wire(
@@ -279,7 +279,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = setServerPayloadForwarder)]
     pub fn set_server_payload_forwarder(&self, callback: Option<Function>) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         let has_forwarder = callback.is_some();
@@ -301,7 +301,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = applyIncomingServerPayload)]
     pub fn apply_incoming_server_payload(&self, payload: Uint8Array) -> Result<(), JsError> {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return Ok(());
         }
         self.inner
@@ -317,7 +317,7 @@ impl WasmWorkerBridge {
     pub fn wait_for_local_sync_flush(&self, batch_id: Option<String>) -> js_sys::Promise {
         let inner = Rc::clone(&self.inner);
         wasm_bindgen_futures::future_to_promise(async move {
-            if inner.is_disposed_like() {
+            if inner.is_inactive() {
                 return Ok(JsValue::UNDEFINED);
             }
             let init_promise = inner.init_promise.borrow().clone();
@@ -326,7 +326,7 @@ impl WasmWorkerBridge {
             }
             let start = now_ms();
             loop {
-                if inner.is_disposed_like() {
+                if inner.is_inactive() {
                     return Ok(JsValue::UNDEFINED);
                 }
                 // Push any accumulated outbox traffic to the worker before
@@ -362,7 +362,7 @@ impl WasmWorkerBridge {
                 };
                 inner.pending_sync_acks.borrow_mut().remove(&ack_id);
 
-                if outcome.is_none() || inner.is_disposed_like() {
+                if outcome.is_none() || inner.is_inactive() {
                     return Ok(JsValue::UNDEFINED);
                 }
                 let outcome = outcome.expect("checked above");
@@ -398,7 +398,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = replayServerConnection)]
     pub fn replay_server_connection(&self) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         self.inner.runtime.remove_server();
@@ -407,7 +407,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = disconnectUpstream)]
     pub fn disconnect_upstream(&self) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         post_wire(&self.inner.worker, &MainToWorkerWire::DisconnectUpstream);
@@ -415,7 +415,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = reconnectUpstream)]
     pub fn reconnect_upstream(&self) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         post_wire(&self.inner.worker, &MainToWorkerWire::ReconnectUpstream);
@@ -441,7 +441,7 @@ impl WasmWorkerBridge {
 
     #[wasm_bindgen(js_name = acknowledgeRejectedBatch)]
     pub fn acknowledge_rejected_batch(&self, batch_id: &str) {
-        if self.inner.is_disposed_like() {
+        if self.inner.is_inactive() {
             return;
         }
         post_wire(
@@ -479,6 +479,18 @@ impl WasmWorkerBridge {
     #[wasm_bindgen]
     pub fn shutdown(&self) -> js_sys::Promise {
         if self.inner.is_disposed_like() {
+            return js_sys::Promise::resolve(&JsValue::UNDEFINED);
+        }
+        // Init failed → the worker errored before reaching its main loop and
+        // will not ack a `Shutdown` post. Do the synchronous detach (same as
+        // `Drop`'s exception path) and skip the 5s ack wait.
+        if self.inner.state.get() == BridgeState::Failed {
+            self.inner.transition_shutdown_called();
+            self.inner.runtime.install_noop_sync_sender();
+            self.inner.sender.set_server_payload_forwarder(None);
+            self.inner.runtime.remove_server();
+            self.inner.worker.set_onmessage(None);
+            self.inner.transition_shutdown_finished();
             return js_sys::Promise::resolve(&JsValue::UNDEFINED);
         }
         self.inner.transition_shutdown_called();
@@ -642,6 +654,19 @@ impl BridgeInner {
         matches!(
             self.state.get(),
             BridgeState::Disposed | BridgeState::ShuttingDown
+        )
+    }
+
+    /// True once the bridge can no longer do useful work — either init
+    /// failed, shutdown is in flight, or shutdown finished. Public methods
+    /// that would otherwise post to or wait on the worker use this so they
+    /// don't hang on a worker that will never reply. `Drop` deliberately
+    /// uses the narrower `is_disposed_like` because a `Failed` bridge still
+    /// owns its runtime/server-edge and must be torn down here.
+    fn is_inactive(&self) -> bool {
+        matches!(
+            self.state.get(),
+            BridgeState::Failed | BridgeState::Disposed | BridgeState::ShuttingDown
         )
     }
 
