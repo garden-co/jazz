@@ -2103,6 +2103,7 @@ fn apply_condition_to_builder(mut builder: QueryBuilder, condition: &Condition) 
 fn condition_to_scan(cond: &Condition) -> ScanCondition {
     match cond {
         Condition::Eq { value, .. } => ScanCondition::Eq(value.clone()),
+        Condition::Contains { value, .. } => ScanCondition::Contains(value.clone()),
         Condition::Lt { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
             max: Bound::Excluded(value.clone()),

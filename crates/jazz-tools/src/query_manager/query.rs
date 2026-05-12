@@ -275,6 +275,7 @@ impl Condition {
             | Condition::Gt { value, .. }
             | Condition::Ge { value, .. } => !value.is_null(),
             Condition::Between { min, max, .. } => !min.is_null() && !max.is_null(),
+            Condition::Contains { value, .. } => !value.is_null(),
             _ => false,
         }
     }

@@ -9,6 +9,8 @@ pub enum ScanCondition {
     All,
     /// Exact match on value.
     Eq(Value),
+    /// Containment match on value.
+    Contains(Value),
     /// Range scan with bounds (inclusive, exclusive, or unbounded).
     Range {
         min: Bound<Value>,
