@@ -289,13 +289,34 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     /// Ensure a client exists and is marked as Peer without resetting state.
     pub fn ensure_client_as_peer(&mut self, client_id: ClientId) {
+        self.ensure_client_as_peer_with_catalogue_state_hash(client_id, None);
+    }
+
+    /// Ensure a peer client exists, then replay catalogue entries only when
+    /// the peer's catalogue digest is missing or stale.
+    pub fn ensure_client_as_peer_with_catalogue_state_hash(
+        &mut self,
+        client_id: ClientId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) {
         use crate::sync_manager::ClientRole;
+
+        let local_catalogue_state_hash = self.schema_manager.catalogue_state_hash();
         let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
-        if sm.get_client(client_id).is_some() {
-            sm.set_client_role(client_id, ClientRole::Peer);
-        } else {
-            sm.add_client_with_storage(&self.storage, client_id);
-            sm.set_client_role(client_id, ClientRole::Peer);
+        let client_existed = sm.get_client(client_id).is_some();
+
+        if !client_existed {
+            sm.add_client(client_id);
+        }
+        sm.set_client_role(client_id, ClientRole::Peer);
+
+        let queued_catalogue_replay = sm.queue_catalogue_sync_to_client_if_hash_mismatch(
+            &self.storage,
+            client_id,
+            remote_catalogue_state_hash,
+            &local_catalogue_state_hash,
+        );
+        if queued_catalogue_replay {
             self.immediate_tick();
         }
     }
