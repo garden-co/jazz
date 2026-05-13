@@ -45,6 +45,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+use jazz_tools::binding_support::serialize_mutation_error_event;
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -292,11 +293,10 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         .borrow_mut()
         .set_sync_sender(Box::new(sender.clone()));
 
-    // 4b. Register the mutation-error callback. The runtime emits per-event
-    //     after each `batched_tick` (and immediately on registration if any
-    //     events were buffered from persistent storage replay). Each event
-    //     is serialised to JSON and posted to main as `MutationErrorReplay`.
-    register_mutation_error_callback(&runtime_rc);
+    // 4b. Replay only mutation errors buffered from persistent storage. Live
+    //     worker rejections travel to main through normal sync `BatchFate`
+    //     payloads so the main runtime owns delivery and acknowledgement.
+    replay_startup_mutation_errors(&runtime_rc);
 
     // 5. Bootstrap catalogue (addServer/removeServer dance forwards catalogue
     //    state to main via the outbox sender's bootstrap-forwarding flag).
@@ -347,10 +347,9 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         perform_upstream_connect(&runtime_rc, &ws_url, &auth_json);
     }
 
-    // 7. Sync retained local batch records to main. Rejected-batch replay
-    //    is driven by the runtime's `on_mutation_error` callback (registered
-    //    in step 4b), which fires for any events that were buffered from
-    //    persistent storage replay.
+    // 7. Sync retained local batch records to main. Rejected-batch error
+    //    replay already happened in step 4b; live rejections are handled by
+    //    normal sync payloads reaching the main runtime.
     sync_retained_local_batch_records(&runtime_rc);
 
     // 8. Flip state to Ready before draining (so message handlers process
@@ -481,25 +480,18 @@ fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>) {
     }
 }
 
-/// Register an `on_mutation_error` callback on the runtime that posts each
-/// emitted `MutationErrorEvent` to main as `MutationErrorReplay { event_json }`.
-///
-/// The runtime emits events after each `batched_tick`. Registering also drains
-/// any events that were buffered before the callback was installed — e.g. from
-/// persistent storage replay on startup — so we don't need an explicit
-/// initial-replay pass.
-fn register_mutation_error_callback(runtime: &Rc<WasmRuntime>) {
-    let callback: Function = Closure::<dyn FnMut(JsValue)>::new(|event: JsValue| {
-        if event.is_null() || event.is_undefined() {
-            return;
-        }
+/// Drain mutation errors restored from persistent storage on startup and post
+/// them to main as `MutationErrorReplay`. This is intentionally one-shot:
+/// live worker rejections must reach main through sync `BatchFate` payloads.
+fn replay_startup_mutation_errors(runtime: &Rc<WasmRuntime>) {
+    for event in runtime.drain_pending_mutation_error_events() {
         post_to_main(&WorkerToMainWire::MutationErrorReplay {
-            event_json: js_value_to_json(&event),
+            event_json: serialize_mutation_error_event(&event).to_string(),
         });
-    })
-    .into_js_value()
-    .unchecked_into();
-    runtime.on_mutation_error(callback);
+        if let Err(err) = runtime.acknowledge_rejected_batch(&event.batch.batch_id.to_string()) {
+            tracing::warn!("acknowledge startup mutation error replay: {err:?}");
+        }
+    }
 }
 
 /// Drive a local-batch reconciliation pass when a `Sync` envelope with

@@ -79,6 +79,7 @@ function makeClientStub() {
     updateAuthToken: vi.fn(),
     connectTransport: vi.fn(),
     getRuntime: vi.fn(() => ({}) as never),
+    onMutationError: vi.fn(() => () => undefined),
   } as unknown as JazzClient & {
     connectTransport: ReturnType<typeof vi.fn>;
   };
@@ -229,6 +230,7 @@ describe("runtime/Db direct path upstream wiring", () => {
       updateAuthToken: vi.fn(),
       connectTransport: vi.fn(),
       getRuntime: vi.fn(() => ({}) as never),
+      onMutationError: vi.fn(() => () => undefined),
     } as unknown as JazzClient & {
       create: ReturnType<typeof vi.fn>;
       shutdown: ReturnType<typeof vi.fn>;

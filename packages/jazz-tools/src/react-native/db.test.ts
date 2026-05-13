@@ -38,12 +38,14 @@ function makeClientStub() {
   const updateAuthToken = vi.fn();
   const updateCookieSession = vi.fn();
   const connectTransport = vi.fn();
+  const onMutationError = vi.fn(() => () => undefined);
   let client: JazzClient & {
     create: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
     updateAuthToken: ReturnType<typeof vi.fn>;
     updateCookieSession: ReturnType<typeof vi.fn>;
     connectTransport: ReturnType<typeof vi.fn>;
+    onMutationError: ReturnType<typeof vi.fn>;
   };
   const create = vi.fn(() => {
     const row: DirectInsertResult = {
@@ -59,6 +61,7 @@ function makeClientStub() {
     updateAuthToken,
     updateCookieSession,
     connectTransport,
+    onMutationError,
     getRuntime: vi.fn(() => ({}) as never),
   } as unknown as typeof client;
   return {
@@ -68,6 +71,7 @@ function makeClientStub() {
     updateAuthToken,
     updateCookieSession,
     connectTransport,
+    onMutationError,
   };
 }
 
