@@ -7,7 +7,7 @@
 use crate::query_manager::graph::QueryGraph;
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{RowDescriptor, Schema, Value};
+use crate::query_manager::types::{RowDescriptor, RowPolicyMode, Schema, Value};
 use crate::schema_manager::SchemaContext;
 
 /// Template for creating subgraph instances.
@@ -28,6 +28,10 @@ pub struct SubgraphTemplate {
     output_descriptor: RowDescriptor,
     /// Schema context inherited from the parent graph compile.
     schema_context: SchemaContext,
+    /// Session inherited from the parent graph compile.
+    session: Option<Session>,
+    /// Policy mode inherited from the parent graph compile.
+    row_policy_mode: RowPolicyMode,
 }
 
 impl SubgraphTemplate {
@@ -44,6 +48,8 @@ impl SubgraphTemplate {
         select_columns: Vec<String>,
         output_descriptor: RowDescriptor,
         schema_context: SchemaContext,
+        session: Option<Session>,
+        row_policy_mode: RowPolicyMode,
     ) -> Self {
         Self {
             base_query,
@@ -51,6 +57,8 @@ impl SubgraphTemplate {
             select_columns,
             output_descriptor,
             schema_context,
+            session,
+            row_policy_mode,
         }
     }
 
@@ -162,9 +170,9 @@ impl SubgraphTemplate {
         let graph = QueryGraph::try_compile_with_schema_context(
             &query,
             schema,
-            None,
+            self.session.clone(),
             &self.schema_context,
-            crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+            self.row_policy_mode,
         )
         .ok()?;
 
@@ -322,6 +330,8 @@ impl SubgraphBuilder {
             self.select_columns,
             output_descriptor,
             SchemaContext::with_defaults(schema.clone(), "main"),
+            None,
+            RowPolicyMode::PermissiveLocal,
         ))
     }
 }
@@ -534,6 +544,8 @@ mod tests {
             Vec::new(),
             output_descriptor,
             schema_context,
+            None,
+            RowPolicyMode::PermissiveLocal,
         );
 
         let instance = template
