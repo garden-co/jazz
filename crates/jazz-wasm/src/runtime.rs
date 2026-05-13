@@ -1106,6 +1106,13 @@ impl WasmRuntime {
         *self.rejected_batch_acknowledged_callback.borrow_mut() = callback;
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn drain_pending_mutation_error_events(
+        &self,
+    ) -> Vec<jazz_tools::runtime_core::MutationErrorEvent> {
+        self.core.borrow_mut().drain_mutation_error_events()
+    }
+
     fn notify_rejected_batch_acknowledged(&self, batch_id: BatchId) {
         let callback = self.rejected_batch_acknowledged_callback.borrow().clone();
         if let Some(callback) = callback {
