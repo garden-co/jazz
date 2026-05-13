@@ -86,6 +86,117 @@ mod install_transport_tests {
     }
 
     #[test]
+    fn transport_catalogue_hash_refreshes_after_server_catalogue_sync() {
+        let mut edge = create_test_runtime();
+        let mut authority = create_runtime_with_schema(schema_evolution_v2(), "test-app");
+        let catalogue_object_id = authority.publish_schema(schema_evolution_v2());
+        let entry = authority
+            .storage
+            .load_catalogue_entry(catalogue_object_id)
+            .expect("authority catalogue lookup")
+            .expect("authority should persist schema catalogue entry");
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut edge,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+        let server_id = edge.transport.as_ref().unwrap().server_id;
+        let initial_handle_hash = edge
+            .transport
+            .as_ref()
+            .unwrap()
+            .catalogue_state_hash_for_test();
+
+        edge.push_sync_inbox(InboxEntry {
+            source: Source::Server(server_id),
+            payload: SyncPayload::CatalogueEntryUpdated { entry },
+        });
+        edge.immediate_tick();
+
+        let expected_hash = edge.schema_manager().catalogue_state_hash();
+        assert_ne!(
+            initial_handle_hash.as_deref(),
+            Some(expected_hash.as_str()),
+            "test fixture should change the edge catalogue hash"
+        );
+        assert_eq!(
+            edge.transport
+                .as_ref()
+                .unwrap()
+                .catalogue_state_hash_for_test()
+                .as_deref(),
+            Some(expected_hash.as_str()),
+            "transport handshakes should use the refreshed catalogue hash after server sync"
+        );
+    }
+
+    #[test]
+    fn peer_secret_transport_drops_live_catalogue_publishes_upstream() {
+        let mut core = create_test_runtime();
+
+        let mut manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig {
+                peer_secret: Some("cluster-peer-secret".to_string()),
+                ..Default::default()
+            },
+            NopTick,
+        );
+        let server_id = core.transport.as_ref().unwrap().server_id;
+        let current_hash = core.schema_manager().catalogue_state_hash();
+        core.handle_transport_inbound_for_test(
+            server_id,
+            crate::transport_manager::TransportInbound::Connected {
+                catalogue_state_hash: Some(current_hash),
+                next_sync_seq: None,
+            },
+        );
+
+        core.publish_schema(schema_evolution_v2());
+        core.batched_tick();
+
+        assert!(
+            manager.try_recv_outbox_for_test().is_none(),
+            "peer-secret transports must not publish live catalogue updates upstream"
+        );
+    }
+
+    #[test]
+    fn admin_secret_transport_drops_live_catalogue_publishes_upstream() {
+        let mut core = create_test_runtime();
+
+        let mut manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig {
+                admin_secret: Some("admin-secret".to_string()),
+                ..Default::default()
+            },
+            NopTick,
+        );
+        let server_id = core.transport.as_ref().unwrap().server_id;
+        let current_hash = core.schema_manager().catalogue_state_hash();
+        core.handle_transport_inbound_for_test(
+            server_id,
+            crate::transport_manager::TransportInbound::Connected {
+                catalogue_state_hash: Some(current_hash),
+                next_sync_seq: None,
+            },
+        );
+
+        core.publish_schema(schema_evolution_v2());
+        core.batched_tick();
+
+        assert!(
+            manager.try_recv_outbox_for_test().is_none(),
+            "admin-secret WS transports authenticate as backend clients; catalogue publication must use HTTP admin forwarding"
+        );
+    }
+
+    #[test]
     fn install_transport_holds_initial_remote_query_frontier_while_connecting() {
         let mut core = create_test_runtime();
 

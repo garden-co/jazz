@@ -199,7 +199,7 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn can_publish_catalogue(&self) -> bool {
-        self.admin_secret.is_some()
+        false
     }
 }
 
@@ -370,8 +370,8 @@ mod handshake_tests {
             ..Default::default()
         };
         assert!(
-            admin_auth.can_publish_catalogue(),
-            "admin-secret transports keep explicit catalogue publish permission"
+            !admin_auth.can_publish_catalogue(),
+            "admin-secret WS transports authenticate as backend clients; catalogue publication must use HTTP admin forwarding"
         );
     }
 
@@ -562,6 +562,11 @@ pub(crate) enum HandshakeResult {
 
 /// Handshake helpers shared between the Tokio and WASM run loops.
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
+    #[cfg(all(test, feature = "transport-websocket"))]
+    pub(crate) fn try_recv_outbox_for_test(&mut self) -> Option<OutboxEntry> {
+        self.outbox_rx.try_recv().ok()
+    }
+
     fn trace_outbound_payload(&self, payload: &SyncPayload) {
         match payload {
             crate::sync_manager::types::SyncPayload::QuerySubscription {

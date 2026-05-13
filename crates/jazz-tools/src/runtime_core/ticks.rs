@@ -583,6 +583,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.schema_manager.process(&mut self.storage);
         }
 
+        self.refresh_transport_catalogue_state_hash();
+
         // 3. Collect subscription updates
         let subscription_updates = self.schema_manager.query_manager_mut().take_updates();
         let subscription_failures = self
@@ -760,20 +762,37 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         let mut unsent = Vec::new();
         for msg in outbox {
-            if let Some((ref tracer, ref name)) = self.sync_tracer {
-                tracer.record_outgoing(name, &msg.destination, &msg.payload);
-            }
             let handled_by_transport = self
                 .transport
                 .as_ref()
                 .is_some_and(|handle| matches!(msg.destination, crate::sync_manager::Destination::Server(server_id) if server_id == handle.server_id));
             if handled_by_transport {
                 if let Some(handle) = self.transport.as_ref() {
+                    if matches!(
+                        msg.payload,
+                        crate::sync_manager::SyncPayload::CatalogueEntryUpdated { .. }
+                    ) && !handle.can_publish_catalogue()
+                    {
+                        tracing::debug!(
+                            server_id = %handle.server_id,
+                            "dropping catalogue publish for transport without catalogue authority"
+                        );
+                        continue;
+                    }
+                    if let Some((ref tracer, ref name)) = self.sync_tracer {
+                        tracer.record_outgoing(name, &msg.destination, &msg.payload);
+                    }
                     handle.send_outbox(msg);
                 }
             } else if let Some(sync_sender) = self.sync_sender.as_ref() {
+                if let Some((ref tracer, ref name)) = self.sync_tracer {
+                    tracer.record_outgoing(name, &msg.destination, &msg.payload);
+                }
                 sync_sender.send_sync_message(msg);
             } else {
+                if let Some((ref tracer, ref name)) = self.sync_tracer {
+                    tracer.record_outgoing(name, &msg.destination, &msg.payload);
+                }
                 unsent.push(msg);
             }
         }

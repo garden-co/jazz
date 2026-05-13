@@ -498,6 +498,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn persist_schema(&mut self) -> ObjectId {
         let id = self.schema_manager.persist_schema(&mut self.storage);
         self.mark_storage_write_pending_flush();
+        self.refresh_transport_catalogue_state_hash();
         info!(object_id = %id, "persisted schema to catalogue");
         id
     }
@@ -570,6 +571,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.schema_manager
             .persist_schema_object(&mut self.storage, &schema);
         self.schema_manager.persist_lens(&mut self.storage, &lens);
+        self.refresh_transport_catalogue_state_hash();
         Ok(())
     }
 
@@ -621,6 +623,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Attach a transport handle. Replaces any existing transport.
     pub fn set_transport(&mut self, handle: crate::transport_manager::TransportHandle) {
         self.transport = Some(handle);
+    }
+
+    fn refresh_transport_catalogue_state_hash(&self) {
+        if let Some(handle) = self.transport.as_ref() {
+            handle.set_catalogue_state_hash(Some(self.schema_manager.catalogue_state_hash()));
+        }
     }
 
     /// Detach the transport handle and remove its server from sync state.
