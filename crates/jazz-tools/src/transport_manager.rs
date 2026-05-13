@@ -199,7 +199,7 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn can_publish_catalogue(&self) -> bool {
-        self.admin_secret.is_some() || self.peer_secret.is_some()
+        self.admin_secret.is_some()
     }
 }
 
@@ -352,6 +352,27 @@ mod handshake_tests {
         let debug = format!("{auth:?}");
         assert!(debug.contains("peer_secret"));
         assert!(!debug.contains("cluster-secret"));
+    }
+
+    #[test]
+    fn peer_secret_does_not_grant_catalogue_publish_permission() {
+        let peer_auth = AuthConfig {
+            peer_secret: Some("cluster-peer-secret".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            !peer_auth.can_publish_catalogue(),
+            "peer-secret edge transports receive catalogue from core but must not publish catalogue upstream"
+        );
+
+        let admin_auth = AuthConfig {
+            admin_secret: Some("admin-secret".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            admin_auth.can_publish_catalogue(),
+            "admin-secret transports keep explicit catalogue publish permission"
+        );
     }
 
     #[test]
