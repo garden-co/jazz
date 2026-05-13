@@ -88,12 +88,23 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
     Map<string, BrowserAuthSecretStore>
   >();
   private readonly key: string;
-  private readonly storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+  private readonly explicitStorage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | undefined;
   private cachedPromise: Promise<string> | null = null;
 
   constructor(options: BrowserAuthSecretStoreOptions = {}) {
     this.key = resolveBrowserAuthSecretKey(options);
-    this.storage = options.storage ?? globalThis.localStorage;
+    this.explicitStorage = options.storage;
+  }
+
+  private requireStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
+    const storage = this.explicitStorage ?? globalThis.localStorage;
+    if (!storage) {
+      throw new Error(
+        "BrowserAuthSecretStore requires a browser environment. " +
+          "Defer reads to a client-only context, or pass `options.storage`.",
+      );
+    }
+    return storage;
   }
 
   static getDefault(options: BrowserAuthSecretStoreOptions = {}): BrowserAuthSecretStore {
@@ -124,27 +135,28 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
   }
 
   async loadSecret(): Promise<string | null> {
-    return this.storage.getItem(this.key);
+    return this.requireStorage().getItem(this.key);
   }
 
   async saveSecret(secret: string): Promise<void> {
-    this.storage.setItem(this.key, secret);
+    this.requireStorage().setItem(this.key, secret);
     this.cachedPromise = Promise.resolve(secret);
   }
 
   async clearSecret(): Promise<void> {
-    this.storage.removeItem(this.key);
+    this.requireStorage().removeItem(this.key);
     this.cachedPromise = null;
   }
 
   getOrCreateSecret(): Promise<string> {
     if (!this.cachedPromise) {
-      const existing = this.storage.getItem(this.key);
+      const storage = this.requireStorage();
+      const existing = storage.getItem(this.key);
       if (existing) {
         this.cachedPromise = Promise.resolve(existing);
       } else {
         const secret = generateAuthSecret();
-        this.storage.setItem(this.key, secret);
+        storage.setItem(this.key, secret);
         this.cachedPromise = Promise.resolve(secret);
       }
     }
