@@ -156,11 +156,10 @@ The parser is case-insensitive and tolerant of extra whitespace between words. I
 `invalid-checksum`.
 
 <Callout type="info">
-  In React, Expo, and Svelte, calling `login()` on the local-first auth handle
-  (`useLocalFirstAuth()` in React/Expo, `LocalFirstAuth` in Svelte) updates the mounted provider
-  immediately. Other frameworks use `BrowserAuthSecretStore.saveSecret()` directly, which doesn't
-  notify the live client — the snippets above reload the page so the new secret is picked up on the
-  next load.
+  Calling `login()` on the framework-specific local-first auth handle (`useLocalFirstAuth()` in
+  React/Expo/Vue, `LocalFirstAuth` in Svelte) updates the mounted provider immediately. Plain
+  TypeScript uses `BrowserAuthSecretStore.saveSecret()` directly, which doesn't notify the live
+  client — the snippets above reload the page so the new secret is picked up on the next load.
 </Callout>
 
 ### Passkey backup
