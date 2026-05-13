@@ -13,7 +13,7 @@ use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 use reqwest::StatusCode;
-use serde_json::{Value as JsonValue, json};
+use serde_json::json;
 use support::{
     TestingClient, deny_all_select_permissions, has_added, has_removed,
     publish_allow_all_permissions, publish_permissions, wait_for, wait_for_query,
@@ -54,35 +54,19 @@ async fn publish_schema_to_core(core: &TestingServer, schema: &jazz_tools::Schem
 }
 
 async fn wait_for_schema_hash(server: &TestingServer, schema: &jazz_tools::Schema) {
-    let expected_hash = SchemaHash::compute(schema).to_string();
+    let expected_hash = SchemaHash::compute(schema);
 
     wait_for(
         REPLICATION_TIMEOUT,
         format!("schema hash {expected_hash} to reach {}", server.base_url()),
-        || {
-            let expected_hash = expected_hash.clone();
-            async move {
-                let response = reqwest::Client::new()
-                    .get(format!(
-                        "{}/apps/{}/schemas",
-                        server.base_url(),
-                        server.app_id()
-                    ))
-                    .header("X-Jazz-Admin-Secret", server.admin_secret())
-                    .send()
-                    .await
-                    .ok()?;
-                if response.status() != StatusCode::OK {
-                    return None;
-                }
-
-                let body = response.json::<JsonValue>().await.ok()?;
-                let hashes = body.get("hashes")?.as_array()?;
-                hashes
-                    .iter()
-                    .any(|hash| hash.as_str() == Some(expected_hash.as_str()))
-                    .then_some(())
-            }
+        || async {
+            server
+                .server_state()
+                .runtime
+                .known_schema_hashes()
+                .ok()?
+                .contains(&expected_hash)
+                .then_some(())
         },
     )
     .await;
@@ -96,27 +80,13 @@ async fn wait_for_permissions_head(server: &TestingServer, expected_bundle_objec
             server.base_url()
         ),
         || async move {
-            let response = reqwest::Client::new()
-                .get(format!(
-                    "{}/apps/{}/admin/permissions/head",
-                    server.base_url(),
-                    server.app_id()
-                ))
-                .header("X-Jazz-Admin-Secret", server.admin_secret())
-                .send()
-                .await
-                .ok()?;
-            if response.status() != StatusCode::OK {
-                return None;
-            }
+            let head = server
+                .server_state()
+                .runtime
+                .current_permissions_head()
+                .ok()??;
 
-            let body = response.json::<JsonValue>().await.ok()?;
-            let bundle_object_id = body
-                .get("head")?
-                .get("bundleObjectId")?
-                .as_str()
-                .unwrap_or_default();
-            (bundle_object_id == expected_bundle_object_id).then_some(())
+            (head.bundle_object_id.to_string() == expected_bundle_object_id).then_some(())
         },
     )
     .await;
@@ -635,6 +605,192 @@ async fn core_schema_and_permissions_pushes_reach_every_edge_before_edge_clients
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     cluster.shutdown().await;
+}
+
+/// A fresh edge connects after the core already has schema and permissions.
+/// The edge must pull catalogue from core before any edge client query exists.
+///
+/// ```text
+/// mallory --schema + permissions--> core
+/// edge_eu --peer reconnect--------> core
+/// core    --full catalogue replay-> edge_eu
+/// alice   --write-----------------> edge_eu --sync--> core
+/// ```
+#[tokio::test]
+async fn fresh_edge_pulls_existing_core_catalogue_on_connect_without_client_query() {
+    let schema = todo_schema();
+    let app_id = TestingServer::default_app_id();
+    let query = QueryBuilder::new("todos").build();
+
+    let core = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .start()
+        .await;
+
+    publish_schema_to_core(&core, &schema).await;
+    let permissions_head = publish_allow_all_permissions(
+        &core.base_url(),
+        core.app_id(),
+        core.admin_secret(),
+        &schema,
+    )
+    .await;
+
+    let edge_eu = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .with_upstream_url(core.base_url())
+        .start()
+        .await;
+
+    wait_for_upstream(&edge_eu).await;
+    wait_for_schema_hash(&edge_eu, &schema).await;
+    wait_for_permissions_head(&edge_eu, &permissions_head.bundle_object_id).await;
+
+    let alice = TestingClient::builder()
+        .with_server(&edge_eu)
+        .with_schema(schema.clone())
+        .with_user_id("alice-fresh-edge-catalogue")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let (todo_id, _) = alice
+        .create_persisted(
+            "todos",
+            HashMap::from([(
+                "title".to_string(),
+                Value::Text("fresh edge catalogue pull".to_string()),
+            )]),
+            DurabilityTier::GlobalServer,
+        )
+        .await
+        .expect("fresh edge should write after pulling core catalogue");
+
+    let alice_rows = wait_for_query(
+        &alice,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        REPLICATION_TIMEOUT,
+        "alice sees row written after fresh edge catalogue pull",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        vec![Value::Text("fresh edge catalogue pull".to_string())]
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    edge_eu.shutdown().await;
+    core.shutdown().await;
+}
+
+/// Catalogue published through one edge is forwarded to core, then core
+/// propagates it to another connected edge over peer sync.
+///
+/// ```text
+/// mallory --schema + permissions--> edge_us --HTTP forward--> core
+/// core    --catalogue sync----------------------------------> edge_eu
+/// alice   --write-------------------------------------------> edge_eu
+/// ```
+#[tokio::test]
+async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
+    let schema = todo_schema();
+    let app_id = TestingServer::default_app_id();
+    let query = QueryBuilder::new("todos").build();
+
+    let core = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .start()
+        .await;
+    let edge_us = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .with_upstream_url(core.base_url())
+        .start()
+        .await;
+    let edge_eu = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .with_upstream_url(core.base_url())
+        .start()
+        .await;
+
+    wait_for_upstream(&edge_us).await;
+    wait_for_upstream(&edge_eu).await;
+
+    let publish_response = reqwest::Client::new()
+        .post(format!(
+            "{}/apps/{}/admin/schemas",
+            edge_us.base_url(),
+            edge_us.app_id()
+        ))
+        .header("X-Jazz-Admin-Secret", edge_us.admin_secret())
+        .json(&json!({ "schema": schema, "permissions": null }))
+        .send()
+        .await
+        .expect("publish schema through edge_us");
+    let status = publish_response.status();
+    if status != StatusCode::CREATED {
+        let body = publish_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable response body>".to_string());
+        panic!("schema publish through edge_us failed: {status} {body}");
+    }
+
+    let permissions_head = publish_allow_all_permissions(
+        &edge_us.base_url(),
+        edge_us.app_id(),
+        edge_us.admin_secret(),
+        &schema,
+    )
+    .await;
+
+    wait_for_schema_hash(&edge_eu, &schema).await;
+    wait_for_permissions_head(&edge_eu, &permissions_head.bundle_object_id).await;
+
+    let alice = TestingClient::builder()
+        .with_server(&edge_eu)
+        .with_schema(schema.clone())
+        .with_user_id("alice-peer-edge-catalogue")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let (todo_id, _) = alice
+        .create_persisted(
+            "todos",
+            HashMap::from([(
+                "title".to_string(),
+                Value::Text("catalogue forwarded through core".to_string()),
+            )]),
+            DurabilityTier::GlobalServer,
+        )
+        .await
+        .expect("peer edge should write after receiving forwarded catalogue");
+
+    let alice_rows = wait_for_query(
+        &alice,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        REPLICATION_TIMEOUT,
+        "alice sees row written after peer edge receives forwarded catalogue",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        vec![Value::Text("catalogue forwarded through core".to_string())]
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    edge_eu.shutdown().await;
+    edge_us.shutdown().await;
+    core.shutdown().await;
 }
 
 /// Permission retightening is published only to the core and must invalidate
