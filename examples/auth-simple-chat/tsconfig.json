@@ -8,17 +8,17 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "types": ["node"]
   },
   "include": [
-    ".env",
     "constants.ts",
+    "schema.ts",
+    "permissions.ts",
     "src",
-    "schema",
     "server",
-    "scripts",
-    "e2e",
-    "playwright.config.ts"
-  ],
-  "exclude": ["schema/permissions.test.ts"]
+    "tests",
+    "vite.config.ts",
+    "vitest.config.browser.ts"
+  ]
 }

@@ -7,18 +7,16 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "types": ["node"]
   },
   "include": [
-    ".env",
     "constants.ts",
+    "schema.ts",
+    "permissions.ts",
     "src",
-    "../auth-simple-chat/src/ChatPanel.tsx",
-    "schema",
-    "server",
-    "scripts",
-    "e2e",
-    "playwright.config.ts"
-  ],
-  "exclude": ["schema/permissions.test.ts"]
+    "tests",
+    "vite.config.ts",
+    "vitest.config.browser.ts"
+  ]
 }

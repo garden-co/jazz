@@ -35,7 +35,7 @@ The `.env` file only needs the values already in `.env.example`:
 `NEXT_PUBLIC_JAZZ_APP_ID`, `NEXT_PUBLIC_JAZZ_SERVER_URL`, and the sync server admin secret are
 injected automatically by `withJazz` in `next.config.ts` — you do not need to add them.
 
-`pnpm dev` and `pnpm test:e2e` both read the same `.env`.
+`pnpm dev` reads `.env` for these values.
 
 ### 2. Start the Next app
 
@@ -161,14 +161,17 @@ If the sync server later returns `401` for an expired or invalid bearer token, t
 `db.updateAuthToken(freshJwt)` only after fetching a replacement JWT for the same Better Auth session.
 It does not use `db.updateAuthToken(null)` for logout.
 
-## Playwright
+## Tests
 
-Run the full end-to-end setup and flow tests with:
+Run the Jazz + permissions integration tests with:
 
 ```bash
-pnpm test:e2e
+pnpm test
 ```
 
-The Playwright `webServer` starts Next at `NEXT_PUBLIC_APP_ORIGIN` from `.env`. Global setup waits
-for the Next-hosted JWKS endpoint, spins up a local Jazz sync server pointed at that JWKS URL, and
-pushes the schema catalogue before the browser test runs.
+Vitest browser mode (chromium) generates an ES256 keypair, hosts a local
+JWKS, and starts a Jazz `TestingServer` pointed at it. Tests mint a
+verified JWT and assert that authenticated callers can post to both
+chats while anonymous callers are denied for Announcements. The Better
+Auth sign-up / sign-in flow is covered by the example itself when run
+via `pnpm dev` — it isn't exercised by `pnpm test`.

@@ -2,7 +2,7 @@ import * as React from "react";
 import { type User, AuthKitProvider, useAuth } from "@workos-inc/authkit-react";
 import { JazzProvider, useAuthState } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, WORKOS_CLIENT_ID } from "../constants.js";
-import { ChatPanel } from "../../auth-simple-chat/src/ChatPanel.js";
+import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
 import { DbConfig } from "jazz-tools";
 
