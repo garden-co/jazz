@@ -34,7 +34,6 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
     hasWorker,
     useBinaryEncoding,
     onAuthFailure,
-    onRejectedBatchAcknowledged,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
     return JazzClient.connectSync(
       TestDb.runtime as never,
@@ -54,7 +53,6 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
       {
         useBinaryEncoding,
         onAuthFailure,
-        onRejectedBatchAcknowledged,
         nonDurableClientRuntime: hasWorker,
       },
     );
@@ -289,7 +287,6 @@ describe("runtime/Db direct path upstream wiring", () => {
           serverUrl: "https://example.test",
         }),
         onAuthFailure: expect.any(Function),
-        onRejectedBatchAcknowledged: expect.any(Function),
       }),
     );
     const createClientContext = runtimeModule.createClient.mock.calls[0]?.[0];

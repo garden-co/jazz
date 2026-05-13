@@ -98,6 +98,7 @@ use jazz_tools::query_manager::manager::LocalUpdates;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{SchemaHash, Value};
+use jazz_tools::row_histories::BatchId;
 use jazz_tools::runtime_core::{
     QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
 };
@@ -447,6 +448,7 @@ fn assemble_wasm_runtime(
 ) -> WasmRuntime {
     let scheduler = WasmScheduler::new();
     let mutation_error_callback = scheduler.mutation_error_callback.clone();
+    let rejected_batch_acknowledged_callback = Rc::new(RefCell::new(None));
     let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
     core.set_tier_label(tier_label);
     let core_rc = Rc::new(RefCell::new(core));
@@ -460,6 +462,7 @@ fn assemble_wasm_runtime(
     WasmRuntime {
         core: core_rc,
         mutation_error_callback,
+        rejected_batch_acknowledged_callback,
         upstream_server_id: Rc::new(std::cell::Cell::new(None)),
         tier_label,
     }
@@ -471,6 +474,7 @@ fn assemble_wasm_runtime(
 
 /// Concrete RuntimeCore type for WASM.
 type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler>;
+pub(crate) type RejectedBatchAcknowledgedCallback = Rc<dyn Fn(BatchId)>;
 
 // ============================================================================
 // WasmScheduler
@@ -1031,6 +1035,11 @@ pub struct WasmRuntime {
     /// `WasmScheduler` so any path that triggers an emission (batched tick,
     /// explicit drain) calls the same JS function.
     pub(crate) mutation_error_callback: Rc<RefCell<Option<Function>>>,
+    /// Rust-side hook used by `WasmWorkerBridge` to forward rejected-batch
+    /// acknowledgements to the worker without routing that control path
+    /// through the TS bridge adapter.
+    pub(crate) rejected_batch_acknowledged_callback:
+        Rc<RefCell<Option<RejectedBatchAcknowledgedCallback>>>,
     /// `Rc<Cell<…>>` so `WasmRuntime` clones share state. The bridge keeps a
     /// clone and mutates `upstream_server_id` via `add_server` / `remove_server`
     /// — those updates must be visible through the original handle too.
@@ -1044,8 +1053,28 @@ impl Clone for WasmRuntime {
         Self {
             core: Rc::clone(&self.core),
             mutation_error_callback: Rc::clone(&self.mutation_error_callback),
+            rejected_batch_acknowledged_callback: Rc::clone(
+                &self.rejected_batch_acknowledged_callback,
+            ),
             upstream_server_id: Rc::clone(&self.upstream_server_id),
             tier_label: self.tier_label,
+        }
+    }
+}
+
+impl WasmRuntime {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_rejected_batch_acknowledged_callback(
+        &self,
+        callback: Option<RejectedBatchAcknowledgedCallback>,
+    ) {
+        *self.rejected_batch_acknowledged_callback.borrow_mut() = callback;
+    }
+
+    fn notify_rejected_batch_acknowledged(&self, batch_id: BatchId) {
+        let callback = self.rejected_batch_acknowledged_callback.borrow().clone();
+        if let Some(callback) = callback {
+            callback(batch_id);
         }
     }
 }
@@ -1126,6 +1155,7 @@ impl WasmRuntime {
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
         let mutation_error_callback = scheduler.mutation_error_callback.clone();
+        let rejected_batch_acknowledged_callback = Rc::new(RefCell::new(None));
         // The outbox `SyncSender` is installed by the worker bridge or host
         // when they know the postMessage target. Direct (non-worker) clients
         // open a transport via `connect()`; their server-bound traffic goes
@@ -1156,6 +1186,7 @@ impl WasmRuntime {
         Ok(WasmRuntime {
             core: core_rc,
             mutation_error_callback,
+            rejected_batch_acknowledged_callback,
             upstream_server_id: Rc::new(std::cell::Cell::new(None)),
             tier_label,
         })
@@ -1647,9 +1678,13 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = acknowledgeRejectedBatch)]
     pub fn acknowledge_rejected_batch(&self, batch_id: &str) -> Result<bool, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let mut core = self.core.borrow_mut();
-        core.acknowledge_rejected_batch(batch_id)
-            .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))
+        let acknowledged = {
+            let mut core = self.core.borrow_mut();
+            core.acknowledge_rejected_batch(batch_id)
+                .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))?
+        };
+        self.notify_rejected_batch_acknowledged(batch_id);
+        Ok(acknowledged)
     }
 
     #[wasm_bindgen(js_name = discardLocalBatch)]

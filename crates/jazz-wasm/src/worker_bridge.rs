@@ -22,6 +22,7 @@ use std::rc::Rc;
 
 use futures::channel::oneshot;
 use futures::future::{select, Either};
+use jazz_tools::row_histories::BatchId;
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
@@ -112,6 +113,12 @@ impl WasmWorkerBridge {
             init_message,
             expects_upstream,
         ));
+        let weak_inner = Rc::downgrade(&inner);
+        runtime.set_rejected_batch_acknowledged_callback(Some(Rc::new(move |batch_id| {
+            if let Some(inner) = weak_inner.upgrade() {
+                inner.acknowledge_rejected_batch(batch_id);
+            }
+        })));
 
         // Install Rust onmessage handler.
         let on_message = {
@@ -439,19 +446,6 @@ impl WasmWorkerBridge {
         })
     }
 
-    #[wasm_bindgen(js_name = acknowledgeRejectedBatch)]
-    pub fn acknowledge_rejected_batch(&self, batch_id: &str) {
-        if self.inner.is_inactive() {
-            return;
-        }
-        post_wire(
-            &self.inner.worker,
-            &MainToWorkerWire::AcknowledgeRejectedBatch {
-                batch_id: batch_id.to_string(),
-            },
-        );
-    }
-
     #[wasm_bindgen(js_name = setListeners)]
     pub fn set_listeners(&self, listeners: JsValue) {
         let mut slots = self.inner.listeners.borrow_mut();
@@ -668,6 +662,18 @@ impl BridgeInner {
             self.state.get(),
             BridgeState::Failed | BridgeState::Disposed | BridgeState::ShuttingDown
         )
+    }
+
+    fn acknowledge_rejected_batch(&self, batch_id: BatchId) {
+        if self.is_inactive() {
+            return;
+        }
+        post_wire(
+            &self.worker,
+            &MainToWorkerWire::AcknowledgeRejectedBatch {
+                batch_id: batch_id.to_string(),
+            },
+        );
     }
 
     fn transition_init_called(&self) -> bool {

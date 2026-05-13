@@ -82,7 +82,6 @@ declare module "jazz-wasm" {
     replayServerConnection(): void;
     disconnectUpstream(): void;
     reconnectUpstream(): void;
-    acknowledgeRejectedBatch(batchId: string): void;
     simulateCrash(): Promise<void>;
     setListeners(listeners: object): void;
     shutdown(): Promise<void>;
