@@ -274,7 +274,7 @@ All plugins accept the same base options:
 | `appId`       | Override the app ID. Defaults to the value in `.env`, otherwise a generated UUID persisted on first run.                                                                          |
 | `adminSecret` | Required when `server` is a URL. Ignored for the embedded server (a random secret is generated).                                                                                  |
 
-When `server` is an object, the embedded server accepts: `port` (default: random), `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, `jwksUrl`, and the catalogue authority forwarding fields. See [Server Setup](/docs/getting-started/server-setup) for the full semantics.
+When `server` is an object, the embedded server accepts: `port` (default: random), `appId`, `adminSecret`, `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, and `jwksUrl`. See [Server Setup](/docs/getting-started/server-setup) for the full semantics.
 
 ### Connecting to an existing server
 
