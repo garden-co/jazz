@@ -1,5 +1,16 @@
 # jazz-wasm
 
+## 2.0.0-alpha.47
+
+### Patch Changes
+
+- 2156a27: Replace replayable batch settlements with whole-batch `BatchFate` sync semantics and remove visible-member manifests from the client-facing fate shape. Successful fate now applies by batch id to locally known rows, avoiding repeated per-row member decoding during subscription settlement.
+- 6352c68: Make sync batch settlements the durability source of truth, including batch-level rejection fate, settlement-based visibility, transport batching, and more reliable offline replay after reconnect.
+- fa3b607: Fix loss of reactivity for query subscriptions with deeply-nested includes. Subscriptions built from depth-2+ `via` include chains (`org.include({ todoViaOrg: { user_checkViaTodo: true } })`) now correctly receive deltas when a row at the bottom of the chain is inserted, updated, or deleted. Previously only the immediate child table was tracked as a dependency of the outer subscription, so mutations further down the chain were silently missed.
+- 729effd: Add opt-in development telemetry export for Jazz runtimes and local dev servers. WASM runtimes now buffer spans and logs in Rust only when telemetry is enabled, notify JavaScript through a coalesced drain subscription, and lazy-load client-side OpenTelemetry exporters only after a collector URL is configured.
+- e9bb115: Compress WebSocket transport frame payloads with LZ4 by default.
+- 92fbdf9: Persist sealed batch manifests and batch fates instead of replayable local batch records. Batch waits and mutation-error replay now read `BatchFate` directly, and sync no longer rebuilds local batch membership one row at a time.
+
 ## 2.0.0-alpha.46
 
 ## 2.0.0-alpha.45
