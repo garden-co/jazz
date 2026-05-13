@@ -161,7 +161,11 @@ describe("jazzSvelteKit", () => {
     expect(viteServer.restart).toHaveBeenCalledTimes(1);
   }, 30_000);
 
-  it("does not restart when appId is already persisted in .env (warm start)", async () => {
+  it("restarts on a warm start so SvelteKit's $env captures the freshly allocated server URL", async () => {
+    // .env persists PUBLIC_JAZZ_APP_ID across runs, but the local Jazz server
+    // port is dynamic per run and never persisted. SvelteKit captures env
+    // before configureServer fires, so a warm start sees APP_ID but not the
+    // fresh SERVER_URL until we restart.
     const persistedAppId = "00000000-0000-0000-0000-000000000099";
     vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
       appId: persistedAppId,
@@ -178,6 +182,65 @@ describe("jazzSvelteKit", () => {
 
     const plugin = jazzSvelteKit({
       server: { port: 19990, adminSecret: "warm-start-admin" },
+    });
+    const viteServer = makeViteServer("serve", root);
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(viteServer.restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restart when both PUBLIC_JAZZ_* vars are already in process.env (post-restart pass)", async () => {
+    // process.env survives Vite restarts within the same Node process, so on
+    // the post-restart pass both APP_ID and SERVER_URL are populated and
+    // SvelteKit's captured env has them — no further restart needed.
+    const persistedAppId = "00000000-0000-0000-0000-000000000098";
+    process.env.PUBLIC_JAZZ_APP_ID = persistedAppId;
+    process.env.PUBLIC_JAZZ_SERVER_URL = "http://127.0.0.1:19991";
+
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: persistedAppId,
+      port: 19991,
+      url: "http://127.0.0.1:19991",
+      dataDir: undefined as unknown as string,
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-post-restart-");
+    await writeFile(join(root, ".env"), `PUBLIC_JAZZ_APP_ID=${persistedAppId}\n`);
+
+    const plugin = jazzSvelteKit({
+      server: { port: 19991, adminSecret: "post-restart-admin" },
+    });
+    const viteServer = makeViteServer("serve", root);
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(viteServer.restart).not.toHaveBeenCalled();
+  });
+
+  it("treats explicitly-empty PUBLIC_JAZZ_* env vars as set (no restart loop)", async () => {
+    // If a user has `PUBLIC_JAZZ_APP_ID=""` (deliberately empty) in their env,
+    // Vite's captured env has the key set to "" — not missing. Restarting
+    // wouldn't help: managed-runtime would write the empty value back to
+    // process.env post-restart and the next pass would loop. Only restart
+    // when the var was genuinely never set (=== undefined).
+    process.env.PUBLIC_JAZZ_APP_ID = "";
+    process.env.PUBLIC_JAZZ_SERVER_URL = "";
+
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000097",
+      port: 19992,
+      url: "http://127.0.0.1:19992",
+      dataDir: undefined as unknown as string,
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-empty-env-");
+    const plugin = jazzSvelteKit({
+      server: { port: 19992, adminSecret: "empty-env-admin" },
     });
     const viteServer = makeViteServer("serve", root);
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
