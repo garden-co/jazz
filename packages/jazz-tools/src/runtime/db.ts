@@ -23,7 +23,6 @@ import {
   DirectBatch as RuntimeDirectBatch,
   WriteResult,
   JazzClient,
-  type LocalBatchRecord,
   type MutationErrorEvent,
   Transaction as RuntimeTransaction,
   WriteHandle,
@@ -206,6 +205,11 @@ export interface QueryBuilder<T> {
 }
 
 export type QueryOptions = QueryExecutionOptions;
+
+type DbRuntimeOperationContext = {
+  session?: Session;
+  attribution?: string;
+};
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
   return { localUpdates: "deferred", ...options };
@@ -1046,6 +1050,10 @@ export class Db {
     return this.clients.get(key)!;
   }
 
+  protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
+    return null;
+  }
+
   /**
    * Attaches a mutation error handler to the given client, ensuring all listeners in
    * {@link Db.mutationErrorListeners} are notified.
@@ -1743,7 +1751,16 @@ export class Db {
     // If the bridge fails to initialize, the insert will be lost on restart.
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
-    const inserted = client.create(table._table, values, options);
+    const context = this.getRuntimeOperationContext();
+    const inserted = context
+      ? client.createHandleInternal(
+          table._table,
+          values,
+          context.session,
+          context.attribution,
+          options,
+        )
+      : client.create(table._table, values, options);
     return inserted.mapValue((row) =>
       transformOutputRow(table, transformRow(row, table._schema, table._table)),
     );
@@ -1762,7 +1779,17 @@ export class Db {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const values = toUpdateRecord(transformedData, table._schema, table._table);
-    return client.upsert(table._table, values, options);
+    const context = this.getRuntimeOperationContext();
+    return context
+      ? client.upsertHandleInternal(
+          table._table,
+          values,
+          options.id,
+          context.session,
+          context.attribution,
+          options.updatedAt,
+        )
+      : client.upsert(table._table, values, options);
   }
 
   /**
@@ -1779,7 +1806,17 @@ export class Db {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const updates = toUpdateRecord(transformedData, table._schema, table._table);
-    return client.update(id, updates, options);
+    const context = this.getRuntimeOperationContext();
+    return context
+      ? client.updateHandleInternal(
+          id,
+          updates,
+          context.session,
+          context.attribution,
+          undefined,
+          options?.updatedAt,
+        )
+      : client.update(id, updates, options);
   }
 
   /**
@@ -1789,7 +1826,10 @@ export class Db {
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     const client = this.getClient(table._schema);
-    return client.delete(id);
+    const context = this.getRuntimeOperationContext();
+    return context
+      ? client.deleteHandleInternal(id, context.session, context.attribution)
+      : client.delete(id);
   }
 
   /**
@@ -1802,9 +1842,10 @@ export class Db {
    * Prefer using {@link Db.transaction} when an explicit commit is not required.
    */
   beginTransaction(): DbTransaction {
+    const context = this.getRuntimeOperationContext();
     return new DbTransaction(
       (schema) => this.getClient(schema),
-      (client) => client.beginTransactionInternal(),
+      (client) => client.beginTransactionInternal(context?.session, context?.attribution),
     );
   }
 
@@ -1840,9 +1881,10 @@ export class Db {
    * Prefer using {@link Db.batch} when an explicit commit is not required.
    */
   beginBatch(): DbDirectBatch {
+    const context = this.getRuntimeOperationContext();
     return new DbDirectBatch(
       (schema) => this.getClient(schema),
-      (client) => client.beginBatchInternal(),
+      (client) => client.beginBatchInternal(context?.session, context?.attribution),
     );
   }
 
@@ -1948,14 +1990,17 @@ export class Db {
     const queryOptions = ordinaryDbQueryOptions(options);
     await this.ensureQueryReady(queryOptions, client);
     const wasmQuery = translateQuery(builderJson, planningSchema);
+    const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
+    const runtimeQueryOptions = usesRelationTraversal
+      ? { ...queryOptions, runtimeSettledTier: null }
+      : queryOptions;
+    const context = this.getRuntimeOperationContext();
     const rows =
-      queryUsesRelationTraversal(builtQuery) &&
-      "queryInternal" in client &&
-      typeof client.queryInternal === "function"
+      context || usesRelationTraversal
         ? await client.queryInternal(
             wasmQuery,
-            undefined,
-            { ...queryOptions, runtimeSettledTier: null },
+            context?.session,
+            runtimeQueryOptions,
             runtimeSchema.peek(),
           )
         : await client.query(wasmQuery, queryOptions);
@@ -2110,12 +2155,13 @@ export class Db {
     };
 
     const queryOptions = ordinaryDbQueryOptions(options);
+    const context = this.getRuntimeOperationContext();
     const subId =
-      session !== undefined
+      context || session
         ? client.subscribeInternal(
             wasmQuery,
             handleDelta,
-            session,
+            context?.session ?? session,
             queryOptions,
             runtimeSchema.peek(),
           )
@@ -2307,6 +2353,10 @@ class ClientBackedDb extends Db {
     this.hasScopedAuthState = scopedAuthState !== undefined;
   }
 
+  protected override getClient(_schema: WasmSchema): JazzClient {
+    return this.runtimeClient;
+  }
+
   override updateAuthToken(jwtToken: string | null): void {
     if (this.hasScopedAuthState) {
       return;
@@ -2322,6 +2372,7 @@ class ClientBackedDb extends Db {
   override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
     return this.runtimeClient.onMutationError(listener);
   }
+
   override updateCookieSession(cookieSession: Session | null): void {
     if (this.hasScopedAuthState) {
       return;
@@ -2334,205 +2385,10 @@ class ClientBackedDb extends Db {
     this.runtimeClient.updateCookieSession(cookieSession ?? undefined);
   }
 
-  override insert<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options?: CreateOptions,
-  ): WriteResult<T> {
-    const transformedData = transformInputColumns(table, data);
-    const values = toInsertRecord(transformedData, table._schema, table._table);
-    return this.runtimeClient
-      .createHandleInternal(table._table, values, this.session, this.attribution, options)
-      .mapValue((row) => transformOutputRow(table, transformRow(row, table._schema, table._table)));
-  }
-
-  override upsert<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Partial<Init>,
-    options: UpsertOptions,
-  ): WriteHandle {
-    const transformedData = transformInputColumns(table, data);
-    const values = toUpdateRecord(transformedData, table._schema, table._table);
-    return this.runtimeClient.upsertHandleInternal(
-      table._table,
-      values,
-      options.id,
-      this.session,
-      this.attribution,
-      options.updatedAt,
-    );
-  }
-
-  override update<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    options?: UpdateOptions,
-  ): WriteHandle {
-    const transformedData = transformInputColumns(table, data);
-    const updates = toUpdateRecord(transformedData, table._schema, table._table);
-    return this.runtimeClient.updateHandleInternal(
-      id,
-      updates,
-      this.session,
-      this.attribution,
-      undefined,
-      options?.updatedAt,
-    );
-  }
-
-  override delete<T, Init>(_table: TableProxy<T, Init>, id: string): WriteHandle {
-    return this.runtimeClient.deleteHandleInternal(id, this.session, this.attribution);
-  }
-
-  override beginTransaction(): DbTransaction {
-    const client = this.runtimeClient;
-    return new DbTransaction(
-      () => client,
-      () => client.beginTransactionInternal(this.session, this.attribution),
-    );
-  }
-
-  override transaction<TResult>(
-    callback: (tx: DbTransactionScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  override transaction<TResult>(
-    callback: (tx: DbTransactionScope) => TResult,
-  ): WriteResult<TResult>;
-  override transaction<TResult>(
-    callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const transaction = this.beginTransaction();
-    return runInBatch(
-      transaction,
-      callback,
-      () => getDbBatchHandleBinding(transaction, "result", "DbTransaction").client,
-    );
-  }
-
-  override beginBatch(): DbDirectBatch {
-    const client = this.runtimeClient;
-    return new DbDirectBatch(
-      () => client,
-      () => client.beginBatchInternal(this.session, this.attribution),
-    );
-  }
-
-  override batch<TResult>(
-    callback: (batch: DbBatchScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  override batch<TResult>(callback: (batch: DbBatchScope) => TResult): WriteResult<TResult>;
-  override batch<TResult>(
-    callback: (batch: DbBatchScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginBatch();
-    return runInBatch(
-      batch,
-      callback,
-      () => getDbBatchHandleBinding(batch, "result", "DbDirectBatch").client,
-    );
-  }
-
-  override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(
-      query._schema,
-      runtimeSchema.get,
-      builtQuery.table,
-    );
-    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
-    const queryOptions = ordinaryDbQueryOptions(options);
-    await this.ensureQueryReady(queryOptions, this.runtimeClient);
-    const rows = await this.runtimeClient.queryInternal(
-      translateQuery(builderJson, planningSchema),
-      this.session,
-      queryUsesRelationTraversal(builtQuery)
-        ? { ...queryOptions, runtimeSettledTier: null }
-        : queryOptions,
-      runtimeSchema.peek(),
-    );
-    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const transformedRows = transformRows(
-      rows,
-      outputSchema,
-      outputTable,
-      outputIncludes,
-      builtQuery.select,
-    );
-    return transformedRows.map((row) =>
-      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
-    );
-  }
-
-  override async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
-    const results = await this.all(query, options);
-    return results[0] ?? null;
-  }
-
-  override subscribeAll<T extends { id: string }>(
-    query: QueryBuilder<T>,
-    callback: (delta: SubscriptionDelta<T>) => void,
-    options?: QueryOptions,
-    _session?: Session,
-  ): () => void {
-    const manager = new SubscriptionManager<T>();
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(
-      query._schema,
-      runtimeSchema.get,
-      builtQuery.table,
-    );
-    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
-    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const nativeOutputColumns = resolveNativeSubscriptionColumns(
-      outputTable,
-      outputSchema,
-      outputIncludes,
-      builtQuery.select,
-    );
-    const wasmQuery = translateQuery(builderJson, planningSchema);
-
-    const transform = (row: WasmRow): T =>
-      transformOutputRow(
-        outputTable === builtQuery.table ? query : {},
-        transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
-      );
-    const nativeTransform =
-      Object.keys(outputIncludes).length === 0 && builtQuery.select.length === 0
-        ? (row: Record<string, unknown>): T =>
-            transformOutputRow(outputTable === builtQuery.table ? query : {}, row)
-        : undefined;
-    const queryOptions = ordinaryDbQueryOptions(options);
-
-    const subId = this.runtimeClient.subscribeInternal(
-      wasmQuery,
-      (delta) => {
-        const typedDelta = manager.handleDelta(
-          delta,
-          transform,
-          nativeOutputColumns,
-          nativeTransform,
-        );
-        callback(typedDelta);
-      },
-      this.session,
-      queryOptions,
-      runtimeSchema.peek(),
-    );
-
-    return () => {
-      this.runtimeClient.unsubscribe(subId);
-      manager.clear();
+  protected override getRuntimeOperationContext(): DbRuntimeOperationContext {
+    return {
+      session: this.session,
+      attribution: this.attribution,
     };
   }
 
