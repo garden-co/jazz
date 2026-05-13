@@ -77,11 +77,22 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       loadEnvFileIntoProcessEnv(viteServer.config.root);
 
       // SvelteKit's vite-plugin captures env in its `config: { order: 'pre' }`
-      // hook, before configureServer ever runs. If this is the first-ever start
-      // (no persisted appId yet), SvelteKit's captured env is empty when we
-      // allocate one below. Trigger a restart so its config hook re-runs and
-      // re-reads the now-populated .env. No-ops on warm starts.
-      const wasColdStart = !process.env.PUBLIC_JAZZ_APP_ID;
+      // hook, before configureServer ever runs. That capture sources from
+      // .env files plus process.env, so anything missing here is also missing
+      // from `$env/dynamic/public` at runtime. PUBLIC_JAZZ_APP_ID is missing
+      // on the first-ever run (no persisted .env yet). PUBLIC_JAZZ_SERVER_URL
+      // is missing every warm start — the port is allocated dynamically and
+      // is never persisted to .env. In either case we restart after the
+      // managed runtime populates process.env, so SvelteKit's config hook
+      // re-runs and the captured env picks up the fresh values. process.env
+      // survives the restart (same Node process) and runtime.initialize() is
+      // idempotent, so the restarted pass reuses the in-flight Jazz server.
+      //
+      // Strict `=== undefined` check: an explicitly empty string is a user
+      // assertion that the var has no value, and managed-runtime would write
+      // that empty back to process.env post-restart — looping forever.
+      const appIdMissingFromCapturedEnv = process.env.PUBLIC_JAZZ_APP_ID === undefined;
+      const serverUrlMissingFromCapturedEnv = process.env.PUBLIC_JAZZ_SERVER_URL === undefined;
 
       const schemaDir = options.schemaDir ?? join(viteServer.config.root, "src", "lib");
       const serverOpt = options.server ?? true;
@@ -140,9 +151,12 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         viteServer.config.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
       }
 
-      if (wasColdStart && managed.appId) {
+      if (
+        (appIdMissingFromCapturedEnv && managed.appId) ||
+        (serverUrlMissingFromCapturedEnv && managed.serverUrl)
+      ) {
         console.log(
-          `${LOG_PREFIX} initial appId allocated, restarting dev server so SvelteKit's $env captures it`,
+          `${LOG_PREFIX} restarting dev server so SvelteKit's $env captures the populated PUBLIC_JAZZ_* vars`,
         );
         void viteServer.restart?.();
       }
