@@ -61,7 +61,6 @@ interface WasmBridgeHandle {
   replayServerConnection(): void;
   disconnectUpstream(): void;
   reconnectUpstream(): void;
-  acknowledgeRejectedBatch(batchId: string): void;
   simulateCrash(): Promise<void>;
   setListeners(listeners: ListenerSlots): void;
   shutdown(): Promise<void>;
@@ -207,10 +206,6 @@ export class WorkerBridge {
 
   replayWorkerUpstreamConnection(): void {
     this.reconnectUpstream();
-  }
-
-  acknowledgeRejectedBatch(batchId: string): void {
-    this.bridge?.acknowledgeRejectedBatch(batchId);
   }
 
   /** Test-only: posts `simulate-crash` so the worker releases OPFS handles

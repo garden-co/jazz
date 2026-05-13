@@ -789,7 +789,10 @@ export class Db {
    * Unsubscribers for {@link Db.clients}'s {@link JazzClient.onMutationError} listeners
    */
   private readonly clientMutationErrorUnsubscribers = new Map<JazzClient, () => void>();
-  private readonly pendingWorkerMutationErrorEvents: MutationErrorEvent[] = [];
+  private readonly pendingWorkerMutationErrorEvents: Array<{
+    client: JazzClient;
+    event: MutationErrorEvent;
+  }> = [];
   private nextActiveQuerySubscriptionTraceId = 1;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
     this.handleSyncChannelMessage(event.data);
@@ -1022,9 +1025,6 @@ export class Db {
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
-        onRejectedBatchAcknowledged: (batchId) => {
-          this.workerBridge?.acknowledgeRejectedBatch(batchId);
-        },
       });
 
       this.attachMutationErrorHandler(client);
@@ -1061,13 +1061,12 @@ export class Db {
       client,
       client.onMutationError((event) => {
         if (this.mutationErrorListeners.size === 0) {
-          this.pendingWorkerMutationErrorEvents.push(event);
+          this.pendingWorkerMutationErrorEvents.push({ client, event });
           return;
         }
         for (const listener of this.mutationErrorListeners) {
           listener(event);
         }
-        this.workerBridge?.acknowledgeRejectedBatch(event.batch.batchId);
       }),
     );
   }
@@ -1152,16 +1151,18 @@ export class Db {
   private handleWorkerMutationErrorReplay(client: JazzClient, event: MutationErrorEvent): void {
     const batch = event.batch;
     if (client.hasAcknowledgedRejectedBatch(batch.batchId)) {
-      this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
+      client.acknowledgeRejectedBatch(batch.batchId);
       return;
     }
     if (client.hasWaitHandlerForBatch(batch.batchId)) {
-      this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
+      client.acknowledgeRejectedBatch(batch.batchId);
       return;
     }
     const runtimeRecord = client.runtimeLocalBatchRecord(batch.batchId);
     if (runtimeRecord?.latestSettlement?.kind === "rejected") {
-      this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
+      // The main runtime already knows this rejection and may still have the
+      // corresponding mutation-error event queued. Let that local delivery
+      // path acknowledge so we don't prune the event before JS listeners see it.
       return;
     }
     const existingRecord = client.localBatchRecord(batch.batchId);
@@ -1174,13 +1175,13 @@ export class Db {
       return;
     }
     if (this.mutationErrorListeners.size === 0) {
-      this.pendingWorkerMutationErrorEvents.push(event);
+      this.pendingWorkerMutationErrorEvents.push({ client, event });
       return;
     }
     for (const listener of this.mutationErrorListeners) {
       listener(event);
     }
-    this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
+    client.acknowledgeRejectedBatch(batch.batchId);
   }
 
   private installMainThreadWasmTelemetry(): void {
@@ -1682,9 +1683,9 @@ export class Db {
       this.attachMutationErrorHandler(client);
     }
     while (this.pendingWorkerMutationErrorEvents.length > 0) {
-      const event = this.pendingWorkerMutationErrorEvents.shift()!;
+      const { client, event } = this.pendingWorkerMutationErrorEvents.shift()!;
       listener(event);
-      this.workerBridge?.acknowledgeRejectedBatch(event.batch.batchId);
+      client.acknowledgeRejectedBatch(event.batch.batchId);
     }
     return () => {
       this.mutationErrorListeners.delete(listener);

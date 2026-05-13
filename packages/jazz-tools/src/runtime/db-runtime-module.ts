@@ -16,7 +16,6 @@ export interface DbRuntimeClientContext<RuntimeConfig extends DbConfig = DbConfi
   hasWorker: boolean;
   useBinaryEncoding: boolean;
   onAuthFailure: (reason: AuthFailureReason) => void;
-  onRejectedBatchAcknowledged: (batchId: string) => void;
 }
 
 export interface DbRuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConfig> {

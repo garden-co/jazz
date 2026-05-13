@@ -52,7 +52,6 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
     hasWorker,
     useBinaryEncoding,
     onAuthFailure,
-    onRejectedBatchAcknowledged,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
 
@@ -61,7 +60,6 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       // direct browser/server routing keeps JSON payloads.
       useBinaryEncoding,
       onAuthFailure,
-      onRejectedBatchAcknowledged,
       nonDurableClientRuntime: hasWorker,
     };
 

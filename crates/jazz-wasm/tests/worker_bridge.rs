@@ -135,8 +135,16 @@ fn build_options(server_url: Option<&str>) -> JsValue {
 }
 
 fn fresh_runtime() -> WasmRuntime {
-    WasmRuntime::new(SCHEMA_JSON, "test-app", "dev", "main", None, Some(true))
-        .expect("WasmRuntime::new")
+    WasmRuntime::new(
+        SCHEMA_JSON,
+        "test-app",
+        "dev",
+        "main",
+        None,
+        Some(true),
+        None,
+    )
+    .expect("WasmRuntime::new")
 }
 
 // =============================================================================
@@ -579,19 +587,34 @@ fn send_peer_sync_drops_empty_payload() {
 }
 
 #[wasm_bindgen_test]
-fn acknowledge_rejected_batch_emits_postcard_binary() {
+fn runtime_rejected_batch_acknowledgement_is_forwarded_by_bridge() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
         .expect("attach");
+    let batch_id = "00000000000000000000000000000007";
 
-    bridge.acknowledge_rejected_batch("batch-7");
-    match fw.last_posted_decoded() {
-        Some(MainToWorkerWire::AcknowledgeRejectedBatch { batch_id }) => {
-            assert_eq!(batch_id, "batch-7");
-        }
-        other => panic!("expected AcknowledgeRejectedBatch, got {other:?}"),
-    }
+    runtime
+        .replay_batch_rejection(batch_id, "rejected", "server denied write")
+        .expect("replay rejected batch");
+    let posted_before = fw.posted.borrow().len();
+
+    assert!(
+        runtime
+            .acknowledge_rejected_batch(batch_id)
+            .expect("acknowledge rejected batch"),
+        "runtime should acknowledge persisted rejected fate"
+    );
+
+    let posted = fw.posted_decoded();
+    assert!(
+        posted[posted_before..].iter().any(|wire| matches!(
+            wire,
+            MainToWorkerWire::AcknowledgeRejectedBatch { batch_id: posted_batch_id }
+                if posted_batch_id == batch_id
+        )),
+        "runtime acknowledgement should be forwarded to worker, got {posted:?}"
+    );
 }
 
 #[wasm_bindgen_test]

@@ -294,7 +294,6 @@ export type SubscriptionCallback = (delta: SubscriptionWireDelta) => void;
 export interface ConnectSyncRuntimeOptions {
   useBinaryEncoding?: boolean;
   onAuthFailure?: (reason: AuthFailureReason) => void;
-  onRejectedBatchAcknowledged?: (batchId: string) => void;
   nonDurableClientRuntime?: boolean;
 }
 
@@ -1336,7 +1335,6 @@ export class JazzClient {
   private readonly hydratedWorkerBatchIds = new Set<string>();
   private readonly hydratedWorkerBatchRecords = new Map<string, LocalBatchRecord>();
   private readonly completedEmptyBatchIds = new Set<string>();
-  private readonly onRejectedBatchAcknowledged?: (batchId: string) => void;
   private shutdownPromise: Promise<void> | null = null;
   private cachedRuntimeSchemaHash: string | null = null;
   private cachedRuntimeSchema: WasmSchema | null = null;
@@ -1383,7 +1381,6 @@ export class JazzClient {
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = this.resolveSessionFromContext();
-    this.onRejectedBatchAcknowledged = runtimeOptions?.onRejectedBatchAcknowledged;
 
     if (runtimeOptions?.onAuthFailure) {
       const handler = runtimeOptions.onAuthFailure;
@@ -1685,9 +1682,6 @@ export class JazzClient {
     const acknowledged = acknowledgedInRuntime || acknowledgedReplayed || acknowledgedHydrated;
     if (acknowledged && rejection) {
       this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
-    }
-    if (acknowledged) {
-      this.onRejectedBatchAcknowledged?.(batchId);
     }
     return acknowledged;
   }
