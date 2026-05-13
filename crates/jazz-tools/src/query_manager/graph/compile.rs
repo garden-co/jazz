@@ -727,6 +727,16 @@ impl QueryGraph {
                 graph
                     .array_subquery_tables
                     .push((node_id, subquery_spec.table));
+                // Nested arrays live inside this node's inner subgraph, so
+                // their tables won't otherwise appear in the outer graph's
+                // dependency list — register them against this node so a
+                // mutation deep in the chain still drives re-evaluation.
+                let mut nested_stack: Vec<&ArraySubquerySpec> =
+                    subquery_spec.nested_arrays.iter().collect();
+                while let Some(nested) = nested_stack.pop() {
+                    graph.array_subquery_tables.push((node_id, nested.table));
+                    nested_stack.extend(nested.nested_arrays.iter());
+                }
                 phase2_input = node_id;
                 current_descriptor = new_descriptor;
                 current_tuple_descriptor = TupleDescriptor::single_with_materialization(
