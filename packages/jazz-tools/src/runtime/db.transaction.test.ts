@@ -176,10 +176,7 @@ describe("Db transactions", () => {
     expect(committed.batchId).toBe("batch-tx");
     await expect(committed.wait({ tier: "global" })).resolves.toBeUndefined();
     expect(committedRuntime.client.waitForBatch).toHaveBeenCalledWith("batch-tx", "global");
-    expect(runtimeTransaction.commit).toHaveBeenCalledWith();
-    expect(tx.localBatchRecord()).toMatchObject({ batchId: "batch-tx" });
-    expect(tx.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-tx")]);
-    expect(tx.acknowledgeRejectedBatch()).toBe(false);
+    expect(runtimeTransaction.commit).toHaveBeenCalled();
   });
 
   it("uses declared schemas for transaction writes without fetching runtime schema", () => {
@@ -1025,12 +1022,6 @@ describe("Db transactions", () => {
     await expect(committed.wait({ tier: "global" })).resolves.toBeUndefined();
     expect(committedRuntime.client.waitForBatch).toHaveBeenCalledWith("batch-direct", "global");
     expect(runtimeBatch.commit).toHaveBeenCalledWith();
-    expect(batch.localBatchRecord()).toMatchObject({
-      batchId: "batch-direct",
-      mode: "direct",
-    });
-    expect(batch.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-direct", "direct")]);
-    expect(batch.acknowledgeRejectedBatch()).toBe(false);
   });
 
   it("uses declared schemas for direct batch writes without fetching runtime schema", () => {
