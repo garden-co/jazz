@@ -365,7 +365,12 @@ async fn handle_ws_connection(
     // 5. Ensure the client state in the runtime.
     match setup {
         WsClientSetup::Peer => {
-            let _ = state.runtime.ensure_client_as_peer(client_id);
+            let _ = state
+                .runtime
+                .ensure_client_as_peer_with_catalogue_state_hash(
+                    client_id,
+                    handshake.catalogue_state_hash.as_deref(),
+                );
         }
         WsClientSetup::Backend => {
             let _ = state.runtime.ensure_client_as_backend(client_id);
