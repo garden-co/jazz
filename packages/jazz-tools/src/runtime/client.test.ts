@@ -669,7 +669,7 @@ describe("JazzClient runtime batch waits", () => {
     });
 
     await expect(waitPromise).rejects.toBeInstanceOf(PersistedWriteRejectedError);
-    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith(batchId);
+    expect(runtime.acknowledgeRejectedBatch).not.toHaveBeenCalled();
     expect(seen).toEqual([]);
   });
 });
@@ -715,7 +715,7 @@ describe("JazzClient mutation error handling", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
-    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-rejected");
+    expect(runtime.acknowledgeRejectedBatch).not.toHaveBeenCalled();
     expect(seen).toEqual([
       {
         code: "permission_denied",
@@ -725,7 +725,7 @@ describe("JazzClient mutation error handling", () => {
     ]);
   });
 
-  it("logs and acknowledges pushed runtime mutation errors when no listener is registered", async () => {
+  it("logs pushed runtime mutation errors when no listener is registered", async () => {
     const runtime = makeFakeRuntime();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     runtime.loadLocalBatchRecords = vi.fn(() => {
@@ -747,7 +747,7 @@ describe("JazzClient mutation error handling", () => {
 
     expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
     expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
-    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-rejected");
+    expect(runtime.acknowledgeRejectedBatch).not.toHaveBeenCalled();
 
     consoleError.mockRestore();
   });
@@ -771,7 +771,7 @@ describe("JazzClient mutation error handling", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(consoleError).toHaveBeenCalledTimes(1);
-    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-rejected");
+    expect(runtime.acknowledgeRejectedBatch).not.toHaveBeenCalled();
     consoleError.mockRestore();
   });
 });

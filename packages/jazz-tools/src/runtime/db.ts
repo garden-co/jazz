@@ -1158,12 +1158,10 @@ export class Db {
 
   private handleWorkerMutationErrorReplay(client: JazzClient, event: MutationErrorEvent): void {
     const batch = event.batch;
-    if (client.hasAcknowledgedRejectedBatch(batch.batchId)) {
-      client.acknowledgeRejectedBatch(batch.batchId);
+    if (client.hasHandledRejectedBatch(batch.batchId)) {
       return;
     }
     if (client.hasWaitHandlerForBatch(batch.batchId)) {
-      client.acknowledgeRejectedBatch(batch.batchId);
       return;
     }
     const runtimeRecord = client.runtimeLocalBatchRecord(batch.batchId);
@@ -1184,12 +1182,13 @@ export class Db {
     }
     if (this.mutationErrorListeners.size === 0) {
       this.pendingWorkerMutationErrorEvents.push({ client, event });
+      client.markMutationErrorHandled(event);
       return;
     }
     for (const listener of this.mutationErrorListeners) {
       listener(event);
     }
-    client.acknowledgeRejectedBatch(batch.batchId);
+    client.markMutationErrorHandled(event);
   }
 
   private installMainThreadWasmTelemetry(): void {
@@ -1693,7 +1692,7 @@ export class Db {
     while (this.pendingWorkerMutationErrorEvents.length > 0) {
       const { client, event } = this.pendingWorkerMutationErrorEvents.shift()!;
       listener(event);
-      client.acknowledgeRejectedBatch(event.batch.batchId);
+      client.markMutationErrorHandled(event);
     }
     return () => {
       this.mutationErrorListeners.delete(listener);

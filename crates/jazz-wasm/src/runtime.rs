@@ -448,7 +448,8 @@ fn assemble_wasm_runtime(
 ) -> WasmRuntime {
     let scheduler = WasmScheduler::new();
     let mutation_error_callback = scheduler.mutation_error_callback.clone();
-    let rejected_batch_acknowledged_callback = Rc::new(RefCell::new(None));
+    let rejected_batch_acknowledged_callback =
+        scheduler.rejected_batch_acknowledged_callback.clone();
     let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
     core.set_tier_label(tier_label);
     let core_rc = Rc::new(RefCell::new(core));
@@ -492,6 +493,9 @@ pub struct WasmScheduler {
     core_ref: Weak<RefCell<WasmCoreType>>,
     /// JS callback receiving pushed mutation error events.
     mutation_error_callback: Rc<RefCell<Option<Function>>>,
+    /// Rust callback invoked after a rejected batch is acknowledged by the
+    /// binding. The worker bridge uses this to notify the worker runtime.
+    rejected_batch_acknowledged_callback: Rc<RefCell<Option<RejectedBatchAcknowledgedCallback>>>,
 }
 
 impl WasmScheduler {
@@ -500,6 +504,7 @@ impl WasmScheduler {
             scheduled: Rc::new(RefCell::new(false)),
             core_ref: Weak::new(),
             mutation_error_callback: Rc::new(RefCell::new(None)),
+            rejected_batch_acknowledged_callback: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -511,6 +516,7 @@ impl WasmScheduler {
 fn emit_pending_mutation_errors(
     core_rc: &Rc<RefCell<WasmCoreType>>,
     mutation_error_callback: &Rc<RefCell<Option<Function>>>,
+    rejected_batch_acknowledged_callback: &Rc<RefCell<Option<RejectedBatchAcknowledgedCallback>>>,
 ) {
     let Some(callback) = mutation_error_callback.borrow().clone() else {
         return;
@@ -526,7 +532,29 @@ fn emit_pending_mutation_errors(
         let Ok(value) = serialize_mutation_error_event(&event).serialize(&serializer) else {
             continue;
         };
-        let _ = callback.call1(&JsValue::UNDEFINED, &value);
+        if callback.call1(&JsValue::UNDEFINED, &value).is_ok() {
+            acknowledge_rejected_batch_after_binding_emit(
+                core_rc,
+                rejected_batch_acknowledged_callback,
+                event.batch.batch_id,
+            );
+        }
+    }
+}
+
+fn acknowledge_rejected_batch_after_binding_emit(
+    core_rc: &Rc<RefCell<WasmCoreType>>,
+    rejected_batch_acknowledged_callback: &Rc<RefCell<Option<RejectedBatchAcknowledgedCallback>>>,
+    batch_id: BatchId,
+) {
+    match core_rc.borrow_mut().acknowledge_rejected_batch(batch_id) {
+        Ok(_) => {
+            let callback = rejected_batch_acknowledged_callback.borrow().clone();
+            if let Some(callback) = callback {
+                callback(batch_id);
+            }
+        }
+        Err(err) => tracing::warn!("acknowledge emitted rejected batch: {err:?}"),
     }
 }
 
@@ -534,6 +562,7 @@ fn schedule_batched_tick_task(
     core_ref: Weak<RefCell<WasmCoreType>>,
     flag: Rc<RefCell<bool>>,
     mutation_error_callback: Rc<RefCell<Option<Function>>>,
+    rejected_batch_acknowledged_callback: Rc<RefCell<Option<RejectedBatchAcknowledgedCallback>>>,
 ) {
     let flag_in_task = Rc::clone(&flag);
     let task = Closure::once_into_js(move || {
@@ -551,7 +580,11 @@ fn schedule_batched_tick_task(
         };
 
         if !needs_retry {
-            emit_pending_mutation_errors(&core_rc, &mutation_error_callback);
+            emit_pending_mutation_errors(
+                &core_rc,
+                &mutation_error_callback,
+                &rejected_batch_acknowledged_callback,
+            );
         }
 
         if needs_retry {
@@ -567,6 +600,7 @@ fn schedule_batched_tick_task(
                 core_ref.clone(),
                 flag_in_task.clone(),
                 mutation_error_callback.clone(),
+                rejected_batch_acknowledged_callback.clone(),
             );
         }
     });
@@ -594,6 +628,7 @@ impl Scheduler for WasmScheduler {
                 self.core_ref.clone(),
                 self.scheduled.clone(),
                 self.mutation_error_callback.clone(),
+                self.rejected_batch_acknowledged_callback.clone(),
             );
         }
     }
@@ -1155,7 +1190,8 @@ impl WasmRuntime {
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
         let mutation_error_callback = scheduler.mutation_error_callback.clone();
-        let rejected_batch_acknowledged_callback = Rc::new(RefCell::new(None));
+        let rejected_batch_acknowledged_callback =
+            scheduler.rejected_batch_acknowledged_callback.clone();
         // The outbox `SyncSender` is installed by the worker bridge or host
         // when they know the postMessage target. Direct (non-worker) clients
         // open a transport via `connect()`; their server-bound traffic goes
@@ -1273,7 +1309,11 @@ impl WasmRuntime {
 
     fn batched_tick_and_emit_mutation_errors(&self) {
         self.core.borrow_mut().batched_tick();
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
+        emit_pending_mutation_errors(
+            &self.core,
+            &self.mutation_error_callback,
+            &self.rejected_batch_acknowledged_callback,
+        );
     }
 
     fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
@@ -1340,7 +1380,11 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = onMutationError)]
     pub fn on_mutation_error(&self, callback: Function) {
         *self.mutation_error_callback.borrow_mut() = Some(callback);
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
+        emit_pending_mutation_errors(
+            &self.core,
+            &self.mutation_error_callback,
+            &self.rejected_batch_acknowledged_callback,
+        );
     }
 
     // =========================================================================
@@ -1580,6 +1624,9 @@ impl WasmRuntime {
     pub fn wait_for_batch(&self, batch_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let tier = parse_tier(tier)?;
+        let core_rc = Rc::clone(&self.core);
+        let rejected_batch_acknowledged_callback =
+            Rc::clone(&self.rejected_batch_acknowledged_callback);
         let receiver = {
             let mut core = self.core.borrow_mut();
             core.wait_for_batch(batch_id, tier)
@@ -1589,13 +1636,21 @@ impl WasmRuntime {
         Ok(wasm_bindgen_futures::future_to_promise(async move {
             match receiver.await {
                 Ok(Ok(())) => Ok(JsValue::undefined()),
-                Ok(Err(rejection)) => Err(serde_wasm_bindgen::to_value(&serde_json::json!({
-                    "kind": "rejected",
-                    "batchId": rejection.batch_id.to_string(),
-                    "code": rejection.code,
-                    "reason": rejection.reason,
-                }))
-                .unwrap_or_else(|_| JsValue::from_str("Persisted batch was rejected"))),
+                Ok(Err(rejection)) => {
+                    let value = serde_wasm_bindgen::to_value(&serde_json::json!({
+                        "kind": "rejected",
+                        "batchId": rejection.batch_id.to_string(),
+                        "code": rejection.code,
+                        "reason": rejection.reason,
+                    }))
+                    .unwrap_or_else(|_| JsValue::from_str("Persisted batch was rejected"));
+                    acknowledge_rejected_batch_after_binding_emit(
+                        &core_rc,
+                        &rejected_batch_acknowledged_callback,
+                        rejection.batch_id,
+                    );
+                    Err(value)
+                }
                 Err(_) => Err(JsValue::from_str("Wait for batch cancelled")),
             }
         }))
@@ -1876,7 +1931,11 @@ impl WasmRuntime {
         }
         core.batched_tick();
         drop(core);
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
+        emit_pending_mutation_errors(
+            &self.core,
+            &self.mutation_error_callback,
+            &self.rejected_batch_acknowledged_callback,
+        );
         Ok(())
     }
 
@@ -2024,7 +2083,11 @@ impl WasmRuntime {
         core.immediate_tick();
         core.batched_tick();
         drop(core);
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
+        emit_pending_mutation_errors(
+            &self.core,
+            &self.mutation_error_callback,
+            &self.rejected_batch_acknowledged_callback,
+        );
 
         Ok(())
     }

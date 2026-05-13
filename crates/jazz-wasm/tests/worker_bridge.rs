@@ -618,6 +618,49 @@ fn runtime_rejected_batch_acknowledgement_is_forwarded_by_bridge() {
 }
 
 #[wasm_bindgen_test]
+fn runtime_mutation_error_emission_acknowledges_and_forwards_to_worker() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+    let batch_id = "00000000000000000000000000000008";
+
+    let seen = Rc::new(RefCell::new(false));
+    let seen_clone = Rc::clone(&seen);
+    let on_mutation_error = Closure::<dyn FnMut(JsValue)>::new(move |_event: JsValue| {
+        *seen_clone.borrow_mut() = true;
+    });
+    runtime.on_mutation_error(
+        on_mutation_error
+            .as_ref()
+            .unchecked_ref::<Function>()
+            .clone(),
+    );
+
+    runtime
+        .replay_batch_rejection(batch_id, "rejected", "server denied write")
+        .expect("replay rejected batch");
+    let posted_before = fw.posted.borrow().len();
+
+    runtime.batched_tick();
+
+    assert!(
+        *seen.borrow(),
+        "mutation error callback should receive event"
+    );
+    let posted = fw.posted_decoded();
+    assert!(
+        posted[posted_before..].iter().any(|wire| matches!(
+            wire,
+            MainToWorkerWire::AcknowledgeRejectedBatch { batch_id: posted_batch_id }
+                if posted_batch_id == batch_id
+        )),
+        "mutation error emission should acknowledge through the bridge, got {posted:?}"
+    );
+    drop(on_mutation_error);
+}
+
+#[wasm_bindgen_test]
 fn disconnect_and_reconnect_upstream_emit_postcard_binary() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();

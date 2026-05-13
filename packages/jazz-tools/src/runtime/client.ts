@@ -811,6 +811,10 @@ function rejectionFromRuntimeWaitError(
   return new PersistedWriteRejectedError(batchId, candidate.code, candidate.reason);
 }
 
+function rejectionFromMutationErrorEvent(event: MutationErrorEvent): PersistedWriteRejectedError {
+  return new PersistedWriteRejectedError(event.batch.batchId, event.code, event.reason);
+}
+
 /**
  * Error returned when a write fails to be persisted at a given durability tier.
  */
@@ -1087,10 +1091,6 @@ abstract class BatchHandleBase {
   localBatchRecords(): LocalBatchRecord[] {
     return this.client.localBatchRecords();
   }
-
-  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
-  }
 }
 
 /**
@@ -1308,10 +1308,6 @@ export class SessionClient {
 
   localBatchRecords(): LocalBatchRecord[] {
     return this.client.localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId: string): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
   }
 }
 
@@ -1654,7 +1650,7 @@ export class JazzClient {
     return this.hydratedWorkerBatchIds.has(batchId);
   }
 
-  hasAcknowledgedRejectedBatch(batchId: string): boolean {
+  hasHandledRejectedBatch(batchId: string): boolean {
     return this.acknowledgedRejectedBatchErrors.has(batchId);
   }
 
@@ -1669,21 +1665,24 @@ export class JazzClient {
     };
   }
 
-  private acknowledgeRejectedBatchInternal(batchId: string): boolean {
-    const rejection = rejectionFromSettlement(this.batchFate(batchId));
-    const acknowledgedInRuntime = this.requireBatchRecordMethod("acknowledgeRejectedBatch")(
-      batchId,
-    );
+  private markRejectedBatchHandledInJs(
+    batchId: string,
+    rejection = rejectionFromSettlement(this.batchFate(batchId)),
+  ): boolean {
     const acknowledgedReplayed = this.replayedRejectedBatchRecords.delete(batchId);
     const hydratedRecord = this.hydratedWorkerBatchRecords.get(batchId);
     const acknowledgedHydrated =
       hydratedRecord?.latestSettlement?.kind === "rejected" &&
       this.hydratedWorkerBatchRecords.delete(batchId);
-    const acknowledged = acknowledgedInRuntime || acknowledgedReplayed || acknowledgedHydrated;
+    const acknowledged = !!rejection || acknowledgedReplayed || acknowledgedHydrated;
     if (acknowledged && rejection) {
       this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
     }
     return acknowledged;
+  }
+
+  markMutationErrorHandled(event: MutationErrorEvent): void {
+    this.markRejectedBatchHandledInJs(event.batch.batchId, rejectionFromMutationErrorEvent(event));
   }
 
   hydrateLocalBatchRecords(records: LocalBatchRecord[]): void {
@@ -1753,10 +1752,6 @@ export class JazzClient {
     for (const batchId of this.hydratedWorkerBatchIds) {
       this.replayRejectedBatchRowsById(batchId);
     }
-  }
-
-  acknowledgeRejectedBatch(batchId: string): boolean {
-    return this.acknowledgeRejectedBatchInternal(batchId);
   }
 
   sealBatch(batchId: string): WriteHandle {
@@ -1877,10 +1872,7 @@ export class JazzClient {
   private requireBatchRecordMethod<
     T extends keyof Pick<
       Runtime,
-      | "loadLocalBatchRecord"
-      | "loadLocalBatchRecords"
-      | "loadBatchFate"
-      | "acknowledgeRejectedBatch"
+      "loadLocalBatchRecord" | "loadLocalBatchRecords" | "loadBatchFate"
     >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
@@ -2574,31 +2566,6 @@ export class JazzClient {
     });
   }
 
-  private batchWaitOutcome(
-    batchId: string,
-    tier: DurabilityTier,
-  ): { settled: true; error: Error | null } | { settled: false } {
-    const acknowledgedRejection = this.acknowledgedRejectedBatchErrors.get(batchId);
-    if (acknowledgedRejection) {
-      return { settled: true, error: acknowledgedRejection };
-    }
-
-    if (this.completedEmptyBatchIds.has(batchId)) {
-      return { settled: true, error: null };
-    }
-
-    const settlement = this.batchFate(batchId);
-    const rejection = rejectionFromSettlement(settlement);
-    if (rejection) {
-      return { settled: true, error: rejection };
-    }
-    if (settlementSatisfiesTier(settlement, tier)) {
-      return { settled: true, error: null };
-    }
-
-    return { settled: false };
-  }
-
   private normalizeBatchWaitError(batchId: string, error: unknown): Error {
     return (
       this.acknowledgedRejectedBatchErrors.get(batchId) ??
@@ -2631,33 +2598,48 @@ export class JazzClient {
       }
     }
 
-    this.acknowledgeRejectedBatchInternal(batchId);
+    this.markMutationErrorHandled(event);
   }
 
   async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
-    const outcome = this.batchWaitOutcome(batchId, tier);
-    if (outcome.settled) {
-      if (outcome.error) {
-        this.replayRejectedBatchRowsById(batchId);
-        throw outcome.error;
-      }
+    const acknowledgedRejection = this.acknowledgedRejectedBatchErrors.get(batchId);
+    if (acknowledgedRejection) {
+      throw acknowledgedRejection;
+    }
+
+    if (this.completedEmptyBatchIds.has(batchId)) {
       return;
+    }
+
+    const settlement = this.batchFate(batchId);
+    const knownRejection = rejectionFromSettlement(settlement);
+    if (!knownRejection && settlementSatisfiesTier(settlement, tier)) {
+      return;
+    }
+    if (knownRejection) {
+      this.replayRejectedBatchRowsById(batchId);
     }
 
     this.waitHandledBatchIds.add(batchId);
 
     try {
       await this.runtime.waitForBatch(batchId, tier);
-      this.waitHandledBatchIds.delete(batchId);
     } catch (error) {
       const normalizedError = this.normalizeBatchWaitError(batchId, error);
       if (normalizedError instanceof PersistedWriteRejectedError) {
-        this.acknowledgeRejectedBatchInternal(batchId);
+        this.markRejectedBatchHandledInJs(batchId, normalizedError);
       } else {
         this.waitHandledBatchIds.delete(batchId);
       }
       throw normalizedError;
     }
+
+    if (knownRejection) {
+      this.markRejectedBatchHandledInJs(batchId, knownRejection);
+      throw knownRejection;
+    }
+
+    this.waitHandledBatchIds.delete(batchId);
   }
 
   /**
