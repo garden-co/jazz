@@ -108,6 +108,97 @@ fn recursive_query_with_hop_expands_transitive_closure() {
 }
 
 #[test]
+fn recursive_query_step_magic_columns_inherit_parent_session() {
+    let sync_manager = SyncManager::new();
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
+    );
+    schema.insert(
+        TableName::new("team_edges"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("child_team", ColumnType::Uuid),
+                ColumnDescriptor::new("parent_team", ColumnType::Uuid),
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::True)
+                .with_update(
+                    Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                    PolicyExpr::True,
+                ),
+        ),
+    );
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let platform = qm
+        .insert(&mut storage, "teams", &[Value::Text("Platform".into())])
+        .unwrap();
+    let api = qm
+        .insert(&mut storage, "teams", &[Value::Text("API".into())])
+        .unwrap();
+    let finance = qm
+        .insert(&mut storage, "teams", &[Value::Text("Finance".into())])
+        .unwrap();
+
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[
+            Value::Uuid(platform.row_id),
+            Value::Uuid(api.row_id),
+            Value::Text("alice".into()),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[
+            Value::Uuid(api.row_id),
+            Value::Uuid(finance.row_id),
+            Value::Text("bob".into()),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("teams")
+        .filter_eq("name", Value::Text("Platform".into()))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "_id")
+                .filter_eq("$canEdit", Value::Boolean(true))
+                .hop("teams", "parent_team")
+                .max_depth(10)
+        })
+        .build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    let mut names: Vec<String> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .filter_map(|(_, values)| match values.first() {
+            Some(Value::Text(name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    qm.unsubscribe_with_sync(sub_id);
+
+    assert_eq!(names, vec!["API", "Platform"]);
+}
+
+#[test]
 fn recursive_query_with_self_referential_hop_expands_ancestors() {
     use crate::query_manager::query::Query;
     use crate::query_manager::relation_ir::{
