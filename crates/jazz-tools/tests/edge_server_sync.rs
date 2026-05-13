@@ -1016,6 +1016,19 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
         .start()
         .await;
 
+    wait_for_upstream(&edge_after_restart).await;
+    wait_for_schema_hash(&edge_after_restart, &v2_schema).await;
+    wait_for_permissions_head(&edge_after_restart, &v2_permissions_head.bundle_object_id).await;
+    assert_eq!(
+        edge_after_restart
+            .server_state()
+            .runtime
+            .catalogue_state_hash()
+            .expect("read restarted edge v2 catalogue hash"),
+        core_v2_catalogue_hash,
+        "restarted edge should receive core's v2 catalogue replay before client work starts"
+    );
+
     let alice = TestingClient::builder()
         .with_server(&edge_after_restart)
         .with_schema(v2_schema.clone())
@@ -1023,9 +1036,6 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
         .ready_on("todos", READY_TIMEOUT)
         .connect()
         .await;
-
-    wait_for_schema_hash(&edge_after_restart, &v2_schema).await;
-    wait_for_permissions_head(&edge_after_restart, &v2_permissions_head.bundle_object_id).await;
 
     let (todo_id, _) = alice
         .create_persisted(
