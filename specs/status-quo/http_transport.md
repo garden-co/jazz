@@ -92,10 +92,10 @@ registered as `ClientRole::Peer`, not as `Backend` or `Admin`. Edges require a
 peer secret because they must authenticate to their upstream core. Cores only
 need a peer secret when they accept edge connections.
 
-Catalogue admin writes remain core-only. Edge servers learn schemas,
-permissions, and migrations through the sync channel from core; they reject
-local admin catalogue publishes with an error that tells callers to publish to
-the core server instead.
+Catalogue authority remains core-owned. Edge servers learn schemas,
+permissions, and migrations through the sync channel from core for runtime/query
+use. Catalogue HTTP reads and writes received by an edge validate the admin
+secret locally, then proxy the request to the upstream core.
 
 ## Why There Is No Separate "Query Transport"
 

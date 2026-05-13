@@ -98,8 +98,9 @@ that into `QueryManager`.
 In an edge/core deployment, catalogue authority is core-only. Schemas,
 permissions, and migrations are published to the core server. Edge servers learn
 those catalogue entries through server-to-server sync and install them locally
-once they arrive. Edge admin catalogue publish endpoints reject writes instead
-of proxying them upstream, so publication tools have one authoritative target.
+once they arrive, so runtime/query work can use local catalogue state. Catalogue
+HTTP reads and writes received by an edge validate the admin secret locally and
+then proxy to the upstream core.
 
 That same catalogue lane carries permission changes. When the core receives a
 new permissions head, connected edges receive the bundle/head pair through sync;
@@ -135,7 +136,8 @@ catalogue authority:
 - core servers accept admin catalogue publishes and replicate catalogue state to
   connected edges
 - edge servers receive catalogue state from core and wait when a requested
-  schema or permission head has not arrived yet
+  schema or permission head has not arrived yet; edge catalogue HTTP reads and
+  writes validate admin access locally and proxy upstream
 
 This means an edge that sees row data before it has the matching schema or
 authorization bundle does not guess. It holds the affected query/write work
