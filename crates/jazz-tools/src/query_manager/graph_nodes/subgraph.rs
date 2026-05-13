@@ -229,6 +229,8 @@ pub struct SubgraphBuilder {
     filters: Vec<(String, Value)>, // Simple equality filters for now
     order_by: Vec<(String, bool)>, // (column, is_descending)
     limit: Option<usize>,
+    session: Option<Session>,
+    row_policy_mode: RowPolicyMode,
 }
 
 impl SubgraphBuilder {
@@ -241,6 +243,8 @@ impl SubgraphBuilder {
             filters: Vec::new(),
             order_by: Vec::new(),
             limit: None,
+            session: None,
+            row_policy_mode: RowPolicyMode::PermissiveLocal,
         }
     }
 
@@ -277,6 +281,18 @@ impl SubgraphBuilder {
     /// Set a limit on results.
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
+        self
+    }
+
+    /// Set the session used when compiling subgraph instances.
+    pub fn with_session(mut self, session: Session) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Set the row policy mode used when compiling subgraph instances.
+    pub fn with_row_policy_mode(mut self, row_policy_mode: RowPolicyMode) -> Self {
+        self.row_policy_mode = row_policy_mode;
         self
     }
 
@@ -330,8 +346,8 @@ impl SubgraphBuilder {
             self.select_columns,
             output_descriptor,
             SchemaContext::with_defaults(schema.clone(), "main"),
-            None,
-            RowPolicyMode::PermissiveLocal,
+            self.session,
+            self.row_policy_mode,
         ))
     }
 }
@@ -409,17 +425,39 @@ mod tests {
     }
 
     #[test]
+    fn subgraph_builder_accepts_session_and_row_policy_mode() {
+        let schema = test_schema();
+
+        let template = SubgraphBuilder::new("posts")
+            .correlate("author_id")
+            .with_session(Session::new("alice"))
+            .with_row_policy_mode(RowPolicyMode::Enforcing)
+            .build(&schema)
+            .unwrap();
+
+        assert_eq!(
+            template
+                .session
+                .as_ref()
+                .map(|session| session.user_id.as_str()),
+            Some("alice")
+        );
+        assert_eq!(template.row_policy_mode, RowPolicyMode::Enforcing);
+    }
+
+    #[test]
     fn array_subgraph_inherits_parent_session_for_permission_magic_columns() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
                     .column("user_id", ColumnType::Text)
-                    .column("name", ColumnType::Text)
+                    .column("team_id", ColumnType::Text)
                     .policies(TablePolicies::new().with_select(PolicyExpr::True)),
             )
             .table(
                 TableSchema::builder("documents")
                     .column("owner_id", ColumnType::Text)
+                    .column("team_id", ColumnType::Text)
                     .column("title", ColumnType::Text)
                     .policies(
                         TablePolicies::new()
@@ -438,21 +476,35 @@ mod tests {
         qm.insert(
             &mut storage,
             "users",
-            &[Value::Text("alice".into()), Value::Text("Alice".into())],
+            &[Value::Text("alice".into()), Value::Text("eng".into())],
         )
         .expect("insert user");
         qm.insert(
             &mut storage,
             "documents",
-            &[Value::Text("alice".into()), Value::Text("Draft".into())],
+            &[
+                Value::Text("alice".into()),
+                Value::Text("eng".into()),
+                Value::Text("Alice Draft".into()),
+            ],
         )
-        .expect("insert document");
+        .expect("insert alice document");
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("eng".into()),
+                Value::Text("Bob Plan".into()),
+            ],
+        )
+        .expect("insert bob document");
 
         let query = qm
             .query("users")
             .with_array("documents", |sub| {
                 sub.from("documents")
-                    .correlate("owner_id", "users.user_id")
+                    .correlate("team_id", "users.team_id")
                     .select(&["title", "$canEdit"])
             })
             .build();
@@ -470,10 +522,24 @@ mod tests {
         let values = decode_row(&update.descriptor, &update.delta.added[0].data)
             .expect("decode subscription row");
         let documents = values[2].as_array().expect("documents should be an array");
-        let document = documents[0].as_row().expect("document should be a row");
+        let permissions_by_title: HashMap<String, bool> = documents
+            .iter()
+            .map(|document| {
+                let values = document.as_row().expect("document should be a row");
+                let title = match &values[0] {
+                    Value::Text(title) => title.clone(),
+                    other => panic!("expected document title text, got {other:?}"),
+                };
+                let can_edit = match &values[1] {
+                    Value::Boolean(can_edit) => *can_edit,
+                    other => panic!("expected $canEdit boolean, got {other:?}"),
+                };
+                (title, can_edit)
+            })
+            .collect();
 
-        assert_eq!(document[0], Value::Text("Draft".into()));
-        assert_eq!(document[1], Value::Boolean(true));
+        assert_eq!(permissions_by_title.get("Alice Draft"), Some(&true));
+        assert_eq!(permissions_by_title.get("Bob Plan"), Some(&false));
     }
 
     #[test]
