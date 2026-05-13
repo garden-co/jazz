@@ -682,18 +682,6 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     const results = await this.all(query, options);
     return results[0] ?? null;
   }
-
-  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.requireRuntimeHandle("localBatchRecord").localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.requireRuntimeHandle("localBatchRecords").localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.requireRuntimeHandle("acknowledgeRejectedBatch").acknowledgeRejectedBatch(batchId);
-  }
 }
 
 /**
