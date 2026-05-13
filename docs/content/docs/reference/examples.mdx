@@ -1,0 +1,61 @@
+---
+title: Examples
+description: What each example app in the Jazz monorepo uniquely demonstrates.
+---
+
+The `examples/` folder in the Jazz monorepo contains runnable apps that each
+highlight a different facet of Jazz&hairsp;—&hairsp;auth strategies, runtimes,
+framework bindings, server-side usage, or a specific product pattern. Use this
+table to jump straight to the example that covers the technique you need.
+
+<Callout type="info">
+If you just want a bare-bones skeleton to build on, the [`starters/`](https://github.com/garden-co/jazz/tree/main/starters) folder ships minimal templates for Next.js, React, and SvelteKit, each in `localfirst`, `betterauth`, and `hybrid` flavours. You can also scaffold a new app from one of these templates with:
+
+```bash
+npm create jazz
+```
+
+Reach for the `examples/` apps below when you want to see a specific pattern worked through end-to-end.
+
+</Callout>
+
+## At a glance
+
+| Example                                                                                                             | Stack                      | Uniquely demonstrates                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [auth-betterauth-chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat)                   | Next.js + Better Auth      | Better Auth tables stored in Jazz via `jazz-tools/better-auth-adapter`; Better Auth's `jwt` plugin issues the ES256 tokens and JWKS that the sync server verifies; demonstrates exposing user attributes (e.g. the `admin` plugin's `role`) as JWT claims that drive Jazz authorization |
+| [auth-simple-chat](https://github.com/garden-co/jazz/tree/main/examples/auth-simple-chat)                           | React + Vite + Express     | Bring-your-own JWT auth server: local Express issuing ES256 tokens, JWKS verified by the sync server, `session.claims.role` driving UI gating                                                                                                                                           |
+| [auth-workos-chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat)                           | React + Vite + WorkOS      | Hosted OAuth/SSO with no local auth server&hairsp;—&hairsp;sync server points at the WorkOS JWKS, `getAccessToken()` is passed straight to `JazzProvider`                                                                                                                               |
+| [chat-react](https://github.com/garden-co/jazz/tree/main/examples/chat-react)                                       | React + Vite               | Public vs private rooms with invite links via ephemeral `session.claims.join_code`; emoji reactions; collaborative drawing canvases; chunked file attachments                                                                                                                           |
+| [cloudflare-worker-runtime-ts](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts)   | Cloudflare Workers         | Booting Jazz inside Workers by passing a precompiled `WebAssembly.Module` via `runtimeSources.wasmModule`&hairsp;—&hairsp;no browser asset URLs                                                                                                                                         |
+| [file-upload-react](https://github.com/garden-co/jazz/tree/main/examples/file-upload-react)                         | React + Vite               | Uploading and rendering images using the `files` / `file_parts` chunked-binary pattern                                                                                                                                                                                                  |
+| [moon-lander-react](https://github.com/garden-co/jazz/tree/main/examples/moon-lander-react)                         | React + Vite               | Multiplayer game state&hairsp;—&hairsp;player positions, fuel deposits, inventory, and chat&hairsp;—&hairsp;synced through Jazz with no custom networking code                                                                                                                          |
+| [nextjs-csr-ssr](https://github.com/garden-co/jazz/tree/main/examples/nextjs-csr-ssr)                               | Next.js (App Router)       | The canonical SSR/RSC story: a Server Component reading via `jazz-tools/backend` alongside a Client Component using `jazz-tools/react` hooks, wired by `withJazz`                                                                                                                       |
+| [todo-client-localfirst-expo](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo)     | Expo (React Native)        | The React Native / Expo bindings end-to-end, with native Fjall storage and `ExpoAuthSecretStore` (backed by `expo-secure-store`) for local-first identity                                                                                                                               |
+| [todo-client-localfirst-react](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-react)   | React + Vite               | Fully client-side React app with local-first (anonymous, locally generated secret) auth; `useAll` with composable `where()`, `useDb` writes, OPFS persistence, `attachDevTools`                                                                                                         |
+| [todo-client-localfirst-svelte](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-svelte) | Svelte 5 + Vite            | The Svelte bindings: `JazzSvelteProvider`, `QuerySubscription` live queries, `getDb` writes                                                                                                                                                                                             |
+| [todo-client-localfirst-ts](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-ts)         | Vanilla TypeScript + Vite  | The low-level client API with no framework bindings: `createDb`, `db.subscribeAll`, `db.onAuthChanged`, `BrowserAuthSecretStore`                                                                                                                                                        |
+| [todo-server-rs](https://github.com/garden-co/jazz/tree/main/examples/todo-server-rs)                               | Rust (axum) + `jazz-tools` | Using Jazz directly from Rust as the embedded database for an axum REST + SSE service&hairsp;—&hairsp;no browser, no WASM, no Node bindings                                                                                                                                             |
+| [todo-server-ts](https://github.com/garden-co/jazz/tree/main/examples/todo-server-ts)                               | Node + Express             | Jazz as a server-side backend via `jazz-tools/backend` and NAPI Fjall storage; `context.forSession(userId)` for per-user policy; SSE live snapshots; `wait({ tier })` durability                                                                                                        |
+| [wequencer](https://github.com/garden-co/jazz/tree/main/examples/wequencer)                                         | React + Vite + Tone.js     | Clock-synchronised collaborative playback&hairsp;—&hairsp;`ClockSync` aligns peers to server epoch time, BPM nudged on drift; instrument samples stored as Jazz `files`                                                                                                                 |
+| [world-tour](https://github.com/garden-co/jazz/tree/main/examples/world-tour)                                       | Vue + Vite + MapLibre GL   | The Vue bindings end-to-end in a non-trivial app (tour management with maps)                                                                                                                                                                                                            |
+
+## How the examples group together
+
+- **The `todo-client-localfirst-*` family** (`-react`, `-svelte`, `-ts`, `-expo`)
+  all implement the same schema and feature set, so the diff between them is the
+  framework binding. They cover the local-first baseline: anonymous identity,
+  reactive queries, synchronous writes, OPFS persistence, optional server sync.
+  See also [Framework Patterns](/docs/reference/framework-patterns).
+- **The `auth-*-chat` family** (`auth-betterauth-chat`, `auth-simple-chat`,
+  `auth-workos-chat`) all implement a role-gated chat against three different
+  JWT-issuing auth setups, so the diff between them is the auth integration.
+- **The server-side examples** (`todo-server-ts`, `todo-server-rs`,
+  `nextjs-csr-ssr`, `cloudflare-worker-runtime-ts`) show Jazz used as the
+  database from a server runtime &mdash; Node, Rust, Next.js App Router, and
+  Cloudflare Workers respectively.
+- **The product-shaped examples** (`chat-react`, `moon-lander-react`,
+  `wequencer`, `world-tour`, `file-upload-react`) are full apps that lean on
+  Jazz for a specific real-world pattern: real-time chat with invites and
+  canvases, multiplayer game state, clock-synchronised collaborative playback,
+  Vue + maps, and chunked binary uploads.
