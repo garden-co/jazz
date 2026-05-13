@@ -550,6 +550,129 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
         "Regular row objects should still be sent during the full sync walk"
     );
 }
+
+fn catalogue_replay_to_client_count(messages: &[OutboxEntry], client_id: ClientId) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                OutboxEntry {
+                    destination: Destination::Client(id),
+                    payload: SyncPayload::CatalogueEntryUpdated { .. },
+                } if *id == client_id
+            )
+        })
+        .count()
+}
+
+fn has_catalogue_replay_to_client(
+    messages: &[OutboxEntry],
+    client_id: ClientId,
+    object_id: ObjectId,
+) -> bool {
+    messages.iter().any(|message| {
+        matches!(
+            message,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::CatalogueEntryUpdated { entry },
+            } if *id == client_id && entry.object_id == object_id
+        )
+    })
+}
+
+#[test]
+fn peer_with_matching_catalogue_hash_skips_catalogue_replay() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
+
+    core.persist_schema();
+    core.batched_tick();
+    core.sync_sender().take();
+
+    let catalogue_state_hash = core.schema_manager().catalogue_state_hash();
+    let peer_id = ClientId::new();
+
+    core.ensure_client_as_peer_with_catalogue_state_hash(peer_id, Some(&catalogue_state_hash));
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    assert_eq!(
+        catalogue_replay_to_client_count(&messages, peer_id),
+        0,
+        "peer with matching catalogue hash should not receive catalogue replay; messages: {messages:?}"
+    );
+}
+
+#[test]
+fn peer_without_catalogue_hash_gets_full_catalogue_replay() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
+
+    let schema_object_id = core.persist_schema();
+    core.batched_tick();
+    core.sync_sender().take();
+
+    let peer_id = ClientId::new();
+
+    core.ensure_client_as_peer_with_catalogue_state_hash(peer_id, None);
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    assert!(
+        has_catalogue_replay_to_client(&messages, peer_id, schema_object_id),
+        "peer without catalogue hash should receive the full catalogue; messages: {messages:?}"
+    );
+}
+
+#[test]
+fn existing_peer_with_stale_catalogue_hash_gets_full_catalogue_replay_on_reconnect() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
+
+    let empty_catalogue_hash = core.schema_manager().catalogue_state_hash();
+    let peer_id = ClientId::new();
+
+    core.ensure_client_as_peer_with_catalogue_state_hash(peer_id, Some(&empty_catalogue_hash));
+    core.batched_tick();
+    let initial_messages = core.sync_sender().take();
+    assert_eq!(
+        catalogue_replay_to_client_count(&initial_messages, peer_id),
+        0,
+        "peer should not receive catalogue while its empty hash matches core"
+    );
+
+    let schema_object_id = core.persist_schema();
+    core.batched_tick();
+    let live_push_that_offline_peer_missed = core.sync_sender().take();
+    assert!(
+        has_catalogue_replay_to_client(
+            &live_push_that_offline_peer_missed,
+            peer_id,
+            schema_object_id
+        ),
+        "core publish should still queue live catalogue propagation to connected peer clients"
+    );
+
+    core.ensure_client_as_peer_with_catalogue_state_hash(peer_id, Some(&empty_catalogue_hash));
+    core.batched_tick();
+
+    let reconnect_messages = core.sync_sender().take();
+    assert!(
+        has_catalogue_replay_to_client(&reconnect_messages, peer_id, schema_object_id),
+        "existing peer with stale hash should receive replay on reconnect; messages: {reconnect_messages:?}"
+    );
+}
 // =========================================================================
 // Foreign Key — No Write-Time Validation
 // =========================================================================
