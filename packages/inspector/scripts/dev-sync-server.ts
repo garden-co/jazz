@@ -27,7 +27,7 @@ export default async function runServer() {
     adminSecret: serverHandle.adminSecret,
     env: TEST_ENV,
     userBranch: TEST_BRANCH,
-    schemaDir: join(import.meta.dirname ?? __dirname, "../tests/browser"),
+    schemaDir: join(import.meta.dirname, "../tests/browser"),
   });
 
   const context = createJazzContext({
