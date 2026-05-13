@@ -557,7 +557,9 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
   const ts = nowMicros();
   for (let i = 0; i < config.users; i += 1) {
     reportLoopProgress("seed users", i, config.users);
-    const { id } = await db.insert(usersTable, {
+    const {
+      value: { id },
+    } = await db.insert(usersTable, {
       display_name: `User ${i}`,
       email: `user${i}@bench.test`,
     });
@@ -566,7 +568,9 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
 
   for (let i = 0; i < config.organizations; i += 1) {
     reportLoopProgress("seed organizations", i, config.organizations);
-    const { id } = await db.insert(organizationsTable, {
+    const {
+      value: { id },
+    } = await db.insert(organizationsTable, {
       name: `Org ${i}`,
       created_at: ts + i,
     });
@@ -584,7 +588,9 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
 
   for (let i = 0; i < config.projects; i += 1) {
     reportLoopProgress("seed projects", i, config.projects);
-    const { id } = await db.insert(projectsTable, {
+    const {
+      value: { id },
+    } = await db.insert(projectsTable, {
       organization_id: organizations[i % organizations.length],
       name: `Project ${i}`,
       archived: false,
@@ -598,7 +604,9 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
     reportLoopProgress("seed tasks", i, config.tasks);
     const projectIdx = i % projects.length;
     const assigneeIdx = i % users.length;
-    const { id } = await db.insert(tasksTable, {
+    const {
+      value: { id },
+    } = await db.insert(tasksTable, {
       project_id: projects[projectIdx],
       title: `Task ${i}`,
       status: statuses[i % statuses.length],
@@ -986,7 +994,9 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
       const batch = await measureBatchedLatency(insertCount - i, async (batchIndex) => {
         const currentIndex = i + batchIndex;
         const taskIdx = rng.nextInt(state.taskIds.length);
-        const { id } = await db.insert(commentsTable, {
+        const {
+          value: { id },
+        } = await db.insert(commentsTable, {
           task_id: state.taskIds[taskIdx],
           author_id: state.users[rng.nextInt(state.users.length)],
           body: `b1_insert_comment_${currentIndex}`,
