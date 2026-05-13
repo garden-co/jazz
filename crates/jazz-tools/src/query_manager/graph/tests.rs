@@ -937,6 +937,72 @@ fn compile_relation_ir_with_array_subqueries_adds_array_nodes() {
 }
 
 #[test]
+fn compile_relation_ir_with_nested_array_subqueries_tracks_all_tables() {
+    let mut schema = join_schema();
+    schema.insert(
+        TableName::new("comments"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("text", ColumnType::Text),
+            ColumnDescriptor::new("post_id", ColumnType::Integer),
+        ])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("reactions"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("emoji", ColumnType::Text),
+            ColumnDescriptor::new("comment_id", ColumnType::Integer),
+        ])
+        .into(),
+    );
+    let relation = RelExpr::TableScan {
+        table: TableName::new("users"),
+    };
+    let branches = vec!["main".to_string()];
+
+    let query_with_arrays = QueryBuilder::new("users")
+        .with_array("posts", |posts| {
+            posts
+                .from("posts")
+                .correlate("author_id", "users.id")
+                .with_array("comments", |comments| {
+                    comments
+                        .from("comments")
+                        .correlate("post_id", "posts.id")
+                        .with_array("reactions", |reactions| {
+                            reactions
+                                .from("reactions")
+                                .correlate("comment_id", "comments.id")
+                        })
+                })
+        })
+        .build();
+
+    let graph = QueryGraph::compile_relation_ir_with_features(
+        &relation,
+        &schema,
+        &branches,
+        None,
+        RelationCompileFeatures {
+            include_deleted: false,
+            array_subqueries: query_with_arrays.array_subqueries,
+            select_columns: None,
+        },
+        RowPolicyMode::PermissiveLocal,
+    )
+    .expect("Graph should compile");
+
+    let tracked_tables: Vec<_> = graph
+        .array_subquery_tables
+        .iter()
+        .map(|(_, table)| table.as_str())
+        .collect();
+    assert_eq!(tracked_tables, vec!["posts", "comments", "reactions"]);
+}
+
+#[test]
 fn compile_relation_ir_with_select_columns_adds_project_node() {
     let schema = test_schema();
     let relation = RelExpr::TableScan {
