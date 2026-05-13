@@ -1270,15 +1270,7 @@ impl SyncManager {
                 let object_id = entry.object_id;
                 let branch_name = BranchName::new("main");
                 match client.role {
-                    ClientRole::Peer | ClientRole::Admin => {
-                        self.apply_payload_from_client(
-                            storage,
-                            client_id,
-                            payload,
-                            AuthoritativeFateRecording::Skip,
-                        );
-                    }
-                    ClientRole::Backend => {
+                    ClientRole::Peer | ClientRole::Backend => {
                         self.outbox.push(OutboxEntry {
                             destination: Destination::Client(client_id),
                             payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
@@ -1286,6 +1278,14 @@ impl SyncManager {
                                 branch_name,
                             }),
                         });
+                    }
+                    ClientRole::Admin => {
+                        self.apply_payload_from_client(
+                            storage,
+                            client_id,
+                            payload,
+                            AuthoritativeFateRecording::Skip,
+                        );
                     }
                     ClientRole::User => {
                         let Some(_session) = &client.session else {

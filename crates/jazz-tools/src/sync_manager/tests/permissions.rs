@@ -333,3 +333,58 @@ fn row_batch_created_from_user_with_older_exact_history_match_skips_permission_c
         "idempotent replay of an older history row should re-emit its cached settlement, got {outbox:?}",
     );
 }
+
+#[test]
+fn catalogue_update_from_peer_client_is_denied() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::GlobalServer);
+    let mut io = MemoryStorage::new();
+    let peer_id = ClientId::new();
+    let catalogue_object_id = ObjectId::new();
+
+    add_client(&mut sm, &io, peer_id);
+    sm.set_client_role(peer_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let entry = CatalogueEntry {
+        object_id: catalogue_object_id,
+        metadata: HashMap::from([(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CatalogueSchema.to_string(),
+        )]),
+        content: b"edge-owned-catalogue-entry".to_vec(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(peer_id),
+        payload: SyncPayload::CatalogueEntryUpdated {
+            entry: entry.clone(),
+        },
+    });
+    sm.process_inbox(&mut io);
+
+    assert!(
+        io.load_catalogue_entry(catalogue_object_id)
+            .expect("catalogue lookup should succeed")
+            .is_none(),
+        "core must not persist catalogue entries sent by peer clients"
+    );
+    assert!(
+        sm.take_pending_catalogue_updates().is_empty(),
+        "denied peer catalogue writes must not reach SchemaManager"
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.iter().any(|message| matches!(
+            message,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                    object_id,
+                    ..
+                }),
+            } if *id == peer_id && *object_id == catalogue_object_id
+        )),
+        "peer client should receive CatalogueWriteDenied; outbox: {outbox:?}"
+    );
+}
