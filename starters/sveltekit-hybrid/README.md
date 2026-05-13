@@ -51,15 +51,16 @@ src/
 ## How it works
 
 `src/routes/+layout.svelte` watches the Better Auth session via
-`authClient.useSession()`. When there is no session, it calls
-`BrowserAuthSecretStore.getOrCreateSecret()` and passes the secret to
-`createJazzClient` as `secret`. When a session exists, it
-fetches a Better Auth JWT and creates the client with `jwtToken` instead.
-
-The layout uses a `clientAuth` gate so the `<JazzSvelteProvider>` only
-renders when the active client matches the current session state. This
-prevents a race where the UI would briefly interact with the stale
-anonymous client during a sign-up → authenticated transition.
+`authClient.useSession()` and forwards the result to
+`JazzClientProvider.svelte`. That provider holds a `LocalFirstAuth`
+instance (from `jazz-tools/svelte`) for the anonymous path and fetches
+a Better Auth JWT for the authenticated path. A `$derived` picks the
+right `createJazzClient(...)` config — `secret` from `auth.secret`
+when no session, `jwtToken` when there is one — so the
+`<JazzSvelteProvider>` only renders once the active client matches the
+current session state. That prevents a race where the UI would briefly
+interact with a stale anonymous client during a sign-up → authenticated
+transition.
 
 ### Identity continuity
 
