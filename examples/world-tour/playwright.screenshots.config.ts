@@ -5,7 +5,6 @@ export default defineConfig({
   testMatch: "screenshots.test.ts",
   timeout: 180_000,
   reporter: "list",
-  globalSetup: "./e2e/global-setup.ts",
   use: {
     baseURL: "http://localhost:5176",
   },
@@ -26,9 +25,6 @@ export default defineConfig({
     reuseExistingServer: false,
     cwd: import.meta.dirname,
     env: {
-      VITE_JAZZ_SERVER_URL: `http://127.0.0.1:19879`,
-      VITE_JAZZ_SERVER_PORT: "19879",
-      VITE_JAZZ_APP_ID: "00000000-0000-0000-0000-000000000100",
       VITE_E2E: "true",
     },
   },

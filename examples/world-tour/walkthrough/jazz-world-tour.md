@@ -9,7 +9,7 @@ paginate: true
 
 # How World Tour uses Jazz
 
-A walkthrough of a tour management app built with Jazz, Vue 3, and MapLibre GL. Band members manage stops, the public sees a live globe.
+A walkthrough of a tour management app built with Jazz and Vue 3. Band members manage stops, the public sees a live globe.
 
 ![bg right:45% 90%](screenshots/02-public-globe.png)
 
@@ -51,6 +51,8 @@ The schema is written directly in `schema.ts`. Running `pnpm build` runs `jazz-t
 
 **[`schema.ts`](../schema.ts)**
 
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+
 ```typescript
 import { schema as s } from "jazz-tools";
 
@@ -63,6 +65,9 @@ const schema = {
     lng: s.float(),
     capacity: s.int().optional(),
   }),
+```
+
+```typescript
   stops: s.table({
     bandId: s.ref("bands"),
     venueId: s.ref("venues"),
@@ -77,6 +82,8 @@ type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 ```
 
+</div>
+
 `s.ref()` declares foreign keys. `s.enum()` maps to a union type. `.optional()` makes a field nullable.
 
 ---
@@ -87,16 +94,24 @@ One call to `createJazzClient` initialises the WASM worker, opens the OPFS datab
 
 **[`src/main.ts`](../src/main.ts)**
 
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+
 ```typescript
 import { createApp, h } from "vue";
 import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+import { BrowserAuthSecretStore } from "jazz-tools";
 import App from "./App.vue";
 
-const client = createJazzClient({
-  appId: "019d29f4-dc2a-74c1-bc08-a22a7fc2204a",
-  serverUrl: "http://localhost:4200",
-});
+const secret = await BrowserAuthSecretStore.getOrCreateSecret();
 
+const client = createJazzClient({
+  appId: import.meta.env.VITE_JAZZ_APP_ID,
+  serverUrl: import.meta.env.VITE_JAZZ_SERVER_URL,
+  secret,
+});
+```
+
+```typescript
 const vueApp = createApp({
   render() {
     return h(
@@ -104,7 +119,7 @@ const vueApp = createApp({
       { client },
       {
         default: () => h(App),
-        fallback: () => h("p", "Loading..."),
+        fallback: () => h("p", "Loading globe..."),
       },
     );
   },
@@ -112,6 +127,8 @@ const vueApp = createApp({
 
 vueApp.mount("#app");
 ```
+
+</div>
 
 ---
 
@@ -134,7 +151,7 @@ Used across the app: `App.vue`, `StopDetail`, `StopCreateForm`, `TourCalendar`, 
 
 ![bg right:38% 85%](screenshots/03-logged-in-globe.png)
 
-`useAll` is a **Vue-specific** composable that wraps `db.subscribeAll`. It returns a `ShallowRef` that stays in sync with the live local database. Every write (from any user, anywhere) triggers a Vue re-render automatically.
+`useAll` is a **Vue-specific** composable that wraps `db.subscribeAll`. It returns a deeply reactive ref that stays in sync with the live local database — nested rows and relations included. Every write (from any user, anywhere) triggers a Vue re-render automatically.
 
 **[`src/App.vue`](../src/App.vue)**
 
@@ -163,19 +180,19 @@ The same `useAll` hook drives different views depending on who's logged in. Band
 **[`src/App.vue`](../src/App.vue)**
 
 ```typescript
-const baseStopsQuery = app.stops
-  .where({ date: { gte: today, lte: threeWeeks } })
-  .include({ venue: true })
-  .orderBy("date", "asc")
-  .limit(12);
-
-const confirmedStopsQuery = app.stops
-  .where({ status: "confirmed", date: { gte: today, lte: threeWeeks } })
-  .include({ venue: true })
-  .orderBy("date", "asc")
-  .limit(12);
-
-const stopsQuery = canEdit ? baseStopsQuery : confirmedStopsQuery;
+const stopsQuery = computed(() => {
+  const base = app.stops
+    .where({ date: { gte: today, lte: threeWeeks } })
+    .include({ venue: true })
+    .orderBy("date", "asc")
+    .limit(12);
+  const confirmed = app.stops
+    .where({ status: "confirmed", date: { gte: today, lte: threeWeeks } })
+    .include({ venue: true })
+    .orderBy("date", "asc")
+    .limit(12);
+  return canEdit ? base : confirmed;
+});
 const stopsData = useAll(stopsQuery);
 ```
 
@@ -231,9 +248,10 @@ Each component owns the Jazz calls it needs. No prop drilling for data, no event
 
   function save() {
     db.update(app.stops, props.stop.id, {
-      date: new Date(editDate.value),
+      date: parseLocalDate(editDate.value),
       status: editStatus.value,
       publicDescription: editDescription.value,
+      privateNotes: editNotes.value || undefined,
     });
   }
 
@@ -260,7 +278,7 @@ Each component owns the Jazz calls it needs. No prop drilling for data, no event
   const venues = useAll(app.venues); // live venue list, no props needed
 
   function submit() {
-    const venue = db.insert(app.venues, {
+    const { value: venue } = db.insert(app.venues, {
       name: newVenue.name,
       city: newVenue.city,
       country: newVenue.country,
@@ -290,7 +308,7 @@ No `await`. The insert returns immediately because writes hit the local DB first
 
 ```typescript
 const db = useDb();
-const bandsWithLogo = useAll(app.bands.include({ logoFile: { parts: true } }));
+const bandsWithLogo = useAll(app.bands.include({ logoFile: { parts: true } }).limit(1));
 
 // Upload: binary file → Jazz file → link to band
 async function onFileSelected(event: Event) {
