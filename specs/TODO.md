@@ -63,6 +63,10 @@
 - [**storage-limits-and-eviction**](todo/ideas/1_mvp/storage-limits-and-eviction.md) — Bounded storage with LRU eviction of cold data on clients and edge servers, with lazy re-fetch from upstream.
 - [**sync-protocol-reliability**](todo/ideas/1_mvp/sync-protocol-reliability.md) — Fix critical reliability gaps in the sync path and unify the transport layer across network sync (client-server), worker communication (main thread-worker), and peer replication (server-server).
 
+### Later
+
+- [**dedupe-array-subquery-tables**](todo/ideas/3_later/dedupe-array-subquery-tables.md) — `QueryGraph.array_subquery_tables` is a `Vec<(NodeId, TableName)>` populated by `compile.rs` and consumed by `involves_table` / `mark_dirty_for_table`. The list can carry duplicate `(node_id, table)` pairs — already possible pre-existing, and more likely now that nested array subqueries register their tables against the outer node. Consumers tolerate duplicates (idempotent dirty bits, short-circuit `.iter().any`), so the cost is a few wasted bool writes per mutation. Worth deduping defensively to keep the list small and make consumer code easier to reason about.
+
 ## Projects
 
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
