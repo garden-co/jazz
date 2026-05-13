@@ -1,5 +1,6 @@
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type {
+  BatchFate,
   DirectInsertResult,
   DirectMutationResult,
   LocalBatchRecord,
@@ -43,6 +44,7 @@ export interface JazzRnRuntimeBinding {
   ): string;
   loadLocalBatchRecord?(batchId: string): string | null;
   loadLocalBatchRecords?(): string;
+  loadBatchFate(batchId: string): string | null | undefined;
   waitForBatch(batchId: string, tier: string): Promise<void>;
   onMutationError(callback: { onError(eventJson: string): void }): void;
   onBatchedTickNeeded(
@@ -286,6 +288,15 @@ export class JazzRnRuntimeAdapter implements Runtime {
     try {
       const recordsJson = this.requireBatchRecordMethod("loadLocalBatchRecords")();
       return JSON.parse(recordsJson) as LocalBatchRecord[];
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  loadBatchFate(batch_id: string): BatchFate | null {
+    try {
+      const fateJson = this.binding.loadBatchFate(batch_id);
+      return fateJson ? (JSON.parse(fateJson) as BatchFate) : null;
     } catch (error) {
       throw normalizeJazzRnError(error);
     }

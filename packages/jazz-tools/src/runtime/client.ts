@@ -69,7 +69,7 @@ export interface Runtime {
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   sealBatch(batch_id: string): void;
   waitForBatch(batch_id: string, tier: string): Promise<void>;
-  loadBatchFate?(batch_id: string): BatchFate | null;
+  loadBatchFate(batch_id: string): BatchFate | null;
   replayBatchRejection?(batch_id: string, code: string, reason: string): void;
   discardLocalBatch?(batch_id: string): boolean;
   query(
@@ -1087,10 +1087,6 @@ abstract class BatchHandleBase {
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
     return this.client.localBatchRecord(batchId);
   }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
 }
 
 /**
@@ -1305,10 +1301,6 @@ export class SessionClient {
   localBatchRecord(batchId: string): LocalBatchRecord | null {
     return this.client.localBatchRecord(batchId);
   }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
 }
 
 /**
@@ -1330,6 +1322,10 @@ export class JazzClient {
   private readonly rejectedBatchRollbackRecords = new Map<string, LocalBatchRecord>();
   private readonly hydratedWorkerBatchIds = new Set<string>();
   private readonly hydratedWorkerBatchRecords = new Map<string, LocalBatchRecord>();
+  /**
+   * Keeps track of batches/transactions that were completed without issuing any writes to the runtime.
+   * Necessary to resolve {@link waitForBatch} promises on these batches.
+   */
   private readonly completedEmptyBatchIds = new Set<string>();
   private shutdownPromise: Promise<void> | null = null;
   private cachedRuntimeSchemaHash: string | null = null;
@@ -1585,26 +1581,8 @@ export class JazzClient {
     return this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
   }
 
-  localBatchRecords(): LocalBatchRecord[] {
-    const records = new Map(
-      this.requireBatchRecordMethod("loadLocalBatchRecords")().map((record) => [
-        record.batchId,
-        record,
-      ]),
-    );
-    for (const [batchId, record] of this.hydratedWorkerBatchRecords) {
-      records.set(batchId, mergeLocalBatchRecords(records.get(batchId), record) ?? record);
-    }
-    for (const [batchId, record] of this.replayedRejectedBatchRecords) {
-      records.set(batchId, mergeLocalBatchRecords(records.get(batchId), record) ?? record);
-    }
-    return [...records.values()].sort((left, right) => left.batchId.localeCompare(right.batchId));
-  }
-
   batchFate(batchId: string): BatchFate | null {
-    const runtimeFate = this.runtime.loadBatchFate
-      ? this.runtime.loadBatchFate(batchId)
-      : (this.localBatchRecord(batchId)?.latestSettlement ?? null);
+    const runtimeFate = this.runtime.loadBatchFate(batchId);
     const hydratedFate = this.hydratedWorkerBatchRecords.get(batchId)?.latestSettlement ?? null;
     const replayedFate = this.replayedRejectedBatchRecords.get(batchId)?.latestSettlement ?? null;
     return mergeBatchFates(mergeBatchFates(runtimeFate, hydratedFate), replayedFate);
@@ -1620,16 +1598,7 @@ export class JazzClient {
   }
 
   hasPendingHydratedBatchReconciliation(tier: DurabilityTier): boolean {
-    for (const batchId of this.hydratedWorkerBatchIds) {
-      const settlement = this.batchFate(batchId);
-      if (rejectionFromSettlement(settlement)) {
-        continue;
-      }
-      if (!settlementSatisfiesTier(settlement, tier)) {
-        return true;
-      }
-    }
-    return false;
+    return this.pendingHydratedBatchReconciliationIds(tier).length > 0;
   }
 
   pendingHydratedBatchReconciliationIds(tier: DurabilityTier): string[] {
@@ -1652,10 +1621,6 @@ export class JazzClient {
 
   hasHandledRejectedBatch(batchId: string): boolean {
     return this.acknowledgedRejectedBatchErrors.has(batchId);
-  }
-
-  hasWaitHandlerForBatch(batchId: string): boolean {
-    return this.waitHandledBatchIds.has(batchId);
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
@@ -1869,12 +1834,9 @@ export class JazzClient {
     return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
   }
 
-  private requireBatchRecordMethod<
-    T extends keyof Pick<
-      Runtime,
-      "loadLocalBatchRecord" | "loadLocalBatchRecords" | "loadBatchFate"
-    >,
-  >(method: T): NonNullable<Runtime[T]> {
+  private requireBatchRecordMethod<T extends keyof Pick<Runtime, "loadLocalBatchRecord">>(
+    method: T,
+  ): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
     if (!runtimeMethod) {
       throw new Error(`${String(method)} is not supported by this runtime`);
@@ -2602,11 +2564,6 @@ export class JazzClient {
   }
 
   async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
-    const acknowledgedRejection = this.acknowledgedRejectedBatchErrors.get(batchId);
-    if (acknowledgedRejection) {
-      throw acknowledgedRejection;
-    }
-
     if (this.completedEmptyBatchIds.has(batchId)) {
       return;
     }

@@ -793,7 +793,11 @@ export class Db {
    * Unsubscribers for {@link Db.clients}'s {@link JazzClient.onMutationError} listeners
    */
   private readonly clientMutationErrorUnsubscribers = new Map<JazzClient, () => void>();
-  private readonly pendingWorkerMutationErrorEvents: Array<{
+  /**
+   * Persists mutation errors thrown before an {@link onMutationError} listener was attached.
+   * Those mutation errors are replayed when `onMutationError` is called.
+   */
+  private readonly pendingMutationErrorEvents: Array<{
     client: JazzClient;
     event: MutationErrorEvent;
   }> = [];
@@ -1059,9 +1063,6 @@ export class Db {
    * {@link Db.mutationErrorListeners} are notified.
    */
   private attachMutationErrorHandler(client: JazzClient): void {
-    if (this.mutationErrorListeners.size === 0 && !this.worker) {
-      return;
-    }
     if (this.clientMutationErrorUnsubscribers.has(client)) {
       return;
     }
@@ -1069,7 +1070,7 @@ export class Db {
       client,
       client.onMutationError((event) => {
         if (this.mutationErrorListeners.size === 0) {
-          this.pendingWorkerMutationErrorEvents.push({ client, event });
+          this.pendingMutationErrorEvents.push({ client, event });
           return;
         }
         for (const listener of this.mutationErrorListeners) {
@@ -1144,9 +1145,7 @@ export class Db {
       client.hydrateLocalBatchRecords(batches);
     });
     bridge.onMutationErrorReplay((event) => {
-      setTimeout(() => {
-        this.handleWorkerMutationErrorReplay(client, event);
-      }, 0);
+      this.handleWorkerMutationErrorReplay(client, event);
     });
     this.workerBridge = bridge;
     const bridgeReady = bridge
@@ -1159,9 +1158,6 @@ export class Db {
   private handleWorkerMutationErrorReplay(client: JazzClient, event: MutationErrorEvent): void {
     const batch = event.batch;
     if (client.hasHandledRejectedBatch(batch.batchId)) {
-      return;
-    }
-    if (client.hasWaitHandlerForBatch(batch.batchId)) {
       return;
     }
     const runtimeRecord = client.runtimeLocalBatchRecord(batch.batchId);
@@ -1181,7 +1177,7 @@ export class Db {
       return;
     }
     if (this.mutationErrorListeners.size === 0) {
-      this.pendingWorkerMutationErrorEvents.push({ client, event });
+      this.pendingMutationErrorEvents.push({ client, event });
       client.markMutationErrorHandled(event);
       return;
     }
@@ -1683,14 +1679,15 @@ export class Db {
    * {@link WriteHandle.wait}.
    * This callback is called even after app restarts (which does not
    * happen with {@link WriteHandle.wait}).
+   * @returns an unsubscribe callback
    */
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
     this.mutationErrorListeners.add(listener);
     for (const client of this.clients.values()) {
       this.attachMutationErrorHandler(client);
     }
-    while (this.pendingWorkerMutationErrorEvents.length > 0) {
-      const { client, event } = this.pendingWorkerMutationErrorEvents.shift()!;
+    while (this.pendingMutationErrorEvents.length > 0) {
+      const { client, event } = this.pendingMutationErrorEvents.shift()!;
       listener(event);
       client.markMutationErrorHandled(event);
     }
