@@ -76,12 +76,24 @@ describe("deep-include reactivity", () => {
     );
 
     const initialSnapshotCount = deltas.length;
-    db.insert(app.user_checks, { todo_id: todoId });
+    const {
+      value: { id: userCheckId },
+    } = db.insert(app.user_checks, { todo_id: todoId });
 
     await waitForCondition(
-      () => deltas.length > initialSnapshotCount,
+      () => {
+        if (deltas.length <= initialSnapshotCount) return false;
+        const latest = deltas[deltas.length - 1]!;
+        const todo = latest.all[0] as
+          | undefined
+          | {
+              user_checksViaTodo?: Array<{ id: string }>;
+            };
+        const userChecks = todo?.user_checksViaTodo;
+        return Array.isArray(userChecks) && userChecks.some((check) => check.id === userCheckId);
+      },
       4000,
-      "expected depth-1 subscription to fire on user_checks insert",
+      "expected depth-1 subscription to deliver fresh nested user_checks",
     );
 
     unsubscribe();
@@ -108,12 +120,26 @@ describe("deep-include reactivity", () => {
     );
 
     const initialSnapshotCount = deltas.length;
-    db.insert(app.user_checks, { todo_id: todoId });
+    const {
+      value: { id: userCheckId },
+    } = db.insert(app.user_checks, { todo_id: todoId });
 
     await waitForCondition(
-      () => deltas.length > initialSnapshotCount,
+      () => {
+        if (deltas.length <= initialSnapshotCount) return false;
+        const latest = deltas[deltas.length - 1]!;
+        const org = latest.all[0] as
+          | undefined
+          | {
+              todosViaOrg?: Array<{
+                user_checksViaTodo?: Array<{ id: string }>;
+              }>;
+            };
+        const userChecks = org?.todosViaOrg?.[0]?.user_checksViaTodo;
+        return Array.isArray(userChecks) && userChecks.some((check) => check.id === userCheckId);
+      },
       4000,
-      "expected depth-2 subscription to fire on user_checks insert",
+      "expected depth-2 subscription to deliver fresh nested user_checks",
     );
 
     unsubscribe();
