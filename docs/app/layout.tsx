@@ -17,6 +17,16 @@ export const metadata: Metadata = {
         ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
         : "http://localhost:3000"),
   ),
+  alternates: {
+    types: {
+      "application/rss+xml": [
+        {
+          title: "Jazz Blog",
+          url: "/rss.xml",
+        },
+      ],
+    },
+  },
 };
 
 export default function Layout({ children }: LayoutProps<"/">) {
