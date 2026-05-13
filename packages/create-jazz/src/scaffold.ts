@@ -19,6 +19,12 @@ export const KNOWN_STARTERS = [
   "sveltekit-betterauth",
   "sveltekit-localfirst",
   "sveltekit-hybrid",
+  "react-betterauth",
+  "react-localfirst",
+  "react-hybrid",
+  "ts-betterauth",
+  "ts-localfirst",
+  "ts-hybrid",
 ] as const;
 export type StarterName = (typeof KNOWN_STARTERS)[number];
 
