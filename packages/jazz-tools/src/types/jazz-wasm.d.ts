@@ -121,7 +121,6 @@ declare module "jazz-wasm" {
     delete(objectId: string): { batchId: string };
     deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
     loadLocalBatchRecord(batchId: string): LocalBatchRecord | null;
-    loadLocalBatchRecordStorageRow(batchId: string): Uint8Array | null;
     hydrateLocalBatchRecordStorageRow(bytes: Uint8Array): void;
     loadLocalBatchRecords(): LocalBatchRecord[];
     acknowledgeRejectedBatch(batchId: string): boolean;
@@ -131,9 +130,6 @@ declare module "jazz-wasm" {
     discardLocalBatch(batchId: string): boolean;
     sealBatch(batchId: string): void;
     waitForBatch(batchId: string, tier: string): Promise<void>;
-    retransmitLocalBatch(batchId: string): void;
-    replayLocalBatchPayloads(batchId: string): Uint8Array[];
-    reconcileLocalBatchWithServer(batchId: string): void;
     query(
       queryJson: string,
       sessionJson?: string | null,
@@ -161,7 +157,6 @@ declare module "jazz-wasm" {
     createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
     addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
-    reconcileLocalBatchWithServer?(batchId: string): void;
     batchedTick?(): void;
     addClient(): string;
     getSchema(): unknown;

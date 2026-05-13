@@ -63,7 +63,6 @@ export interface Runtime {
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
-  loadLocalBatchRecordStorageRow?(batch_id: string): Uint8Array | null;
   hydrateLocalBatchRecordStorageRow?(bytes: Uint8Array): void;
   loadLocalBatchRecords?(): LocalBatchRecord[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
@@ -73,9 +72,6 @@ export interface Runtime {
   loadBatchFate?(batch_id: string): BatchFate | null;
   replayBatchRejection?(batch_id: string, code: string, reason: string): void;
   discardLocalBatch?(batch_id: string): boolean;
-  retransmitLocalBatch?(batch_id: string): void;
-  replayLocalBatchPayloads?(batch_id: string): Uint8Array[];
-  reconcileLocalBatchWithServer?(batch_id: string): void;
   query(
     query_json: string,
     session_json?: string | null,
@@ -109,7 +105,6 @@ export interface Runtime {
   batchedTick?(): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
-  reconcileLocalBatchWithServer?(batch_id: string): void;
   addClient(): string;
   /**
    * When true, runtime row outputs are already aligned to the declared schema order.

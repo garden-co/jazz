@@ -1589,24 +1589,6 @@ impl WasmRuntime {
         }
     }
 
-    #[wasm_bindgen(js_name = loadLocalBatchRecordStorageRow)]
-    pub fn load_local_batch_record_storage_row(&self, batch_id: &str) -> Result<JsValue, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let core = self.core.borrow();
-        let record = core
-            .local_batch_record(batch_id)
-            .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
-        match record {
-            Some(record) => {
-                let bytes = record
-                    .encode_storage_row()
-                    .map_err(|e| JsError::new(&format!("Encode local batch record failed: {e}")))?;
-                Ok(Uint8Array::from(bytes.as_slice()).into())
-            }
-            None => Ok(JsValue::null()),
-        }
-    }
-
     #[wasm_bindgen(js_name = hydrateLocalBatchRecordStorageRow)]
     pub fn hydrate_local_batch_record_storage_row(&self, bytes: Uint8Array) -> Result<(), JsError> {
         let mut data = vec![0; bytes.length() as usize];
@@ -1686,16 +1668,6 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Seal batch failed: {e}")))
     }
 
-    #[wasm_bindgen(js_name = retransmitLocalBatch)]
-    pub fn retransmit_local_batch(&self, batch_id: &str) -> Result<(), JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let mut core = self.core.borrow_mut();
-        core.retransmit_local_batch_to_servers(batch_id);
-        core.batched_tick();
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = replayLocalBatchPayloads)]
     pub fn replay_local_batch_payloads(&self, batch_id: &str) -> Result<js_sys::Array, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let core = self.core.borrow();
@@ -1711,7 +1683,6 @@ impl WasmRuntime {
         Ok(array)
     }
 
-    #[wasm_bindgen(js_name = reconcileLocalBatchWithServer)]
     pub fn reconcile_local_batch_with_server(&self, batch_id: &str) -> Result<(), JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let mut core = self.core.borrow_mut();
