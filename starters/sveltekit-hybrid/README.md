@@ -169,9 +169,9 @@ manually:
    `src/lib/auth-client.ts`, `src/routes/signin/`, and
    `src/routes/signup/`.
 2. In `src/routes/+layout.svelte`, remove the `authClient`, `session`,
-   `clientAuth`, and `ready` logic — reduce the effect to: resolve
-   `BrowserAuthSecretStore.getOrCreateSecret()`, build a `DbConfig` with
-   `auth: { localFirstSecret: secret }`, and call `createJazzClient`.
+   `clientAuth`, and `ready` logic — reduce it to: instantiate
+   `LocalFirstAuth` from `jazz-tools/svelte` and `$derived` a client
+   from `auth.secret`.
 3. In `src/routes/+page.svelte`, remove the auth-nav block and the
    `handleSignOut` function — the page renders just the header and the
    `<TodoWidget />`.
