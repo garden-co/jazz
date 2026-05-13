@@ -14,7 +14,7 @@ export type { DocResult, DocsBackend, PageInfo, SearchResult };
 function emitWarning(): void {
   process.stderr.write(
     "node:sqlite not available — using basic text search. " +
-      "Upgrade to Node >=22.13 (current LTS) for better results.\n",
+      "Full-text search requires a runtime with node:sqlite + FTS5.\n",
   );
 }
 
