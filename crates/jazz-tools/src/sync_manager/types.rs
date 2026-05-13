@@ -232,7 +232,7 @@ pub enum SyncError {
         object_id: ObjectId,
         branch_name: BranchName,
     },
-    /// User clients cannot write catalogue objects.
+    /// This client role cannot write catalogue objects.
     CatalogueWriteDenied {
         object_id: ObjectId,
         branch_name: BranchName,
