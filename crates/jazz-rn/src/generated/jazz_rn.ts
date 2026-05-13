@@ -821,6 +821,7 @@ export interface RnRuntimeInterface {
     writeContextJson: string | undefined,
     objectId: string | undefined
   ) /*throws*/ : string;
+  loadBatchFate(batchId: string) /*throws*/ : string | undefined;
   loadLocalBatchRecord(batchId: string) /*throws*/ : string | undefined;
   loadLocalBatchRecords() /*throws*/ : string;
   /**
@@ -1212,6 +1213,24 @@ export class RnRuntime
             FfiConverterString.lower(valuesJson),
             FfiConverterOptionalString.lower(writeContextJson),
             FfiConverterOptionalString.lower(objectId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  loadBatchFate(batchId: string): string | undefined /*throws*/ {
+    return FfiConverterOptionalString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_batch_fate(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            FfiConverterString.lower(batchId),
             callStatus
           );
         },
@@ -1856,6 +1875,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_batch_fate() !==
+    37612
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_load_batch_fate'
     );
   }
   if (

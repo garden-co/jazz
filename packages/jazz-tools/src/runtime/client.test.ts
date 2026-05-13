@@ -240,8 +240,15 @@ describe("JazzClient worker batch hydration", () => {
       return runtimeRecord;
     });
     runtime.loadLocalBatchRecords.mockReturnValue([runtimeRecord]);
+    runtime.loadBatchFate.mockImplementation((requestedBatchId: string) => {
+      if (requestedBatchId !== batchId) return null;
+      return {
+        kind: "durableDirect",
+        batchId,
+        confirmedTier: "local",
+      };
+    });
     runtime.waitForBatch.mockImplementation(() => new Promise(() => {}));
-    delete (runtime as Partial<Runtime>).loadBatchFate;
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
     client.hydrateLocalBatchRecords([

@@ -20,6 +20,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
+    loadBatchFate: vi.fn(() => null),
     waitForBatch: vi.fn(async () => undefined),
     insert: vi.fn((_table, _valuesJson) =>
       JSON.stringify({ id: "row-1", values: [], batchId: "batch-1" }),
@@ -514,6 +515,14 @@ describe("JazzRnRuntimeAdapter", () => {
           },
         ]),
       ),
+      loadBatchFate: vi.fn(() =>
+        JSON.stringify({
+          kind: "rejected",
+          batchId: "batch-1",
+          code: "WriteRejected",
+          reason: "nope",
+        }),
+      ),
       acknowledgeRejectedBatch: vi.fn(() => true),
       sealBatch: vi.fn(),
     });
@@ -537,6 +546,12 @@ describe("JazzRnRuntimeAdapter", () => {
         },
       },
     ]);
+    expect(adapter.loadBatchFate("batch-1")).toEqual({
+      kind: "rejected",
+      batchId: "batch-1",
+      code: "WriteRejected",
+      reason: "nope",
+    });
     expect(adapter.acknowledgeRejectedBatch("batch-1")).toBe(true);
     const mutationErrorListener = vi.fn();
     adapter.onMutationError(mutationErrorListener);
@@ -558,6 +573,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
     expect(binding.loadLocalBatchRecord).toHaveBeenCalledWith("batch-1");
     expect(binding.loadLocalBatchRecords).toHaveBeenCalledTimes(1);
+    expect(binding.loadBatchFate).toHaveBeenCalledWith("batch-1");
     expect(binding.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-1");
     expect(binding.onMutationError).toHaveBeenCalledTimes(1);
     expect(mutationErrorListener).toHaveBeenCalledWith({
