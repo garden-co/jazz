@@ -150,7 +150,7 @@ describe("Db transactions", () => {
     const updated = tx.update(table, "todo-1", { done: true });
     const deleted = tx.delete(table, "todo-1");
 
-    expect(beginTransactionInternal).toHaveBeenCalledWith();
+    expect(beginTransactionInternal).toHaveBeenCalledWith(undefined, undefined);
     expect(tx.batchId()).toBe("batch-tx");
     expect(inserted).toEqual({
       id: "todo-1",
@@ -995,7 +995,7 @@ describe("Db transactions", () => {
     const updated = batch.update(table, "todo-direct-1", { done: true });
     const deleted = batch.delete(table, "todo-direct-1");
 
-    expect(beginBatchInternal).toHaveBeenCalledWith();
+    expect(beginBatchInternal).toHaveBeenCalledWith(undefined, undefined);
     expect(batch.batchId()).toBe("batch-direct");
     expect(inserted).toEqual({
       id: "todo-direct-1",
