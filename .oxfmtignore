@@ -8,3 +8,4 @@ examples/docs/*/schema/app.ts
 dev/benchmarks/**/*.json
 dev/benchmarks/**/*.html
 **/ENV.md
+**/.jazz-schema-*.mjs

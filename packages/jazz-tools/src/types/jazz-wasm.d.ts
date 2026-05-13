@@ -1,23 +1,6 @@
 import type { LocalBatchRecord, MutationErrorEvent } from "../runtime/client.js";
 
 declare module "jazz-wasm" {
-  type SyncOutboxCallbackArgs =
-    | [
-        destinationKind: "server" | "client",
-        destinationId: string,
-        payload: string | Uint8Array,
-        isCatalogue: boolean,
-        sequence?: number | null,
-      ]
-    | [
-        err: unknown,
-        destinationKind: "server" | "client",
-        destinationId: string,
-        payload: string | Uint8Array,
-        isCatalogue: boolean,
-        sequence?: number | null,
-      ];
-  type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
   type InsertValues = Record<string, unknown>;
 
   export type WasmTraceEntry =
@@ -47,6 +30,64 @@ declare module "jazz-wasm" {
   export function setTraceEntryCollectionEnabled(enabled: boolean): void;
   export function drainTraceEntries(): WasmTraceEntry[];
   export function subscribeTraceEntries(callback: () => void): () => void;
+  /**
+   * Worker-side entry point. Called by the JS shim after WASM init.
+   * Synchronously installs a Rust closure as `self.onmessage`, then opens
+   * the runtime and posts `init-ok` asynchronously.
+   */
+  export function runAsWorker(initMessage: unknown, pendingMessages: unknown[]): void;
+  /**
+   * Encode a JS-shaped main→worker control message (`{type: "<kebab-case>", ...}`)
+   * to a postcard-binary `Uint8Array`. Test-harness convenience.
+   */
+  export function encodeMainToWorkerJs(value: unknown): Uint8Array;
+  /**
+   * Encode a JS-shaped worker→main control message (`{type: "<kebab-case>", ...}`)
+   * to a postcard-binary `Uint8Array`. Test-harness convenience.
+   */
+  export function encodeWorkerToMainJs(value: unknown): Uint8Array;
+  /**
+   * Decode a postcard-binary main→worker message back into a JS object
+   * (`{type: "<kebab-case>", ...}`). Test-harness convenience.
+   */
+  export function decodeMainToWorkerJs(bytes: Uint8Array): {
+    type: string;
+    [key: string]: unknown;
+  };
+  /**
+   * Decode a postcard-binary worker→main message back into a JS object
+   * (`{type: "<kebab-case>", ...}`). Test-harness convenience.
+   */
+  export function decodeWorkerToMainJs(bytes: Uint8Array): {
+    type: string;
+    [key: string]: unknown;
+  };
+
+  export class WasmWorkerBridge {
+    static attach(worker: Worker, runtime: WasmRuntime, options: unknown): WasmWorkerBridge;
+    init(): Promise<{ clientId: string }>;
+    updateAuth(jwtToken?: string | null): void;
+    sendLifecycleHint(event: string): void;
+    openPeer(peerId: string): void;
+    sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void;
+    closePeer(peerId: string): void;
+    setServerPayloadForwarder(
+      callback:
+        | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
+        | null,
+    ): void;
+    applyIncomingServerPayload(payload: Uint8Array): void;
+    waitForUpstreamServerConnection(): Promise<void>;
+    waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
+    replayServerConnection(): void;
+    disconnectUpstream(): void;
+    reconnectUpstream(): void;
+    acknowledgeRejectedBatch(batchId: string): void;
+    simulateCrash(): Promise<void>;
+    setListeners(listeners: object): void;
+    shutdown(): Promise<void>;
+    getWorkerClientId(): string | null;
+  }
 
   export class WasmRuntime {
     constructor(
@@ -114,7 +155,9 @@ declare module "jazz-wasm" {
     ): number;
     unsubscribe(handle: number): void;
     onSyncMessageReceived(messageJson: string, seq?: number | null): void;
-    onSyncMessageToSend(callback: SyncOutboxCallback): void;
+    /** Construct a Rust-owned `WasmWorkerBridge` attached to this runtime. Options
+     * are parsed at attach time per spec; `init()` is parameter-less. */
+    createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
     addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
     reconcileLocalBatchWithServer?(batchId: string): void;
