@@ -115,13 +115,14 @@ proof-token flow.
 
 ## Related APIs
 
-| API                               | Use it for                                                       |
-| --------------------------------- | ---------------------------------------------------------------- |
-| `BrowserAuthSecretStore`          | Browser local-first secret storage                               |
-| `ExpoAuthSecretStore`             | Expo secure local-first secret storage                           |
-| `useLocalFirstAuth()`             | React/Expo hook for loading, replacing, and clearing the secret  |
-| `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                   |
-| `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal |
-| `db.logout()`                     | Shutting down a client during logout or principal switch         |
-| `db.logout({ wipeData: true })`   | Logout plus browser OPFS database wipe                           |
-| `db.deleteClientStorage()`        | Development-only browser OPFS storage reset                      |
+| API                               | Use it for                                                            |
+| --------------------------------- | --------------------------------------------------------------------- |
+| `BrowserAuthSecretStore`          | Browser local-first secret storage                                    |
+| `ExpoAuthSecretStore`             | Expo secure local-first secret storage                                |
+| `useLocalFirstAuth()`             | React/Expo hook for loading, replacing, and clearing the secret       |
+| `LocalFirstAuth`                  | Svelte reactive class for loading, replacing, and clearing the secret |
+| `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                        |
+| `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal      |
+| `db.logout()`                     | Shutting down a client during logout or principal switch              |
+| `db.logout({ wipeData: true })`   | Logout plus browser OPFS database wipe                                |
+| `db.deleteClientStorage()`        | Development-only browser OPFS storage reset                           |
