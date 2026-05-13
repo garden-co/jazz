@@ -11,7 +11,4 @@ members = [
   "crates/opfs-btree",
 ]
 [patch.crates-io]
-rocksdb = { git = "https://github.com/garden-co/rust-rocksdb.git", branch = "feat/tdb-flush" }
-
-[patch."https://github.com/garden-co/rust-rocksdb.git"]
-librocksdb-sys = { path = "dev/vendor/librocksdb-sys" }
+rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }

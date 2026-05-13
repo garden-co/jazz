@@ -63,6 +63,9 @@ jobs:
         with:
           toolchain: 1.93.1
 
+      - name: Prepare libclang for bindgen
+        run: bash dev/benchmarks/realistic/prepare_libclang_env.sh
+
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
@@ -228,6 +231,9 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
+
+      - name: Prepare libclang for bindgen
+        run: bash dev/benchmarks/realistic/prepare_libclang_env.sh
 
       - uses: actions/setup-node@v6
         with:
