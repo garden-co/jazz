@@ -721,6 +721,8 @@ impl QueryGraph {
                 schema,
                 &branches,
                 schema_context,
+                session.as_ref(),
+                row_policy_mode,
             ) {
                 let node_id = graph.add_node(GraphNode::ArraySubquery(node));
                 graph.add_edge(node_id, phase2_input);
@@ -901,6 +903,8 @@ impl QueryGraph {
                 schema,
                 &branches,
                 schema_context,
+                session.as_ref(),
+                row_policy_mode,
             )
         {
             let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
@@ -999,6 +1003,7 @@ impl QueryGraph {
 
     /// Compile an array subquery specification into an ArraySubqueryNode.
     /// Returns the node and the new output descriptor (outer + array column).
+    #[allow(clippy::too_many_arguments)]
     fn compile_array_subquery(
         &self,
         spec: &crate::query_manager::query::ArraySubquerySpec,
@@ -1006,6 +1011,8 @@ impl QueryGraph {
         schema: &Schema,
         branches: &[String],
         schema_context: &SchemaContext,
+        session: Option<&Session>,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<(ArraySubqueryNode, RowDescriptor)> {
         // Get inner table descriptor
         let inner_descriptor = schema.get(&spec.table)?.columns.clone();
@@ -1094,6 +1101,8 @@ impl QueryGraph {
             spec.select_columns.clone().unwrap_or_default(),
             inner_output_descriptor,
             schema_context.clone(),
+            session.cloned(),
+            row_policy_mode,
         );
 
         // Create outer tuple descriptor
@@ -1154,6 +1163,7 @@ impl QueryGraph {
     }
 
     /// Compile a recursive relation specification into a RecursiveRelationNode.
+    #[allow(clippy::too_many_arguments)]
     fn compile_recursive_relation(
         &self,
         spec: &crate::query_manager::query::RecursiveSpec,
@@ -1161,6 +1171,8 @@ impl QueryGraph {
         schema: &Schema,
         branches: &[String],
         schema_context: &SchemaContext,
+        session: Option<&Session>,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<(RecursiveRelationNode, RowDescriptor, TableName)> {
         let step_table_schema = schema.get(&spec.table)?;
         let step_table_descriptor = step_table_schema.columns.clone();
@@ -1259,6 +1271,8 @@ impl QueryGraph {
             spec.select_columns.clone().unwrap_or_default(),
             step_output_descriptor,
             schema_context.clone(),
+            session.cloned(),
+            row_policy_mode,
         );
 
         let input_descriptor =
@@ -1423,6 +1437,8 @@ impl QueryGraph {
                 schema,
                 branches,
                 schema_context,
+                session.as_ref(),
+                row_policy_mode,
             )
         {
             let node_id = graph.add_node(GraphNode::RecursiveRelation(node));

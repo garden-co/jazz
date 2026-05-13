@@ -890,6 +890,114 @@ describe("TS Query API", () => {
       expect(assignee.$updatedAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
     });
 
+    it("include builders resolve permission magic columns on reverse relations", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: todoId } = insertTodo(db, {
+        title: "Draft docs",
+        done: false,
+        tags: ["dev"],
+        projectId,
+        assigneesIds: [],
+      });
+      const { id: lockedTodoId } = insertTodo(db, {
+        title: "Shipped docs",
+        done: true,
+        tags: ["docs"],
+        projectId,
+        assigneesIds: [],
+      });
+
+      const result = await db.one(
+        app.projects.where({ id: { eq: projectId } }).include({
+          todosViaProject: app.todos
+            .select("title", "$canRead", "$canEdit", "$canDelete")
+            .orderBy("title", "asc"),
+        }),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.todosViaProject).toHaveLength(2);
+      const todo = result.todosViaProject[0];
+      assert(todo, "Included todo is not defined");
+      expectTypeOf(todo.$canRead).toEqualTypeOf<boolean | null>();
+      expect(result.todosViaProject).toEqual([
+        {
+          id: todoId,
+          title: "Draft docs",
+          $canRead: true,
+          $canEdit: true,
+          $canDelete: true,
+        },
+        {
+          id: lockedTodoId,
+          title: "Shipped docs",
+          $canRead: true,
+          $canEdit: false,
+          $canDelete: false,
+        },
+      ]);
+    });
+
+    it("include builders resolve permission magic columns on nested array relations", async () => {
+      const alice = insertUser(db, "Alice");
+      const bob = insertUser(db, "Bob");
+      makeFriends(db, alice, bob);
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: todoId } = insertTodo(db, {
+        title: "Draft docs",
+        done: false,
+        tags: ["dev"],
+        projectId,
+        ownerId: bob.id,
+        assigneesIds: [],
+      });
+      const { id: lockedTodoId } = insertTodo(db, {
+        title: "Shipped docs",
+        done: true,
+        tags: ["docs"],
+        projectId,
+        ownerId: bob.id,
+        assigneesIds: [],
+      });
+
+      const result = await db.one(
+        app.users.where({ id: { eq: alice.id } }).include({
+          friends: app.users.include({
+            todosViaOwner: app.todos
+              .select("title", "$canRead", "$canEdit", "$canDelete")
+              .orderBy("title", "asc"),
+          }),
+        }),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.friends).toHaveLength(1);
+      const friend = result.friends[0];
+      assert(friend, "Friend is not defined");
+      expect(friend.id).toBe(bob.id);
+      expect(friend.todosViaOwner).toHaveLength(2);
+      const todo = friend.todosViaOwner[0];
+      assert(todo, "Nested todo is not defined");
+      expectTypeOf(todo.$canRead).toEqualTypeOf<boolean | null>();
+      expectTypeOf(todo.$canEdit).toEqualTypeOf<boolean | null>();
+      expect(friend.todosViaOwner).toEqual([
+        {
+          id: todoId,
+          title: "Draft docs",
+          $canRead: true,
+          $canEdit: true,
+          $canDelete: true,
+        },
+        {
+          id: lockedTodoId,
+          title: "Shipped docs",
+          $canRead: true,
+          $canEdit: false,
+          $canDelete: false,
+        },
+      ]);
+    });
+
     it("subscribeAll preserves projected root columns with includes", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);

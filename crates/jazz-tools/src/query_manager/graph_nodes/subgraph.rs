@@ -6,7 +6,8 @@
 
 use crate::query_manager::graph::QueryGraph;
 use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::types::{RowDescriptor, Schema, Value};
+use crate::query_manager::session::Session;
+use crate::query_manager::types::{RowDescriptor, RowPolicyMode, Schema, Value};
 use crate::schema_manager::SchemaContext;
 
 /// Template for creating subgraph instances.
@@ -27,6 +28,10 @@ pub struct SubgraphTemplate {
     output_descriptor: RowDescriptor,
     /// Schema context inherited from the parent graph compile.
     schema_context: SchemaContext,
+    /// Session inherited from the parent graph compile.
+    session: Option<Session>,
+    /// Policy mode inherited from the parent graph compile.
+    row_policy_mode: RowPolicyMode,
 }
 
 impl SubgraphTemplate {
@@ -43,6 +48,8 @@ impl SubgraphTemplate {
         select_columns: Vec<String>,
         output_descriptor: RowDescriptor,
         schema_context: SchemaContext,
+        session: Option<Session>,
+        row_policy_mode: RowPolicyMode,
     ) -> Self {
         Self {
             base_query,
@@ -50,6 +57,8 @@ impl SubgraphTemplate {
             select_columns,
             output_descriptor,
             schema_context,
+            session,
+            row_policy_mode,
         }
     }
 
@@ -161,9 +170,9 @@ impl SubgraphTemplate {
         let graph = QueryGraph::try_compile_with_schema_context(
             &query,
             schema,
-            None,
+            self.session.clone(),
             &self.schema_context,
-            crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+            self.row_policy_mode,
         )
         .ok()?;
 
@@ -220,6 +229,8 @@ pub struct SubgraphBuilder {
     filters: Vec<(String, Value)>, // Simple equality filters for now
     order_by: Vec<(String, bool)>, // (column, is_descending)
     limit: Option<usize>,
+    session: Option<Session>,
+    row_policy_mode: RowPolicyMode,
 }
 
 impl SubgraphBuilder {
@@ -232,6 +243,8 @@ impl SubgraphBuilder {
             filters: Vec::new(),
             order_by: Vec::new(),
             limit: None,
+            session: None,
+            row_policy_mode: RowPolicyMode::PermissiveLocal,
         }
     }
 
@@ -268,6 +281,18 @@ impl SubgraphBuilder {
     /// Set a limit on results.
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
+        self
+    }
+
+    /// Set the session used when compiling subgraph instances.
+    pub fn with_session(mut self, session: Session) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Set the row policy mode used when compiling subgraph instances.
+    pub fn with_row_policy_mode(mut self, row_policy_mode: RowPolicyMode) -> Self {
+        self.row_policy_mode = row_policy_mode;
         self
     }
 
@@ -321,6 +346,8 @@ impl SubgraphBuilder {
             self.select_columns,
             output_descriptor,
             SchemaContext::with_defaults(schema.clone(), "main"),
+            self.session,
+            self.row_policy_mode,
         ))
     }
 }
@@ -330,11 +357,16 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::query_manager::encoding::decode_row;
     use crate::query_manager::graph::GraphNode;
+    use crate::query_manager::manager::QueryManager;
+    use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::query::QueryBuilder;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName};
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName, TablePolicies};
     use crate::query_manager::types::{ComposedBranchName, SchemaBuilder, SchemaHash, TableSchema};
     use crate::schema_manager::{Lens, LensOp, LensTransform};
+    use crate::sync_manager::SyncManager;
+    use crate::test_support::seeded_memory_storage;
 
     fn test_schema() -> Schema {
         let mut schema = HashMap::new();
@@ -390,6 +422,124 @@ mod tests {
 
         let instance = instance.unwrap();
         assert_eq!(instance.correlation_value, Value::Integer(42));
+    }
+
+    #[test]
+    fn subgraph_builder_accepts_session_and_row_policy_mode() {
+        let schema = test_schema();
+
+        let template = SubgraphBuilder::new("posts")
+            .correlate("author_id")
+            .with_session(Session::new("alice"))
+            .with_row_policy_mode(RowPolicyMode::Enforcing)
+            .build(&schema)
+            .unwrap();
+
+        assert_eq!(
+            template
+                .session
+                .as_ref()
+                .map(|session| session.user_id.as_str()),
+            Some("alice")
+        );
+        assert_eq!(template.row_policy_mode, RowPolicyMode::Enforcing);
+    }
+
+    #[test]
+    fn array_subgraph_inherits_parent_session_for_permission_magic_columns() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("user_id", ColumnType::Text)
+                    .column("team_id", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .table(
+                TableSchema::builder("documents")
+                    .column("owner_id", ColumnType::Text)
+                    .column("team_id", ColumnType::Text)
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_update(
+                                Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                                PolicyExpr::True,
+                            ),
+                    ),
+            )
+            .build();
+        let mut qm = QueryManager::new(SyncManager::new());
+        qm.set_current_schema(schema, "dev", "main");
+        let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text("alice".into()), Value::Text("eng".into())],
+        )
+        .expect("insert user");
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("eng".into()),
+                Value::Text("Alice Draft".into()),
+            ],
+        )
+        .expect("insert alice document");
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("eng".into()),
+                Value::Text("Bob Plan".into()),
+            ],
+        )
+        .expect("insert bob document");
+
+        let query = qm
+            .query("users")
+            .with_array("documents", |sub| {
+                sub.from("documents")
+                    .correlate("team_id", "users.team_id")
+                    .select(&["title", "$canEdit"])
+            })
+            .build();
+        let sub_id = qm
+            .subscribe_with_session(query, Some(Session::new("alice")), None)
+            .expect("subscribe with session");
+
+        qm.process(&mut storage);
+
+        let update = qm
+            .take_updates()
+            .into_iter()
+            .find(|update| update.subscription_id == sub_id)
+            .expect("subscription should produce initial update");
+        let values = decode_row(&update.descriptor, &update.delta.added[0].data)
+            .expect("decode subscription row");
+        let documents = values[2].as_array().expect("documents should be an array");
+        let permissions_by_title: HashMap<String, bool> = documents
+            .iter()
+            .map(|document| {
+                let values = document.as_row().expect("document should be a row");
+                let title = match &values[0] {
+                    Value::Text(title) => title.clone(),
+                    other => panic!("expected document title text, got {other:?}"),
+                };
+                let can_edit = match &values[1] {
+                    Value::Boolean(can_edit) => *can_edit,
+                    other => panic!("expected $canEdit boolean, got {other:?}"),
+                };
+                (title, can_edit)
+            })
+            .collect();
+
+        assert_eq!(permissions_by_title.get("Alice Draft"), Some(&true));
+        assert_eq!(permissions_by_title.get("Bob Plan"), Some(&false));
     }
 
     #[test]
@@ -460,6 +610,8 @@ mod tests {
             Vec::new(),
             output_descriptor,
             schema_context,
+            None,
+            RowPolicyMode::PermissiveLocal,
         );
 
         let instance = template
