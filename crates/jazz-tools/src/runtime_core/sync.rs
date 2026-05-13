@@ -302,7 +302,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         use crate::sync_manager::ClientRole;
 
         let local_catalogue_state_hash = self.schema_manager.catalogue_state_hash();
-        let catalogue_app_id = self.schema_manager.app_id().uuid().to_string();
         let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
         let client_existed = sm.get_client(client_id).is_some();
 
@@ -314,7 +313,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let queued_catalogue_replay = sm.queue_catalogue_sync_to_client_if_hash_mismatch(
             &self.storage,
             client_id,
-            &catalogue_app_id,
             remote_catalogue_state_hash,
             &local_catalogue_state_hash,
         );

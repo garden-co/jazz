@@ -901,9 +901,6 @@ impl<'a> Normalizer<'a> {
                     entry.object_type().unwrap_or("unknown"),
                 )
             }
-            SyncPayload::CatalogueSnapshot { app_id, entries } => {
-                format!("catalogue snapshot app:{app_id} entries:{}", entries.len())
-            }
             SyncPayload::QuerySubscription { query_id, .. } => {
                 format!("query:{}", query_id.0)
             }
@@ -1035,9 +1032,6 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 names.object(&entry.object_id),
                 entry.object_type().unwrap_or("unknown"),
             )
-        }
-        SyncPayload::CatalogueSnapshot { app_id, entries } => {
-            format!("catalogue snapshot app:{app_id} entries:{}", entries.len())
         }
         SyncPayload::BatchFate { fate } => format_settlement_details(fate, names),
         SyncPayload::BatchFateNeeded { batch_ids } => {

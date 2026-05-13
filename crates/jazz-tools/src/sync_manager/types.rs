@@ -262,15 +262,6 @@ pub enum SyncPayload {
     /// Semantic update for one catalogue/system entry.
     CatalogueEntryUpdated { entry: CatalogueEntry },
 
-    /// Authoritative catalogue snapshot from a core server.
-    ///
-    /// The receiver must persist these entries and prune local catalogue entries
-    /// for the same app that are absent from this snapshot.
-    CatalogueSnapshot {
-        app_id: String,
-        entries: Vec<CatalogueEntry>,
-    },
-
     /// Upstream replication of a newly created or newly learned row batch entry.
     RowBatchCreated {
         metadata: Option<RowMetadata>,
@@ -426,7 +417,6 @@ impl SyncPayload {
     pub fn object_id(&self) -> Option<ObjectId> {
         match self {
             SyncPayload::CatalogueEntryUpdated { entry } => Some(entry.object_id),
-            SyncPayload::CatalogueSnapshot { .. } => None,
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(row.row_id)
             }
@@ -445,7 +435,6 @@ impl SyncPayload {
     pub fn branch_name(&self) -> Option<BranchName> {
         match self {
             SyncPayload::CatalogueEntryUpdated { .. } => None,
-            SyncPayload::CatalogueSnapshot { .. } => None,
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(BranchName::new(&row.branch))
             }
@@ -464,7 +453,6 @@ impl SyncPayload {
         matches!(
             self,
             SyncPayload::CatalogueEntryUpdated { .. }
-                | SyncPayload::CatalogueSnapshot { .. }
                 | SyncPayload::RowBatchCreated { .. }
                 | SyncPayload::RowBatchNeeded { .. }
                 | SyncPayload::BatchFate { .. }
@@ -492,31 +480,18 @@ impl SyncPayload {
 
     /// Check if this payload carries a catalogue object (schema or lens).
     pub fn is_catalogue(&self) -> bool {
-        match self {
-            SyncPayload::CatalogueEntryUpdated { entry } => entry.is_catalogue(),
-            SyncPayload::CatalogueSnapshot { entries, .. } => {
-                entries.iter().any(CatalogueEntry::is_catalogue)
-            }
-            _ => false,
-        }
+        matches!(self, SyncPayload::CatalogueEntryUpdated { entry } if entry.is_catalogue())
     }
 
     /// Check if this payload carries a structural schema catalogue object.
     pub fn is_structural_schema_catalogue(&self) -> bool {
-        match self {
-            SyncPayload::CatalogueEntryUpdated { entry } => entry.is_structural_schema_catalogue(),
-            SyncPayload::CatalogueSnapshot { entries, .. } => entries
-                .iter()
-                .any(CatalogueEntry::is_structural_schema_catalogue),
-            _ => false,
-        }
+        matches!(self, SyncPayload::CatalogueEntryUpdated { entry } if entry.is_structural_schema_catalogue())
     }
 
     /// Get the variant name for debugging.
     pub fn variant_name(&self) -> &'static str {
         match self {
             SyncPayload::CatalogueEntryUpdated { .. } => "CatalogueEntryUpdated",
-            SyncPayload::CatalogueSnapshot { .. } => "CatalogueSnapshot",
             SyncPayload::RowBatchCreated { .. } => "RowBatchCreated",
             SyncPayload::RowBatchNeeded { .. } => "RowBatchNeeded",
             SyncPayload::BatchFate { .. } => "BatchFate",

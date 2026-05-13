@@ -554,18 +554,16 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
 fn catalogue_replay_to_client_count(messages: &[OutboxEntry], client_id: ClientId) -> usize {
     messages
         .iter()
-        .map(|message| match message {
-            OutboxEntry {
-                destination: Destination::Client(id),
-                payload: SyncPayload::CatalogueEntryUpdated { .. },
-            } if *id == client_id => 1,
-            OutboxEntry {
-                destination: Destination::Client(id),
-                payload: SyncPayload::CatalogueSnapshot { entries, .. },
-            } if *id == client_id => entries.len(),
-            _ => 0,
+        .filter(|message| {
+            matches!(
+                message,
+                OutboxEntry {
+                    destination: Destination::Client(id),
+                    payload: SyncPayload::CatalogueEntryUpdated { .. },
+                } if *id == client_id
+            )
         })
-        .sum()
+        .count()
 }
 
 fn has_catalogue_replay_to_client(
@@ -580,12 +578,6 @@ fn has_catalogue_replay_to_client(
                 destination: Destination::Client(id),
                 payload: SyncPayload::CatalogueEntryUpdated { entry },
             } if *id == client_id && entry.object_id == object_id
-        ) || matches!(
-            message,
-            OutboxEntry {
-                destination: Destination::Client(id),
-                payload: SyncPayload::CatalogueSnapshot { entries, .. },
-            } if *id == client_id && entries.iter().any(|entry| entry.object_id == object_id)
         )
     })
 }
@@ -686,78 +678,6 @@ fn existing_peer_with_stale_catalogue_hash_gets_full_catalogue_replay_on_reconne
     assert!(
         has_catalogue_replay_to_client(&reconnect_messages, peer_id, schema_object_id),
         "existing peer with stale hash should receive replay on reconnect; messages: {reconnect_messages:?}"
-    );
-}
-
-#[test]
-fn stale_peer_catalogue_reconnect_prunes_edge_local_entries() {
-    let app_id = AppId::from_name("test-app");
-    let mut core = new_test_core(
-        SchemaManager::new_server(SyncManager::new(), app_id, "dev"),
-        MemoryStorage::new(),
-        NoopScheduler,
-    );
-    let mut edge = new_test_core(
-        SchemaManager::new_server(SyncManager::new(), app_id, "dev"),
-        MemoryStorage::new(),
-        NoopScheduler,
-    );
-
-    let core_schema_object_id = core.publish_schema(schema_evolution_v2());
-    let core_catalogue_hash = core.schema_manager().catalogue_state_hash();
-    core.sync_sender().take();
-
-    let edge_only_schema_hash = SchemaHash::compute(&schema_evolution_v1());
-    let edge_only_schema_object_id = edge.publish_schema(schema_evolution_v1());
-    let stale_edge_catalogue_hash = edge.schema_manager().catalogue_state_hash();
-    assert!(
-        edge.storage()
-            .load_catalogue_entry(edge_only_schema_object_id)
-            .expect("edge catalogue lookup")
-            .is_some(),
-        "test fixture should start with an edge-local catalogue entry"
-    );
-
-    let peer_id = ClientId::new();
-    core.ensure_client_as_peer_with_catalogue_state_hash(peer_id, Some(&stale_edge_catalogue_hash));
-    core.batched_tick();
-
-    let upstream_server_id = ServerId::new();
-    for message in core.sync_sender().take() {
-        if message.destination == Destination::Client(peer_id) {
-            edge.push_sync_inbox(InboxEntry {
-                source: Source::Server(upstream_server_id),
-                payload: message.payload,
-            });
-        }
-    }
-    edge.immediate_tick();
-
-    assert!(
-        edge.storage()
-            .load_catalogue_entry(core_schema_object_id)
-            .expect("edge catalogue lookup")
-            .is_some(),
-        "edge should keep the authoritative core catalogue entry after reconnect"
-    );
-    assert!(
-        edge.storage()
-            .load_catalogue_entry(edge_only_schema_object_id)
-            .expect("edge catalogue lookup")
-            .is_none(),
-        "authoritative reconnect should prune catalogue entries that only exist on the edge"
-    );
-    assert!(
-        !edge
-            .schema_manager()
-            .known_schema_hashes()
-            .contains(&edge_only_schema_hash),
-        "pruned edge-local catalogue schema must not remain usable in memory"
-    );
-    assert_eq!(
-        edge.schema_manager().catalogue_state_hash(),
-        core_catalogue_hash,
-        "edge catalogue hash should converge exactly to core after authoritative reconnect"
     );
 }
 // =========================================================================

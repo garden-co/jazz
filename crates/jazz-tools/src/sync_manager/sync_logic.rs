@@ -1,11 +1,10 @@
 use super::*;
 use crate::catalogue::CatalogueEntry;
-use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::SharedString;
 use crate::row_histories::StoredRowBatch;
 use crate::storage::{RowLocator, metadata_from_row_locator};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 type RowSyncData = (SharedString, HashMap<String, String>, StoredRowBatch);
 
@@ -117,95 +116,6 @@ impl SyncManager {
                 .insert(entry.object_id, entry.clone());
             self.queue_catalogue_entry_to_client(client_id, entry);
         }
-    }
-
-    pub(super) fn queue_authoritative_catalogue_snapshot_to_client_from_storage<H: Storage>(
-        &mut self,
-        client_id: ClientId,
-        app_id: &str,
-        storage: &H,
-    ) -> bool {
-        let Ok(entries) = storage.scan_catalogue_entries() else {
-            tracing::warn!(
-                %client_id,
-                app_id,
-                "failed to scan catalogue entries for authoritative peer snapshot"
-            );
-            return false;
-        };
-        let entries: Vec<_> = entries
-            .into_iter()
-            .filter(|entry| catalogue_entry_matches_app(entry, app_id))
-            .collect();
-
-        for entry in &entries {
-            self.catalogue_entries
-                .insert(entry.object_id, entry.clone());
-        }
-
-        self.outbox.push(OutboxEntry {
-            destination: Destination::Client(client_id),
-            payload: SyncPayload::CatalogueSnapshot {
-                app_id: app_id.to_string(),
-                entries,
-            },
-        });
-        true
-    }
-
-    pub(super) fn apply_authoritative_catalogue_snapshot<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        app_id: String,
-        entries: Vec<CatalogueEntry>,
-    ) {
-        let snapshot_ids: HashSet<_> = entries.iter().map(|entry| entry.object_id).collect();
-
-        match storage.scan_catalogue_entries() {
-            Ok(local_entries) => {
-                for local_entry in local_entries {
-                    if !catalogue_entry_matches_app(&local_entry, &app_id)
-                        || snapshot_ids.contains(&local_entry.object_id)
-                    {
-                        continue;
-                    }
-
-                    match storage.delete_catalogue_entry(local_entry.object_id) {
-                        Ok(()) => {
-                            self.catalogue_entries.remove(&local_entry.object_id);
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                object_id = %local_entry.object_id,
-                                app_id,
-                                %error,
-                                "failed to prune non-authoritative catalogue entry"
-                            );
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    app_id,
-                    %error,
-                    "failed to scan local catalogue entries for authoritative snapshot"
-                );
-                return;
-            }
-        }
-
-        for entry in entries {
-            if self.persist_catalogue_entry(storage, entry.clone()) {
-                self.forward_catalogue_entry_to_clients(entry.clone(), None);
-                self.pending_catalogue_updates.push(entry);
-            } else {
-                self.catalogue_entries.insert(entry.object_id, entry);
-            }
-        }
-
-        self.pending_authoritative_catalogue_replacements
-            .push(app_id);
     }
 
     pub fn upsert_catalogue_entry<H: Storage>(&mut self, storage: &mut H, entry: CatalogueEntry) {
@@ -430,11 +340,4 @@ impl SyncManager {
             },
         });
     }
-}
-
-fn catalogue_entry_matches_app(entry: &CatalogueEntry, app_id: &str) -> bool {
-    entry
-        .metadata
-        .get(MetadataKey::AppId.as_str())
-        .is_some_and(|entry_app_id| entry_app_id == app_id)
 }

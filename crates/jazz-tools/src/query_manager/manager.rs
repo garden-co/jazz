@@ -728,41 +728,6 @@ impl QueryManager {
         self.authorization_context_cache.clear();
     }
 
-    pub(crate) fn reset_catalogue_derived_state(
-        &mut self,
-        schema_context: &SchemaContext,
-        known_schemas: Arc<HashMap<SchemaHash, Schema>>,
-    ) {
-        self.schema_context = schema_context.clone();
-        self.known_schemas = known_schemas;
-        self.row_policy_mode = if self.schema_context.is_initialized()
-            && Self::schema_has_any_explicit_policies(self.schema.as_ref())
-        {
-            RowPolicyMode::Enforcing
-        } else {
-            RowPolicyMode::PermissiveLocal
-        };
-        self.authorization_schema = if matches!(self.row_policy_mode, RowPolicyMode::Enforcing) {
-            Some(Arc::clone(&self.schema))
-        } else {
-            None
-        };
-        self.authorization_schema_required = false;
-        self.authorization_context_cache.clear();
-        self.pending_catalogue_updates.clear();
-        self.branch_schema_map.clear();
-        if self.schema_context.is_initialized() {
-            self.branch_schema_map.insert(
-                self.schema_context.branch_name().as_str().to_string(),
-                self.schema_context.current_hash,
-            );
-        }
-        self.pending_catalogue_schema_hashes.clear();
-        self.catalogued_storage_namespaces.clear();
-        self.write_table_cache.clear();
-        self.mark_subscriptions_for_recompile();
-    }
-
     /// Add a live schema (one we can read from but don't write to).
     ///
     /// Creates indices for the schema's branch.
