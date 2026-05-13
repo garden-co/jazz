@@ -531,6 +531,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         let mut unsent = Vec::new();
         for msg in outbox {
+            let peer_kind = msg.destination.peer_kind();
+            let peer_id = msg.destination.peer_uuid();
+            let payload = msg.payload.variant_name();
+            let _send_span = debug_span!(
+                "sync.send",
+                peer_kind = peer_kind,
+                peer_id = %peer_id,
+                payload = payload,
+                payload_json = %serde_json::to_string(&msg.payload).unwrap_or_default(),
+                tier = self.tier_label,
+            )
+            .entered();
+
             if let Some((ref tracer, ref name)) = self.sync_tracer {
                 tracer.record_outgoing(name, &msg.destination, &msg.payload);
             }
@@ -688,7 +701,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     /// Park a sync message for processing in next batched_tick.
     pub fn park_sync_message(&mut self, message: InboxEntry) {
-        trace!(source = ?message.source, payload = message.payload.variant_name(), "parking sync message");
+        let _recv_span = debug_span!(
+            "sync.recv",
+            peer_kind = message.source.peer_kind(),
+            peer_id = %message.source.peer_uuid(),
+            payload = message.payload.variant_name(),
+            payload_json = %serde_json::to_string(&message.payload).unwrap_or_default(),
+            tier = self.tier_label,
+        )
+        .entered();
         if let Some((ref tracer, ref name)) = self.sync_tracer {
             tracer.record_incoming(&message.source, name, &message.payload);
         }
@@ -700,6 +721,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn park_sync_message_with_sequence(&mut self, message: InboxEntry, sequence: u64) {
         match message.source {
             crate::sync_manager::Source::Server(server_id) => {
+                let _recv_span = debug_span!(
+                    "sync.recv",
+                    peer_kind = "server",
+                    peer_id = %server_id,
+                    payload = message.payload.variant_name(),
+                    payload_json = %serde_json::to_string(&message.payload).unwrap_or_default(),
+                    sequence = sequence,
+                    tier = self.tier_label,
+                )
+                .entered();
                 let next_expected = self
                     .next_expected_server_seq
                     .entry(server_id)

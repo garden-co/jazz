@@ -58,16 +58,15 @@ function Router() {
   return <GenerateData />;
 }
 
-const appId = import.meta.env.VITE_JAZZ_APP_ID;
-const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
+const appId = requireEnv(import.meta.env.VITE_JAZZ_APP_ID, "JAZZ_APP_ID");
+const serverUrl = requireEnv(import.meta.env.VITE_JAZZ_SERVER_URL, "JAZZ_SERVER_URL");
 const telemetryCollectorUrl = import.meta.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
 
-if (!appId) {
-  throw new Error("JAZZ_APP_ID is required");
-}
-
-if (!serverUrl) {
-  throw new Error("JAZZ_SERVER_URL is required");
+function requireEnv(value: string | undefined, name: string): string {
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
 }
 
 function AppInner() {
