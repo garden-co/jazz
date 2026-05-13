@@ -771,6 +771,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     if matches!(
                         msg.payload,
                         crate::sync_manager::SyncPayload::CatalogueEntryUpdated { .. }
+                            | crate::sync_manager::SyncPayload::CatalogueSnapshot { .. }
                     ) && !handle.can_publish_catalogue()
                     {
                         tracing::debug!(

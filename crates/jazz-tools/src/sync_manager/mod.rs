@@ -75,6 +75,9 @@ pub struct SyncManager {
     pub(super) pending_row_visibility_changes: Vec<RowVisibilityChange>,
     /// Catalogue/system entry updates awaiting SchemaManager processing.
     pub(super) pending_catalogue_updates: Vec<CatalogueEntry>,
+    /// App ids whose catalogue state was authoritatively replaced by an
+    /// upstream snapshot and must be rebuilt in SchemaManager.
+    pub(super) pending_authoritative_catalogue_replacements: Vec<String>,
 
     pub(super) next_pending_id: u64,
 
@@ -138,6 +141,10 @@ impl std::fmt::Debug for SyncManager {
                 &self.pending_row_visibility_changes,
             )
             .field("pending_catalogue_updates", &self.pending_catalogue_updates)
+            .field(
+                "pending_authoritative_catalogue_replacements",
+                &self.pending_authoritative_catalogue_replacements,
+            )
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
             .field("row_batch_interest", &self.row_batch_interest)
@@ -241,6 +248,7 @@ impl SyncManager {
             pending_query_unsubscriptions: Vec::new(),
             pending_row_visibility_changes: Vec::new(),
             pending_catalogue_updates: Vec::new(),
+            pending_authoritative_catalogue_replacements: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
             row_batch_interest: HashMap::new(),
@@ -390,6 +398,8 @@ impl SyncManager {
             + self.pending_row_visibility_changes.len()
                 * std::mem::size_of::<RowVisibilityChange>()
             + self.pending_catalogue_updates.len() * std::mem::size_of::<CatalogueEntry>()
+            + self.pending_authoritative_catalogue_replacements.len()
+                * std::mem::size_of::<String>()
             + self.pending_query_settled.len() * std::mem::size_of::<PendingQuerySettled>()
             + self.pending_batch_fates.len() * std::mem::size_of::<BatchFate>()
             + self
@@ -529,6 +539,7 @@ impl SyncManager {
         &mut self,
         storage: &H,
         client_id: ClientId,
+        app_id: &str,
         remote_catalogue_state_hash: Option<&str>,
         local_catalogue_state_hash: &str,
     ) -> bool {
@@ -536,8 +547,9 @@ impl SyncManager {
             return false;
         }
 
-        self.queue_catalogue_sync_to_client_from_storage(client_id, storage);
-        true
+        self.queue_authoritative_catalogue_snapshot_to_client_from_storage(
+            client_id, app_id, storage,
+        )
     }
 
     /// Remove a client connection and all associated state.
@@ -1012,6 +1024,12 @@ impl SyncManager {
     /// Take pending catalogue/system entry updates for QueryManager/SchemaManager.
     pub fn take_pending_catalogue_updates(&mut self) -> Vec<CatalogueEntry> {
         std::mem::take(&mut self.pending_catalogue_updates)
+    }
+
+    /// Take app ids whose catalogue state was authoritatively replaced by an
+    /// upstream snapshot.
+    pub fn take_pending_authoritative_catalogue_replacements(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_authoritative_catalogue_replacements)
     }
 
     /// Requeue row visibility changes that could not be processed yet,

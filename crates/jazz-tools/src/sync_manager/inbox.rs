@@ -1118,6 +1118,14 @@ impl SyncManager {
                     self.forward_catalogue_entry_to_clients(entry, None);
                 }
             }
+            SyncPayload::CatalogueSnapshot { app_id, entries } => {
+                tracing::debug!(
+                    app_id = %app_id,
+                    entry_count = entries.len(),
+                    "server→CatalogueSnapshot"
+                );
+                self.apply_authoritative_catalogue_snapshot(storage, app_id, entries);
+            }
             SyncPayload::RowBatchCreated { metadata, row }
             | SyncPayload::RowBatchNeeded { metadata, row } => {
                 let object_id = row.row_id;
@@ -1318,6 +1326,13 @@ impl SyncManager {
                         });
                     }
                 }
+            }
+            SyncPayload::CatalogueSnapshot { .. } => {
+                tracing::warn!(
+                    %client_id,
+                    role = ?client.role,
+                    "client attempted to send authoritative catalogue snapshot; ignoring"
+                );
             }
             SyncPayload::RowBatchCreated { metadata, row }
             | SyncPayload::RowBatchNeeded { metadata, row } => {

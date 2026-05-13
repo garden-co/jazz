@@ -38,14 +38,18 @@ Use the existing WebSocket handshake digest exchange.
 3. Before sending normal queued sync traffic, the core compares the edge hash
    with its own current `catalogue_state_hash`.
 4. If the hashes match, the core sends no catalogue replay.
-5. If the edge hash is missing, invalid, or different, the core queues every
-   catalogue entry from core storage to that edge as `CatalogueEntryUpdated`.
-6. The edge applies these entries through the existing `Source::Server` path,
-   persists them, and processes pending catalogue updates through
-   `SchemaManager`.
+5. If the edge hash is missing, invalid, or different, the core queues an
+   authoritative `CatalogueSnapshot` for this app containing every catalogue
+   entry from core storage.
+6. The edge applies this snapshot through the existing `Source::Server` path,
+   persists the core entries, prunes local catalogue entries for the same app
+   that are absent from the snapshot, and rebuilds `SchemaManager` catalogue
+   state from storage.
 
-This is a full catalogue pull semantically, even though transport delivery is
-implemented as core-to-edge sync replay after the edge presents its digest.
+This is an authoritative full catalogue pull semantically, even though
+transport delivery is implemented as core-to-edge sync after the edge presents
+its digest. A mismatch converges the edge catalogue set to exactly the core set
+for that app, rather than only filling missing entries.
 
 ## Authority Rules
 
@@ -85,8 +89,10 @@ edge reconnects
   -> core authenticates peer
   -> core compares edge_hash with core_hash
   -> mismatch: core scans catalogue storage
-  -> core sends CatalogueEntryUpdated for every catalogue entry
-  -> edge persists entries and updates SchemaManager
+  -> core sends CatalogueSnapshot { app_id, entries }
+  -> edge persists core entries
+  -> edge prunes same-app catalogue entries absent from the snapshot
+  -> edge rebuilds SchemaManager catalogue state from storage
 ```
 
 For matching hashes:
@@ -117,9 +123,10 @@ If the core cannot scan catalogue storage during mismatch replay, it should leav
 the edge connected and log the failure. The next reconnect or the next accepted
 catalogue publish can repair the edge.
 
-If a replayed catalogue entry fails to persist on the edge, the existing
-`persist_catalogue_entry` warning behaviour applies. The digest should remain
-different, causing a future reconnect to retry the replay.
+If a snapshot catalogue entry fails to persist on the edge, the existing
+`persist_catalogue_entry` warning behaviour applies. If pruning fails, the edge
+logs the failed object id and keeps the entry. In both cases the digest should
+remain different, causing a future reconnect to retry the snapshot.
 
 ## Testing
 
@@ -131,8 +138,10 @@ Coverage should include:
   catalogue entries and receives them without a client query.
 - A reconnecting edge with a matching catalogue hash does not receive catalogue
   replay.
-- A reconnecting edge with a stale or empty catalogue hash receives full
-  catalogue replay.
+- A reconnecting edge with a stale or empty catalogue hash receives an
+  authoritative catalogue snapshot.
+- A reconnecting edge with extra same-app catalogue entries prunes them and
+  converges to the core catalogue hash.
 - A catalogue publish accepted by core propagates to already connected edges.
 - A catalogue publish sent to an edge is forwarded to core, then reaches peer
   edges from core.
@@ -144,7 +153,7 @@ Coverage should include:
 The likely code path is the server-side WebSocket connection setup, where the
 core already has the client's handshake and the authenticated role. For peer
 connections, use the handshake `catalogue_state_hash` to decide whether to queue
-`queue_catalogue_sync_to_client_from_storage` for that edge connection.
+an authoritative catalogue snapshot for that edge connection.
 
 The edge-side `RuntimeCore::add_server_with_catalogue_state_hash...` path should
 stop treating peer-secret edge connections as permission to publish catalogue

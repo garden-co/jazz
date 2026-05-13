@@ -98,9 +98,11 @@ that into `QueryManager`.
 In an edge/core deployment, catalogue authority is core-only. Schemas,
 permissions, and migrations are published to the core server. Edge servers learn
 those catalogue entries through server-to-server sync and install them locally
-once they arrive, so runtime/query work can use local catalogue state. Catalogue
-HTTP reads and writes received by an edge validate the admin secret locally and
-then proxy to the upstream core.
+once they arrive, so runtime/query work can use local catalogue state. When an
+edge reconnects with a stale catalogue digest, core sends an authoritative
+same-app snapshot; the edge prunes catalogue entries absent from that snapshot
+before rebuilding SchemaManager state. Catalogue HTTP reads and writes received
+by an edge validate the admin secret locally and then proxy to the upstream core.
 
 That same catalogue lane carries permission changes. When the core receives a
 new permissions head, connected edges receive the bundle/head pair through sync;

@@ -365,6 +365,11 @@ pub trait Storage {
         )
     }
 
+    fn delete_catalogue_entry(&mut self, object_id: ObjectId) -> Result<(), StorageError> {
+        invalidate_catalogue_lookup_caches_with_storage(self);
+        self.raw_table_delete("catalogue", &key_codec::catalogue_entry_key(object_id))
+    }
+
     fn load_catalogue_entry(
         &self,
         object_id: ObjectId,
@@ -1699,6 +1704,10 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
         (**self).upsert_catalogue_entry(entry)
+    }
+
+    fn delete_catalogue_entry(&mut self, object_id: ObjectId) -> Result<(), StorageError> {
+        (**self).delete_catalogue_entry(object_id)
     }
 
     fn load_catalogue_entry(

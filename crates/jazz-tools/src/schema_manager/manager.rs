@@ -261,6 +261,41 @@ impl SchemaManager {
         self.context.is_initialized()
     }
 
+    pub fn replace_catalogue_state_from_storage<H: Storage>(
+        &mut self,
+        storage: &H,
+    ) -> Result<(), String> {
+        self.reset_catalogue_derived_state();
+        crate::schema_manager::rehydrate::rehydrate_schema_manager_from_catalogue(
+            self,
+            storage,
+            self.app_id,
+        )
+    }
+
+    fn reset_catalogue_derived_state(&mut self) {
+        self.catalogue_publish_timestamps.clear();
+        self.current_permissions_head = None;
+        self.known_permissions_bundles.clear();
+        self.pending_permissions_head = None;
+        self.context.live_schemas.clear();
+        self.context.lenses.clear();
+        self.context.pending_schemas.clear();
+
+        let mut known_schemas = HashMap::new();
+        if self.context.is_initialized() {
+            known_schemas.insert(
+                self.context.current_hash,
+                strip_schema_policies(&self.context.current_schema),
+            );
+        }
+        self.known_schemas = Arc::new(known_schemas);
+        self.known_schemas_dirty = true;
+        self.insert_alignment_cache.clear();
+        self.query_manager
+            .reset_catalogue_derived_state(&self.context, Arc::clone(&self.known_schemas));
+    }
+
     /// Add a schema to known_schemas without requiring a lens path to current.
     ///
     /// Used by servers when receiving client schemas via catalogue sync.
@@ -1971,12 +2006,31 @@ impl SchemaManager {
         let _span = tracing::debug_span!("SM::process").entered();
         self.query_manager.process(storage);
 
-        // Process any catalogue updates queued by QueryManager
-        let updates = self.query_manager.take_pending_catalogue_updates();
-        for update in updates {
-            // Ignore errors from individual catalogue updates - they're non-critical
-            let _ =
-                self.process_catalogue_update(update.object_id, &update.metadata, &update.content);
+        let authoritative_replacements = self
+            .query_manager
+            .sync_manager_mut()
+            .take_pending_authoritative_catalogue_replacements();
+        if !authoritative_replacements.is_empty() {
+            let _discarded_incremental_updates =
+                self.query_manager.take_pending_catalogue_updates();
+            if let Err(error) = self.replace_catalogue_state_from_storage(storage) {
+                tracing::warn!(
+                    app_ids = ?authoritative_replacements,
+                    %error,
+                    "failed to rebuild schema manager from authoritative catalogue snapshot"
+                );
+            }
+        } else {
+            // Process any catalogue updates queued by QueryManager
+            let updates = self.query_manager.take_pending_catalogue_updates();
+            for update in updates {
+                // Ignore errors from individual catalogue updates - they're non-critical
+                let _ = self.process_catalogue_update(
+                    update.object_id,
+                    &update.metadata,
+                    &update.content,
+                );
+            }
         }
 
         // Sync known schemas to QueryManager for server-mode lazy activation
