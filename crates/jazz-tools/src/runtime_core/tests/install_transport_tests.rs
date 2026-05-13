@@ -109,11 +109,11 @@ mod install_transport_tests {
             .unwrap()
             .catalogue_state_hash_for_test();
 
-        edge.push_sync_inbox(InboxEntry {
+        edge.park_sync_message(InboxEntry {
             source: Source::Server(server_id),
             payload: SyncPayload::CatalogueEntryUpdated { entry },
         });
-        edge.immediate_tick();
+        edge.batched_tick();
 
         let expected_hash = edge.schema_manager().catalogue_state_hash();
         assert_ne!(
@@ -129,6 +129,36 @@ mod install_transport_tests {
                 .as_deref(),
             Some(expected_hash.as_str()),
             "transport handshakes should use the refreshed catalogue hash after server sync"
+        );
+    }
+
+    #[test]
+    fn ordinary_row_tick_does_not_refresh_transport_catalogue_hash() {
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+        let sentinel_hash = "sentinel-catalogue-hash".to_string();
+        core.transport
+            .as_ref()
+            .unwrap()
+            .set_catalogue_state_hash(Some(sentinel_hash.clone()));
+
+        core.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .expect("ordinary row insert should succeed");
+
+        assert_eq!(
+            core.transport
+                .as_ref()
+                .unwrap()
+                .catalogue_state_hash_for_test()
+                .as_deref(),
+            Some(sentinel_hash.as_str()),
+            "ordinary row ticks should not rewrite the transport catalogue hash"
         );
     }
 

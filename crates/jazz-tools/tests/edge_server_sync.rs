@@ -19,10 +19,21 @@ use support::{
     publish_allow_all_permissions, publish_permissions, wait_for, wait_for_query,
     wait_for_subscription_update,
 };
+use tempfile::TempDir;
 
 fn todo_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("todos").column("title", ColumnType::Text))
+        .build()
+}
+
+fn todo_schema_with_notes() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .nullable_column("notes", ColumnType::Text),
+        )
         .build()
 }
 
@@ -101,6 +112,14 @@ async fn wait_for_upstream(edge: &TestingServer) {
     .expect("edge should connect to upstream before timeout")
     .then_some(())
     .expect("edge transport should report connected");
+}
+
+fn app_scoped_ws_upstream_url(server: &TestingServer) -> String {
+    format!(
+        "ws://127.0.0.1:{}/apps/{}/ws",
+        server.port(),
+        server.app_id()
+    )
 }
 
 struct MultiServerCluster {
@@ -790,6 +809,261 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
     alice.shutdown().await.expect("shutdown alice");
     edge_eu.shutdown().await;
     edge_us.shutdown().await;
+    core.shutdown().await;
+}
+
+/// A WebSocket-style, app-scoped upstream URL should drive both peer sync and
+/// HTTP catalogue forwarding.
+///
+/// ```text
+/// edge --upstream-url ws://core/apps/<app>/ws-- peer sync + HTTP forwarding
+/// mallory --schema + permissions--------------> edge --------> core
+/// alice   --write/read------------------------> edge
+/// ```
+#[tokio::test]
+async fn app_scoped_ws_upstream_url_forwards_and_reads_catalogue_through_edge() {
+    let schema = todo_schema();
+    let schema_hash = SchemaHash::compute(&schema).to_string();
+    let app_id = TestingServer::default_app_id();
+    let query = QueryBuilder::new("todos").build();
+    let client = reqwest::Client::new();
+
+    let core = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .start()
+        .await;
+    let edge = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .with_upstream_url(app_scoped_ws_upstream_url(&core))
+        .start()
+        .await;
+
+    wait_for_upstream(&edge).await;
+
+    let publish_schema_response = client
+        .post(format!(
+            "{}/apps/{}/admin/schemas",
+            edge.base_url(),
+            edge.app_id()
+        ))
+        .header("X-Jazz-Admin-Secret", edge.admin_secret())
+        .json(&json!({ "schema": schema, "permissions": null }))
+        .send()
+        .await
+        .expect("publish schema through edge configured with app-scoped ws upstream");
+    assert_eq!(publish_schema_response.status(), StatusCode::CREATED);
+
+    let permissions_head = publish_allow_all_permissions(
+        &edge.base_url(),
+        edge.app_id(),
+        edge.admin_secret(),
+        &schema,
+    )
+    .await;
+
+    wait_for_schema_hash(&core, &schema).await;
+    wait_for_schema_hash(&edge, &schema).await;
+    wait_for_permissions_head(&core, &permissions_head.bundle_object_id).await;
+    wait_for_permissions_head(&edge, &permissions_head.bundle_object_id).await;
+
+    let edge_hashes_response = client
+        .get(format!(
+            "{}/apps/{}/schemas",
+            edge.base_url(),
+            edge.app_id()
+        ))
+        .header("X-Jazz-Admin-Secret", edge.admin_secret())
+        .send()
+        .await
+        .expect("read schema catalogue through edge");
+    assert_eq!(edge_hashes_response.status(), StatusCode::OK);
+    let edge_hashes: serde_json::Value = edge_hashes_response
+        .json()
+        .await
+        .expect("decode edge schema hashes");
+    let hashes = edge_hashes
+        .get("hashes")
+        .and_then(serde_json::Value::as_array)
+        .expect("schema hashes response should include hashes");
+    assert!(
+        hashes
+            .iter()
+            .any(|hash| hash.as_str() == Some(schema_hash.as_str())),
+        "edge catalogue read should include schema published through ws-style upstream"
+    );
+
+    let alice = TestingClient::builder()
+        .with_server(&edge)
+        .with_schema(schema.clone())
+        .with_user_id("alice-ws-upstream-catalogue")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let (todo_id, _) = alice
+        .create_persisted(
+            "todos",
+            HashMap::from([(
+                "title".to_string(),
+                Value::Text("catalogue over app-scoped ws upstream".to_string()),
+            )]),
+            DurabilityTier::GlobalServer,
+        )
+        .await
+        .expect("alice writes after catalogue is published through ws-style upstream");
+
+    let alice_rows = wait_for_query(
+        &alice,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        REPLICATION_TIMEOUT,
+        "alice reads row through edge configured with app-scoped ws upstream",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        vec![Value::Text(
+            "catalogue over app-scoped ws upstream".to_string()
+        )]
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    edge.shutdown().await;
+    core.shutdown().await;
+}
+
+/// A persisted edge that was offline for a core catalogue update reconnects
+/// with its older catalogue hash. The core should treat that hash as stale and
+/// replay the missing catalogue before the first post-restart client write.
+///
+/// ```text
+/// core: v1 catalogue ----sync----> edge (persistent data_dir)
+/// edge stops
+/// core: v2 catalogue + permissions
+/// edge restarts with v1 hash --handshake--> core --catalogue replay--> edge
+/// alice(v2) writes through restarted edge
+/// ```
+#[tokio::test]
+async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
+    let app_id = TestingServer::default_app_id();
+    let v1_schema = todo_schema();
+    let v2_schema = todo_schema_with_notes();
+    let edge_data_dir = TempDir::new().expect("temp edge data dir");
+    let query = QueryBuilder::new("todos").build();
+
+    let core = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .start()
+        .await;
+
+    publish_schema_to_core(&core, &v1_schema).await;
+    let v1_permissions_head = publish_allow_all_permissions(
+        &core.base_url(),
+        core.app_id(),
+        core.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
+    let edge_before_restart = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .with_upstream_url(core.base_url())
+        .with_persistent_storage()
+        .with_data_dir(edge_data_dir.path())
+        .start()
+        .await;
+
+    wait_for_upstream(&edge_before_restart).await;
+    wait_for_schema_hash(&edge_before_restart, &v1_schema).await;
+    wait_for_permissions_head(&edge_before_restart, &v1_permissions_head.bundle_object_id).await;
+    let stale_edge_catalogue_hash = edge_before_restart
+        .server_state()
+        .runtime
+        .catalogue_state_hash()
+        .expect("read edge v1 catalogue hash");
+
+    edge_before_restart.shutdown().await;
+
+    publish_schema_to_core(&core, &v2_schema).await;
+    let v2_permissions_head = publish_allow_all_permissions(
+        &core.base_url(),
+        core.app_id(),
+        core.admin_secret(),
+        &v2_schema,
+    )
+    .await;
+    let core_v2_catalogue_hash = core
+        .server_state()
+        .runtime
+        .catalogue_state_hash()
+        .expect("read core v2 catalogue hash");
+    assert_ne!(
+        stale_edge_catalogue_hash, core_v2_catalogue_hash,
+        "edge should restart from an older persisted catalogue hash"
+    );
+
+    let edge_after_restart = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret(PEER_SECRET)
+        .with_upstream_url(core.base_url())
+        .with_persistent_storage()
+        .with_data_dir(edge_data_dir.path())
+        .start()
+        .await;
+
+    let alice = TestingClient::builder()
+        .with_server(&edge_after_restart)
+        .with_schema(v2_schema.clone())
+        .with_user_id("alice-stale-edge-replay")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    wait_for_schema_hash(&edge_after_restart, &v2_schema).await;
+    wait_for_permissions_head(&edge_after_restart, &v2_permissions_head.bundle_object_id).await;
+
+    let (todo_id, _) = alice
+        .create_persisted(
+            "todos",
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("write after stale catalogue replay".to_string()),
+                ),
+                (
+                    "notes".to_string(),
+                    Value::Text("v2 column available before work proceeds".to_string()),
+                ),
+            ]),
+            DurabilityTier::GlobalServer,
+        )
+        .await
+        .expect("v2 write should settle after stale edge receives catalogue replay");
+
+    let alice_rows = wait_for_query(
+        &alice,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        REPLICATION_TIMEOUT,
+        "alice sees v2 row after stale edge replay",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        vec![
+            Value::Text("write after stale catalogue replay".to_string()),
+            Value::Text("v2 column available before work proceeds".to_string()),
+        ]
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    edge_after_restart.shutdown().await;
     core.shutdown().await;
 }
 

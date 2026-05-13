@@ -583,7 +583,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.schema_manager.process(&mut self.storage);
         }
 
-        self.refresh_transport_catalogue_state_hash();
+        if self.transport_catalogue_state_hash_dirty {
+            self.refresh_transport_catalogue_state_hash();
+        }
 
         // 3. Collect subscription updates
         let subscription_updates = self.schema_manager.query_manager_mut().take_updates();
