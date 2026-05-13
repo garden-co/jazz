@@ -1,0 +1,573 @@
+//! Worker bridge protocol — binary postcard envelopes.
+//!
+//! Every `postMessage` between main and worker carries a single `Uint8Array`
+//! of postcard-encoded enum bytes, with the underlying `ArrayBuffer`
+//! transferred. The only exception is the **init** message, which stays as a
+//! JS object so the worker's JS shim can consume `runtimeSources` (bundler-
+//! resolved JS module/blob refs) before handing off to Rust. The shim also
+//! posts a JS-object `{type:"ready"}` once WASM is loaded.
+//!
+//! Variant fields use `serde_bytes::ByteBuf` for binary payloads so postcard
+//! serialises them as length-prefixed bytes rather than Vec<u8>'s default
+//! sequence-of-u8s. Heterogeneous JS-shaped fields (`LocalBatchRecord`,
+//! `DebugSchemaState`) ride as JSON strings inside the binary envelope and
+//! are `JSON.parse`-d on the JS side — it's the cheapest way to preserve
+//! the existing TS listener shapes without re-serialising via
+//! `serde-wasm-bindgen` on every receive.
+
+#![allow(dead_code)]
+
+use js_sys::{Array, Reflect, Uint8Array};
+use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+
+// =============================================================================
+// Lifecycle event
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkerLifecycleEvent {
+    VisibilityHidden,
+    VisibilityVisible,
+    Pagehide,
+    Freeze,
+    Resume,
+}
+
+// =============================================================================
+// Init payload (JS-object special case)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitPayloadFields {
+    pub schema_json: String,
+    pub app_id: String,
+    pub env: String,
+    pub user_branch: String,
+    pub db_name: String,
+    pub client_id: String,
+    pub server_url: Option<String>,
+    pub jwt_token: Option<String>,
+    pub admin_secret: Option<String>,
+    pub fallback_wasm_url: Option<String>,
+    pub log_level: Option<String>,
+    pub telemetry_collector_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InitPayload {
+    pub fields: InitPayloadFields,
+    /// Opaque bundler-resolved JS source references (Uint8Array / module / URL).
+    /// Stays as a `JsValue` because there's no clean Rust shape for it.
+    pub runtime_sources: JsValue,
+}
+
+// =============================================================================
+// Worker → main `Sync` entry
+// =============================================================================
+
+/// Per-entry shape inside a worker → main `sync` batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SyncEntry {
+    BareBytes(ByteBuf),
+    BareString(String),
+    SequencedBytes { payload: ByteBuf, sequence: u64 },
+    SequencedString { payload: String, sequence: u64 },
+}
+
+// =============================================================================
+// Wire enums (postcard-encoded)
+// =============================================================================
+
+/// Wire-only Main → Worker variants. The `Init` message is *not* in this enum
+/// — it stays as a JS object so the worker's JS shim can pull
+/// `runtimeSources` out before handoff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MainToWorkerWire {
+    /// Sync batch from main → worker. `ack_id` is set when the main side
+    /// expects a `SyncAck` reply (e.g. `wait_for_local_sync_flush`). When
+    /// present alongside `ack_batch_id`, the worker also performs a local
+    /// batch reconciliation pass before acking.
+    Sync {
+        payloads: Vec<ByteBuf>,
+        ack_id: Option<u32>,
+        ack_batch_id: Option<String>,
+    },
+    PeerOpen {
+        peer_id: String,
+    },
+    PeerSync {
+        peer_id: String,
+        term: u32,
+        payloads: Vec<ByteBuf>,
+    },
+    PeerClose {
+        peer_id: String,
+    },
+    LifecycleHint {
+        event: WorkerLifecycleEvent,
+        sent_at_ms: f64,
+    },
+    UpdateAuth {
+        jwt_token: Option<String>,
+    },
+    DisconnectUpstream,
+    ReconnectUpstream,
+    Shutdown,
+    AcknowledgeRejectedBatch {
+        batch_id: String,
+    },
+    SimulateCrash,
+    DebugSchemaState,
+    DebugSeedLiveSchema {
+        schema_json: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WorkerToMainWire {
+    InitOk {
+        client_id: String,
+    },
+    UpstreamConnected,
+    UpstreamDisconnected,
+    Sync {
+        payloads: Vec<SyncEntry>,
+    },
+    /// Reply to a `MainToWorkerWire::Sync` envelope carrying `ack_id`. Reports
+    /// whether the worker observed any payloads for the requested batch and
+    /// whether the batch's fate has settled in a way the main side can rely on
+    /// for `wait_for_local_sync_flush`.
+    SyncAck {
+        ack_id: u32,
+        has_batch_record: bool,
+        batch_reconciled: bool,
+    },
+    PeerSync {
+        peer_id: String,
+        term: u32,
+        payloads: Vec<ByteBuf>,
+    },
+    /// `Vec<LocalBatchRecord>` serialised as JSON. JS side does `JSON.parse`.
+    LocalBatchRecordsSync {
+        batches_json: String,
+    },
+    /// `MutationErrorEvent` (`{ code, reason, batch }`) serialised as JSON.
+    MutationErrorReplay {
+        event_json: String,
+    },
+    Error {
+        message: String,
+    },
+    AuthFailed {
+        reason: String,
+    },
+    ShutdownOk,
+    /// `DebugSchemaState` serialised as JSON.
+    DebugSchemaStateOk {
+        state_json: String,
+    },
+    DebugSeedLiveSchemaOk,
+}
+
+// =============================================================================
+// In-process Rust enum used by the host's dispatch loop
+// =============================================================================
+
+#[derive(Debug, Clone)]
+pub enum MainToWorkerMessage {
+    Init(Box<InitPayload>),
+    Wire(MainToWorkerWire),
+    /// Fallback for unrecognised JS-object messages. Worker host responds
+    /// with an `Error`.
+    Unknown(String),
+}
+
+// =============================================================================
+// Read path (Main → Worker)
+// =============================================================================
+
+/// Parse an inbound `MessageEvent.data`. Init is JS-object; everything else is
+/// a `Uint8Array` of postcard-encoded `MainToWorkerWire` bytes.
+pub fn parse_main_to_worker(value: &JsValue) -> Result<MainToWorkerMessage, String> {
+    // Init special case (JS object with `type === "init"`).
+    if let Some(type_str) = Reflect::get(value, &JsValue::from_str("type"))
+        .ok()
+        .and_then(|v| v.as_string())
+    {
+        if type_str == "init" {
+            let runtime_sources = Reflect::get(value, &JsValue::from_str("runtimeSources"))
+                .unwrap_or(JsValue::UNDEFINED);
+            let fields: InitPayloadFields = serde_wasm_bindgen::from_value(value.clone())
+                .map_err(|e| format!("init payload: {e}"))?;
+            return Ok(MainToWorkerMessage::Init(Box::new(InitPayload {
+                fields,
+                runtime_sources,
+            })));
+        }
+        return Ok(MainToWorkerMessage::Unknown(type_str));
+    }
+
+    // Binary path.
+    if let Some(arr) = value.dyn_ref::<Uint8Array>() {
+        let bytes = arr.to_vec();
+        let wire: MainToWorkerWire =
+            postcard::from_bytes(&bytes).map_err(|e| format!("postcard decode: {e}"))?;
+        return Ok(MainToWorkerMessage::Wire(wire));
+    }
+
+    Err("expected Uint8Array (binary) or `init` JS object".to_string())
+}
+
+// =============================================================================
+// Read path (Worker → Main)
+// =============================================================================
+
+/// Decode a worker → main message. The JS shim posts two JS-object envelopes
+/// before WASM takes over: `{type:"ready"}` once the module is loaded, and
+/// `{type:"error", message}` if the WASM load or bootstrap throws (no
+/// postcard wire is possible because the runtime isn't yet up). Everything
+/// else is a `Uint8Array` of postcard-encoded `WorkerToMainWire`.
+pub fn parse_worker_to_main(value: &JsValue) -> ParsedWorkerToMain {
+    if let Some(type_str) = Reflect::get(value, &JsValue::from_str("type"))
+        .ok()
+        .and_then(|v| v.as_string())
+    {
+        return match type_str.as_str() {
+            "ready" => ParsedWorkerToMain::Ready,
+            "error" => {
+                let message = Reflect::get(value, &JsValue::from_str("message"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_else(|| "worker shim error (no message)".to_string());
+                ParsedWorkerToMain::Wire(WorkerToMainWire::Error { message })
+            }
+            other => ParsedWorkerToMain::UnknownJsObject(other.to_string()),
+        };
+    }
+
+    if let Some(arr) = value.dyn_ref::<Uint8Array>() {
+        let bytes = arr.to_vec();
+        return match postcard::from_bytes::<WorkerToMainWire>(&bytes) {
+            Ok(wire) => ParsedWorkerToMain::Wire(wire),
+            Err(e) => ParsedWorkerToMain::DecodeError(format!("postcard decode: {e}")),
+        };
+    }
+
+    ParsedWorkerToMain::Malformed
+}
+
+#[derive(Debug)]
+pub enum ParsedWorkerToMain {
+    Ready,
+    Wire(WorkerToMainWire),
+    UnknownJsObject(String),
+    DecodeError(String),
+    Malformed,
+}
+
+// =============================================================================
+// Encode path
+// =============================================================================
+
+pub fn encode_main_to_worker(msg: &MainToWorkerWire) -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(msg)
+}
+
+pub fn encode_worker_to_main(msg: &WorkerToMainWire) -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(msg)
+}
+
+/// Build a JS-owned `Uint8Array` containing the postcard-encoded message
+/// alongside a transfer list with its `ArrayBuffer`. Caller passes both to
+/// `target.postMessage(message, transfer)`.
+pub fn encode_to_uint8array_with_transfer(bytes: &[u8]) -> (JsValue, Array) {
+    let arr = Uint8Array::from(bytes);
+    let transfer = Array::new();
+    transfer.push(&arr.buffer().into());
+    (arr.into(), transfer)
+}
+
+// =============================================================================
+// Helpers shared with the worker host's outbound builders
+// =============================================================================
+
+/// Convenience: serialise a `WorkerToMainWire` and produce the
+/// `(message, transfer)` pair ready for `postMessage`.
+pub fn worker_to_main_post(msg: &WorkerToMainWire) -> Result<(JsValue, Array), postcard::Error> {
+    let bytes = encode_worker_to_main(msg)?;
+    Ok(encode_to_uint8array_with_transfer(&bytes))
+}
+
+pub fn main_to_worker_post(msg: &MainToWorkerWire) -> Result<(JsValue, Array), postcard::Error> {
+    let bytes = encode_main_to_worker(msg)?;
+    Ok(encode_to_uint8array_with_transfer(&bytes))
+}
+
+// =============================================================================
+// JS-callable encode/decode helpers (test-only convenience)
+// =============================================================================
+//
+// Bindings exposed to JS so test harnesses can construct postcard-encoded
+// envelopes (and decode responses) without re-implementing postcard in TS.
+// The JS shape is `{ type: "<kebab-case>", ...fields }`, mirroring the legacy
+// JS-object protocol so test bodies stay readable.
+
+#[wasm_bindgen(js_name = encodeMainToWorkerJs)]
+pub fn encode_main_to_worker_js(value: JsValue) -> Result<Uint8Array, JsError> {
+    let type_str = Reflect::get(&value, &JsValue::from_str("type"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .ok_or_else(|| JsError::new("missing `type` field"))?;
+    let wire = match type_str.as_str() {
+        "debug-schema-state" => MainToWorkerWire::DebugSchemaState,
+        "debug-seed-live-schema" => {
+            let schema_json = Reflect::get(&value, &JsValue::from_str("schemaJson"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
+            MainToWorkerWire::DebugSeedLiveSchema { schema_json }
+        }
+        other => {
+            return Err(JsError::new(&format!(
+                "encodeMainToWorkerJs: unsupported type `{other}`"
+            )));
+        }
+    };
+    let bytes =
+        encode_main_to_worker(&wire).map_err(|e| JsError::new(&format!("postcard encode: {e}")))?;
+    Ok(Uint8Array::from(bytes.as_slice()))
+}
+
+#[wasm_bindgen(js_name = encodeWorkerToMainJs)]
+pub fn encode_worker_to_main_js(value: JsValue) -> Result<Uint8Array, JsError> {
+    let type_str = Reflect::get(&value, &JsValue::from_str("type"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .ok_or_else(|| JsError::new("missing `type` field"))?;
+    let wire = match type_str.as_str() {
+        "error" => {
+            let message = Reflect::get(&value, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
+            WorkerToMainWire::Error { message }
+        }
+        "debug-schema-state-ok" => {
+            let state_value =
+                Reflect::get(&value, &JsValue::from_str("state")).unwrap_or(JsValue::UNDEFINED);
+            let state_json = if state_value.is_undefined() || state_value.is_null() {
+                "null".to_string()
+            } else {
+                js_sys::JSON::stringify(&state_value)
+                    .ok()
+                    .and_then(|s| s.as_string())
+                    .unwrap_or_else(|| "null".to_string())
+            };
+            WorkerToMainWire::DebugSchemaStateOk { state_json }
+        }
+        "debug-seed-live-schema-ok" => WorkerToMainWire::DebugSeedLiveSchemaOk,
+        other => {
+            return Err(JsError::new(&format!(
+                "encodeWorkerToMainJs: unsupported type `{other}`"
+            )));
+        }
+    };
+    let bytes =
+        encode_worker_to_main(&wire).map_err(|e| JsError::new(&format!("postcard encode: {e}")))?;
+    Ok(Uint8Array::from(bytes.as_slice()))
+}
+
+#[wasm_bindgen(js_name = decodeMainToWorkerJs)]
+pub fn decode_main_to_worker_js(bytes: &Uint8Array) -> Result<JsValue, JsError> {
+    let bytes = bytes.to_vec();
+    let wire: MainToWorkerWire =
+        postcard::from_bytes(&bytes).map_err(|e| JsError::new(&format!("postcard decode: {e}")))?;
+    let obj = js_sys::Object::new();
+    let set = |k: &str, v: &JsValue| -> Result<(), JsError> {
+        Reflect::set(&obj, &JsValue::from_str(k), v)
+            .map(|_| ())
+            .map_err(|_| JsError::new("Reflect::set failed"))
+    };
+    match wire {
+        MainToWorkerWire::UpdateAuth { jwt_token } => {
+            set("type", &JsValue::from_str("update-auth"))?;
+            let token_val = match jwt_token {
+                Some(s) => JsValue::from_str(&s),
+                None => JsValue::NULL,
+            };
+            set("jwtToken", &token_val)?;
+        }
+        MainToWorkerWire::Shutdown => {
+            set("type", &JsValue::from_str("shutdown"))?;
+        }
+        MainToWorkerWire::DebugSchemaState => {
+            set("type", &JsValue::from_str("debug-schema-state"))?;
+        }
+        MainToWorkerWire::DebugSeedLiveSchema { schema_json } => {
+            set("type", &JsValue::from_str("debug-seed-live-schema"))?;
+            set("schemaJson", &JsValue::from_str(&schema_json))?;
+        }
+        other => {
+            return Err(JsError::new(&format!(
+                "decodeMainToWorkerJs: unsupported variant {other:?}"
+            )));
+        }
+    }
+    Ok(obj.into())
+}
+
+#[wasm_bindgen(js_name = decodeWorkerToMainJs)]
+pub fn decode_worker_to_main_js(bytes: &Uint8Array) -> Result<JsValue, JsError> {
+    let bytes = bytes.to_vec();
+    let wire: WorkerToMainWire =
+        postcard::from_bytes(&bytes).map_err(|e| JsError::new(&format!("postcard decode: {e}")))?;
+    let obj = js_sys::Object::new();
+    let set = |k: &str, v: &JsValue| -> Result<(), JsError> {
+        Reflect::set(&obj, &JsValue::from_str(k), v)
+            .map(|_| ())
+            .map_err(|_| JsError::new("Reflect::set failed"))
+    };
+    match wire {
+        WorkerToMainWire::Error { message } => {
+            set("type", &JsValue::from_str("error"))?;
+            set("message", &JsValue::from_str(&message))?;
+        }
+        WorkerToMainWire::DebugSchemaStateOk { state_json } => {
+            set("type", &JsValue::from_str("debug-schema-state-ok"))?;
+            let state = js_sys::JSON::parse(&state_json).unwrap_or(JsValue::NULL);
+            set("state", &state)?;
+        }
+        WorkerToMainWire::DebugSeedLiveSchemaOk => {
+            set("type", &JsValue::from_str("debug-seed-live-schema-ok"))?;
+        }
+        WorkerToMainWire::InitOk { client_id } => {
+            set("type", &JsValue::from_str("init-ok"))?;
+            set("clientId", &JsValue::from_str(&client_id))?;
+        }
+        other => {
+            return Err(JsError::new(&format!(
+                "decodeWorkerToMainJs: unsupported variant {other:?}"
+            )));
+        }
+    }
+    Ok(obj.into())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Postcard round-trip tests for the wire enums. These guard the protocol
+    //! from a regression where the receiver expects postcard but the sender
+    //! emits a JS object — the silent-drop class of bug.
+    use super::*;
+
+    fn rt_main(msg: &MainToWorkerWire) {
+        let bytes = postcard::to_allocvec(msg).expect("encode");
+        let decoded: MainToWorkerWire = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(format!("{:?}", msg), format!("{:?}", decoded));
+    }
+
+    fn rt_worker(msg: &WorkerToMainWire) {
+        let bytes = postcard::to_allocvec(msg).expect("encode");
+        let decoded: WorkerToMainWire = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(format!("{:?}", msg), format!("{:?}", decoded));
+    }
+
+    #[test]
+    fn main_to_worker_round_trips() {
+        rt_main(&MainToWorkerWire::Sync {
+            payloads: vec![ByteBuf::from(vec![1, 2, 3]), ByteBuf::from(vec![4, 5])],
+            ack_id: None,
+            ack_batch_id: None,
+        });
+        rt_main(&MainToWorkerWire::Sync {
+            payloads: vec![ByteBuf::from(vec![9])],
+            ack_id: Some(7),
+            ack_batch_id: Some("batch-1".into()),
+        });
+        rt_main(&MainToWorkerWire::PeerOpen {
+            peer_id: "tab-a".into(),
+        });
+        rt_main(&MainToWorkerWire::PeerSync {
+            peer_id: "tab-b".into(),
+            term: 7,
+            payloads: vec![ByteBuf::from(vec![9, 8, 7])],
+        });
+        rt_main(&MainToWorkerWire::PeerClose {
+            peer_id: "tab-c".into(),
+        });
+        rt_main(&MainToWorkerWire::LifecycleHint {
+            event: WorkerLifecycleEvent::VisibilityHidden,
+            sent_at_ms: 1_700_000_000_000.0,
+        });
+        rt_main(&MainToWorkerWire::UpdateAuth {
+            jwt_token: Some("jwt".into()),
+        });
+        rt_main(&MainToWorkerWire::UpdateAuth { jwt_token: None });
+        rt_main(&MainToWorkerWire::DisconnectUpstream);
+        rt_main(&MainToWorkerWire::ReconnectUpstream);
+        rt_main(&MainToWorkerWire::Shutdown);
+        rt_main(&MainToWorkerWire::AcknowledgeRejectedBatch {
+            batch_id: "b1".into(),
+        });
+        rt_main(&MainToWorkerWire::SimulateCrash);
+        rt_main(&MainToWorkerWire::DebugSchemaState);
+        rt_main(&MainToWorkerWire::DebugSeedLiveSchema {
+            schema_json: "{}".into(),
+        });
+    }
+
+    #[test]
+    fn worker_to_main_round_trips() {
+        rt_worker(&WorkerToMainWire::InitOk {
+            client_id: "c1".into(),
+        });
+        rt_worker(&WorkerToMainWire::UpstreamConnected);
+        rt_worker(&WorkerToMainWire::UpstreamDisconnected);
+        rt_worker(&WorkerToMainWire::Sync {
+            payloads: vec![
+                SyncEntry::BareBytes(ByteBuf::from(vec![1, 2])),
+                SyncEntry::BareString("hi".into()),
+                SyncEntry::SequencedBytes {
+                    payload: ByteBuf::from(vec![9]),
+                    sequence: 42,
+                },
+                SyncEntry::SequencedString {
+                    payload: "x".into(),
+                    sequence: 99,
+                },
+            ],
+        });
+        rt_worker(&WorkerToMainWire::PeerSync {
+            peer_id: "p".into(),
+            term: 1,
+            payloads: vec![ByteBuf::from(vec![0xff])],
+        });
+        rt_worker(&WorkerToMainWire::LocalBatchRecordsSync {
+            batches_json: "[]".into(),
+        });
+        rt_worker(&WorkerToMainWire::SyncAck {
+            ack_id: 1,
+            has_batch_record: true,
+            batch_reconciled: false,
+        });
+        rt_worker(&WorkerToMainWire::MutationErrorReplay {
+            event_json: "{}".into(),
+        });
+        rt_worker(&WorkerToMainWire::Error {
+            message: "oops".into(),
+        });
+        rt_worker(&WorkerToMainWire::AuthFailed {
+            reason: "expired".into(),
+        });
+        rt_worker(&WorkerToMainWire::ShutdownOk);
+        rt_worker(&WorkerToMainWire::DebugSchemaStateOk {
+            state_json: "{}".into(),
+        });
+        rt_worker(&WorkerToMainWire::DebugSeedLiveSchemaOk);
+    }
+}
