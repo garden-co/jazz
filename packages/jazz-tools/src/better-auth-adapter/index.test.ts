@@ -21,7 +21,7 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+        schemaDir: join(import.meta.dirname, "fixtures"),
       });
 
       context = createJazzContext({
@@ -476,7 +476,7 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+        schemaDir: join(import.meta.dirname, "fixtures"),
       });
 
       context = createJazzContext({
@@ -845,7 +845,7 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+        schemaDir: join(import.meta.dirname, "fixtures"),
       });
 
       context = createJazzContext({
@@ -925,7 +925,7 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+        schemaDir: join(import.meta.dirname, "fixtures"),
       });
 
       context = createJazzContext({
@@ -991,7 +991,7 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+        schemaDir: join(import.meta.dirname, "fixtures"),
       });
 
       const ctx1 = createJazzContext({
