@@ -259,11 +259,8 @@ async fn send_ws_error_with_code(
         code,
     };
     if let Ok(bytes) = serde_json::to_vec(&event) {
-        let _ = socket
-            .send(Message::Binary(crate::transport_manager::frame_encode(
-                &bytes,
-            )))
-            .await;
+        let frame = crate::transport_manager::frame_encode(&bytes);
+        let _ = socket.send(Message::Binary(frame)).await;
     }
 }
 
@@ -291,7 +288,7 @@ async fn handle_ws_connection(
         }
     };
     let payload = match crate::transport_manager::frame_decode(&first) {
-        Some(p) => p.to_vec(),
+        Some(payload) => payload,
         None => {
             let _ = socket.close().await;
             return;
@@ -412,13 +409,8 @@ async fn handle_ws_connection(
             return;
         }
     };
-    if socket
-        .send(Message::Binary(crate::transport_manager::frame_encode(
-            &resp_bytes,
-        )))
-        .await
-        .is_err()
-    {
+    let connected_frame = crate::transport_manager::frame_encode(&resp_bytes);
+    if socket.send(Message::Binary(connected_frame)).await.is_err() {
         ws_cleanup(&state, connection_id, client_id).await;
         return;
     }
@@ -434,11 +426,10 @@ async fn handle_ws_connection(
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(data))) => {
-                    let Some(inner) = crate::transport_manager::frame_decode(&data) else {
+                    let Some(payload) = crate::transport_manager::frame_decode(&data) else {
                         continue;
                     };
-                    let inner = inner.to_vec();
-                    if let Err(e) = state.process_ws_client_frame(client_id, &inner).await {
+                    if let Err(e) = state.process_ws_client_frame(client_id, &payload).await {
                         tracing::warn!(error = ?e, "ws client frame rejected");
                     }
                 }
@@ -475,26 +466,16 @@ async fn handle_ws_connection(
                     Ok(b) => b,
                     Err(_) => continue,
                 };
-                if socket
-                    .send(Message::Binary(
-                        crate::transport_manager::frame_encode(&bytes),
-                    ))
-                    .await
-                    .is_err()
-                {
+                let frame = crate::transport_manager::frame_encode(&bytes);
+                if socket.send(Message::Binary(frame)).await.is_err() {
                     break;
                 }
             }
             _ = heartbeat.tick() => {
                 let event = crate::jazz_transport::ServerEvent::Heartbeat;
                 let Ok(bytes) = event.encode_payload() else { continue };
-                if socket
-                    .send(Message::Binary(
-                        crate::transport_manager::frame_encode(&bytes),
-                    ))
-                    .await
-                    .is_err()
-                {
+                let frame = crate::transport_manager::frame_encode(&bytes);
+                if socket.send(Message::Binary(frame)).await.is_err() {
                     break;
                 }
             }
