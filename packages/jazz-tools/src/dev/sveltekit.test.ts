@@ -75,6 +75,17 @@ afterEach(async () => {
 });
 
 describe("jazzSvelteKit", () => {
+  it("config hook accepts both Vite ssr.external shapes (true and string[])", () => {
+    const plugin = jazzSvelteKit();
+
+    const arrayResult = plugin.config({ ssr: { external: ["other-pkg"] } });
+    expect(arrayResult.ssr.external).toContain("jazz-napi");
+    expect(arrayResult.ssr.external).toContain("other-pkg");
+
+    const externaliseAll = plugin.config({ ssr: { external: true } });
+    expect(externaliseAll.ssr.external).toBe(true);
+  });
+
   it("starts a local server in dev and injects PUBLIC_JAZZ_* env vars", async () => {
     const port = await getAvailablePort();
     const root = await tempRoots.create("jazz-sveltekit-test-");
