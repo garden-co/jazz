@@ -38,5 +38,8 @@
     "vite-plugin-top-level-await": "catalog:default",
     "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default"
+  },
+  "engines": {
+    "node": ">=22.12"
   }
 }
