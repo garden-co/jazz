@@ -1,5 +1,82 @@
 # jazz-tools
 
+## 2.0.0-alpha.47
+
+### Minor Changes
+
+- 3d7e00f: Add edge upstream sync support for self-hosted Jazz servers.
+
+  `jazz-tools server` can now run as an edge when configured with an upstream core URL and peer secret, and the DevServer/testing APIs expose matching upstream and peer-secret options for integration coverage.
+
+### Patch Changes
+
+- 2156a27: Replace replayable batch settlements with whole-batch `BatchFate` sync semantics and remove visible-member manifests from the client-facing fate shape. Successful fate now applies by batch id to locally known rows, avoiding repeated per-row member decoding during subscription settlement.
+- 7f7b5da: Add rollback and scoped read support to explicit batches. `DirectBatch`/`DbDirectBatch` now expose `rollback()`, and batch handles can read their own local writes before commit through `DirectBatch.query(...)` and `DbDirectBatch.all(...)`/`one(...)`.
+- 6352c68: Make sync batch settlements the durability source of truth, including batch-level rejection fate, settlement-based visibility, transport batching, and more reliable offline replay after reconnect.
+- 411d0a0: Updated BetterAuth adapter query-support rules: timestamp columns now support `ne`, `null` filters are only allowed for nullable columns, and `ne null` remains rejected for references and `id`.
+- fa3b607: Fix loss of reactivity for query subscriptions with deeply-nested includes. Subscriptions built from depth-2+ `via` include chains (`org.include({ todoViaOrg: { user_checkViaTodo: true } })`) now correctly receive deltas when a row at the bottom of the chain is inserted, updated, or deleted. Previously only the immediate child table was tracked as a dependency of the outer subscription, so mutations further down the chain were silently missed.
+- 729effd: Add opt-in development telemetry export for Jazz runtimes and local dev servers. WASM runtimes now buffer spans and logs in Rust only when telemetry is enabled, notify JavaScript through a coalesced drain subscription, and lazy-load client-side OpenTelemetry exporters only after a collector URL is configured.
+- 9942d24: Drop the `fetch` polyfill from `jazz-tools/expo`.
+
+  Nothing in jazz-tools consumes a streaming `response.body`, sync runs over WebSocket, and every fetch call site uses buffered methods like `.json()`/`.text()`. The `expo/fetch` swap (and its accompanying `fetchSpecCompliant` URL/Request coercion) was working around `expo/fetch`'s string-only native bridge, but with `expo/fetch` gone, RN's default fetch — which is `whatwg-fetch` under the hood — already accepts URL and Request inputs natively. Better-auth's URL-input path therefore works without the wrapper.
+
+  The `ReadableStream` polyfill stays — it's still consumed by `runtime/file-storage.ts` for the chunked-file API, which Hermes can't service without it.
+
+- 22e5263: Drop no-op `Headers`/`Request`/`Response` polyfills from `jazz-tools/expo`.
+
+  These were imported from `react-native/Libraries/Network/fetch`, which just re-exports `global.*` — so each polyfill collapsed to `globalThis.X = globalThis.X` at best, and to `globalThis.X = undefined` if the polyfill module evaluated before RN installed its networking globals. The latter case broke any consumer that touched `Headers.prototype` (e.g. Clerk's `new Headers(...)` in `fapiClient`), which surfaced as `TypeError: Cannot read property 'prototype' of undefined`. The `fetch` and `ReadableStream` polyfills, which do real work, are kept.
+
+- 37299e9: Keep transaction and direct-batch writes isolated from ordinary indexed queries until commit, while still letting batch-scoped reads see their own staged inserts, updates, and deletes.
+- c392b08: Persist authoritative direct batch fate when a server accepts sealed client-originated direct batches, preventing reconnect replays from being answered as missing.
+- 30b55f4: Fix OPFS-backed storage reads so coalesced disk reads stop at the current file length instead of reading past EOF after uncheckpointed growth.
+- 2ea35d5: Fix query subscription sync by preserving local-first auth mode through binary payloads.
+- 8962e44: Fix query planning so multiple conditions on the same column are combined correctly, preserving accurate results for same-column where clauses.
+- bf27d80: Fix reverse and nested relation includes that selected provenance magic columns such as `$createdAt` and `$updatedAt`.
+
+  Included relation rows now remain present when those magic timestamp columns are selected, instead of resolving as missing, null, or empty because subquery row descriptors dropped non-physical magic columns.
+
+- 5427303: Fix queries with reverse relations that select permission magic columns such as `$canRead`, `$canEdit`, and `$canDelete`.
+
+  Included rows now preserve those permission values for reverse, nested, and recursive relation results instead of dropping the subquery table dependency needed to compute them.
+
+- cd6c2b9: `jazzSvelteKit` from `jazz-tools/dev/sveltekit` now accepts the full Vite `ssr.external` shape (`true | string[]`). Previously the inline parameter type only allowed `string[]`, so `defineConfig({ plugins: [jazzSvelteKit()] })` failed to typecheck under `strict: true`. The `true` sentinel is preserved verbatim to keep externalise-everything semantics.
+- 19dc2c4: **Breaking change — action required for Expo / React Native users:** you must now install `jazz-rn` as a direct dependency in every Expo / React Native project (e.g. `npm install jazz-rn` / `pnpm add jazz-rn` / `yarn add jazz-rn`). It used to be pulled in transitively through `jazz-tools`, but is now an optional peer dependency, so it will no longer be installed for you. Web/Node apps are unaffected (jazz-wasm continues to be bundled internally). If `jazz-rn` is missing at runtime, the new `loadJazzRn` loader surfaces an explicit install hint instead of a generic module-resolution error.
+- e9bb115: Compress WebSocket transport frame payloads with LZ4 by default.
+- 576531d: `ManagedDevRuntime` no longer throws when a prior in-process run leaves `*_JAZZ_SERVER_URL` set in `process.env`. The env var on its own is now treated as our own persisted value and ignored in favour of spinning up a fresh local server. The plugin still takes the "connect to an external server" path when the caller explicitly supplies an `adminSecret` option or sets `JAZZ_ADMIN_SECRET`. This makes Vite HMR restarts and repeated test runs work without stale-state errors.
+- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~+43 KB gzipped on the napi `.node`).
+- 7f34895: Auto-reload the browser when the schema changes in a Next.js app.
+  `withJazz` writes the live schema hash into a generated module that the
+  React provider depends on, so Turbopack and Webpack reload the page
+  whenever the schema is pushed — no consumer-side wiring required.
+- e5c83ea: Keep dev plugins running when the initial schema auto-push cannot reach a configured remote Jazz server. The plugins now warn and continue with the configured app and server URL, while still failing on schema, auth, or server rejections.
+- 670f797: fix: prevent null field updates from getting lost on sync
+- 1d1bdc7: Skip catalogue replay from clients that are not authenticated with catalogue publish authority, avoiding harmless `CatalogueWriteDenied` sync errors.
+- 5b1d352: Stop server row replay from sending local durability acknowledgements back upstream, and ignore client-sent durability acknowledgements as authoritative server state.
+- 5752bde: Add React Native anonymous auth support. `jazz-tools` now mints anonymous JWTs through the React Native runtime module when no auth credentials are provided, and `jazz-rn` exposes the matching native `mintAnonymousToken` binding.
+- 15b347d: `jazz-rn`: `query` is now `async` and no longer blocks the React Native JS thread on one-shot reads.
+
+  The native uniffi export used `block_on` on the JS thread, so any `db.all(...)` that needed a later `batched_tick` to settle (e.g. queries that wait on server-sourced data or parked sync messages) could deadlock — the JS thread was blocked, so the `batched_tick` callback could never fire to fulfil the query future. The export is now `async fn` and uniffi-bindgen-react-native generates a Promise-returning JSI call, polled off the JS thread. `JazzRnRuntimeAdapter.query` now `await`s the binding before parsing.
+
+- fe0c43a: Move the dedicated-worker bridge orchestration (init handshake, peer routing, lifecycle hints, shutdown handshake, outbox routing, server-payload forwarding) out of TypeScript and into Rust (`crates/jazz-wasm`). `JsSyncSender` and the `onSyncMessageToSend` WASM API are gone; the runtime now posts directly to the worker via `worker.postMessage`. The TypeScript `WorkerBridge` is a thin adapter over the Rust-owned `WasmWorkerBridge`; `jazz-worker.ts` is reduced to a WASM-bootstrap shim. Public `Db` API and the on-the-wire structured-clone protocol shape are unchanged.
+- 181a66f: Modifies `createPolicyTestApp` to receive an app and permission objects instead of the schema's dir.
+- 92fbdf9: Persist sealed batch manifests and batch fates instead of replayable local batch records. Batch waits and mutation-error replay now read `BatchFate` directly, and sync no longer rebuilds local batch membership one row at a time.
+- e336d8d: Modify the permission tests API to make `expectAllowed`/`expectDenied` side-effect free.
+- 57a21cd: Fix `s.timestamp()` row output inference so timestamp columns are typed as `Date` instead of `Date | number`.
+
+  Numeric timestamp defaults remain accepted, but inserted and queried rows now match the runtime shape and infer timestamp values as JavaScript `Date` objects.
+
+- a523693: Add `rollback()` to transaction handles. Calling rollback closes the transaction without committing it, so later writes, reads, commits, or rollbacks on the same transaction fail.
+- Updated dependencies [2156a27]
+- Updated dependencies [6352c68]
+- Updated dependencies [fa3b607]
+- Updated dependencies [729effd]
+- Updated dependencies [e9bb115]
+- Updated dependencies [5752bde]
+- Updated dependencies [15b347d]
+- Updated dependencies [92fbdf9]
+  - jazz-wasm@2.0.0-alpha.47
+  - jazz-rn@2.0.0-alpha.47
+
 ## 2.0.0-alpha.46
 
 ### Patch Changes
