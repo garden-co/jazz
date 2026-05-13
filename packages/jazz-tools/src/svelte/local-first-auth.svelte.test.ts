@@ -202,7 +202,125 @@ describe("svelte/LocalFirstAuth", () => {
     cleanup();
   });
 
-  it("rejected getOrCreateSecret resolves to secret=null with isLoading=false", async () => {
+  it("an in-flight refetch is discarded if a later refetch overtakes it", async () => {
+    const releases: Array<(secret: string) => void> = [];
+    const slowStore: AuthSecretStore = {
+      loadSecret: async () => null,
+      saveSecret: async () => {},
+      clearSecret: async () => {},
+      getOrCreateSecret() {
+        return new Promise<string>((r) => releases.push(r));
+      },
+    };
+
+    let auth!: InstanceType<typeof LocalFirstAuth>;
+    const cleanup = $effect.root(() => {
+      auth = new LocalFirstAuth(slowStore);
+    });
+
+    await waitUntil(() => expect(releases.length).toBe(1));
+
+    void auth.login("login-bump");
+    await waitUntil(() => expect(releases.length).toBe(2));
+
+    // Resolve the SECOND call first, then the (older) first.
+    releases[1]("newer-secret-cccccccccccccccccccccccccc");
+    await waitUntil(() => expect(auth.secret).toBe("newer-secret-cccccccccccccccccccccccccc"));
+
+    releases[0]("older-secret-dddddddddddddddddddddddddd");
+    await Promise.resolve();
+    flushSync();
+    expect(auth.secret).toBe("newer-secret-cccccccccccccccccccccccccc");
+
+    cleanup();
+  });
+
+  it("rejected login still notifies siblings — partial-commit saves reconverge on store truth", async () => {
+    let underlying: string | null = "initial-secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+    const partialCommitStore: AuthSecretStore = {
+      async loadSecret() {
+        return underlying;
+      },
+      async saveSecret(secret) {
+        underlying = secret;
+        throw new Error("save partially failed");
+      },
+      async clearSecret() {
+        underlying = null;
+      },
+      getOrCreateSecret() {
+        if (underlying) return Promise.resolve(underlying);
+        underlying = "generated";
+        return Promise.resolve(underlying);
+      },
+    };
+
+    let alice!: InstanceType<typeof LocalFirstAuth>;
+    let bob!: InstanceType<typeof LocalFirstAuth>;
+    const cleanup = $effect.root(() => {
+      alice = new LocalFirstAuth(partialCommitStore);
+      bob = new LocalFirstAuth(partialCommitStore);
+    });
+    await waitUntil(() => {
+      expect(alice.isLoading).toBe(false);
+      expect(bob.isLoading).toBe(false);
+    });
+
+    await expect(alice.login("new-secret-eeeeeeeeeeeeeeeeeeeeeeee")).rejects.toThrow(
+      "save partially failed",
+    );
+
+    await waitUntil(() => {
+      expect(alice.secret).toBe("new-secret-eeeeeeeeeeeeeeeeeeeeeeee");
+      expect(bob.secret).toBe("new-secret-eeeeeeeeeeeeeeeeeeeeeeee");
+    });
+
+    cleanup();
+  });
+
+  it("rejected signOut still notifies siblings — partial-commit clears reconverge on store truth", async () => {
+    let underlying: string | null = "initial-secret-ffffffffffffffffffffffff";
+    const partialCommitStore: AuthSecretStore = {
+      async loadSecret() {
+        return underlying;
+      },
+      async saveSecret(secret) {
+        underlying = secret;
+      },
+      async clearSecret() {
+        underlying = null;
+        throw new Error("clear partially failed");
+      },
+      getOrCreateSecret() {
+        if (underlying) return Promise.resolve(underlying);
+        underlying = "generated-gggggggggggggggggggggggggggg";
+        return Promise.resolve(underlying);
+      },
+    };
+
+    let alice!: InstanceType<typeof LocalFirstAuth>;
+    let bob!: InstanceType<typeof LocalFirstAuth>;
+    const cleanup = $effect.root(() => {
+      alice = new LocalFirstAuth(partialCommitStore);
+      bob = new LocalFirstAuth(partialCommitStore);
+    });
+    await waitUntil(() => {
+      expect(alice.isLoading).toBe(false);
+      expect(bob.isLoading).toBe(false);
+    });
+
+    await expect(alice.signOut()).rejects.toThrow("clear partially failed");
+
+    await waitUntil(() => {
+      expect(alice.secret).toBe("generated-gggggggggggggggggggggggggggg");
+      expect(bob.secret).toBe("generated-gggggggggggggggggggggggggggg");
+    });
+
+    cleanup();
+  });
+
+  it("rejected getOrCreateSecret resolves to secret=null with isLoading=false and warns", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const failingStore: AuthSecretStore = {
       loadSecret: async () => null,
       saveSecret: async () => {},
@@ -221,7 +339,9 @@ describe("svelte/LocalFirstAuth", () => {
       expect(auth.isLoading).toBe(false);
       expect(auth.secret).toBeNull();
     });
+    expect(warn).toHaveBeenCalledWith("[LocalFirstAuth] secret store failed:", expect.any(Error));
 
     cleanup();
+    warn.mockRestore();
   });
 });

@@ -66,37 +66,47 @@ export class LocalFirstAuth {
     };
 
     this.login = async (secret: string) => {
-      await store.saveSecret(secret);
-      notify();
+      try {
+        await store.saveSecret(secret);
+      } finally {
+        notify();
+      }
     };
 
     this.signOut = async () => {
-      await store.clearSecret();
-      notify();
+      try {
+        await store.clearSecret();
+      } finally {
+        notify();
+      }
     };
 
     $effect(() => {
       let cancelled = false;
+      let latestCallId = 0;
 
       const refetch = () => {
+        const callId = ++latestCallId;
+        const stale = () => cancelled || callId !== latestCallId;
+        const onError = (err: unknown) => {
+          if (stale()) return;
+          console.warn("[LocalFirstAuth] secret store failed:", err);
+          this.secret = null;
+          this.isLoading = false;
+        };
+
         this.isLoading = true;
         try {
           store
             .getOrCreateSecret()
             .then((resolved) => {
-              if (cancelled) return;
+              if (stale()) return;
               this.secret = resolved;
               this.isLoading = false;
             })
-            .catch(() => {
-              if (cancelled) return;
-              this.secret = null;
-              this.isLoading = false;
-            });
-        } catch {
-          if (cancelled) return;
-          this.secret = null;
-          this.isLoading = false;
+            .catch(onError);
+        } catch (err) {
+          onError(err);
         }
       };
 
