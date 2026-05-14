@@ -9,7 +9,6 @@ export {
   type LocalUpdatesMode,
   type MutationErrorEvent,
   PersistedWriteRejectedError,
-  SessionClient,
   Transaction,
   type BatchScope,
   type TransactionScope,
