@@ -181,12 +181,12 @@ Conflicts are surfaced by diff only. They do not block merge.
 If a parent link or common ancestor cannot be resolved, diff should report an error for that row
 instead of guessing.
 
-Diff should return query-shaped rows with a small diff sidecar. The main value should be the same
+Diff should return query-shaped rows with a `$diff` magic column. The main value should be the same
 row shape callers already get from ordinary queries.
 
 ```ts
 type QueryDiffRow<Row> = Row & {
-  _jazz_diff: {
+  $diff: {
     kind: "insert" | "update" | "delete" | "unchanged" | "error";
     changed: string[];
     conflicts: string[];
@@ -201,7 +201,7 @@ type QueryDiffRow<Row> = Row & {
 
 For inserts and updates, the row fields are the values that `mergeBranch(source, target)` would
 write if the merge ran at the same observed source and target tips. For deletes, the row fields are
-the target-side row being removed, marked with `_jazz_diff.kind = "delete"`.
+the target-side row being removed, marked with `$diff.kind = "delete"`.
 
 The preview is not a lock. A later merge may produce a different value if either side changed after
 the diff was computed.
@@ -274,7 +274,7 @@ Required coverage:
 - repeated merge may create extra history while visible result remains stable
 - cross-branch parent links resolve correctly
 - diff reports an error for unresolved parent/common-ancestor state
-- diff returns query-shaped rows with `_jazz_diff` metadata
+- diff returns query-shaped rows with `$diff` magic-column metadata
 - schema/lens failures produce clear diff/merge errors
 
 ## Main Implementation Risk
