@@ -8,8 +8,8 @@ Branches provide write isolation by visibility only. A normal read from `main` d
 writes. Branch data is not secret: a caller with normal read permission may read a branch if they
 explicitly query that branch name.
 
-The first implementation supports branch reads and writes as overlays on `main`, diffs from a
-branch to `main`, and merges from a branch to `main`.
+The first implementation supports branch reads and writes as overlays on `main`, scoped diffs from
+a branch query to `main`, and merges from a branch to `main`.
 
 ## Non-Goals
 
@@ -92,8 +92,7 @@ Expose branch names directly.
 
 ```ts
 db.branch("draft/alice");
-db.table("todos").branch("draft/alice");
-db.diffBranch("draft/alice", "main");
+db.table("todos").branch("draft/alice").where({ projectId }).diff("main");
 db.mergeBranch("draft/alice", "main");
 ```
 
@@ -104,6 +103,9 @@ The query builder must also accept a branch selector. Query-builder branch selec
 overlay semantics as `db.branch(name)`. If a query is built from a branch-scoped database view and
 also selects a branch directly, the query-level branch wins because it is the closest explicit
 choice.
+
+Diff is exposed through the query builder, not as a whole-branch API. Callers scope the diff by
+building the query they want to inspect, then call `.diff(targetBranch)`.
 
 The MVP should only support merge target `main` unless the implementation explicitly supports more.
 `mergeBranch(source, target)` must reject `source === target`.
@@ -136,8 +138,22 @@ the corresponding main row.
 
 ## Diff Semantics
 
-`diffBranch(source, target)` scans rows changed on `source`, including branch tombstones and branch
-inserts, and compares them with `target`.
+Query-builder diff compares a source branch query with a target branch.
+
+```ts
+db.table("todos").branch("draft/alice").where({ projectId }).diff("main");
+```
+
+The source branch comes from the query builder's `.branch(...)` selection, or from the enclosing
+branch-scoped database view if the query does not select a branch directly. The target branch is the
+argument passed to `.diff(...)`.
+
+The diff scope includes any row that matches the query in the source branch overlay, the target
+branch, or the merged preview. This prevents a branch edit from hiding a row just because it no
+longer matches the query on one side.
+
+Within that scope, diff compares the source overlay rows with target rows, including branch
+tombstones and branch inserts.
 
 For each changed row:
 
@@ -271,6 +287,8 @@ Required coverage:
 - branch read falls back to current `main`
 - query-builder branch selection uses branch overlay reads
 - query-level branch selection overrides a branch-scoped database default
+- query-builder diff compares the selected source branch with the target branch
+- query-builder diff includes rows matching the query on the source, target, or preview side
 - branch edit overrides current `main`
 - branch delete hides current `main`
 - first branch write parents to the current `main` frontier
