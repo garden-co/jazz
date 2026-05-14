@@ -27,6 +27,7 @@ use super::policy::{Operation, PolicyExpr};
 use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
+use super::settlement_eval_cache::SettlementEvalCache;
 use super::types::{
     ColumnName, ComposedBranchName, LoadedRow, OrderedAdded, OrderedRowDelta, Row, RowDelta,
     RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple,
@@ -511,7 +512,6 @@ pub struct QueryManager {
     /// Server-side query subscriptions from downstream clients.
     /// Key is (client_id, query_id) to allow multiple queries per client.
     pub(super) server_subscriptions: HashMap<(ClientId, QueryId), ServerQuerySubscription>,
-
     /// Schema context for multi-schema queries.
     /// Starts empty; initialized via set_current_schema().
     /// Enables lens transforms for rows from old schema branches.
@@ -1569,8 +1569,10 @@ impl QueryManager {
             let mut visible_tuples = if subscription.uses_explicit_authorization_filtering {
                 let auth_schema_context = self.schema_context.clone();
                 let auth_branch_schema_map = self.branch_schema_map.clone();
-                Cow::Owned(self.authorized_tuples_from_graph(
+                let mut settlement_eval_cache = SettlementEvalCache::default();
+                Cow::Owned(self.authorized_tuples_from_graph_with_cache(
                     storage_ref,
+                    &mut settlement_eval_cache,
                     &subscription.graph,
                     &auth_schema_context,
                     &auth_branch_schema_map,
