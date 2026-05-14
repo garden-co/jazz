@@ -721,10 +721,7 @@ function rejectionFromSettlement(
   return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
 }
 
-function rejectionFromRuntimeWaitError(
-  fallbackBatchId: string,
-  error: unknown,
-): PersistedWriteRejectedError | null {
+function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedError | null {
   if (!error || typeof error !== "object") {
     return null;
   }
@@ -737,15 +734,14 @@ function rejectionFromRuntimeWaitError(
   if (candidate.kind !== "rejected") {
     return null;
   }
-  if (typeof candidate.code !== "string" || typeof candidate.reason !== "string") {
+  if (
+    typeof candidate.code !== "string" ||
+    typeof candidate.reason !== "string" ||
+    typeof candidate.batchId !== "string"
+  ) {
     return null;
   }
-  const batchId = typeof candidate.batchId === "string" ? candidate.batchId : fallbackBatchId;
-  return new PersistedWriteRejectedError(batchId, candidate.code, candidate.reason);
-}
-
-function rejectionFromMutationErrorEvent(event: MutationErrorEvent): PersistedWriteRejectedError {
-  return new PersistedWriteRejectedError(event.batch.batchId, event.code, event.reason);
+  return new PersistedWriteRejectedError(candidate.batchId, candidate.code, candidate.reason);
 }
 
 /**
@@ -1238,12 +1234,6 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   /**
-   * Listeners attached with {@link JazzClient.onMutationError} that are notified when a batch is rejected.
-   */
-  private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
-  private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
-  private readonly waitHandledBatchIds = new Set<string>();
-  /**
    * Keeps track of batches/transactions that were completed without issuing any writes to the runtime.
    * Necessary to resolve {@link waitForBatch} promises on these batches.
    */
@@ -1303,7 +1293,7 @@ export class JazzClient {
     }
 
     this.runtime.onMutationError((event) => {
-      this.queueMutationError(event);
+      console.error("Unhandled Jazz mutation error", event);
     });
   }
 
@@ -1492,25 +1482,8 @@ export class JazzClient {
     return this.runtime.loadBatchFate(batchId);
   }
 
-  onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
-    this.mutationErrorListeners.add(listener);
-    return () => {
-      this.mutationErrorListeners.delete(listener);
-    };
-  }
-
-  private markRejectedBatchHandledInJs(
-    batchId: string,
-    rejection = rejectionFromSettlement(this.batchFate(batchId)),
-  ): boolean {
-    if (rejection) {
-      this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
-    }
-    return !!rejection;
-  }
-
-  markMutationErrorHandled(event: MutationErrorEvent): void {
-    this.markRejectedBatchHandledInJs(event.batch.batchId, rejectionFromMutationErrorEvent(event));
+  onMutationError(listener: (event: MutationErrorEvent) => void): void {
+    this.runtime.onMutationError(listener);
   }
 
   sealBatch(batchId: string): WriteHandle {
@@ -2311,72 +2284,30 @@ export class JazzClient {
     });
   }
 
-  private normalizeBatchWaitError(batchId: string, error: unknown): Error {
-    return (
-      this.acknowledgedRejectedBatchErrors.get(batchId) ??
-      rejectionFromSettlement(this.batchFate(batchId)) ??
-      rejectionFromRuntimeWaitError(batchId, error) ??
-      (error instanceof Error ? error : new Error(String(error)))
-    );
-  }
-
-  private queueMutationError(event: MutationErrorEvent): void {
-    setTimeout(() => {
-      this.deliverMutationError(event);
-    }, 0);
-  }
-
-  private deliverMutationError(event: MutationErrorEvent): void {
-    const batchId = event.batch.batchId;
-    if (this.acknowledgedRejectedBatchErrors.has(batchId)) {
-      return;
-    }
-    if (this.waitHandledBatchIds.has(batchId)) {
-      return;
-    }
-
-    if (this.mutationErrorListeners.size === 0) {
-      console.error("Unhandled Jazz mutation error", event);
-    } else {
-      for (const listener of this.mutationErrorListeners) {
-        listener(event);
-      }
-    }
-
-    this.markMutationErrorHandled(event);
-  }
-
   async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
     if (this.completedEmptyBatchIds.has(batchId)) {
       return;
     }
-
     const settlement = this.batchFate(batchId);
-    const knownRejection = rejectionFromSettlement(settlement);
-    if (!knownRejection && settlementSatisfiesTier(settlement, tier)) {
+    if (settlementSatisfiesTier(settlement, tier)) {
       return;
     }
-
-    this.waitHandledBatchIds.add(batchId);
-
+    const knownRejection = rejectionFromSettlement(settlement);
+    if (knownRejection) {
+      throw knownRejection;
+    }
     try {
       await this.runtime.waitForBatch(batchId, tier);
     } catch (error) {
-      const normalizedError = this.normalizeBatchWaitError(batchId, error);
-      if (normalizedError instanceof PersistedWriteRejectedError) {
-        this.markRejectedBatchHandledInJs(batchId, normalizedError);
-      } else {
-        this.waitHandledBatchIds.delete(batchId);
-      }
-      throw normalizedError;
+      throw this.normalizeBatchWaitError(error);
     }
+  }
 
-    if (knownRejection) {
-      this.markRejectedBatchHandledInJs(batchId, knownRejection);
-      throw knownRejection;
-    }
-
-    this.waitHandledBatchIds.delete(batchId);
+  private normalizeBatchWaitError(error: unknown): Error {
+    return (
+      rejectionFromRuntimeWaitError(error) ??
+      (error instanceof Error ? error : new Error(String(error)))
+    );
   }
 
   /**
