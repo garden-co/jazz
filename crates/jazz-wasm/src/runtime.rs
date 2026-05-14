@@ -638,9 +638,6 @@ struct RustOutboxSenderInner {
     /// Worker-side: the runtime client id assigned to the main-thread peer.
     /// `None` on the main side and during the brief window before init.
     main_client_id: RefCell<Option<String>>,
-    /// Worker-side: `(clientId: string) => { peerId, term } | null` lookup
-    /// for routing client-bound payloads to the right follower-tab peer.
-    peer_routing_lookup: RefCell<Option<Function>>,
     /// Worker-side: `() => void` invoked after each batch flush that
     /// contained at least one main-bound client entry. The TS shim uses
     /// it to schedule the rejected-batch replay walk.
@@ -685,7 +682,6 @@ impl RustOutboxSender {
             inner: Rc::new(RustOutboxSenderInner {
                 target: RefCell::new(JsValue::NULL),
                 main_client_id: RefCell::new(None),
-                peer_routing_lookup: RefCell::new(None),
                 on_main_sync_flushed: RefCell::new(None),
                 server_payload_forwarder: RefCell::new(None),
                 bootstrap_catalogue_forwarding: RefCell::new(false),
@@ -723,12 +719,10 @@ impl RustOutboxSender {
         &self,
         target: JsValue,
         main_client_id: Option<String>,
-        peer_routing_lookup: Option<Function>,
         on_main_sync_flushed: Option<Function>,
     ) {
         *self.inner.target.borrow_mut() = target;
         *self.inner.main_client_id.borrow_mut() = main_client_id;
-        *self.inner.peer_routing_lookup.borrow_mut() = peer_routing_lookup;
         *self.inner.on_main_sync_flushed.borrow_mut() = on_main_sync_flushed;
     }
 
@@ -847,63 +841,7 @@ impl SyncSender for RustOutboxSender {
                 .borrow_mut()
                 .push(PeerRouting { is_main: true });
             self.schedule_flush();
-            return;
         }
-
-        // Peer client: look up (peerId, term) and post peer-sync immediately.
-        let routing = inner.peer_routing_lookup.borrow();
-        let Some(lookup) = routing.as_ref() else {
-            return;
-        };
-        let routing_value = match lookup.call1(&JsValue::NULL, &JsValue::from_str(&destination_id))
-        {
-            Ok(v) => v,
-            Err(_err) => {
-                #[cfg(target_arch = "wasm32")]
-                warn!(
-                    ?destination_id,
-                    ?_err,
-                    "peer_routing_lookup threw; dropping"
-                );
-                return;
-            }
-        };
-        if routing_value.is_null() || routing_value.is_undefined() {
-            return;
-        }
-        let peer_id = match js_sys::Reflect::get(&routing_value, &"peerId".into()) {
-            Ok(v) => v.as_string(),
-            Err(_) => None,
-        };
-        let term = match js_sys::Reflect::get(&routing_value, &"term".into()) {
-            Ok(v) => v.as_f64(),
-            Err(_) => None,
-        };
-        let (Some(peer_id), Some(term)) = (peer_id, term) else {
-            return;
-        };
-
-        // Postcard-encode `WorkerToMainWire::PeerSync { peer_id, term, payloads:[bytes] }`
-        // and post the Uint8Array with the underlying ArrayBuffer transferred.
-        let bytes_payload = match encoded {
-            SyncEntry::BareBytes(b) | SyncEntry::SequencedBytes { payload: b, .. } => b,
-            // Peer payloads are binary postcard only.
-            SyncEntry::BareString(_) | SyncEntry::SequencedString { .. } => return,
-        };
-        let wire = crate::worker_protocol::WorkerToMainWire::PeerSync {
-            peer_id,
-            term: term as u32,
-            payloads: vec![bytes_payload],
-        };
-        let Ok(bytes) = postcard::to_allocvec(&wire) else {
-            return;
-        };
-        let arr = Uint8Array::from(bytes.as_slice());
-        let transferables = js_sys::Array::new();
-        transferables.push(&arr.buffer().into());
-
-        let target = inner.target.borrow();
-        let _ = post_message_with_transfer(&target, &arr, &transferables);
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1282,10 +1220,10 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = createWorkerBridge)]
     pub fn create_worker_bridge(
         &self,
-        worker: web_sys::Worker,
+        endpoint: JsValue,
         options: JsValue,
     ) -> Result<crate::worker_bridge::WasmWorkerBridge, JsError> {
-        crate::worker_bridge::WasmWorkerBridge::attach(worker, self, options)
+        crate::worker_bridge::WasmWorkerBridge::attach(endpoint, self, options)
     }
 
     /// Bridge/host shutdown: replace the active sync sender with a noop so

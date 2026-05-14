@@ -6,6 +6,7 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
+import type { WorkerBridgeEndpoint } from "./worker-bridge.js";
 import type {
   InsertValues,
   Value,
@@ -103,7 +104,7 @@ export interface Runtime {
    * an opaque handle that the TS `WorkerBridge` adapter wraps. WASM-only.
    * Options are parsed at attach time; `bridge.init()` is parameter-less.
    */
-  createWorkerBridge?(worker: Worker, options: object): unknown;
+  createWorkerBridge?(endpoint: WorkerBridgeEndpoint, options: object): unknown;
   /** Drive a synchronous batched tick. Used by callers that need to flush
    * pending state before a synchronous teardown. */
   batchedTick?(): void;

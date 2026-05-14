@@ -31,24 +31,27 @@
 //! ## Reentrancy
 //!
 //! Three `thread_local!` cells split borrowing:
-//! - `HOST`         — state machine + pending queue + closures
-//! - `RUNTIME`      — `Rc<WasmRuntime>` (cloned into outbox callbacks)
-//! - `PEER_ROUTING` — peer table, looked up by the outbox sender on each
-//!                    client-bound entry. Different cell than `HOST`, so the
-//!                    outbox lookup does not re-borrow `HOST` while `HOST` is
-//!                    already borrowed elsewhere.
+//! - `HOST`            — state machine + pending queue + closures
+//! - `RUNTIME`         — `Rc<WasmRuntime>` (cloned into outbox callbacks)
+//! - `MAIN_CLIENT_ID`  — runtime client id assigned to the main-thread peer.
+//!                       Different cell than `HOST` so the outbox lookup does
+//!                       not re-borrow `HOST` while `HOST` is already borrowed
+//!                       elsewhere.
 
 #![cfg(target_arch = "wasm32")]
 #![allow(dead_code)]
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use js_sys::{Array, Function, Object, Reflect, Uint8Array};
+use jazz_tools::runtime_core::SyncSender;
+use jazz_tools::sync_manager::{Destination, OutboxEntry};
+use js_sys::{Array, Function, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
+use web_sys::{DedicatedWorkerGlobalScope, MessageEvent, MessagePort};
 
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
@@ -63,7 +66,63 @@ use crate::worker_protocol::{
 thread_local! {
     static HOST: RefCell<Option<WorkerHost>> = const { RefCell::new(None) };
     static RUNTIME: RefCell<Option<Rc<WasmRuntime>>> = const { RefCell::new(None) };
-    static PEER_ROUTING: RefCell<PeerRouting> = RefCell::new(PeerRouting::default());
+    static MAIN_CLIENT_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Follower-tab peers attached via `attach-tab-port`. Keyed by the
+    /// runtime client id assigned when the port was adopted. The leader's own
+    /// main-thread peer lives in `MAIN_CLIENT_ID`, not here.
+    static PORT_PEERS: RefCell<HashMap<String, PortPeer>> = RefCell::new(HashMap::new());
+}
+
+/// One adopted follower tab. Holds the `MessagePort`, the per-port
+/// `RustOutboxSender` (configured to route messages destined for this peer's
+/// client id to the port's `postMessage`), and the closure backing the
+/// port's `onmessage` slot. Keyed by the runtime client id inside
+/// {@link PORT_PEERS}.
+struct PortPeer {
+    port: MessagePort,
+    sender: RustOutboxSender,
+    _on_message_closure: Closure<dyn FnMut(MessageEvent)>,
+}
+
+/// Fans the runtime's outbox out across the main-thread peer and any
+/// attached follower-tab peers. Messages destined for the main peer
+/// (`MAIN_CLIENT_ID`) and all server-bound traffic go to the main
+/// `RustOutboxSender` (which posts on the global `DedicatedWorkerGlobalScope`
+/// or hands server-bound to the Rust transport). Messages destined for any
+/// other registered client id route to that peer's port-bound sender.
+#[derive(Clone)]
+struct MultiplexedSyncSender {
+    main: RustOutboxSender,
+}
+
+impl MultiplexedSyncSender {
+    fn new(main: RustOutboxSender) -> Self {
+        Self { main }
+    }
+}
+
+impl SyncSender for MultiplexedSyncSender {
+    fn send_sync_message(&self, message: OutboxEntry) {
+        let routed_sender = if let Destination::Client(client_id) = &message.destination {
+            let id = client_id.0.to_string();
+            let main_id = MAIN_CLIENT_ID.with(|c| c.borrow().clone());
+            if main_id.as_deref() == Some(&id) {
+                None
+            } else {
+                PORT_PEERS.with(|cell| cell.borrow().get(&id).map(|p| p.sender.clone()))
+            }
+        } else {
+            None
+        };
+        match routed_sender {
+            Some(sender) => sender.send_sync_message(message),
+            None => self.main.send_sync_message(message),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,28 +132,10 @@ enum HostState {
     ShuttingDown,
 }
 
-struct PeerRouting {
-    main_client_id: Option<String>,
-    peer_client_by_peer_id: HashMap<String, String>,
-    peer_id_by_client: HashMap<String, String>,
-    peer_terms: HashMap<String, u32>,
-}
-
-impl Default for PeerRouting {
-    fn default() -> Self {
-        Self {
-            main_client_id: None,
-            peer_client_by_peer_id: HashMap::new(),
-            peer_id_by_client: HashMap::new(),
-            peer_terms: HashMap::new(),
-        }
-    }
-}
-
 struct WorkerHost {
     state: HostState,
     /// Buffered messages that arrived before `Ready`. Drained in arrival order
-    /// once init completes. Includes Sync / PeerSync / control messages.
+    /// once init completes.
     pending_messages: VecDeque<MainToWorkerMessage>,
     on_message_closure: Option<Closure<dyn FnMut(MessageEvent)>>,
     current_auth_jwt: Option<String>,
@@ -165,6 +206,29 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
     // Install Rust onmessage. Subsequent messages during init also buffer here.
     let global = global_worker_scope();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        // Out-of-band `attach-tab-port` carries a `MessagePort` via the
+        // event's `ports` list and uses a plain JS object (`{type:
+        // "attach-tab-port"}`) as `data`. Recognise it here rather than
+        // through `parse_main_to_worker` so we don't have to teach the
+        // postcard wire format about port-transfer plumbing.
+        if is_attach_tab_port_message(&event.data()) {
+            let ports = event.ports();
+            if ports.length() == 0 {
+                tracing::warn!("attach-tab-port arrived without a MessagePort");
+                return;
+            }
+            let port_value = ports.get(0);
+            match port_value.dyn_into::<MessagePort>() {
+                Ok(port) => handle_attach_tab_port(port),
+                Err(value) => {
+                    tracing::warn!(
+                        "attach-tab-port: event.ports[0] is not a MessagePort: {value:?}"
+                    );
+                }
+            }
+            return;
+        }
+
         let data = event.data();
         match parse_main_to_worker(&data) {
             Ok(msg) => handle_main_message(msg),
@@ -196,9 +260,6 @@ fn describe_main_message(msg: &MainToWorkerMessage) -> &'static str {
         MainToWorkerMessage::Unknown(_) => "<unknown>",
         MainToWorkerMessage::Wire(wire) => match wire {
             MainToWorkerWire::Sync { .. } => "sync",
-            MainToWorkerWire::PeerOpen { .. } => "peer-open",
-            MainToWorkerWire::PeerSync { .. } => "peer-sync",
-            MainToWorkerWire::PeerClose { .. } => "peer-close",
             MainToWorkerWire::LifecycleHint { .. } => "lifecycle-hint",
             MainToWorkerWire::UpdateAuth { .. } => "update-auth",
             MainToWorkerWire::DisconnectUpstream => "disconnect-upstream",
@@ -268,29 +329,24 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     .into_js_value();
     runtime.on_auth_failure(auth_cb.unchecked_into());
 
-    // 3. Stash runtime + main client id atomically and seed the peer table.
+    // 3. Stash runtime + main client id atomically.
     let runtime_rc = Rc::new(runtime);
     RUNTIME.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&runtime_rc)));
-    PEER_ROUTING.with(|cell| {
-        cell.borrow_mut().main_client_id = Some(main_client_id.clone());
-    });
+    MAIN_CLIENT_ID.with(|cell| *cell.borrow_mut() = Some(main_client_id.clone()));
 
-    // 4. Construct the outbox sender, configure for worker-side routing
-    //    (main client id + peer table), and install on the runtime core.
-    //    Binary encoding is required (the bridge decodes via `parse_worker_to_main`).
+    // 4. Construct the main-thread outbox sender, then wrap it in a
+    //    `MultiplexedSyncSender` that fans the runtime's outbox out across
+    //    the main-thread peer and any follower-tab peers attached later via
+    //    `attach-tab-port`. Binary encoding is required on both layers (the
+    //    bridge decodes via `parse_worker_to_main`).
     let sender = RustOutboxSender::new(true);
     let global: JsValue = global_worker_scope().into();
-    let peer_lookup = make_peer_routing_lookup();
-    sender.attach_target(
-        global,
-        Some(main_client_id.clone()),
-        Some(peer_lookup),
-        None,
-    );
+    sender.attach_target(global, Some(main_client_id.clone()), None);
+    let multiplexed = MultiplexedSyncSender::new(sender.clone());
     runtime_rc
         .core
         .borrow_mut()
-        .set_sync_sender(Box::new(sender.clone()));
+        .set_sync_sender(Box::new(multiplexed));
 
     // 4b. Register the mutation-error callback. The runtime emits per-event
     //     after each `batched_tick` (and immediately on registration if any
@@ -361,7 +417,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         }
     });
 
-    // 9. Drain pending messages in arrival order. Sync/PeerSync park into the
+    // 9. Drain pending messages in arrival order. Sync parks into the
     //    runtime; control messages dispatch immediately. Parked messages
     //    process on the next microtask via batched_tick.
     drain_pending_messages();
@@ -407,63 +463,6 @@ fn perform_upstream_connect(runtime: &Rc<WasmRuntime>, ws_url: &str, auth_json: 
             post_to_main(&WorkerToMainWire::UpstreamDisconnected);
         }
     }
-}
-
-fn ensure_peer_client(runtime: &Rc<WasmRuntime>, peer_id: &str) -> Result<String, String> {
-    if let Some(existing) =
-        PEER_ROUTING.with(|cell| cell.borrow().peer_client_by_peer_id.get(peer_id).cloned())
-    {
-        return Ok(existing);
-    }
-    let client_id = runtime.add_client();
-    runtime
-        .set_client_role(&client_id, "peer")
-        .map_err(|e| format!("setClientRole peer: {e:?}"))?;
-    PEER_ROUTING.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        guard
-            .peer_client_by_peer_id
-            .insert(peer_id.to_string(), client_id.clone());
-        guard
-            .peer_id_by_client
-            .insert(client_id.clone(), peer_id.to_string());
-    });
-    Ok(client_id)
-}
-
-fn close_peer(peer_id: &str) {
-    PEER_ROUTING.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        if let Some(client) = guard.peer_client_by_peer_id.remove(peer_id) {
-            guard.peer_id_by_client.remove(&client);
-        }
-        guard.peer_terms.remove(peer_id);
-    });
-}
-
-// =============================================================================
-// Outbox callbacks
-// =============================================================================
-
-fn make_peer_routing_lookup() -> Function {
-    Closure::<dyn Fn(JsValue) -> JsValue>::new(|client_id: JsValue| {
-        let Some(client) = client_id.as_string() else {
-            return JsValue::NULL;
-        };
-        PEER_ROUTING.with(|cell| {
-            let guard = cell.borrow();
-            let Some(peer_id) = guard.peer_id_by_client.get(&client) else {
-                return JsValue::NULL;
-            };
-            let term = guard.peer_terms.get(peer_id).copied().unwrap_or(0);
-            let obj = Object::new();
-            let _ = Reflect::set(&obj, &"peerId".into(), &JsValue::from_str(peer_id));
-            let _ = Reflect::set(&obj, &"term".into(), &JsValue::from_f64(term as f64));
-            obj.into()
-        })
-    })
-    .into_js_value()
-    .unchecked_into()
 }
 
 // =============================================================================
@@ -651,35 +650,6 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 });
             }
         }
-        MainToWorkerWire::PeerOpen { peer_id } => {
-            if let Some(rt) = runtime.as_ref() {
-                let _ = ensure_peer_client(rt, &peer_id);
-            }
-        }
-        MainToWorkerWire::PeerSync {
-            peer_id,
-            term,
-            payloads,
-        } => {
-            let Some(rt) = runtime.as_ref() else { return };
-            match ensure_peer_client(rt, &peer_id) {
-                Ok(client) => {
-                    PEER_ROUTING.with(|cell| {
-                        cell.borrow_mut().peer_terms.insert(peer_id.clone(), term);
-                    });
-                    for payload in payloads {
-                        let arr = Uint8Array::from(payload.as_ref());
-                        if let Err(err) =
-                            rt.on_sync_message_received_from_client(&client, arr.into())
-                        {
-                            tracing::warn!("peer-sync route: {err:?}");
-                        }
-                    }
-                }
-                Err(err) => tracing::warn!("ensure peer client: {err}"),
-            }
-        }
-        MainToWorkerWire::PeerClose { peer_id } => close_peer(&peer_id),
         MainToWorkerWire::LifecycleHint { event, .. } => {
             handle_lifecycle_hint(event, runtime.as_ref());
         }
@@ -856,14 +826,17 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
     let global = global_worker_scope();
     global.set_onmessage(None);
 
-    RUNTIME.with(|cell| *cell.borrow_mut() = None);
-    PEER_ROUTING.with(|cell| {
-        let mut g = cell.borrow_mut();
-        g.peer_client_by_peer_id.clear();
-        g.peer_id_by_client.clear();
-        g.peer_terms.clear();
-        g.main_client_id = None;
+    // Detach every adopted follower port so their (now-stale) closures stop
+    // firing, then drop the entries.
+    PORT_PEERS.with(|cell| {
+        let mut map = cell.borrow_mut();
+        for (_, peer) in map.drain() {
+            peer.port.set_onmessage(None);
+        }
     });
+
+    RUNTIME.with(|cell| *cell.borrow_mut() = None);
+    MAIN_CLIENT_ID.with(|cell| *cell.borrow_mut() = None);
 
     post_to_main(&WorkerToMainWire::ShutdownOk);
     global.close();
@@ -871,11 +844,215 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
 }
 
 // =============================================================================
+// Follower-tab port adoption
+// =============================================================================
+
+fn is_attach_tab_port_message(data: &JsValue) -> bool {
+    if !data.is_object() {
+        return false;
+    }
+    let Ok(t) = Reflect::get(data, &"type".into()) else {
+        return false;
+    };
+    t.as_string().as_deref() == Some("attach-tab-port")
+}
+
+/// Adopt a `MessagePort` handed to us by the leader-tab supervisor via
+/// `{type: "attach-tab-port"}`. Allocates a fresh runtime client id for the
+/// follower behind this port, registers a per-port `RustOutboxSender` so the
+/// runtime's outbox routes correctly, and installs an `onmessage` handler on
+/// the port that parses each incoming message as `MainToWorkerMessage` and
+/// dispatches to {@link handle_port_message}.
+///
+/// Refuses to adopt before the worker is `Ready` — port traffic arriving
+/// during the leader's own init would race the bootstrap catalogue dance.
+/// In practice the broker only hands out ports after the leader has called
+/// `claim-leader`, which happens after `init-ok`.
+fn handle_attach_tab_port(port: MessagePort) {
+    let state = HOST.with(|c| c.borrow().as_ref().map(|h| h.state));
+    if state != Some(HostState::Ready) {
+        tracing::warn!("attach-tab-port arrived before worker Ready; ignoring");
+        return;
+    }
+
+    let runtime = match RUNTIME.with(|c| c.borrow().clone()) {
+        Some(rt) => rt,
+        None => {
+            tracing::warn!("attach-tab-port: no runtime available; ignoring");
+            return;
+        }
+    };
+
+    // Allocate a runtime client id for this follower.
+    let client_id = runtime.add_client();
+    if let Err(err) = runtime.set_client_role(&client_id, "peer") {
+        tracing::warn!("attach-tab-port: setClientRole failed: {err:?}");
+        return;
+    }
+
+    // Per-port outbox sender. Configured so its `main_client_id == client_id`
+    // — that way `RustOutboxSender::send_sync_message` only enqueues
+    // messages destined for this peer, and the multiplexer's routing is the
+    // only filter that needs to be correct.
+    let sender = RustOutboxSender::new(true);
+    let port_js: JsValue = port.clone().into();
+    sender.attach_target(port_js, Some(client_id.clone()), None);
+
+    // Install per-port message handler.
+    let port_for_closure = port.clone();
+    let client_id_for_closure = client_id.clone();
+    let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let data = event.data();
+        match parse_main_to_worker(&data) {
+            Ok(msg) => handle_port_message(&client_id_for_closure, &port_for_closure, msg),
+            Err(e) => {
+                tracing::warn!("malformed port message on follower tab: {e}");
+            }
+        }
+    });
+    port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    port.start();
+
+    PORT_PEERS.with(|cell| {
+        cell.borrow_mut().insert(
+            client_id,
+            PortPeer {
+                port: port.clone(),
+                sender,
+                _on_message_closure: on_message,
+            },
+        );
+    });
+}
+
+/// Dispatch one parsed `MainToWorkerMessage` arriving from a follower tab's
+/// `MessagePort`. The follower's `WorkerBridge` speaks the same protocol as
+/// the leader's main-thread bridge, but its `Init`, auth, and upstream
+/// control messages have follower-only semantics:
+///
+/// - `Init`: respond with `InitOk { client_id }` plus `UpstreamConnected` and
+///   an empty `LocalBatchRecordsSync` so the follower's bridge unblocks.
+///   The follower's serverUrl / jwtToken / runtimeSources fields are
+///   ignored — upstream and auth are owned by the leader.
+/// - `Sync`: route into the runtime addressed as this port's `client_id`.
+///   On `ack_id`, reconcile and reply with `SyncAck` via the port.
+/// - `LifecycleHint`: forward to the leader's runtime so it can aggregate.
+/// - `UpdateAuth`: forward to the leader-owned auth/transport state so a
+///   login or token refresh on a follower tab updates the upstream socket's
+///   credentials. The follower's `Db` calls `workerBridge.updateAuth(...)`
+///   for every tab; without this forward, follower-side refreshes would
+///   silently keep the leader on stale credentials.
+/// - `DisconnectUpstream` / `ReconnectUpstream` / `Shutdown` (a follower
+///   closing its bridge): drop the port peer on `Shutdown`; ignore the
+///   others (upstream control is leader-only).
+fn handle_port_message(client_id: &str, port: &MessagePort, msg: MainToWorkerMessage) {
+    match msg {
+        MainToWorkerMessage::Init(_) => {
+            post_via_port(
+                port,
+                &WorkerToMainWire::InitOk {
+                    client_id: client_id.to_string(),
+                },
+            );
+            post_via_port(port, &WorkerToMainWire::UpstreamConnected);
+            post_via_port(
+                port,
+                &WorkerToMainWire::LocalBatchRecordsSync {
+                    batches_json: "[]".to_string(),
+                },
+            );
+        }
+        MainToWorkerMessage::Unknown(t) => {
+            tracing::warn!("ignoring unknown port message type {t}");
+        }
+        MainToWorkerMessage::Wire(wire) => match wire {
+            MainToWorkerWire::Sync {
+                payloads,
+                ack_id,
+                ack_batch_id,
+            } => {
+                let Some(rt) = RUNTIME.with(|cell| cell.borrow().clone()) else {
+                    return;
+                };
+                for payload in payloads {
+                    let arr = Uint8Array::from(payload.as_ref());
+                    if let Err(err) = rt.on_sync_message_received_from_client(client_id, arr.into())
+                    {
+                        tracing::warn!("port onSyncMessageReceivedFromClient: {err:?}");
+                    }
+                }
+                rt.batched_tick();
+                if let Some(ack_id) = ack_id {
+                    rt.flush_wal();
+                    let (has_batch_record, batch_reconciled) =
+                        reconcile_local_batch_for_ack(&rt, client_id, ack_batch_id.as_deref());
+                    post_via_port(
+                        port,
+                        &WorkerToMainWire::SyncAck {
+                            ack_id,
+                            has_batch_record,
+                            batch_reconciled,
+                        },
+                    );
+                }
+            }
+            MainToWorkerWire::LifecycleHint { event, .. } => {
+                let runtime = RUNTIME.with(|cell| cell.borrow().clone());
+                handle_lifecycle_hint(event, runtime.as_ref());
+            }
+            MainToWorkerWire::AcknowledgeRejectedBatch { batch_id } => {
+                if let Some(rt) = RUNTIME.with(|cell| cell.borrow().clone()) {
+                    if let Err(err) = rt.acknowledge_rejected_batch(&batch_id) {
+                        tracing::warn!("port acknowledgeRejectedBatch: {err:?}");
+                    }
+                }
+            }
+            MainToWorkerWire::Shutdown => {
+                deregister_port_peer(client_id);
+                post_via_port(port, &WorkerToMainWire::ShutdownOk);
+            }
+            // Auth is leader-owned. The follower's `Db` still calls
+            // `workerBridge.updateAuth(...)` per-tab on login/refresh, and
+            // we forward it into the leader-owned credential state so the
+            // upstream socket gets refreshed credentials.
+            MainToWorkerWire::UpdateAuth { jwt_token } => {
+                let runtime = RUNTIME.with(|cell| cell.borrow().clone());
+                update_auth(jwt_token, runtime.as_ref());
+            }
+            // Upstream control and debug surfaces are leader-only.
+            MainToWorkerWire::DisconnectUpstream
+            | MainToWorkerWire::ReconnectUpstream
+            | MainToWorkerWire::SimulateCrash
+            | MainToWorkerWire::DebugSchemaState
+            | MainToWorkerWire::DebugSeedLiveSchema { .. } => {
+                tracing::debug!("ignoring follower-side control message");
+            }
+        },
+    }
+}
+
+fn deregister_port_peer(client_id: &str) {
+    let removed = PORT_PEERS.with(|cell| cell.borrow_mut().remove(client_id));
+    if let Some(peer) = removed {
+        // Clear the port's onmessage slot so the (now-dropped) closure is not
+        // invoked again, then drop the peer (which drops the closure handle).
+        peer.port.set_onmessage(None);
+    }
+}
+
+fn post_via_port(port: &MessagePort, msg: &WorkerToMainWire) {
+    let Ok((value, transfer)) = worker_to_main_post(msg) else {
+        return;
+    };
+    let _ = port.post_message_with_transferable(&value, &transfer);
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
 fn get_main_client_id() -> Option<String> {
-    PEER_ROUTING.with(|cell| cell.borrow().main_client_id.clone())
+    MAIN_CLIENT_ID.with(|cell| cell.borrow().clone())
 }
 
 fn global_worker_scope() -> DedicatedWorkerGlobalScope {

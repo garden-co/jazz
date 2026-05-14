@@ -21,4 +21,14 @@ describe("loadWasmModule build output", () => {
     expect(builtWorker).toContain('await import("jazz-wasm")');
     expect(builtWorker).not.toContain('await runtimeImportModule("jazz-wasm")');
   });
+
+  it("copies the shared worker entry next to the dedicated worker entry", async () => {
+    const builtSharedWorkerUrl = new URL(
+      "../../dist/worker/jazz-shared-worker.ts",
+      import.meta.url,
+    );
+    const builtSharedWorker = await readFile(builtSharedWorkerUrl, "utf8");
+
+    expect(builtSharedWorker).toContain("installSharedWorkerBroker");
+  });
 });

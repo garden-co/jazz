@@ -37,25 +37,25 @@ export interface WorkerBridgeOptions {
   telemetryCollectorUrl?: string;
 }
 
-export interface PeerSyncBatch {
-  peerId: string;
-  term: number;
-  payload: Uint8Array[];
+export interface WorkerBridgeEndpoint {
+  postMessage(message: unknown, transfer?: Transferable[]): void;
+  addEventListener?(type: "message", listener: (event: MessageEvent) => void): void;
+  removeEventListener?(type: "message", listener: (event: MessageEvent) => void): void;
+  onmessage?: ((event: MessageEvent) => void) | null;
+  start?(): void;
+  close?(): void;
+  terminate?(): void;
 }
 
 interface WasmBridgeHandle {
   init(): Promise<{ clientId: string }>;
   updateAuth(jwtToken?: string | null): void;
   sendLifecycleHint(event: string): void;
-  openPeer(peerId: string): void;
-  sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void;
-  closePeer(peerId: string): void;
   setServerPayloadForwarder(
     callback:
       | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
       | null,
   ): void;
-  applyIncomingServerPayload(payload: Uint8Array): void;
   waitForUpstreamServerConnection(): Promise<void>;
   waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
   replayServerConnection(): void;
@@ -69,11 +69,10 @@ interface WasmBridgeHandle {
 }
 
 interface RuntimeWithWorkerBridge extends Runtime {
-  createWorkerBridge?(worker: Worker, options: object): WasmBridgeHandle;
+  createWorkerBridge?(endpoint: WorkerBridgeEndpoint, options: object): WasmBridgeHandle;
 }
 
 interface ListenerSlots {
-  onPeerSync?: (batch: PeerSyncBatch) => void;
   onAuthFailure?: (reason: AuthFailureReason) => void;
   onLocalBatchRecordsSync?: (batches: LocalBatchRecord[]) => void;
   onMutationErrorReplay?: (event: MutationErrorEvent) => void;
@@ -82,7 +81,7 @@ interface ListenerSlots {
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
 
 export class WorkerBridge {
-  private readonly worker: Worker;
+  private readonly endpoint: WorkerBridgeEndpoint;
   private readonly runtime: Runtime;
   private bridge: WasmBridgeHandle | null = null;
   private readonly listeners: ListenerSlots = {};
@@ -91,8 +90,8 @@ export class WorkerBridge {
   private workerClientId: string | null = null;
   private disposed = false;
 
-  constructor(worker: Worker, runtime: Runtime) {
-    this.worker = worker;
+  constructor(endpoint: WorkerBridgeEndpoint, runtime: Runtime) {
+    this.endpoint = endpoint;
     this.runtime = runtime;
   }
 
@@ -113,7 +112,7 @@ export class WorkerBridge {
 
     let bridge: WasmBridgeHandle;
     try {
-      bridge = create.call(this.runtime, this.worker, options as unknown as object);
+      bridge = create.call(this.runtime, this.endpoint, options as unknown as object);
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
       this.clientIdPromise = Promise.reject(err);
@@ -189,10 +188,6 @@ export class WorkerBridge {
     await this.bridge.waitForLocalSyncFlush(batchId ?? null);
   }
 
-  applyIncomingServerPayload(payload: Uint8Array): void {
-    this.bridge?.applyIncomingServerPayload(payload);
-  }
-
   replayServerConnection(): void {
     this.bridge?.replayServerConnection();
   }
@@ -221,11 +216,6 @@ export class WorkerBridge {
     await this.bridge.simulateCrash();
   }
 
-  onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
-    this.listeners.onPeerSync = listener;
-    this.bridge?.setListeners(this.listeners);
-  }
-
   onAuthFailure(listener: (reason: AuthFailureReason) => void): void {
     this.listeners.onAuthFailure = listener;
     this.bridge?.setListeners(this.listeners);
@@ -239,17 +229,5 @@ export class WorkerBridge {
   onMutationErrorReplay(listener: (event: MutationErrorEvent) => void): void {
     this.listeners.onMutationErrorReplay = listener;
     this.bridge?.setListeners(this.listeners);
-  }
-
-  openPeer(peerId: string): void {
-    this.bridge?.openPeer(peerId);
-  }
-
-  sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void {
-    this.bridge?.sendPeerSync(peerId, term, payload);
-  }
-
-  closePeer(peerId: string): void {
-    this.bridge?.closePeer(peerId);
   }
 }

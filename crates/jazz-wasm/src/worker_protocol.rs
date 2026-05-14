@@ -97,17 +97,6 @@ pub enum MainToWorkerWire {
         ack_id: Option<u32>,
         ack_batch_id: Option<String>,
     },
-    PeerOpen {
-        peer_id: String,
-    },
-    PeerSync {
-        peer_id: String,
-        term: u32,
-        payloads: Vec<ByteBuf>,
-    },
-    PeerClose {
-        peer_id: String,
-    },
     LifecycleHint {
         event: WorkerLifecycleEvent,
         sent_at_ms: f64,
@@ -146,11 +135,6 @@ pub enum WorkerToMainWire {
         ack_id: u32,
         has_batch_record: bool,
         batch_reconciled: bool,
-    },
-    PeerSync {
-        peer_id: String,
-        term: u32,
-        payloads: Vec<ByteBuf>,
     },
     /// `Vec<LocalBatchRecord>` serialised as JSON. JS side does `JSON.parse`.
     LocalBatchRecordsSync {
@@ -489,17 +473,6 @@ mod tests {
             ack_id: Some(7),
             ack_batch_id: Some("batch-1".into()),
         });
-        rt_main(&MainToWorkerWire::PeerOpen {
-            peer_id: "tab-a".into(),
-        });
-        rt_main(&MainToWorkerWire::PeerSync {
-            peer_id: "tab-b".into(),
-            term: 7,
-            payloads: vec![ByteBuf::from(vec![9, 8, 7])],
-        });
-        rt_main(&MainToWorkerWire::PeerClose {
-            peer_id: "tab-c".into(),
-        });
         rt_main(&MainToWorkerWire::LifecycleHint {
             event: WorkerLifecycleEvent::VisibilityHidden,
             sent_at_ms: 1_700_000_000_000.0,
@@ -541,11 +514,6 @@ mod tests {
                     sequence: 99,
                 },
             ],
-        });
-        rt_worker(&WorkerToMainWire::PeerSync {
-            peer_id: "p".into(),
-            term: 1,
-            payloads: vec![ByteBuf::from(vec![0xff])],
         });
         rt_worker(&WorkerToMainWire::LocalBatchRecordsSync {
             batches_json: "[]".into(),

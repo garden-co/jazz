@@ -27,7 +27,7 @@ use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{MessageEvent, Worker};
+use web_sys::MessageEvent;
 
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
@@ -54,12 +54,69 @@ fn parse_lifecycle_event(s: &str) -> Option<WorkerLifecycleEvent> {
 }
 
 /// Build a `Uint8Array` of postcard-encoded `MainToWorkerWire` bytes plus a
-/// transfer list, then post via `worker.postMessage(value, transfer)`.
-fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
+/// transfer list, then post via `endpoint.postMessage(value, transfer)`.
+fn post_wire(endpoint: &JsValue, msg: &MainToWorkerWire) {
     let Ok((value, transfer)) = main_to_worker_post(msg) else {
         return;
     };
-    let _ = worker.post_message_with_transfer(&value, transfer.as_ref());
+    let _ = post_message_with_transfer(endpoint, &value, transfer.as_ref());
+}
+
+fn post_message_with_transfer(
+    endpoint: &JsValue,
+    message: &JsValue,
+    transfer: &Array,
+) -> Result<(), JsValue> {
+    let post_fn = Reflect::get(endpoint, &"postMessage".into())?;
+    let post_fn: Function = post_fn
+        .dyn_into()
+        .map_err(|v| JsValue::from_str(&format!("postMessage is not a function: {v:?}")))?;
+    post_fn.call2(endpoint, message, transfer.as_ref())?;
+    Ok(())
+}
+
+fn maybe_function(endpoint: &JsValue, name: &str) -> Option<Function> {
+    Reflect::get(endpoint, &name.into()).ok()?.dyn_into().ok()
+}
+
+fn install_endpoint_message_listener(
+    endpoint: &JsValue,
+    listener: &Closure<dyn FnMut(MessageEvent)>,
+) -> Result<(), JsValue> {
+    if let Some(add_event_listener) = maybe_function(endpoint, "addEventListener") {
+        add_event_listener.call2(
+            endpoint,
+            &JsValue::from_str("message"),
+            listener.as_ref().unchecked_ref(),
+        )?;
+        if let Some(start) = maybe_function(endpoint, "start") {
+            let _ = start.call0(endpoint);
+        }
+        return Ok(());
+    }
+
+    Reflect::set(
+        endpoint,
+        &"onmessage".into(),
+        listener.as_ref().unchecked_ref(),
+    )?;
+    Ok(())
+}
+
+fn clear_endpoint_message_listener(
+    endpoint: &JsValue,
+    listener: Option<&Closure<dyn FnMut(MessageEvent)>>,
+) {
+    if let (Some(remove_event_listener), Some(listener)) =
+        (maybe_function(endpoint, "removeEventListener"), listener)
+    {
+        let _ = remove_event_listener.call2(
+            endpoint,
+            &JsValue::from_str("message"),
+            listener.as_ref().unchecked_ref(),
+        );
+    }
+    let _ = Reflect::set(endpoint, &"onmessage".into(), &JsValue::NULL);
 }
 
 // =============================================================================
@@ -73,12 +130,12 @@ pub struct WasmWorkerBridge {
 
 #[wasm_bindgen]
 impl WasmWorkerBridge {
-    /// Attach a Rust bridge to an externally-constructed Worker.
+    /// Attach a Rust bridge to an externally-constructed postMessage endpoint.
     ///
     /// Options are parsed at attach time; `init()` is parameter-less.
     #[wasm_bindgen(js_name = attach)]
     pub fn attach(
-        worker: Worker,
+        endpoint: JsValue,
         runtime: &WasmRuntime,
         options: JsValue,
     ) -> Result<WasmWorkerBridge, JsError> {
@@ -93,7 +150,7 @@ impl WasmWorkerBridge {
         // `Sync` envelopes posted to the worker. Binary encoding for server-
         // bound is required (the worker decodes via `parse_main_to_worker`).
         let sender = RustOutboxSender::new(true);
-        sender.attach_target(worker.clone().into(), None, None, None);
+        sender.attach_target(endpoint.clone(), None, None);
         sender.set_init_gate(false);
 
         // Install the sender on the runtime's `RuntimeCore` so its outbox
@@ -106,7 +163,7 @@ impl WasmWorkerBridge {
             .set_sync_sender(Box::new(sender.clone()));
 
         let inner = Rc::new(BridgeInner::new(
-            worker.clone(),
+            endpoint.clone(),
             runtime.clone(),
             sender,
             init_message,
@@ -120,7 +177,8 @@ impl WasmWorkerBridge {
                 inner.handle_message(event);
             })
         };
-        worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        install_endpoint_message_listener(&endpoint, &on_message)
+            .map_err(|e| JsError::new(&format!("install message listener: {e:?}")))?;
         *inner.on_message_closure.borrow_mut() = Some(on_message);
 
         // Register the worker as the upstream server for the main runtime.
@@ -159,7 +217,12 @@ impl WasmWorkerBridge {
         let (tx, rx) = oneshot::channel::<Result<String, String>>();
         *self.inner.init_resolver.borrow_mut() = Some(tx);
 
-        if let Err(e) = self.inner.worker.post_message(&self.inner.init_message) {
+        let empty_transfer = Array::new();
+        if let Err(e) = post_message_with_transfer(
+            &self.inner.endpoint,
+            &self.inner.init_message,
+            &empty_transfer,
+        ) {
             self.inner.init_resolver.borrow_mut().take();
             self.inner.transition_init_failed();
             return js_sys::Promise::reject(&JsValue::from_str(&format!(
@@ -201,7 +264,7 @@ impl WasmWorkerBridge {
             return;
         }
         post_wire(
-            &self.inner.worker,
+            &self.inner.endpoint,
             &MainToWorkerWire::UpdateAuth { jwt_token },
         );
     }
@@ -216,63 +279,10 @@ impl WasmWorkerBridge {
             return;
         };
         post_wire(
-            &self.inner.worker,
+            &self.inner.endpoint,
             &MainToWorkerWire::LifecycleHint {
                 event: parsed,
                 sent_at_ms: js_sys::Date::now(),
-            },
-        );
-    }
-
-    #[wasm_bindgen(js_name = openPeer)]
-    pub fn open_peer(&self, peer_id: &str) {
-        if self.inner.is_inactive() {
-            return;
-        }
-        post_wire(
-            &self.inner.worker,
-            &MainToWorkerWire::PeerOpen {
-                peer_id: peer_id.to_string(),
-            },
-        );
-    }
-
-    #[wasm_bindgen(js_name = sendPeerSync)]
-    pub fn send_peer_sync(&self, peer_id: &str, term: u32, payload: Array) {
-        if self.inner.is_inactive() {
-            return;
-        }
-        if payload.length() == 0 {
-            return;
-        }
-        let mut payloads: Vec<serde_bytes::ByteBuf> = Vec::with_capacity(payload.length() as usize);
-        for entry in payload.iter() {
-            if let Some(arr) = entry.dyn_ref::<Uint8Array>() {
-                payloads.push(serde_bytes::ByteBuf::from(arr.to_vec()));
-            }
-        }
-        if payloads.is_empty() {
-            return;
-        }
-        post_wire(
-            &self.inner.worker,
-            &MainToWorkerWire::PeerSync {
-                peer_id: peer_id.to_string(),
-                term,
-                payloads,
-            },
-        );
-    }
-
-    #[wasm_bindgen(js_name = closePeer)]
-    pub fn close_peer(&self, peer_id: &str) {
-        if self.inner.is_inactive() {
-            return;
-        }
-        post_wire(
-            &self.inner.worker,
-            &MainToWorkerWire::PeerClose {
-                peer_id: peer_id.to_string(),
             },
         );
     }
@@ -286,10 +296,6 @@ impl WasmWorkerBridge {
         self.inner.has_forwarder.set(has_forwarder);
         self.inner.sender.set_server_payload_forwarder(callback);
         if has_forwarder {
-            // Forwarder install short-circuits the upstream wait gate (a
-            // follower tab routes through the leader instead of the worker's
-            // own upstream). Release any current awaiters without flipping
-            // `upstream_connected` — the gate is checked at call-time.
             self.inner.release_upstream_waiters();
         } else if self.inner.expects_upstream.get() && !self.inner.upstream_connected.get() {
             // Forwarder removed and the upstream isn't actually live yet —
@@ -297,16 +303,6 @@ impl WasmWorkerBridge {
             // `waitForUpstreamServerConnection` calls actually wait.
             self.inner.rearm_upstream_ready_promise();
         }
-    }
-
-    #[wasm_bindgen(js_name = applyIncomingServerPayload)]
-    pub fn apply_incoming_server_payload(&self, payload: Uint8Array) -> Result<(), JsError> {
-        if self.inner.is_inactive() {
-            return Ok(());
-        }
-        self.inner
-            .runtime
-            .on_sync_message_received(payload.into(), None)
     }
 
     /// Mirror of the TS-side `waitForLocalSyncFlush(batchId?)` from main: drive
@@ -346,7 +342,7 @@ impl WasmWorkerBridge {
                 inner.pending_sync_acks.borrow_mut().insert(ack_id, tx);
 
                 post_wire(
-                    &inner.worker,
+                    &inner.endpoint,
                     &MainToWorkerWire::Sync {
                         payloads,
                         ack_id: Some(ack_id),
@@ -410,7 +406,7 @@ impl WasmWorkerBridge {
         if self.inner.is_inactive() {
             return;
         }
-        post_wire(&self.inner.worker, &MainToWorkerWire::DisconnectUpstream);
+        post_wire(&self.inner.endpoint, &MainToWorkerWire::DisconnectUpstream);
     }
 
     #[wasm_bindgen(js_name = reconnectUpstream)]
@@ -418,7 +414,7 @@ impl WasmWorkerBridge {
         if self.inner.is_inactive() {
             return;
         }
-        post_wire(&self.inner.worker, &MainToWorkerWire::ReconnectUpstream);
+        post_wire(&self.inner.endpoint, &MainToWorkerWire::ReconnectUpstream);
     }
 
     /// Test-only: post `MainToWorkerWire::SimulateCrash` to the worker. The
@@ -432,7 +428,7 @@ impl WasmWorkerBridge {
         wasm_bindgen_futures::future_to_promise(async move {
             let (tx, rx) = oneshot::channel::<()>();
             *inner.shutdown_resolver.borrow_mut() = Some(tx);
-            post_wire(&inner.worker, &MainToWorkerWire::SimulateCrash);
+            post_wire(&inner.endpoint, &MainToWorkerWire::SimulateCrash);
             let timeout = make_timeout(SHUTDOWN_ACK_TIMEOUT_MS);
             let _ = select(rx, timeout).await;
             Ok(JsValue::UNDEFINED)
@@ -445,7 +441,7 @@ impl WasmWorkerBridge {
             return;
         }
         post_wire(
-            &self.inner.worker,
+            &self.inner.endpoint,
             &MainToWorkerWire::AcknowledgeRejectedBatch {
                 batch_id: batch_id.to_string(),
             },
@@ -455,7 +451,6 @@ impl WasmWorkerBridge {
     #[wasm_bindgen(js_name = setListeners)]
     pub fn set_listeners(&self, listeners: JsValue) {
         let mut slots = self.inner.listeners.borrow_mut();
-        slots.on_peer_sync = read_optional_function(&listeners, "onPeerSync");
         slots.on_auth_failure = read_optional_function(&listeners, "onAuthFailure");
         slots.on_local_batch_records_sync =
             read_optional_function(&listeners, "onLocalBatchRecordsSync");
@@ -489,7 +484,7 @@ impl WasmWorkerBridge {
             self.inner.runtime.install_noop_sync_sender();
             self.inner.sender.set_server_payload_forwarder(None);
             self.inner.runtime.remove_server();
-            self.inner.worker.set_onmessage(None);
+            self.inner.clear_endpoint_message_listener();
             self.inner.transition_shutdown_finished();
             return js_sys::Promise::resolve(&JsValue::UNDEFINED);
         }
@@ -517,7 +512,7 @@ impl WasmWorkerBridge {
 
         let (tx, rx) = oneshot::channel::<()>();
         *self.inner.shutdown_resolver.borrow_mut() = Some(tx);
-        post_wire(&self.inner.worker, &MainToWorkerWire::Shutdown);
+        post_wire(&self.inner.endpoint, &MainToWorkerWire::Shutdown);
 
         let inner = Rc::clone(&self.inner);
         wasm_bindgen_futures::future_to_promise(async move {
@@ -526,7 +521,7 @@ impl WasmWorkerBridge {
             // Clear `worker.onmessage` so late inbound messages don't invoke
             // a freed Rust trampoline. `Closure::drop` alone does NOT clear
             // the JS slot.
-            inner.worker.set_onmessage(None);
+            inner.clear_endpoint_message_listener();
             inner.transition_shutdown_finished();
             Ok(JsValue::UNDEFINED)
         })
@@ -547,7 +542,6 @@ impl Drop for WasmWorkerBridge {
         if self.inner.is_disposed_like() {
             return;
         }
-        self.inner.dispose_internals();
         // Detach: install the noop sender, drop the server-edge, clear the
         // worker's `onmessage` slot. We do *not* post `Shutdown` from `Drop` —
         // by the time `Drop` runs in an exception path, the receiver may be
@@ -555,7 +549,8 @@ impl Drop for WasmWorkerBridge {
         self.inner.runtime.install_noop_sync_sender();
         self.inner.sender.set_server_payload_forwarder(None);
         self.inner.runtime.remove_server();
-        self.inner.worker.set_onmessage(None);
+        self.inner.clear_endpoint_message_listener();
+        self.inner.dispose_internals();
     }
 }
 
@@ -579,14 +574,13 @@ enum BridgeState {
 
 #[derive(Default)]
 struct Listeners {
-    on_peer_sync: Option<Function>,
     on_auth_failure: Option<Function>,
     on_local_batch_records_sync: Option<Function>,
     on_mutation_error_replay: Option<Function>,
 }
 
 struct BridgeInner {
-    worker: Worker,
+    endpoint: JsValue,
     runtime: WasmRuntime,
     /// `Rc<Inner>`-shared clone of the outbox sender installed on the
     /// runtime's `RuntimeCore`. The bridge mutates it directly to flip the
@@ -621,7 +615,7 @@ struct SyncAckOutcome {
 
 impl BridgeInner {
     fn new(
-        worker: Worker,
+        endpoint: JsValue,
         runtime: WasmRuntime,
         sender: RustOutboxSender,
         init_message: JsValue,
@@ -629,7 +623,7 @@ impl BridgeInner {
     ) -> Self {
         let (promise, resolver) = make_deferred_promise();
         Self {
-            worker,
+            endpoint,
             runtime,
             sender,
             init_message,
@@ -717,6 +711,11 @@ impl BridgeInner {
     fn dispose_internals(&self) {
         *self.listeners.borrow_mut() = Listeners::default();
         *self.on_message_closure.borrow_mut() = None;
+    }
+
+    fn clear_endpoint_message_listener(&self) {
+        let listener = self.on_message_closure.borrow_mut().take();
+        clear_endpoint_message_listener(&self.endpoint, listener.as_ref());
     }
 
     fn mark_upstream_connected(&self) {
@@ -816,25 +815,6 @@ impl BridgeInner {
                 if let Some(cb) = cb {
                     let event = json_parse(&event_json);
                     let _ = cb.call1(&JsValue::NULL, &event);
-                }
-            }
-            WorkerToMainWire::PeerSync {
-                peer_id,
-                term,
-                payloads,
-            } => {
-                let cb = self.listeners.borrow().on_peer_sync.clone();
-                if let Some(cb) = cb {
-                    let payload_array = Array::new();
-                    for entry in &payloads {
-                        let arr = Uint8Array::from(entry.as_ref());
-                        payload_array.push(&arr);
-                    }
-                    let batch = Object::new();
-                    let _ = Reflect::set(&batch, &"peerId".into(), &JsValue::from_str(&peer_id));
-                    let _ = Reflect::set(&batch, &"term".into(), &JsValue::from_f64(term as f64));
-                    let _ = Reflect::set(&batch, &"payload".into(), &payload_array);
-                    let _ = cb.call1(&JsValue::NULL, &batch.into());
                 }
             }
             WorkerToMainWire::Sync { payloads } => {
