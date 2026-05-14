@@ -20,6 +20,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+
 jobs:
   build-rn:
     name: Build jazz-rn (Android) artifacts
@@ -47,7 +50,7 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: 0.14.0
-          cache-key: ${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
+          cache-key: ${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
 
       - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
         with:
@@ -56,6 +59,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Build sandbox binary
         run: |
@@ -112,6 +116,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Build Expo E2E JS dependencies
         run: |
@@ -127,12 +132,16 @@ jobs:
       - name: Expo prebuild (Android)
         run: pnpm --filter todo-client-localfirst-expo run verify:expo:android
 
+      - name: Write Gradle cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
       - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
           cache-dependency-path: |
+            .github-cache-scope
             examples/todo-client-localfirst-expo/android/**/*.gradle*
             examples/todo-client-localfirst-expo/android/gradle/wrapper/gradle-wrapper.properties
             crates/jazz-rn/android/**/*.gradle*
