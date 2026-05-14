@@ -423,6 +423,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
+          cache-bin: false
           key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
@@ -474,6 +475,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
+          cache-bin: false
           key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Build CLI binary
@@ -528,6 +530,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
+          cache-bin: false
           key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
@@ -610,6 +613,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
+          cache-bin: false
           key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - if: ${{ matrix.use_sccache }}
@@ -688,6 +692,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
+          cache-bin: false
           key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Install/build React Native iOS prerequisites
@@ -761,6 +766,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
+          cache-bin: false
           key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
