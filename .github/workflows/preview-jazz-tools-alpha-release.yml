@@ -24,7 +24,7 @@ jobs:
     if: startsWith(github.ref, 'refs/heads/changeset-release/')
     steps:
       - name: Set pending commit status
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             await github.rest.repos.createCommitStatus({
@@ -51,7 +51,7 @@ jobs:
     needs: [mark-preview-pending, preview]
     steps:
       - name: Set final commit status
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           PREVIEW_RESULT: ${{ needs.preview.result }}
         with:
