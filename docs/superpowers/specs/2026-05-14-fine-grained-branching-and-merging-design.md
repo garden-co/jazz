@@ -173,7 +173,7 @@ target_changed = target != base
 The column merge strategy decides:
 
 - the value that merge would produce
-- whether overlapping edits are a conflict, warning, or normal automatic merge
+- whether overlapping edits are a conflict or normal automatic merge
 - the explanation to include in the diff
 
 Conflicts are surfaced by diff only. They do not block merge.
@@ -190,7 +190,6 @@ type QueryDiffRow<Row> = Row & {
     kind: "insert" | "update" | "delete" | "unchanged" | "error";
     changed: string[];
     conflicts: string[];
-    warnings: string[];
     error?: {
       code: "unresolved_parent" | "missing_common_ancestor" | "schema_error" | "merge_strategy_error";
       message: string;
