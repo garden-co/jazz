@@ -91,7 +91,7 @@ jobs:
 
   build-ios:
     name: Build iOS artifacts
-    runs-on: macos-latest
+    runs-on: blacksmith-6vcpu-macos-15
     if: ${{ !inputs.disableIOS }}
     steps:
       - name: Checkout
