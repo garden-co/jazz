@@ -786,17 +786,10 @@ export class Db {
    */
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   /**
-   * Unsubscribers for {@link Db.clients}'s {@link JazzClient.onMutationError} listeners
-   */
-  private readonly clientMutationErrorUnsubscribers = new Map<JazzClient, () => void>();
-  /**
    * Persists mutation errors thrown before an {@link onMutationError} listener was attached.
    * Those mutation errors are replayed when `onMutationError` is called.
    */
-  private readonly pendingMutationErrorEvents: Array<{
-    client: JazzClient;
-    event: MutationErrorEvent;
-  }> = [];
+  private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
     this.handleSyncChannelMessage(event.data);
@@ -1059,21 +1052,16 @@ export class Db {
    * {@link Db.mutationErrorListeners} are notified.
    */
   private attachMutationErrorHandler(client: JazzClient): void {
-    if (this.clientMutationErrorUnsubscribers.has(client)) {
-      return;
-    }
-    this.clientMutationErrorUnsubscribers.set(
-      client,
-      client.onMutationError((event) => {
-        if (this.mutationErrorListeners.size === 0) {
-          this.pendingMutationErrorEvents.push({ client, event });
-          return;
-        }
-        for (const listener of this.mutationErrorListeners) {
-          listener(event);
-        }
-      }),
-    );
+    client.onMutationError((event) => {
+      if (this.mutationErrorListeners.size === 0) {
+        console.error("Unhandled Jazz mutation error", event);
+        this.pendingMutationErrorEvents.push(event);
+        return;
+      }
+      for (const listener of this.mutationErrorListeners) {
+        listener(event);
+      }
+    });
   }
   /**
    * Wait for the worker bridge to be initialized (if in worker mode).
@@ -1616,19 +1604,11 @@ export class Db {
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
     this.mutationErrorListeners.add(listener);
     while (this.pendingMutationErrorEvents.length > 0) {
-      const { client, event } = this.pendingMutationErrorEvents.shift()!;
+      const event = this.pendingMutationErrorEvents.shift()!;
       listener(event);
-      client.markMutationErrorHandled(event);
     }
     return () => {
       this.mutationErrorListeners.delete(listener);
-      if (this.mutationErrorListeners.size > 0) {
-        return;
-      }
-      for (const unsubscribe of this.clientMutationErrorUnsubscribers.values()) {
-        unsubscribe();
-      }
-      this.clientMutationErrorUnsubscribers.clear();
     };
   }
 
@@ -2151,10 +2131,6 @@ export class Db {
       this.workerBridge = null;
     }
 
-    for (const unsubscribe of this.clientMutationErrorUnsubscribers.values()) {
-      unsubscribe();
-    }
-    this.clientMutationErrorUnsubscribers.clear();
     this.mutationErrorListeners.clear();
     this.disposeWasmTelemetry?.();
     this.disposeWasmTelemetry = null;
@@ -2295,7 +2271,10 @@ class ClientBackedDb extends Db {
   }
 
   override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
-    return this.runtimeClient.onMutationError(listener);
+    this.runtimeClient.onMutationError(listener);
+    return () => {
+      /* Do nothing */
+    };
   }
 
   override updateCookieSession(cookieSession: Session | null): void {
