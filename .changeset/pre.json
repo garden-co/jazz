@@ -95,6 +95,7 @@
     "deploy-missing-policy-warnings",
     "dev-schema-autopush-help",
     "dev-telemetry-drain",
+    "disable-rejected-fate-replay",
     "drop-expo-fetch-polyfill",
     "drop-expo-headers-request-response-polyfills",
     "durability-tier-overhaul-summary",

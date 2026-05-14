@@ -1,5 +1,11 @@
 # jazz-napi
 
+## 2.0.0-alpha.49
+
+### Patch Changes
+
+- 24607e1: Disable cold-start replay of persisted rejected batch fates so runtimes no longer surface stale mutation errors or retract visible rows from stored rejection records on startup.
+
 ## 2.0.0-alpha.48
 
 ### Patch Changes
