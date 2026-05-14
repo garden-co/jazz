@@ -1397,6 +1397,55 @@ fn rc_restart_retracts_visible_rows_with_stored_rejected_settlement() {
 }
 
 #[test]
+fn rc_startup_ignores_orphan_rejected_fates_without_replay_metadata() {
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let batch_id = BatchId::new();
+    let history_row_batch_scan_calls = Arc::new(Mutex::new(0));
+    let mut storage = RowRegionReadFailingStorage::with_history_row_batch_scan_counter(
+        history_row_batch_scan_calls.clone(),
+    );
+
+    for _ in 0..3 {
+        storage
+            .put_row_locator(
+                ObjectId::new(),
+                Some(&RowLocator {
+                    table: "users".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+    }
+    storage
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "server-side rejected fate without local replay metadata".to_string(),
+        })
+        .unwrap();
+
+    let app_id = AppId::from_name("rc-startup-orphan-rejected-fate-test");
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let mut restarted = new_test_core(
+        schema_manager,
+        Box::new(storage) as Box<dyn Storage>,
+        NoopScheduler,
+    );
+
+    assert_eq!(
+        *history_row_batch_scan_calls.lock().unwrap(),
+        0,
+        "startup should not globally scan row histories for rejected fates with no local replay metadata"
+    );
+    assert!(
+        restarted.drain_mutation_error_events().is_empty(),
+        "orphan server-side rejected fates should not be surfaced as local mutation errors"
+    );
+}
+
+#[test]
 fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
     let schema = test_schema();
     let schema_hash = SchemaHash::compute(&schema);
