@@ -21,6 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
   PACKAGE_PATH: crates/jazz-rn
   PACKAGE_NAME: jazz-rn
 
@@ -35,13 +36,13 @@ jobs:
     if: ${{ !inputs.disableAndroid }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: |
@@ -51,23 +52,24 @@ jobs:
             x86_64-linux-android
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        uses: cargo-bins/cargo-binstall@bbd0a7de0e936c8c626fa0e93584169d58ff1307 # main
 
       - name: Install cargo-ndk
         run: cargo binstall cargo-ndk
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: sccache
 
       - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
-          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          key: sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
 
       - name: Show sccache stats (before build)
@@ -80,7 +82,7 @@ jobs:
         run: sccache --show-stats || true
 
       - name: Upload Android artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-android
           if-no-files-found: error
@@ -95,7 +97,7 @@ jobs:
     if: ${{ !inputs.disableIOS }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
@@ -103,7 +105,7 @@ jobs:
           cache: "false"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: |
@@ -115,7 +117,7 @@ jobs:
         run: pnpm --filter ${{ env.PACKAGE_NAME }} run build:rn:ios
 
       - name: Upload iOS artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-ios
           if-no-files-found: error

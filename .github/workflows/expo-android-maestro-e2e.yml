@@ -20,6 +20,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+
 jobs:
   build-rn:
     name: Build jazz-rn (Android) artifacts
@@ -37,25 +40,26 @@ jobs:
       CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
       JAZZ_TOOLS_SANDBOX_TARGET: x86_64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: ${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
 
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.14.0
-          cache-key: ${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
+          cache-key: ${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: cargo-zigbuild
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Build sandbox binary
         run: |
@@ -64,7 +68,7 @@ jobs:
           cp "target/${JAZZ_TOOLS_SANDBOX_TARGET}/release/jazz-tools" ".artifacts/jazz-tools/jazz-tools-${JAZZ_TOOLS_SANDBOX_TARGET}"
 
       - name: Upload sandbox binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-tools-sandbox-${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
           if-no-files-found: error
@@ -83,35 +87,36 @@ jobs:
       COREPACK_HOME: /home/runner/.local/share/corepack
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
 
       - name: Download React Native Android artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: jazz-rn-android
           path: crates/jazz-rn
 
       - name: Download jazz-tools sandbox binaries
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: jazz-tools-sandbox-x86_64-unknown-linux-musl
           path: .artifacts/jazz-tools
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: wasm-pack@0.13.1
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Build Expo E2E JS dependencies
         run: |
@@ -127,19 +132,23 @@ jobs:
       - name: Expo prebuild (Android)
         run: pnpm --filter todo-client-localfirst-expo run verify:expo:android
 
-      - uses: actions/setup-java@v5
+      - name: Write Gradle cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
           cache-dependency-path: |
+            .github-cache-scope
             examples/todo-client-localfirst-expo/android/**/*.gradle*
             examples/todo-client-localfirst-expo/android/gradle/wrapper/gradle-wrapper.properties
             crates/jazz-rn/android/**/*.gradle*
             crates/jazz-rn/android/gradle.properties
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
 
       - name: Install Android NDK
         run: |
@@ -272,7 +281,7 @@ jobs:
 
       - name: Run Maestro Cloud flows
         id: maestro
-        uses: mobile-dev-inc/action-maestro-cloud@v2
+        uses: mobile-dev-inc/action-maestro-cloud@34906065ba3e85fd57ed533b178187eefb042aed # v2
         with:
           api-key: ${{ secrets.MAESTRO_KEY }}
           project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
@@ -308,7 +317,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: expo-android-maestro-e2e-logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
