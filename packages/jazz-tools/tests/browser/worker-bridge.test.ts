@@ -1401,7 +1401,7 @@ describe("Worker Bridge with OPFS", () => {
     await waitForCondition(
       async () => {
         const client = (db as any).getClient(app.wasmSchema);
-        return client.localBatchRecord(insertResult.batchId)?.latestSettlement?.kind === "rejected";
+        return client.batchFate(insertResult.batchId)?.kind === "rejected";
       },
       5000,
       "insert should be rejected before listener is registered",

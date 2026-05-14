@@ -17,7 +17,6 @@
 #![allow(dead_code)]
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use futures::channel::oneshot;
@@ -40,10 +39,6 @@ use crate::worker_protocol::{
 
 const INIT_RESPONSE_TIMEOUT_MS: i32 = 12_000;
 const SHUTDOWN_ACK_TIMEOUT_MS: i32 = 5_000;
-/// Deadline budget for `wait_for_local_sync_flush` (mirrors the JS path).
-const LOCAL_SYNC_ACK_TIMEOUT_MS: i32 = 2_000;
-/// Inter-attempt sleep when retrying because the batch is not yet reconciled.
-const LOCAL_SYNC_ACK_RETRY_MS: i32 = 10;
 
 fn parse_lifecycle_event(s: &str) -> Option<WorkerLifecycleEvent> {
     Some(match s {
@@ -318,78 +313,6 @@ impl WasmWorkerBridge {
             .on_sync_message_received(payload.into(), None)
     }
 
-    /// Mirror of the TS-side `waitForLocalSyncFlush(batchId?)` from main: drive
-    /// the main runtime's outbox to the worker, await a `SyncAck`, optionally
-    /// retry while the batch is still reconciling. Returns once the worker
-    /// confirms reconciliation, the 2s budget expires, or any ack times out.
-    #[wasm_bindgen(js_name = waitForLocalSyncFlush)]
-    pub fn wait_for_local_sync_flush(&self, batch_id: Option<String>) -> js_sys::Promise {
-        let inner = Rc::clone(&self.inner);
-        wasm_bindgen_futures::future_to_promise(async move {
-            if inner.is_inactive() {
-                return Ok(JsValue::UNDEFINED);
-            }
-            let init_promise = inner.init_promise.borrow().clone();
-            if let Some(promise) = init_promise {
-                let _ = JsFuture::from(promise).await;
-            }
-            let start = now_ms();
-            loop {
-                if inner.is_inactive() {
-                    return Ok(JsValue::UNDEFINED);
-                }
-                // Push any accumulated outbox traffic to the worker before
-                // posting the ack envelope so the ack covers the whole batch.
-                // `batched_tick` only drains the runtime's outbox into the
-                // sender's pending queue; `flush_now` is what synchronously
-                // postMessages it. Without the flush, the ack envelope posted
-                // below would race ahead of the writes it is meant to cover.
-                inner.runtime.batched_tick();
-                inner.sender.flush_now();
-
-                let payloads = collect_replay_payloads(&inner.runtime, batch_id.as_deref());
-
-                let ack_id = inner.next_sync_ack_id.get();
-                inner.next_sync_ack_id.set(ack_id.wrapping_add(1));
-                let (tx, rx) = oneshot::channel::<SyncAckOutcome>();
-                inner.pending_sync_acks.borrow_mut().insert(ack_id, tx);
-
-                post_wire(
-                    &inner.worker,
-                    &MainToWorkerWire::Sync {
-                        payloads,
-                        ack_id: Some(ack_id),
-                        ack_batch_id: batch_id.clone(),
-                    },
-                );
-
-                let remaining_ms = remaining_deadline(start, LOCAL_SYNC_ACK_TIMEOUT_MS);
-                let timeout = make_timeout(remaining_ms);
-                let outcome = match select(rx, timeout).await {
-                    Either::Left((Ok(ack), _)) => Some(ack),
-                    _ => None,
-                };
-                inner.pending_sync_acks.borrow_mut().remove(&ack_id);
-
-                if outcome.is_none() || inner.is_inactive() {
-                    return Ok(JsValue::UNDEFINED);
-                }
-                let outcome = outcome.expect("checked above");
-
-                // No batch in flight → first ack is enough.
-                if batch_id.is_none() {
-                    return Ok(JsValue::UNDEFINED);
-                }
-                if outcome.batch_reconciled || elapsed_exceeded(start, LOCAL_SYNC_ACK_TIMEOUT_MS) {
-                    return Ok(JsValue::UNDEFINED);
-                }
-
-                // Still reconciling; back off briefly and try again.
-                let _ = JsFuture::from(make_timeout_promise(LOCAL_SYNC_ACK_RETRY_MS)).await;
-            }
-        })
-    }
-
     #[wasm_bindgen(js_name = waitForUpstreamServerConnection)]
     pub async fn wait_for_upstream_server_connection(&self) -> Result<(), JsValue> {
         if !self.inner.expects_upstream.get() {
@@ -596,17 +519,6 @@ struct BridgeInner {
     has_forwarder: Cell<bool>,
     upstream_ready_promise: RefCell<js_sys::Promise>,
     upstream_ready_resolver: RefCell<Option<Function>>,
-    /// Outstanding `wait_for_local_sync_flush` ack waiters keyed by ack_id.
-    /// The worker host replies with `WorkerToMainWire::SyncAck` after running
-    /// the local-batch reconciliation pass; the dispatch resolves the matching
-    /// oneshot to wake the awaiting promise.
-    pending_sync_acks: RefCell<HashMap<u32, oneshot::Sender<SyncAckOutcome>>>,
-    next_sync_ack_id: Cell<u32>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SyncAckOutcome {
-    batch_reconciled: bool,
 }
 
 impl BridgeInner {
@@ -635,8 +547,6 @@ impl BridgeInner {
             has_forwarder: Cell::new(false),
             upstream_ready_promise: RefCell::new(promise),
             upstream_ready_resolver: RefCell::new(Some(resolver)),
-            pending_sync_acks: RefCell::new(HashMap::new()),
-            next_sync_ack_id: Cell::new(1),
         }
     }
 
@@ -916,16 +826,6 @@ impl BridgeInner {
                     self.runtime.batched_tick();
                 }
             }
-            WorkerToMainWire::SyncAck {
-                ack_id,
-                has_batch_record: _,
-                batch_reconciled,
-            } => {
-                let waiter = self.pending_sync_acks.borrow_mut().remove(&ack_id);
-                if let Some(tx) = waiter {
-                    let _ = tx.send(SyncAckOutcome { batch_reconciled });
-                }
-            }
             WorkerToMainWire::ShutdownOk => {
                 if let Some(tx) = self.shutdown_resolver.borrow_mut().take() {
                     let _ = tx.send(());
@@ -1044,55 +944,4 @@ fn make_timeout_promise(ms: i32) -> js_sys::Promise {
     js_sys::Promise::new(&mut |resolve, _reject| {
         let _ = set_timeout.call2(&JsValue::NULL, &resolve, &JsValue::from_f64(ms as f64));
     })
-}
-
-fn now_ms() -> f64 {
-    let global = js_sys::global();
-    let date_ctor = Reflect::get(&global, &"Date".into()).expect("Date global");
-    let now_fn: Function = Reflect::get(&date_ctor, &"now".into())
-        .expect("Date.now")
-        .dyn_into()
-        .expect("Date.now is a function");
-    now_fn
-        .call0(&JsValue::NULL)
-        .ok()
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
-}
-
-fn remaining_deadline(start_ms: f64, total_budget_ms: i32) -> i32 {
-    let elapsed = (now_ms() - start_ms).max(0.0);
-    let remaining = (total_budget_ms as f64) - elapsed;
-    if remaining <= 0.0 {
-        0
-    } else {
-        remaining as i32
-    }
-}
-
-fn elapsed_exceeded(start_ms: f64, total_budget_ms: i32) -> bool {
-    (now_ms() - start_ms) >= total_budget_ms as f64
-}
-
-/// Gather replay payloads for a batch from the main runtime as raw bytes
-/// suitable for the postcard wire. Errors and missing batches collapse to an
-/// empty vec — `wait_for_local_sync_flush` calls without a batch id also pass
-/// an empty payload set just to drain the runtime outbox.
-fn collect_replay_payloads(
-    runtime: &WasmRuntime,
-    batch_id: Option<&str>,
-) -> Vec<serde_bytes::ByteBuf> {
-    let Some(batch_id) = batch_id else {
-        return Vec::new();
-    };
-    let Ok(array) = runtime.replay_local_batch_payloads(batch_id) else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(array.length() as usize);
-    for i in 0..array.length() {
-        if let Some(arr) = array.get(i).dyn_ref::<Uint8Array>() {
-            out.push(serde_bytes::ByteBuf::from(arr.to_vec()));
-        }
-    }
-    out
 }

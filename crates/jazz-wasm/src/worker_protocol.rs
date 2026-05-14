@@ -87,14 +87,9 @@ pub enum SyncEntry {
 /// `runtimeSources` out before handoff.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MainToWorkerWire {
-    /// Sync batch from main → worker. `ack_id` is set when the main side
-    /// expects a `SyncAck` reply (e.g. `wait_for_local_sync_flush`). When
-    /// present alongside `ack_batch_id`, the worker also performs a local
-    /// batch reconciliation pass before acking.
+    /// Sync batch from main → worker.
     Sync {
         payloads: Vec<ByteBuf>,
-        ack_id: Option<u32>,
-        ack_batch_id: Option<String>,
     },
     PeerOpen {
         peer_id: String,
@@ -136,15 +131,6 @@ pub enum WorkerToMainWire {
     UpstreamDisconnected,
     Sync {
         payloads: Vec<SyncEntry>,
-    },
-    /// Reply to a `MainToWorkerWire::Sync` envelope carrying `ack_id`. Reports
-    /// whether the worker observed any payloads for the requested batch and
-    /// whether the batch's fate has settled in a way the main side can rely on
-    /// for `wait_for_local_sync_flush`.
-    SyncAck {
-        ack_id: u32,
-        has_batch_record: bool,
-        batch_reconciled: bool,
     },
     PeerSync {
         peer_id: String,
@@ -483,13 +469,6 @@ mod tests {
     fn main_to_worker_round_trips() {
         rt_main(&MainToWorkerWire::Sync {
             payloads: vec![ByteBuf::from(vec![1, 2, 3]), ByteBuf::from(vec![4, 5])],
-            ack_id: None,
-            ack_batch_id: None,
-        });
-        rt_main(&MainToWorkerWire::Sync {
-            payloads: vec![ByteBuf::from(vec![9])],
-            ack_id: Some(7),
-            ack_batch_id: Some("batch-1".into()),
         });
         rt_main(&MainToWorkerWire::PeerOpen {
             peer_id: "tab-a".into(),
@@ -551,11 +530,6 @@ mod tests {
         });
         rt_worker(&WorkerToMainWire::LocalBatchRecordsSync {
             encoded_records: Vec::new(),
-        });
-        rt_worker(&WorkerToMainWire::SyncAck {
-            ack_id: 1,
-            has_batch_record: true,
-            batch_reconciled: false,
         });
         rt_worker(&WorkerToMainWire::MutationErrorReplay {
             batch_id: "b1".into(),

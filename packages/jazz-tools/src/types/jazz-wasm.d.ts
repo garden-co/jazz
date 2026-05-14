@@ -78,7 +78,6 @@ declare module "jazz-wasm" {
     ): void;
     applyIncomingServerPayload(payload: Uint8Array): void;
     waitForUpstreamServerConnection(): Promise<void>;
-    waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
     replayServerConnection(): void;
     disconnectUpstream(): void;
     reconnectUpstream(): void;

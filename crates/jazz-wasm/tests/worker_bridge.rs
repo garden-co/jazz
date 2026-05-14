@@ -472,21 +472,13 @@ fn main_to_worker_main_side_sync_envelope() {
     // contract independently of any send-path test.
     let bytes = encode_main_to_worker(&MainToWorkerWire::Sync {
         payloads: vec![ByteBuf::from(vec![9])],
-        ack_id: None,
-        ack_batch_id: None,
     })
     .expect("encode");
     let decoded: MainToWorkerWire = postcard::from_bytes(&bytes).expect("decode");
     match decoded {
-        MainToWorkerWire::Sync {
-            payloads,
-            ack_id,
-            ack_batch_id,
-        } => {
+        MainToWorkerWire::Sync { payloads } => {
             assert_eq!(payloads.len(), 1);
             assert_eq!(&*payloads[0], &[9]);
-            assert_eq!(ack_id, None);
-            assert_eq!(ack_batch_id, None);
         }
         other => panic!("expected Sync, got {other:?}"),
     }
@@ -507,21 +499,6 @@ async fn yield_once() {
         let _ = set_timeout.call2(&JsValue::NULL, &resolve, &JsValue::from_f64(0.0));
     });
     JsFuture::from(promise).await.expect("yield");
-}
-
-/// Resolve with the sentinel string `"deadline"` after `ms` so a `Promise::race`
-/// can tell whether the racee settled before the deadline.
-fn deadline_marker(ms: i32) -> js_sys::Promise {
-    js_sys::Promise::new(&mut |resolve, _reject| {
-        let global = js_sys::global();
-        let set_timeout: Function = Reflect::get(&global, &"setTimeout".into())
-            .unwrap()
-            .unchecked_into();
-        let cb = Closure::once_into_js(move || {
-            let _ = resolve.call1(&JsValue::NULL, &JsValue::from_str("deadline"));
-        });
-        let _ = set_timeout.call2(&JsValue::NULL, &cb, &JsValue::from_f64(ms as f64));
-    })
 }
 
 // =============================================================================
@@ -933,57 +910,6 @@ fn ready_js_object_does_not_break_dispatch() {
     let ready = Object::new();
     Reflect::set(&ready, &"type".into(), &"ready".into()).unwrap();
     fw.emit_data(ready.into());
-}
-
-/// Ports the intent of the JS test `does not hang forever when a local sync
-/// flush ack is dropped`. If the worker never replies with `SyncAck`, the
-/// `wait_for_local_sync_flush` promise still settles inside the budget.
-#[wasm_bindgen_test]
-async fn wait_for_local_sync_flush_does_not_hang_when_ack_is_dropped() {
-    let fw = FakeWorker::new();
-    let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
-        .expect("attach");
-
-    let init = bridge.init();
-    fw.emit_wire(&WorkerToMainWire::InitOk {
-        client_id: "c1".into(),
-    });
-    JsFuture::from(init).await.expect("init resolved");
-
-    // Caller asks the bridge to drain — but the worker never replies. The
-    // promise must still resolve (within ~2s) rather than hanging forever.
-    JsFuture::from(bridge.wait_for_local_sync_flush(None))
-        .await
-        .expect("wait_for_local_sync_flush resolves on dropped ack");
-}
-
-/// Regression: after init has failed, `wait_for_local_sync_flush` must settle
-/// promptly rather than spending the full `LOCAL_SYNC_ACK_TIMEOUT_MS` posting
-/// to a worker that already errored. Pre-fix the bridge's `is_disposed_like`
-/// only covered `Disposed | ShuttingDown`, so `Failed` slipped through and the
-/// call hung ~2s on every invocation.
-#[wasm_bindgen_test]
-async fn wait_for_local_sync_flush_returns_promptly_after_failed_init() {
-    let fw = FakeWorker::new();
-    let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
-        .expect("attach");
-
-    let init = bridge.init();
-    fw.emit_wire(&WorkerToMainWire::Error {
-        message: "boom".into(),
-    });
-    let init_result = JsFuture::from(init).await;
-    assert!(init_result.is_err(), "init should reject");
-
-    let flush = bridge.wait_for_local_sync_flush(None);
-    let race = js_sys::Promise::race(&js_sys::Array::of2(&flush, &deadline_marker(500)));
-    let outcome = JsFuture::from(race).await.expect("race resolves");
-    assert!(
-        outcome.as_string().as_deref() != Some("deadline"),
-        "wait_for_local_sync_flush did not settle within 500ms after Failed state"
-    );
 }
 
 #[wasm_bindgen_test]

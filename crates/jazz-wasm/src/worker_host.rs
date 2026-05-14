@@ -511,77 +511,6 @@ fn replay_startup_mutation_errors(runtime: &Rc<WasmRuntime>) {
     }
 }
 
-/// Drive a local-batch reconciliation pass when a `Sync` envelope with
-/// `ack_batch_id` arrives. Mirrors the JS-side worker's flow from main: feed
-/// the seal payload back to the worker, advance the upstream sync edge, and
-/// inspect the resulting batch fate to decide whether main can stop waiting.
-fn reconcile_local_batch_for_ack(
-    runtime: &Rc<WasmRuntime>,
-    main_client_id: &str,
-    ack_batch_id: Option<&str>,
-) -> (bool, bool) {
-    let Some(batch_id) = ack_batch_id else {
-        return (false, false);
-    };
-
-    let mut has_batch_record = false;
-    if let Ok(replay_payloads) = runtime.replay_local_batch_payloads(batch_id) {
-        let len = replay_payloads.length();
-        has_batch_record = len > 1;
-        if has_batch_record {
-            if let Some(seal) = replay_payloads.get(len - 1).dyn_ref::<Uint8Array>() {
-                if let Err(err) = runtime
-                    .on_sync_message_received_from_client(main_client_id, seal.clone().into())
-                {
-                    tracing::warn!("reconcile seal replay: {err:?}");
-                } else {
-                    runtime.batched_tick();
-                }
-            }
-            let _ = runtime.add_server(None, None);
-            if let Err(err) = runtime.reconcile_local_batch_with_server(batch_id) {
-                tracing::warn!("reconcileLocalBatchWithServer: {err:?}");
-            }
-            runtime.batched_tick();
-        }
-    }
-
-    let batch_reconciled = match runtime.load_batch_fate(batch_id) {
-        Ok(fate) => fate_is_reconciled(&fate),
-        Err(err) => {
-            tracing::warn!("loadBatchFate: {err:?}");
-            false
-        }
-    };
-
-    (has_batch_record, batch_reconciled)
-}
-
-/// `BatchFate` shapes that satisfy `wait_for_local_sync_flush`: the rejection
-/// path is terminal, the transactional accept is terminal, and a direct-durable
-/// confirmation at any tier above `local` is what callers really wait for.
-fn fate_is_reconciled(fate: &JsValue) -> bool {
-    if fate.is_null() || fate.is_undefined() {
-        return false;
-    }
-    let Ok(kind) = Reflect::get(fate, &"kind".into()) else {
-        return false;
-    };
-    let Some(kind) = kind.as_string() else {
-        return false;
-    };
-    match kind.as_str() {
-        "rejected" | "acceptedTransaction" => true,
-        "durableDirect" => {
-            let confirmed = Reflect::get(fate, &"confirmedTier".into())
-                .ok()
-                .and_then(|v| v.as_string());
-            confirmed.as_deref() != Some("local")
-        }
-        _ => false,
-    }
-}
-
 // =============================================================================
 // Message dispatch
 // =============================================================================
@@ -631,11 +560,7 @@ fn process_main_message(msg: MainToWorkerMessage) {
     };
 
     match wire {
-        MainToWorkerWire::Sync {
-            payloads,
-            ack_id,
-            ack_batch_id,
-        } => {
+        MainToWorkerWire::Sync { payloads } => {
             let Some(rt) = runtime.as_ref() else { return };
             let Some(main_client_id) = get_main_client_id() else {
                 return;
@@ -649,16 +574,6 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 }
             }
             rt.batched_tick();
-            if let Some(ack_id) = ack_id {
-                rt.flush_wal();
-                let (has_batch_record, batch_reconciled) =
-                    reconcile_local_batch_for_ack(rt, &main_client_id, ack_batch_id.as_deref());
-                post_to_main(&WorkerToMainWire::SyncAck {
-                    ack_id,
-                    has_batch_record,
-                    batch_reconciled,
-                });
-            }
         }
         MainToWorkerWire::PeerOpen { peer_id } => {
             if let Some(rt) = runtime.as_ref() {
