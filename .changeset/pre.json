@@ -47,6 +47,7 @@
   },
   "changesets": [
     "allow-fk-ref-without-id",
+    "alpha46-storage-compat",
     "apply-stored-rejected-on-startup",
     "authmode-anonymous-react-provider",
     "authorship-edit-metadata-mvp",
