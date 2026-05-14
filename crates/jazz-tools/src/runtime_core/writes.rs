@@ -794,12 +794,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 let batch = self.local_batch_record(batch_id)?.unwrap_or_else(|| {
                     LocalBatchRecord::new(batch_id, BatchMode::Direct, true, Some(fate.clone()))
                 });
-                self.durability
-                    .queue_mutation_error_event(MutationErrorEvent {
-                        code: code.to_string(),
-                        reason: reason.to_string(),
-                        batch,
-                    });
+                self.queue_mutation_error_event(MutationErrorEvent {
+                    code: code.to_string(),
+                    reason: reason.to_string(),
+                    batch,
+                });
             }
         }
         self.mark_storage_write_pending_flush();

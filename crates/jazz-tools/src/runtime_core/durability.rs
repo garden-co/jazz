@@ -103,6 +103,10 @@ impl DurabilityTracker {
             .or_insert(event);
     }
 
+    pub(crate) fn has_pending_mutation_error_events(&self) -> bool {
+        !self.pending_mutation_error_events.is_empty()
+    }
+
     /// Drop a queued-but-undelivered mutation error event for `batch_id`.
     pub(crate) fn take_mutation_error_event(
         &mut self,

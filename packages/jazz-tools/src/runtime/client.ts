@@ -686,41 +686,6 @@ function normalizeUpdatedAt(updatedAt?: number): number | undefined {
   return updatedAt;
 }
 
-function durabilityTierRank(tier: DurabilityTier): number {
-  switch (tier) {
-    case "local":
-      return 0;
-    case "edge":
-      return 1;
-    case "global":
-      return 2;
-  }
-}
-
-function settlementSatisfiesTier(
-  settlement: BatchFate | null | undefined,
-  tier: DurabilityTier,
-): boolean {
-  if (!settlement) {
-    return false;
-  }
-
-  if (settlement.kind !== "durableDirect" && settlement.kind !== "acceptedTransaction") {
-    return false;
-  }
-
-  return durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier);
-}
-
-function rejectionFromSettlement(
-  settlement: BatchFate | null | undefined,
-): PersistedWriteRejectedError | null {
-  if (!settlement || settlement.kind !== "rejected") {
-    return null;
-  }
-  return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
-}
-
 function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedError | null {
   if (!error || typeof error !== "object") {
     return null;
@@ -2287,14 +2252,6 @@ export class JazzClient {
   async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
     if (this.completedEmptyBatchIds.has(batchId)) {
       return;
-    }
-    const settlement = this.batchFate(batchId);
-    if (settlementSatisfiesTier(settlement, tier)) {
-      return;
-    }
-    const knownRejection = rejectionFromSettlement(settlement);
-    if (knownRejection) {
-      throw knownRejection;
     }
     try {
       await this.runtime.waitForBatch(batchId, tier);

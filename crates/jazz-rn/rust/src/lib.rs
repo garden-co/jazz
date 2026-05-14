@@ -7,7 +7,8 @@ uniffi::setup_scaffolding!();
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use futures::future::FutureExt;
 use serde::Deserialize;
@@ -26,7 +27,8 @@ use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
-    ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
+    MutationErrorCallback as CoreMutationErrorCallback, ReadDurabilityOptions, RuntimeCore,
+    Scheduler, SubscriptionDelta, SubscriptionHandle,
 };
 use jazz_tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
 use jazz_tools::storage::{SqliteStorage, Storage};
@@ -272,10 +274,18 @@ pub trait MutationErrorCallback: Send + Sync {
 #[derive(Clone, Default)]
 struct RnScheduler {
     scheduled: Arc<AtomicBool>,
+    mutation_error_delivery_scheduled: Arc<AtomicBool>,
+    core_ref: Arc<Mutex<Option<Weak<Mutex<RnCoreType>>>>>,
     callback: Arc<Mutex<Option<Box<dyn BatchedTickCallback>>>>,
 }
 
 impl RnScheduler {
+    fn set_core_ref(&self, core_ref: Weak<Mutex<RnCoreType>>) {
+        if let Ok(mut slot) = self.core_ref.lock() {
+            *slot = Some(core_ref);
+        }
+    }
+
     fn set_callback(&self, cb: Option<Box<dyn BatchedTickCallback>>) {
         if let Ok(mut slot) = self.callback.lock() {
             *slot = cb;
@@ -310,6 +320,32 @@ impl Scheduler for RnScheduler {
             }
         }
     }
+
+    fn schedule_mutation_error_delivery(&self) {
+        if self
+            .mutation_error_delivery_scheduled
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let scheduled = Arc::clone(&self.mutation_error_delivery_scheduled);
+        let core_ref = self.core_ref.lock().ok().and_then(|slot| slot.clone());
+        let Some(core_ref) = core_ref else {
+            scheduled.store(false, Ordering::SeqCst);
+            return;
+        };
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1));
+            scheduled.store(false, Ordering::SeqCst);
+            if let Some(core) = core_ref.upgrade() {
+                if let Err(error) = deliver_pending_mutation_errors(&core) {
+                    eprintln!("jazz-rn: deliver pending mutation errors: {error:?}");
+                }
+            }
+        });
+    }
 }
 
 // ============================================================================
@@ -318,36 +354,27 @@ impl Scheduler for RnScheduler {
 
 type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler>;
 
-fn emit_pending_mutation_errors(
-    core: &Mutex<RnCoreType>,
-    mutation_error_callback: &Mutex<Option<Box<dyn MutationErrorCallback>>>,
-) -> Result<(), JazzRnError> {
-    let callback_guard = mutation_error_callback
-        .lock()
-        .map_err(|_| JazzRnError::Internal {
-            message: "lock poisoned".into(),
-        })?;
-    let Some(callback) = callback_guard.as_ref() else {
-        return Ok(());
-    };
-
-    let events = {
+fn deliver_pending_mutation_errors(core: &Arc<Mutex<RnCoreType>>) -> Result<(), JazzRnError> {
+    let delivery = {
         let mut core = core.lock().map_err(|_| JazzRnError::Internal {
             message: "lock poisoned".into(),
         })?;
-        core.drain_mutation_error_events()
+        core.pending_mutation_error_delivery()
+    };
+
+    let Some((callback, events)) = delivery else {
+        return Ok(());
     };
 
     for event in events {
-        let event_json =
-            serde_json::to_string(&serialize_mutation_error_event(&event)).map_err(|error| {
-                JazzRnError::Internal {
-                    message: format!("mutation error serialization failed: {error}"),
-                }
+        let batch_id = event.batch.batch_id;
+        if callback(&event) {
+            let mut core = core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
             })?;
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            callback.on_error(event_json);
-        }));
+            core.acknowledge_handled_rejected_batch(batch_id)
+                .map_err(runtime_err)?;
+        }
     }
 
     Ok(())
@@ -355,11 +382,10 @@ fn emit_pending_mutation_errors(
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
-    core: Mutex<RnCoreType>,
+    core: Arc<Mutex<RnCoreType>>,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
-    mutation_error_callback: Mutex<Option<Box<dyn MutationErrorCallback>>>,
 }
 
 #[uniffi::export]
@@ -430,13 +456,19 @@ impl RnRuntime {
 
             let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
             core.persist_schema();
+            let core = Arc::new(Mutex::new(core));
+            {
+                let core_guard = core.lock().map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?;
+                core_guard.scheduler().set_core_ref(Arc::downgrade(&core));
+            }
 
             Ok(Arc::new(Self {
-                core: Mutex::new(core),
+                core,
                 upstream_server_id: Mutex::new(None),
                 declared_schema,
                 subscription_queries: Mutex::new(HashMap::new()),
-                mutation_error_callback: Mutex::new(None),
             }))
         })
     }
@@ -465,7 +497,6 @@ impl RnRuntime {
                 core.scheduler_mut().clear_scheduled();
                 core.batched_tick();
             }
-            emit_pending_mutation_errors(&self.core, &self.mutation_error_callback)?;
             Ok(())
         })
     }
@@ -1036,16 +1067,23 @@ impl RnRuntime {
         callback: Box<dyn MutationErrorCallback>,
     ) -> Result<(), JazzRnError> {
         with_panic_boundary("on_mutation_error", || {
-            {
-                let mut slot =
-                    self.mutation_error_callback
-                        .lock()
-                        .map_err(|_| JazzRnError::Internal {
-                            message: "lock poisoned".into(),
-                        })?;
-                *slot = Some(callback);
-            }
-            emit_pending_mutation_errors(&self.core, &self.mutation_error_callback)
+            let callback: CoreMutationErrorCallback = Arc::new(move |event| {
+                let Ok(event_json) = serde_json::to_string(&serialize_mutation_error_event(event))
+                else {
+                    return false;
+                };
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    callback.on_error(event_json);
+                }))
+                .is_ok()
+            });
+            self.core
+                .lock()
+                .map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?
+                .set_mutation_error_callback(Some(callback));
+            Ok(())
         })
     }
 

@@ -5,7 +5,6 @@ import {
   resolveDefaultDurabilityTier,
   type MutationErrorEvent,
   type Runtime,
-  type LocalBatchRecord,
   WriteHandle,
   PersistedWriteRejectedError,
 } from "./client.js";
@@ -90,18 +89,6 @@ function makeContext(): AppContext {
     schema: {},
     serverUrl: "https://example.test",
     jwtToken: "initial.jwt.token",
-  };
-}
-
-function makeLocalBatchRecord(
-  batchId: string,
-  latestSettlement: LocalBatchRecord["latestSettlement"] = null,
-): LocalBatchRecord {
-  return {
-    batchId,
-    mode: "direct",
-    sealed: true,
-    latestSettlement,
   };
 }
 
