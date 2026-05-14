@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::metadata::{RowProvenance, SYSTEM_PRINCIPAL_ID};
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::settlement_eval_cache::SettlementEvalCache;
 use crate::query_manager::types::{
     LoadedRow, Row, RowDescriptor, Schema, TableName, Tuple, TupleBatchProvenance, TupleDelta,
     TupleDescriptor, TupleElement, TupleProvenance, Value,
@@ -102,10 +103,11 @@ impl RecursiveRelationNode {
     }
 
     /// Process seed tuple deltas with query context.
-    pub fn process_with_context<F>(
+    pub(crate) fn process_with_context<F>(
         &mut self,
         input: TupleDelta,
         io: &dyn Storage,
+        settlement_eval_cache: Option<&mut SettlementEvalCache>,
         mut row_loader: F,
     ) -> TupleDelta
     where
@@ -117,7 +119,7 @@ impl RecursiveRelationNode {
             return TupleDelta::default();
         }
 
-        let next = self.recompute(io, &mut row_loader);
+        let next = self.recompute(io, settlement_eval_cache, &mut row_loader);
         let delta = diff_sets(&self.current_tuples, &next);
 
         self.current_tuples = next;
@@ -158,10 +160,11 @@ impl RecursiveRelationNode {
     fn recompute(
         &self,
         io: &dyn Storage,
+        settlement_eval_cache: Option<&mut SettlementEvalCache>,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
         if self.hop.is_some() {
-            return self.recompute_with_hop(io, row_loader);
+            return self.recompute_with_hop(io, settlement_eval_cache, row_loader);
         }
         if matches!(self.correlation_source, CorrelationSource::ObjectId) {
             return self.recompute_with_object_id(io, row_loader);
@@ -444,8 +447,21 @@ impl RecursiveRelationNode {
     fn recompute_with_hop(
         &self,
         io: &dyn Storage,
+        _settlement_eval_cache: Option<&mut SettlementEvalCache>,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
+        self.recompute_with_hop_uncached(io, row_loader)
+    }
+
+    fn recompute_with_hop_uncached(
+        &self,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    ) -> AHashSet<Tuple> {
+        crate::query_manager::policy_counters::increment(
+            "relation_subexpr_eval",
+            "kind=recursive_hop".to_string(),
+        );
         let Some(hop) = &self.hop else {
             return AHashSet::new();
         };
