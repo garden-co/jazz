@@ -189,9 +189,6 @@ type BranchDiffRowPreview = {
   rowId: string;
   table: string;
   kind: "insert" | "update" | "delete" | "unchanged" | "error";
-  baseBatchIds: string[];
-  sourceBatchIds: string[];
-  targetBatchIds: string[];
   merged?: Record<string, unknown>;
   columns: BranchDiffColumnPreview[];
   errors: BranchDiffError[];
@@ -285,7 +282,6 @@ Required coverage:
 - cross-branch parent links resolve correctly
 - diff reports an error for unresolved parent/common-ancestor state
 - diff returns preview values for each changed column
-- diff preview reports source, target, and base frontiers
 - schema/lens failures produce clear diff/merge errors
 
 ## Main Implementation Risk
