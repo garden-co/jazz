@@ -420,6 +420,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          cache-bin: false
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -470,6 +471,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          cache-bin: false
 
       - name: Build CLI binary
         run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
@@ -518,6 +520,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          cache-bin: false
 
       - uses: taiki-e/install-action@v2
         with:
@@ -594,6 +597,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          cache-bin: false
 
       - if: ${{ matrix.use_sccache }}
         uses: taiki-e/install-action@v2
@@ -666,6 +670,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          cache-bin: false
 
       - name: Install/build React Native iOS prerequisites
         env:
@@ -733,6 +738,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          cache-bin: false
 
       - uses: taiki-e/install-action@v2
         with:
