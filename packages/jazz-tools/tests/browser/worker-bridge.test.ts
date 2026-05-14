@@ -1435,7 +1435,7 @@ describe("Worker Bridge with OPFS", () => {
     });
   });
 
-  it("does not replay acknowledged rejected worker batches after restart", async () => {
+  it("does not replay delivered rejected worker batches after restart", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-restart",
       readOnlyPermissions,
@@ -1480,7 +1480,6 @@ describe("Worker Bridge with OPFS", () => {
         },
       },
     });
-    await sleep(250);
 
     await dbBeforeRestart.shutdown();
     untrack(dbBeforeRestart);
@@ -1491,6 +1490,69 @@ describe("Worker Bridge with OPFS", () => {
     await dbAfterAcknowledgement.all(allTodos, { tier: "local" });
     await sleep(500);
     expect(replayAfterAckSpy).not.toHaveBeenCalled();
+  });
+
+  it("replays undelivered rejected worker batches after restart", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-on-mutation-error-undelivered-restart",
+      readOnlyPermissions,
+    );
+
+    const sharedLocalAuthToken = generateAuthSecret();
+    const dbName = uniqueDbName("sync-on-mutation-error-undelivered-restart");
+    const createPersistentDb = (serverUrl?: string) =>
+      createDb({
+        appId: syncServer.appId,
+        driver: { type: "persistent" as const, dbName },
+        serverUrl,
+        secret: sharedLocalAuthToken,
+      });
+
+    const dbBeforeRestart = track(await createPersistentDb(undefined));
+    const mutationErrorSpy = vi.fn();
+    dbBeforeRestart.onMutationError(mutationErrorSpy);
+
+    const insertResult = dbBeforeRestart.insert(todos, {
+      title: "Rejected replayed after restart",
+      done: false,
+    });
+    await withTimeout(
+      insertResult.wait({ tier: "local" }),
+      5000,
+      "pending rejected insert should be durably recorded locally before restart",
+    );
+
+    await dbBeforeRestart.shutdown();
+    untrack(dbBeforeRestart);
+    expect(mutationErrorSpy).not.toHaveBeenCalled();
+
+    const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
+    const replayAfterRestartSpy = vi.fn();
+    dbAfterRestart.onMutationError(replayAfterRestartSpy);
+
+    // Run a query to set up the runtime
+    await dbAfterRestart.all(allTodos, { tier: "edge" });
+
+    await waitForCondition(
+      async () => replayAfterRestartSpy.mock.calls.length > 0,
+      5000,
+      "onMutationError handler should replay undelivered rejection after restart",
+    );
+    expect(replayAfterRestartSpy).toHaveBeenCalledWith({
+      code: "permission_denied",
+      reason: "Insert denied by policy on table todos",
+      batch: {
+        batchId: insertResult.batchId,
+        mode: "direct",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId: insertResult.batchId,
+          code: "permission_denied",
+          reason: "Insert denied by policy on table todos",
+        },
+      },
+    });
   });
 
   describe("optimistic writes are reverted on server rejection", () => {
@@ -1572,6 +1634,191 @@ describe("Worker Bridge with OPFS", () => {
 
       const todosAfterRevert = await db.all(allTodos, { tier: "local" });
       expect(todosAfterRevert).toEqual([todo]);
+    });
+
+    describe("also reverts after restart", () => {
+      it("insert", async () => {
+        const syncServer = await publishSyncServerSchemaAndPermissions(
+          "sync-restart-revert-insert",
+          readOnlyPermissions,
+        );
+
+        const sharedLocalAuthToken = generateAuthSecret();
+        const dbName = uniqueDbName("sync-restart-revert-insert");
+        const createPersistentDb = (serverUrl?: string) =>
+          createDb({
+            appId: syncServer.appId,
+            driver: { type: "persistent" as const, dbName },
+            serverUrl,
+            secret: sharedLocalAuthToken,
+          });
+
+        const dbBeforeRestart = track(await createPersistentDb(undefined));
+        const insertResult = dbBeforeRestart.insert(todos, {
+          title: "Rejected after restart",
+          done: false,
+        });
+        await insertResult.wait({ tier: "local" });
+
+        const todosBeforeRestart = await dbBeforeRestart.all(allTodos, { tier: "local" });
+        expect(todosBeforeRestart).toEqual([insertResult.value]);
+
+        await dbBeforeRestart.shutdown();
+        untrack(dbBeforeRestart);
+
+        const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
+        const mutationErrorSpy = vi.fn();
+        dbAfterRestart.onMutationError(mutationErrorSpy);
+
+        // Run a query to set up the runtime
+        await dbAfterRestart.all(allTodos, { tier: "edge" });
+
+        expect(await dbAfterRestart.all(allTodos, { tier: "local" })).toEqual([]);
+        await waitForCondition(
+          async () => mutationErrorSpy.mock.calls.length > 0,
+          5000,
+          "restarted rejected insert should surface onMutationError",
+        );
+        expect(mutationErrorSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            code: "permission_denied",
+            batch: expect.objectContaining({ batchId: insertResult.batchId }),
+          }),
+        );
+      });
+
+      it("update", async () => {
+        const syncServer = await publishSyncServerSchemaAndPermissions(
+          "sync-restart-revert-update",
+        );
+
+        const sharedLocalAuthToken = generateAuthSecret();
+        const dbName = uniqueDbName("sync-restart-revert-update");
+        const createPersistentDb = (serverUrl?: string) =>
+          createDb({
+            appId: syncServer.appId,
+            driver: { type: "persistent" as const, dbName },
+            serverUrl,
+            secret: sharedLocalAuthToken,
+          });
+
+        const seeder = track(await createPersistentDb(syncServer.serverUrl));
+        const insertResult = seeder.insert(todos, {
+          title: "Initial task",
+          done: false,
+        });
+        const todo = insertResult.value;
+        await insertResult.wait({ tier: "edge" });
+        await seeder.shutdown();
+        untrack(seeder);
+
+        await publishPermissionsForServer(syncServer, noUpdatePermissions);
+
+        const dbBeforeRestart = track(await createPersistentDb(undefined));
+        expect(await dbBeforeRestart.all(allTodos, { tier: "local" })).toEqual([todo]);
+
+        const updateResult = dbBeforeRestart.update(todos, todo.id, {
+          title: "Rejected update after restart",
+        });
+        await updateResult.wait({ tier: "local" });
+
+        const todosBeforeRestart = await dbBeforeRestart.all(allTodos, { tier: "local" });
+        expect(todosBeforeRestart).toEqual([{ ...todo, title: "Rejected update after restart" }]);
+
+        await dbBeforeRestart.shutdown();
+        untrack(dbBeforeRestart);
+
+        const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
+        const mutationErrorSpy = vi.fn();
+        dbAfterRestart.onMutationError(mutationErrorSpy);
+        await dbAfterRestart.all(allTodos, { tier: "edge" });
+
+        await waitForCondition(
+          async () => {
+            const todosAfterRevert = await dbAfterRestart.all(allTodos, { tier: "local" });
+            return todosAfterRevert.length === 1 && todosAfterRevert[0]?.title === todo.title;
+          },
+          5000,
+          "restarted rejected update should restore the previous local row",
+        );
+        await waitForCondition(
+          async () => mutationErrorSpy.mock.calls.length > 0,
+          5000,
+          "restarted rejected update should surface onMutationError",
+        );
+        expect(mutationErrorSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            code: "permission_denied",
+            batch: expect.objectContaining({ batchId: updateResult.batchId }),
+          }),
+        );
+      });
+
+      it("delete", async () => {
+        const syncServer = await publishSyncServerSchemaAndPermissions(
+          "sync-restart-revert-delete",
+        );
+
+        const sharedLocalAuthToken = generateAuthSecret();
+        const dbName = uniqueDbName("sync-restart-revert-delete");
+        const createPersistentDb = (serverUrl?: string) =>
+          createDb({
+            appId: syncServer.appId,
+            driver: { type: "persistent" as const, dbName },
+            serverUrl,
+            secret: sharedLocalAuthToken,
+          });
+
+        const seeder = track(await createPersistentDb(syncServer.serverUrl));
+        const insertResult = seeder.insert(todos, {
+          title: "Initial task",
+          done: false,
+        });
+        const todo = insertResult.value;
+        await insertResult.wait({ tier: "edge" });
+        await seeder.shutdown();
+        untrack(seeder);
+
+        await publishPermissionsForServer(syncServer, noDeletePermissions);
+
+        const dbBeforeRestart = track(await createPersistentDb(undefined));
+        expect(await dbBeforeRestart.all(allTodos, { tier: "local" })).toEqual([todo]);
+
+        const deleteResult = dbBeforeRestart.delete(todos, todo.id);
+        await deleteResult.wait({ tier: "local" });
+
+        const todosBeforeRestart = await dbBeforeRestart.all(allTodos, { tier: "local" });
+        expect(todosBeforeRestart).toEqual([]);
+
+        await dbBeforeRestart.shutdown();
+        untrack(dbBeforeRestart);
+
+        const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
+        const mutationErrorSpy = vi.fn();
+        dbAfterRestart.onMutationError(mutationErrorSpy);
+        await dbAfterRestart.all(allTodos, { tier: "edge" });
+
+        await waitForCondition(
+          async () => {
+            const todosAfterRevert = await dbAfterRestart.all(allTodos, { tier: "local" });
+            return todosAfterRevert.length === 1 && todosAfterRevert[0]?.title === todo.title;
+          },
+          5000,
+          "restarted rejected delete should restore the previous local row",
+        );
+        expect(await dbAfterRestart.all(allTodos, { tier: "local" })).toEqual([todo]);
+        await waitForCondition(
+          async () => mutationErrorSpy.mock.calls.length > 0,
+          5000,
+          "restarted rejected delete should surface onMutationError",
+        );
+        expect(mutationErrorSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            code: "permission_denied",
+            batch: expect.objectContaining({ batchId: deleteResult.batchId }),
+          }),
+        );
+      });
     });
   });
 
@@ -2144,13 +2391,6 @@ async function publishSyncServerSchemaAndPermissions(
   schema?: Schema,
 ): Promise<TestingServerInfo> {
   const testingServer = await getTestingServerInfo(uniqueDbName(`worker-bridge-${scope}`));
-  const { appId, serverUrl, adminSecret } = testingServer;
-  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
-    appId,
-    adminSecret,
-    schema: schema ?? app.wasmSchema,
-  });
-  const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
   const permissionsToPublish = permissions ?? {
     todos: {
       select: { using: { type: "True" } },
@@ -2171,15 +2411,29 @@ async function publishSyncServerSchemaAndPermissions(
       delete: { using: { type: "True" } },
     },
   };
+  await publishPermissionsForServer(testingServer, permissionsToPublish, schema);
+  return testingServer;
+}
+
+async function publishPermissionsForServer(
+  testingServer: TestingServerInfo,
+  permissions: CompiledPermissions,
+  schema?: Schema,
+): Promise<void> {
+  const { appId, serverUrl, adminSecret } = testingServer;
+  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+    appId,
+    adminSecret,
+    schema: schema ?? app.wasmSchema,
+  });
+  const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
   await publishStoredPermissions(serverUrl, {
     appId,
     adminSecret,
     schemaHash,
-    permissions: permissionsToPublish,
+    permissions,
     expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
-
-  return testingServer;
 }
 
 function hasRestoredCatalogueState(state: DebugSchemaState): boolean {

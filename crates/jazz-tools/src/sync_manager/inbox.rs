@@ -475,11 +475,7 @@ impl SyncManager {
         }
     }
 
-    pub(super) fn interested_clients_for_batch_fate<H: Storage>(
-        &self,
-        _storage: &H,
-        fate: &BatchFate,
-    ) -> HashSet<ClientId> {
+    pub(super) fn interested_clients_for_batch_fate(&self, fate: &BatchFate) -> HashSet<ClientId> {
         match fate {
             BatchFate::DurableDirect { batch_id, .. }
             | BatchFate::AcceptedTransaction { batch_id, .. }
@@ -889,7 +885,7 @@ impl SyncManager {
         );
 
         if matches!(fate, BatchFate::DurableDirect { .. }) {
-            let mut interested_clients = self.interested_clients_for_batch_fate(storage, &fate);
+            let mut interested_clients = self.interested_clients_for_batch_fate(&fate);
             if let Some(client_id) = origin_client_id {
                 self.queue_batch_fate_to_client_unfiltered(client_id, fate.clone());
                 interested_clients.remove(&client_id);
@@ -1154,7 +1150,7 @@ impl SyncManager {
                     let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
                     self.apply_transactional_batch_fate_to_rows(storage, None, &fate, &rows);
                 }
-                let interested = self.interested_clients_for_batch_fate(storage, &fate);
+                let interested = self.interested_clients_for_batch_fate(&fate);
                 for cid in interested {
                     if let Some(fate) = self.batch_fate_for_client(cid, &fate) {
                         self.outbox.push(OutboxEntry {
