@@ -14,7 +14,7 @@ import type {
   WasmSchema,
 } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import { applyUserAuthHeaders, type AuthFailureReason } from "./sync-transport.js";
+import type { AuthFailureReason } from "./sync-transport.js";
 import {
   resolveClientSessionStateSync,
   LOCAL_FIRST_JWT_ISSUER,
@@ -27,7 +27,7 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
-import { appScopedUrl, httpUrlToWs } from "./url.js";
+import { httpUrlToWs } from "./url.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -1097,111 +1097,6 @@ export class SessionClient {
   constructor(client: JazzClient, session: Session) {
     this.client = client;
     this.session = session;
-  }
-
-  /**
-   * Create a new row as this session's user.
-   */
-  async create(table: string, values: InsertValues, options?: CreateOptions): Promise<string> {
-    if (!this.client.getServerUrl()) {
-      throw new Error("No server connection");
-    }
-
-    const response = await this.client.sendRequest(
-      this.client.getRequestUrl("/sync/object"),
-      "POST",
-      {
-        table,
-        values,
-        schema_context: this.client.getSchemaContext(),
-        ...(options?.id ? { object_id: options.id } : {}),
-        ...(options?.updatedAt !== undefined
-          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
-          : {}),
-      },
-      this.session,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Create failed: ${response.statusText}`);
-    }
-
-    const result = await response.json();
-    return result.object_id;
-  }
-
-  /**
-   * Create or update a row as this session's user using a caller-supplied id.
-   */
-  async upsert(table: string, values: InsertValues, options: UpsertOptions): Promise<void> {
-    try {
-      await this.create(table, values, options);
-      return;
-    } catch (error) {
-      if (!shouldFallbackToUpsertUpdate(error)) {
-        throw error;
-      }
-    }
-
-    await this.update(options.id, values as Record<string, Value>, {
-      updatedAt: options.updatedAt,
-    });
-  }
-
-  /**
-   * Update a row as this session's user.
-   */
-  async update(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: UpdateOptions,
-  ): Promise<void> {
-    if (!this.client.getServerUrl()) {
-      throw new Error("No server connection");
-    }
-
-    const updateArray = Object.entries(updates);
-
-    const response = await this.client.sendRequest(
-      this.client.getRequestUrl("/sync/object"),
-      "PUT",
-      {
-        object_id: objectId,
-        updates: updateArray,
-        schema_context: this.client.getSchemaContext(),
-        ...(options?.updatedAt !== undefined
-          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
-          : {}),
-      },
-      this.session,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Update failed: ${response.statusText}`);
-    }
-  }
-
-  /**
-   * Delete a row as this session's user.
-   */
-  async delete(objectId: string): Promise<void> {
-    if (!this.client.getServerUrl()) {
-      throw new Error("No server connection");
-    }
-
-    const response = await this.client.sendRequest(
-      this.client.getRequestUrl("/sync/object/delete"),
-      "POST",
-      {
-        object_id: objectId,
-        schema_context: this.client.getSchemaContext(),
-      },
-      this.session,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Delete failed: ${response.statusText}`);
-    }
   }
 
   /**
@@ -2466,25 +2361,6 @@ export class JazzClient {
   }
 
   /**
-   * Get the server URL (for SessionClient).
-   * @internal
-   */
-  getServerUrl(): string | undefined {
-    return this.context.serverUrl;
-  }
-
-  /**
-   * Build a fully-qualified endpoint URL against the configured server.
-   * @internal
-   */
-  getRequestUrl(path: string): string {
-    if (!this.context.serverUrl) {
-      throw new Error("No server connection");
-    }
-    return appScopedUrl(this.context.serverUrl, this.context.appId, path);
-  }
-
-  /**
    * Get schema context for server requests.
    * @internal
    */
@@ -2498,39 +2374,6 @@ export class JazzClient {
       schema_hash: this.runtime.getSchemaHash(),
       user_branch: this.context.userBranch ?? "main",
     };
-  }
-
-  /**
-   * Send an HTTP request with appropriate auth headers.
-   * @internal
-   */
-  async sendRequest(
-    url: string,
-    method: string,
-    body: unknown,
-    session?: Session,
-  ): Promise<Response> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-
-    // Priority 1: Backend impersonation (via SessionClient)
-    if (session && this.context.backendSecret) {
-      headers["X-Jazz-Backend-Secret"] = this.context.backendSecret;
-      headers["X-Jazz-Session"] = btoa(JSON.stringify(session));
-    }
-    // Priority 2: frontend auth (JWT bearer token)
-    else {
-      applyUserAuthHeaders(headers, {
-        jwtToken: this.context.jwtToken,
-      });
-    }
-
-    return fetch(url, {
-      method,
-      headers,
-      body: JSON.stringify(body),
-    });
   }
 
   private batchWaitOutcome(
