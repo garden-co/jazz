@@ -28,6 +28,9 @@ on:
         required: false
         type: string
 
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+
 jobs:
   release-push-gate:
     name: Gate release push trigger
@@ -43,7 +46,7 @@ jobs:
       release_pr_head_sha: ${{ steps.gate.outputs.release_pr_head_sha }}
     steps:
       - id: gate
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
@@ -209,7 +212,7 @@ jobs:
       reason: ${{ steps.resolve.outputs.reason }}
     steps:
       - id: resolve
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
@@ -410,23 +413,25 @@ jobs:
             output: jazz-tools-linux-arm64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.14.0
-          cache-key: ${{ matrix.target }}
+          cache-key: ${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ matrix.target }}
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: cargo-zigbuild
 
@@ -438,7 +443,7 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.output }}
           path: dist/${{ matrix.output }}
@@ -460,16 +465,18 @@ jobs:
             output: jazz-tools-darwin-x64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Build CLI binary
         run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
@@ -479,7 +486,7 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.output }}
           path: dist/${{ matrix.output }}
@@ -495,42 +502,49 @@ jobs:
       SCCACHE_CACHE_SIZE: 8G
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.14.0
           run_install: false
 
-      - uses: actions/setup-node@v6
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: wasm-pack@0.13.1
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: sccache
 
       - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
-          key: release-wasm-sccache-${{ github.repository_id }}-v1
+          key: release-wasm-sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-v1
           path: /home/runner/.cache/sccache
 
       - name: Build jazz-wasm npm package
@@ -542,7 +556,7 @@ jobs:
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
@@ -571,40 +585,47 @@ jobs:
             use_sccache: false
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.14.0
           run_install: false
 
-      - uses: actions/setup-node@v6
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - if: ${{ matrix.use_sccache }}
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: sccache
 
       - if: ${{ matrix.use_sccache }}
         name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
-          key: release-napi-sccache-${{ github.repository_id }}-${{ matrix.platform }}-v1
+          key: release-napi-sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ matrix.platform }}-v1
           path: /home/runner/.cache/sccache
 
       - name: Build jazz-napi binding (Linux)
@@ -619,13 +640,13 @@ jobs:
         if: runner.os == 'macOS'
         run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-napi-binding-${{ matrix.platform }}
           path: crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: matrix.platform == 'linux-x64-gnu'
         with:
           name: jazz-napi-loader
@@ -643,29 +664,36 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: 1
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.14.0
           run_install: false
 
-      - uses: actions/setup-node@v6
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Install/build React Native iOS prerequisites
         env:
@@ -686,7 +714,7 @@ jobs:
           cp -R crates/jazz-rn/JazzRnFramework.xcframework dist/rn-ios/
           cp -R crates/jazz-rn/cpp/generated dist/rn-ios/cpp-generated
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-ios-payload
           path: dist/rn-ios
@@ -711,30 +739,37 @@ jobs:
             abi: x86_64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.14.0
           run_install: false
 
-      - uses: actions/setup-node@v6
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: cargo-ndk
 
@@ -755,7 +790,7 @@ jobs:
           mkdir -p dist/rn-android/jniLibs
           cp -R crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }} dist/rn-android/jniLibs/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-android-payload-${{ matrix.abi }}
           path: dist/rn-android
@@ -796,19 +831,24 @@ jobs:
       RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.14.0
           run_install: false
 
-      - uses: actions/setup-node@v6
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
@@ -821,46 +861,46 @@ jobs:
           fi
           echo "Artifact decision reason: ${{ needs.resolve-preview-artifacts.outputs.reason }}"
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           pattern: jazz-tools-*
           path: dist
           merge-multiple: true
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           name: jazz-napi-loader
           path: crates/jazz-napi
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
           merge-multiple: true
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           name: jazz-rn-ios-payload
           path: dist/rn-ios
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           pattern: jazz-rn-android-payload-*
           path: dist/rn-android
           merge-multiple: true
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
         with:
           github-token: ${{ github.token }}
@@ -870,7 +910,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
         with:
           github-token: ${{ github.token }}
@@ -879,7 +919,7 @@ jobs:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
         with:
           github-token: ${{ github.token }}
@@ -888,7 +928,7 @@ jobs:
           name: jazz-napi-loader
           path: crates/jazz-napi
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
         with:
           github-token: ${{ github.token }}
@@ -898,7 +938,7 @@ jobs:
           path: crates/jazz-napi/artifacts
           merge-multiple: true
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
         with:
           github-token: ${{ github.token }}
@@ -907,7 +947,7 @@ jobs:
           name: jazz-rn-ios-payload
           path: dist/rn-ios
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
         with:
           github-token: ${{ github.token }}
@@ -1221,14 +1261,14 @@ jobs:
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.14.0
           run_install: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
 
