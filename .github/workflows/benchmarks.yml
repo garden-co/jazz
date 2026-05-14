@@ -358,7 +358,7 @@ jobs:
 
   site:
     name: Build Benchmark Site
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [native, browser]
     if: >-
       ${{
