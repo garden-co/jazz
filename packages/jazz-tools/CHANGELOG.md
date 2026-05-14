@@ -1,5 +1,13 @@
 # jazz-tools
 
+## 2.0.0-alpha.48
+
+### Patch Changes
+
+- b0a7b14: Fix current runtimes reading stored data written by alpha.46 when tables use the default index configuration.
+  - jazz-wasm@2.0.0-alpha.48
+  - jazz-rn@2.0.0-alpha.48
+
 ## 2.0.0-alpha.47
 
 ### Minor Changes

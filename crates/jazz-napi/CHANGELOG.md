@@ -1,5 +1,11 @@
 # jazz-napi
 
+## 2.0.0-alpha.48
+
+### Patch Changes
+
+- b0a7b14: Fix current runtimes reading stored data written by alpha.46 when tables use the default index configuration.
+
 ## 2.0.0-alpha.47
 
 ### Patch Changes
