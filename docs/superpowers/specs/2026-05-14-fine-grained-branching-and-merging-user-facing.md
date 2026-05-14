@@ -1,6 +1,6 @@
-# Fine-Grained Branching And Merging Companion Spec
+# Fine-Grained Branching And Merging User-Facing Spec
 
-This companion explains the user-facing shape of branches in Jazz. The technical design lives in
+This spec explains the user-facing shape of branches in Jazz. The technical design lives in
 [2026-05-14-fine-grained-branching-and-merging-design.md](2026-05-14-fine-grained-branching-and-merging-design.md).
 
 ## What Branches Mean In Jazz
