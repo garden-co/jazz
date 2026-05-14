@@ -651,6 +651,48 @@ fn schema_hash_ignores_policies() {
 }
 
 #[test]
+fn schema_hash_preserves_existing_todo_schema_identity() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+
+    assert_eq!(
+        SchemaHash::compute(&schema).to_string(),
+        "bfd77d25b0696da75df2ca82ab129c6289432decaaad8b86adcb31a366bdd217",
+    );
+}
+
+#[test]
+fn schema_hash_ignores_index_metadata() {
+    let schema_with_default_indexes = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+
+    let schema_with_selective_indexes = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean)
+                .index_only(["done"]),
+        )
+        .build();
+
+    assert_eq!(
+        SchemaHash::compute(&schema_with_default_indexes),
+        SchemaHash::compute(&schema_with_selective_indexes),
+        "Index metadata should not affect row storage identity",
+    );
+}
+
+#[test]
 fn schema_hash_changes_when_column_default_changes() {
     let schema1 = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("role", ColumnType::Text))
