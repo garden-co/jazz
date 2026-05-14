@@ -32,6 +32,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         crate::storage::RowLocator,
         crate::row_histories::StoredRowBatch,
     )> {
+        self.local_batch_rows_with_scan_policy(batch_id, true)
+    }
+
+    fn indexed_local_batch_rows(
+        &self,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Vec<(
+        LocalBatchMember,
+        crate::storage::RowLocator,
+        crate::row_histories::StoredRowBatch,
+    )> {
+        self.local_batch_rows_with_scan_policy(batch_id, false)
+    }
+
+    fn local_batch_rows_with_scan_policy(
+        &self,
+        batch_id: crate::row_histories::BatchId,
+        include_unindexed_history_scan: bool,
+    ) -> Vec<(
+        LocalBatchMember,
+        crate::storage::RowLocator,
+        crate::row_histories::StoredRowBatch,
+    )> {
         let mut rows = Vec::new();
         if let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) {
             for sealed_member in submission.members {
@@ -136,6 +159,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
         }
         if rows.is_empty()
+            && include_unindexed_history_scan
             && let Ok(row_locators) = self.storage.scan_row_locators()
         {
             for (object_id, row_locator) in row_locators {
@@ -298,10 +322,31 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         &mut self,
         batch_id: crate::row_histories::BatchId,
     ) {
+        self.mark_local_batch_rows_rejected_with_scan_policy(batch_id, true);
+    }
+
+    pub(crate) fn mark_indexed_local_batch_rows_rejected(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+    ) {
+        self.mark_local_batch_rows_rejected_with_scan_policy(batch_id, false);
+    }
+
+    fn mark_local_batch_rows_rejected_with_scan_policy(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+        include_unindexed_history_scan: bool,
+    ) {
         let mut cleared_rows = Vec::new();
         let mut batch_patch_succeeded_by_table = std::collections::HashMap::new();
 
-        for (member, row_locator, row) in self.local_batch_rows(batch_id) {
+        let local_batch_rows = if include_unindexed_history_scan {
+            self.local_batch_rows(batch_id)
+        } else {
+            self.indexed_local_batch_rows(batch_id)
+        };
+
+        for (member, row_locator, row) in local_batch_rows {
             let was_visible = matches!(row.state, RowState::VisibleDirect)
                 || (matches!(row.state, RowState::Rejected)
                     && self

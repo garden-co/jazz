@@ -367,8 +367,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .scan_acknowledged_rejected_batch_fates()
             .map(|batch_ids| batch_ids.into_iter().collect())
             .unwrap_or_default();
+        let replayable_rejected_batch_fates = rejected_batch_fates
+            .into_iter()
+            .filter(|fate| {
+                Self::has_startup_rejected_batch_replay_metadata(&storage, fate.batch_id())
+            })
+            .collect::<Vec<_>>();
         let pending_mutation_error_events: BTreeMap<BatchId, MutationErrorEvent> =
-            rejected_batch_fates
+            replayable_rejected_batch_fates
                 .iter()
                 .filter_map(|fate| {
                     let crate::batch_fate::BatchFate::Rejected {
@@ -428,12 +434,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // "delete visible row + retract subscriptions", lingering visible
         // rows would render on reload and then get retracted by the next
         // network-delivered settlement — a visible flash. Re-apply stored
-        // rejections before any query can observe the visible region.
-        for fate in rejected_batch_fates {
-            core.mark_local_batch_rows_rejected(fate.batch_id());
+        // rejections before any query can observe the visible region. Only
+        // batches with local replay metadata can own such optimistic rows;
+        // orphan authoritative fates are server history, not startup work.
+        for fate in replayable_rejected_batch_fates {
+            core.mark_indexed_local_batch_rows_rejected(fate.batch_id());
         }
 
         core
+    }
+
+    fn has_startup_rejected_batch_replay_metadata(storage: &S, batch_id: BatchId) -> bool {
+        matches!(storage.load_sealed_batch_submission(batch_id), Ok(Some(_)))
+            || matches!(storage.load_local_batch_record(batch_id), Ok(Some(_)))
     }
 
     /// Set the tier label used in tracing spans.

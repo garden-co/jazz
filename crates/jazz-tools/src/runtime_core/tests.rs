@@ -36,6 +36,7 @@ struct RowRegionReadFailingStorage {
     inner: MemoryStorage,
     fail_visible_row_reads: bool,
     fail_row_locator_scans: bool,
+    history_row_batch_scan_calls: Option<Arc<Mutex<usize>>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +71,7 @@ impl RowRegionReadFailingStorage {
             inner: MemoryStorage::new(),
             fail_visible_row_reads: true,
             fail_row_locator_scans: false,
+            history_row_batch_scan_calls: None,
         }
     }
 
@@ -78,6 +80,16 @@ impl RowRegionReadFailingStorage {
             inner: MemoryStorage::new(),
             fail_visible_row_reads: false,
             fail_row_locator_scans: true,
+            history_row_batch_scan_calls: None,
+        }
+    }
+
+    fn with_history_row_batch_scan_counter(calls: Arc<Mutex<usize>>) -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            fail_visible_row_reads: false,
+            fail_row_locator_scans: false,
+            history_row_batch_scan_calls: Some(calls),
         }
     }
 }
@@ -344,6 +356,9 @@ impl Storage for RowRegionReadFailingStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
+        if let Some(calls) = &self.history_row_batch_scan_calls {
+            *calls.lock().unwrap() += 1;
+        }
         self.inner.scan_history_row_batches(table, row_id)
     }
 
