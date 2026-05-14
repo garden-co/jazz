@@ -133,8 +133,9 @@ For deletes, the row fields are the target row being removed, and `$diff.kind` i
 `$diff.changed` lists changed column names. `$diff.conflicts` lists columns where both sides changed
 and the merge strategy says the overlap should be surfaced as a conflict.
 
-The diff scope includes rows matching the query on the branch side, the `main` side, or the merge
-preview side. This avoids hiding a row just because a branch edit moved it out of the query filter.
+The diff scope includes rows matching the query on the branch side or the `main` side. Jazz then
+computes the merge preview for that union of rows. This avoids hiding a row just because a branch
+edit moved it out of the query filter.
 
 ### Merge
 
@@ -149,8 +150,9 @@ conflicts. Conflicts are for review and UI. Merge still resolves through the con
 
 The first version only supports merging into `main`.
 
-Repeated merges are allowed. They may create extra history, but the visible result should stay
-correct.
+Repeated merges are allowed. They may create extra history, and concurrent repeated merges may
+create a diamond in `main` history. Jazz should still show one correct visible result and must not
+double-apply the same branch change.
 
 ### Typical Product Flow
 
@@ -161,4 +163,3 @@ An app can use the APIs like this:
 3. Preview publish impact with query-builder `.diff("main")`.
 4. Show changed rows using the normal row fields plus `$diff`.
 5. Publish with `db.mergeBranch("draft/alice", "main")`.
-

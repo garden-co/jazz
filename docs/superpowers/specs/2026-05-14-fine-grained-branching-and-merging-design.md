@@ -82,9 +82,12 @@ main
 
 That records that `main` incorporated the branch state.
 
-Parent references must be resolvable across branches. If `batch_id` is not globally resolvable,
-parent refs must include enough information to find the parent row, such as `(branch_name,
-batch_id)`.
+Parent references must be resolvable across branches. For branch and merge ancestry, the logical
+parent reference is `(branch_name, batch_id)`. The row id is implicit because parent lists are
+row-local.
+
+Durable storage may compact same-branch parents, but cross-branch parents must preserve the branch
+name. Implementations must not rely on a bare `batch_id` being enough to resolve parent history.
 
 ## API Shape
 
@@ -148,9 +151,16 @@ The source branch comes from the query builder's `.branch(...)` selection, or fr
 branch-scoped database view if the query does not select a branch directly. The target branch is the
 argument passed to `.diff(...)`.
 
-The diff scope includes any row that matches the query in the source branch overlay, the target
-branch, or the merged preview. This prevents a branch edit from hiding a row just because it no
-longer matches the query on one side.
+The diff candidate set is concrete and non-circular:
+
+1. Evaluate the query against the source branch overlay.
+2. Evaluate the same query against the target branch.
+3. Take the union of those row ids.
+4. Compute the merged preview only for that candidate set.
+
+This prevents a branch edit from hiding a row just because it no longer matches the query on one
+side. A row that would match only after merge, but matches neither source nor target before merge,
+is not included by query-scoped diff in the first version.
 
 Within that scope, diff compares the source overlay rows with target rows, including branch
 tombstones and branch inserts.
@@ -222,8 +232,18 @@ diff. Merge always resolves through the merge strategies.
 If a merge strategy cannot compute a value, merge fails before writing anything for that merge
 batch.
 
-Repeated merges may write extra history. The visible result should still resolve correctly through
-normal row-history rules.
+Repeated merges may write extra history. Concurrent repeated merges may also produce a diamond on
+`main`, for example when two callers merge the same source branch tip into the same target tip at
+the same time.
+
+Visible resolution must treat equivalent duplicate merge outputs as one logical contribution. In
+particular, if multiple `main` frontier tips incorporate the same source branch tip and produce the
+same merged user values, merge strategies must not count that source change more than once. This is
+required for strategies such as counters, where blindly summing each diamond tip as an independent
+delta would double-apply the same branch change.
+
+If concurrent merge outputs differ because they observed different source or target inputs, normal
+row-history merge strategy rules apply to those distinct outputs.
 
 Delete/update combinations follow existing delete semantics and merge-strategy behavior.
 
@@ -262,7 +282,7 @@ Required coverage:
 - query-builder branch selection uses branch overlay reads
 - query-level branch selection overrides a branch-scoped database default
 - query-builder diff compares the selected source branch with the target branch
-- query-builder diff includes rows matching the query on the source, target, or preview side
+- query-builder diff includes rows matching the query on the source or target side
 - branch edit overrides current `main`
 - branch delete hides current `main`
 - first branch write parents to the current `main` frontier
@@ -271,8 +291,11 @@ Required coverage:
 - diff detects strategy-defined overlap
 - merge resolves through merge strategies
 - repeated merge may create extra history while visible result remains stable
+- concurrent repeated merges can produce a diamond without double-applying the same source change
 - cross-branch parent links resolve correctly
+- cross-branch parent refs include branch name plus batch id
 - diff reports an error for unresolved parent/common-ancestor state
+- query-builder diff scope is the union of source-query and target-query matches
 - diff returns query-shaped rows with `$diff` magic-column metadata
 - schema/lens failures produce clear diff/merge errors
 
