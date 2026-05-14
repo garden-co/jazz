@@ -1000,11 +1000,7 @@ fn flush_pending(inner: &Rc<RustOutboxSenderInner>) {
         if payloads.is_empty() {
             return;
         }
-        match postcard::to_allocvec(&crate::worker_protocol::MainToWorkerWire::Sync {
-            payloads,
-            ack_id: None,
-            ack_batch_id: None,
-        }) {
+        match postcard::to_allocvec(&crate::worker_protocol::MainToWorkerWire::Sync { payloads }) {
             Ok(b) => b,
             Err(_) => return,
         }
@@ -1732,29 +1728,6 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.seal_batch(batch_id)
             .map_err(|e| JsError::new(&format!("Seal batch failed: {e}")))
-    }
-
-    pub fn replay_local_batch_payloads(&self, batch_id: &str) -> Result<js_sys::Array, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let core = self.core.borrow();
-        let array = js_sys::Array::new();
-
-        for payload in core.local_batch_replay_payloads(batch_id) {
-            let bytes = payload
-                .to_bytes()
-                .map_err(|e| JsError::new(&format!("Encode local batch replay failed: {e}")))?;
-            array.push(&Uint8Array::from(bytes.as_slice()));
-        }
-
-        Ok(array)
-    }
-
-    pub fn reconcile_local_batch_with_server(&self, batch_id: &str) -> Result<(), JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let mut core = self.core.borrow_mut();
-        core.reconcile_local_batch_with_server(batch_id);
-        core.batched_tick();
-        Ok(())
     }
 
     // =========================================================================

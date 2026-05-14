@@ -57,7 +57,6 @@ interface WasmBridgeHandle {
   ): void;
   applyIncomingServerPayload(payload: Uint8Array): void;
   waitForUpstreamServerConnection(): Promise<void>;
-  waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
   replayServerConnection(): void;
   disconnectUpstream(): void;
   reconnectUpstream(): void;
@@ -179,11 +178,6 @@ export class WorkerBridge {
   async waitForUpstreamServerConnection(): Promise<void> {
     if (!this.bridge) return;
     await this.bridge.waitForUpstreamServerConnection();
-  }
-
-  async waitForLocalSyncFlush(batchId?: string): Promise<void> {
-    if (this.disposed || !this.bridge) return;
-    await this.bridge.waitForLocalSyncFlush(batchId ?? null);
   }
 
   applyIncomingServerPayload(payload: Uint8Array): void {
