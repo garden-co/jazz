@@ -111,6 +111,9 @@ jobs:
             aarch64-apple-ios-sim
             x86_64-apple-ios
 
+      - name: Prepend rustup proxies to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Build iOS artifacts
         run: pnpm --filter ${{ env.PACKAGE_NAME }} run build:rn:ios
 
