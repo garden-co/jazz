@@ -85,10 +85,6 @@ import { StorageResetCoordinator, type StorageResetHost } from "./storage-reset-
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyDbRuntimeModule = DbRuntimeModule<any>;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * Configuration for creating a Db instance.
  */
@@ -1090,41 +1086,15 @@ export class Db {
     }
   }
 
-  protected async ensureQueryReady(options?: QueryOptions, client?: JazzClient): Promise<void> {
+  protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
     await this.ensureBridgeReady();
     if (!this.workerBridge || !this.config.serverUrl) {
       return;
     }
     if (!options?.tier || options.tier === "local") {
-      if (client?.hasPendingHydratedBatchReconciliation("edge")) {
-        await this.workerBridge.waitForLocalSyncFlush();
-        await this.workerBridge.waitForUpstreamServerConnection();
-        this.workerBridge.replayWorkerUpstreamConnection();
-        await this.waitForHydratedWorkerBatchReconciliation(client, "edge");
-      }
       return;
     }
     await this.workerBridge.waitForUpstreamServerConnection();
-  }
-
-  private async waitForHydratedWorkerBatchReconciliation(
-    client: JazzClient,
-    tier: DurabilityTier,
-  ): Promise<void> {
-    const deadline = Date.now() + 5_000;
-    while (client.hasPendingHydratedBatchReconciliation(tier)) {
-      if (Date.now() >= deadline) {
-        return;
-      }
-      const pendingBatchIds = client.pendingHydratedBatchReconciliationIds(tier);
-      if (pendingBatchIds.length === 0) {
-        return;
-      }
-      for (const batchId of pendingBatchIds) {
-        await this.workerBridge?.waitForLocalSyncFlush(batchId);
-      }
-      await sleep(20);
-    }
   }
 
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
@@ -1141,50 +1111,12 @@ export class Db {
     bridge.onAuthFailure((reason) => {
       this.markUnauthenticated(reason);
     });
-    bridge.onLocalBatchRecordsSync((batches) => {
-      client.hydrateLocalBatchRecords(batches);
-    });
-    bridge.onMutationErrorReplay((event) => {
-      this.handleWorkerMutationErrorReplay(client, event);
-    });
     this.workerBridge = bridge;
     const bridgeReady = bridge
       .init(this.buildWorkerBridgeOptions(schemaJson))
       .then(() => undefined);
     bridgeReady.catch(() => undefined);
     this.bridgeReady = bridgeReady;
-  }
-
-  private handleWorkerMutationErrorReplay(client: JazzClient, event: MutationErrorEvent): void {
-    const batch = event.batch;
-    if (client.hasHandledRejectedBatch(batch.batchId)) {
-      return;
-    }
-    const runtimeRecord = client.runtimeLocalBatchRecord(batch.batchId);
-    if (runtimeRecord?.latestSettlement?.kind === "rejected") {
-      // The main runtime already knows this rejection and may still have the
-      // corresponding mutation-error event queued. Let that local delivery
-      // path acknowledge so we don't prune the event before JS listeners see it.
-      return;
-    }
-    const existingRecord = client.localBatchRecord(batch.batchId);
-    const replayableFromWorker = client.hasHydratedWorkerBatch(batch.batchId);
-    client.replayRejectedBatchRecord(batch);
-    if (existingRecord && !replayableFromWorker) {
-      return;
-    }
-    if (batch.latestSettlement?.kind !== "rejected") {
-      return;
-    }
-    if (this.mutationErrorListeners.size === 0) {
-      this.pendingMutationErrorEvents.push({ client, event });
-      client.markMutationErrorHandled(event);
-      return;
-    }
-    for (const listener of this.mutationErrorListeners) {
-      listener(event);
-    }
-    client.markMutationErrorHandled(event);
   }
 
   private installMainThreadWasmTelemetry(): void {
@@ -1683,9 +1615,6 @@ export class Db {
    */
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
     this.mutationErrorListeners.add(listener);
-    for (const client of this.clients.values()) {
-      this.attachMutationErrorHandler(client);
-    }
     while (this.pendingMutationErrorEvents.length > 0) {
       const { client, event } = this.pendingMutationErrorEvents.shift()!;
       listener(event);
@@ -1984,7 +1913,7 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
-    await this.ensureQueryReady(queryOptions, client);
+    await this.ensureQueryReady(queryOptions);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const runtimeQueryOptions = usesRelationTraversal

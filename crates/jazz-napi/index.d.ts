@@ -22,10 +22,7 @@ export declare class NapiRuntime {
   updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): any
   delete(objectId: string): any
   deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
-  loadLocalBatchRecord(batchId: string): any | null
-  loadLocalBatchRecords(): any[]
   loadBatchFate(batchId: string): any | null
-  acknowledgeRejectedBatch(batchId: string): boolean
   onMutationError(callback: (event: any) => void): void
   discardLocalBatch(batchId: string): boolean
   sealBatch(batchId: string): void

@@ -766,7 +766,6 @@ const FfiConverterTypeJazzRnError = (() => {
 })();
 
 export interface RnRuntimeInterface {
-  acknowledgeRejectedBatch(batchId: string) /*throws*/ : boolean;
   addClient() /*throws*/ : string;
   addServer() /*throws*/ : void;
   /**
@@ -822,8 +821,6 @@ export interface RnRuntimeInterface {
     objectId: string | undefined
   ) /*throws*/ : string;
   loadBatchFate(batchId: string) /*throws*/ : string | undefined;
-  loadLocalBatchRecord(batchId: string) /*throws*/ : string | undefined;
-  loadLocalBatchRecords() /*throws*/ : string;
   /**
    * Register a callback that fires when the transport receives an auth
    * rejection from the server during the WS handshake.
@@ -923,24 +920,6 @@ export class RnRuntime
     this[pointerLiteralSymbol] = pointer;
     this[destructorGuardSymbol] =
       uniffiTypeRnRuntimeObjectFactory.bless(pointer);
-  }
-
-  acknowledgeRejectedBatch(batchId: string): boolean /*throws*/ {
-    return FfiConverterBool.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch(
-            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-            FfiConverterString.lower(batchId),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
   }
 
   addClient(): string /*throws*/ {
@@ -1231,41 +1210,6 @@ export class RnRuntime
           return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_batch_fate(
             uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
             FfiConverterString.lower(batchId),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
-  loadLocalBatchRecord(batchId: string): string | undefined /*throws*/ {
-    return FfiConverterOptionalString.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record(
-            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-            FfiConverterString.lower(batchId),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
-  loadLocalBatchRecords(): string /*throws*/ {
-    return FfiConverterString.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records(
-            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
             callStatus
           );
         },
@@ -1758,14 +1702,6 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch() !==
-    54914
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch'
-    );
-  }
-  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_client() !==
     20251
   ) {
@@ -1883,22 +1819,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_load_batch_fate'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record() !==
-    21509
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records() !==
-    57451
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records'
     );
   }
   if (

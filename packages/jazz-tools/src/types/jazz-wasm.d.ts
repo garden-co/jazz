@@ -1,4 +1,4 @@
-import type { LocalBatchRecord, MutationErrorEvent } from "../runtime/client.js";
+import type { MutationErrorEvent } from "../runtime/client.js";
 
 declare module "jazz-wasm" {
   type InsertValues = Record<string, unknown>;
@@ -119,10 +119,7 @@ declare module "jazz-wasm" {
     ): { batchId: string };
     delete(objectId: string): { batchId: string };
     deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
-    loadLocalBatchRecord(batchId: string): LocalBatchRecord | null;
     hydrateLocalBatchRecordStorageRow(bytes: Uint8Array): void;
-    loadLocalBatchRecords(): LocalBatchRecord[];
-    acknowledgeRejectedBatch(batchId: string): boolean;
     onMutationError(callback: (event: MutationErrorEvent) => void): void;
     loadBatchFate(batchId: string): BatchFate | null;
     replayBatchRejection(batchId: string, code: string, reason: string): void;

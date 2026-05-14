@@ -10,7 +10,7 @@
  * `init()`.
  */
 
-import type { LocalBatchRecord, MutationErrorEvent, Runtime } from "./client.js";
+import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 
@@ -74,8 +74,6 @@ interface RuntimeWithWorkerBridge extends Runtime {
 interface ListenerSlots {
   onPeerSync?: (batch: PeerSyncBatch) => void;
   onAuthFailure?: (reason: AuthFailureReason) => void;
-  onLocalBatchRecordsSync?: (batches: LocalBatchRecord[]) => void;
-  onMutationErrorReplay?: (event: MutationErrorEvent) => void;
 }
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
@@ -223,16 +221,6 @@ export class WorkerBridge {
 
   onAuthFailure(listener: (reason: AuthFailureReason) => void): void {
     this.listeners.onAuthFailure = listener;
-    this.bridge?.setListeners(this.listeners);
-  }
-
-  onLocalBatchRecordsSync(listener: (batches: LocalBatchRecord[]) => void): void {
-    this.listeners.onLocalBatchRecordsSync = listener;
-    this.bridge?.setListeners(this.listeners);
-  }
-
-  onMutationErrorReplay(listener: (event: MutationErrorEvent) => void): void {
-    this.listeners.onMutationErrorReplay = listener;
     this.bridge?.setListeners(this.listeners);
   }
 

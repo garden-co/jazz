@@ -22,6 +22,8 @@ use std::rc::Rc;
 
 use futures::channel::oneshot;
 use futures::future::{select, Either};
+use jazz_tools::batch_fate::{BatchFate, LocalBatchRecord};
+use jazz_tools::binding_support::parse_batch_id_input;
 use jazz_tools::row_histories::BatchId;
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde::Deserialize;
@@ -451,10 +453,6 @@ impl WasmWorkerBridge {
         let mut slots = self.inner.listeners.borrow_mut();
         slots.on_peer_sync = read_optional_function(&listeners, "onPeerSync");
         slots.on_auth_failure = read_optional_function(&listeners, "onAuthFailure");
-        slots.on_local_batch_records_sync =
-            read_optional_function(&listeners, "onLocalBatchRecordsSync");
-        slots.on_mutation_error_replay =
-            read_optional_function(&listeners, "onMutationErrorReplay");
     }
 
     /// Get the worker-assigned client id (post-init), or `null`.
@@ -575,8 +573,6 @@ enum BridgeState {
 struct Listeners {
     on_peer_sync: Option<Function>,
     on_auth_failure: Option<Function>,
-    on_local_batch_records_sync: Option<Function>,
-    on_mutation_error_replay: Option<Function>,
 }
 
 struct BridgeInner {
@@ -674,6 +670,53 @@ impl BridgeInner {
                 batch_id: batch_id.to_string(),
             },
         );
+    }
+
+    fn hydrate_worker_local_batch_records(&self, encoded_records: Vec<serde_bytes::ByteBuf>) {
+        for row in encoded_records {
+            match LocalBatchRecord::decode_storage_row(row.as_ref()) {
+                Ok(record) => self.hydrate_worker_local_batch_record(record),
+                Err(error) => tracing::warn!("decode worker local batch record: {error:?}"),
+            }
+        }
+    }
+
+    fn hydrate_worker_local_batch_record(&self, record: LocalBatchRecord) {
+        let mut core = self.runtime.core.borrow_mut();
+        if let Some(BatchFate::Rejected { code, reason, .. }) = record.latest_fate.clone() {
+            if let Err(error) = core.replay_batch_rejection(record.batch_id, &code, &reason) {
+                tracing::warn!(
+                    batch_id = ?record.batch_id,
+                    %error,
+                    "replay worker rejected batch during hydration failed"
+                );
+            }
+        }
+        if let Err(error) = core.hydrate_local_batch_record(record) {
+            tracing::warn!("hydrate worker local batch record: {error:?}");
+        }
+    }
+
+    fn replay_worker_mutation_error(&self, batch_id: &str, code: &str, reason: &str) {
+        let batch_id = match parse_batch_id_input(batch_id) {
+            Ok(batch_id) => batch_id,
+            Err(error) => {
+                tracing::warn!("decode worker mutation error batch id: {error:?}");
+                return;
+            }
+        };
+        if let Err(error) = self
+            .runtime
+            .core
+            .borrow_mut()
+            .replay_batch_rejection(batch_id, code, reason)
+        {
+            tracing::warn!(
+                ?batch_id,
+                %error,
+                "replay worker mutation error failed"
+            );
+        }
     }
 
     fn transition_init_called(&self) -> bool {
@@ -810,19 +853,15 @@ impl BridgeInner {
                     let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&reason));
                 }
             }
-            WorkerToMainWire::LocalBatchRecordsSync { batches_json } => {
-                let cb = self.listeners.borrow().on_local_batch_records_sync.clone();
-                if let Some(cb) = cb {
-                    let batches = json_parse(&batches_json);
-                    let _ = cb.call1(&JsValue::NULL, &batches);
-                }
+            WorkerToMainWire::LocalBatchRecordsSync { encoded_records } => {
+                self.hydrate_worker_local_batch_records(encoded_records);
             }
-            WorkerToMainWire::MutationErrorReplay { event_json } => {
-                let cb = self.listeners.borrow().on_mutation_error_replay.clone();
-                if let Some(cb) = cb {
-                    let event = json_parse(&event_json);
-                    let _ = cb.call1(&JsValue::NULL, &event);
-                }
+            WorkerToMainWire::MutationErrorReplay {
+                batch_id,
+                code,
+                reason,
+            } => {
+                self.replay_worker_mutation_error(&batch_id, &code, &reason);
             }
             WorkerToMainWire::PeerSync {
                 peer_id,
@@ -898,10 +937,6 @@ impl BridgeInner {
             }
         }
     }
-}
-
-fn json_parse(s: &str) -> JsValue {
-    js_sys::JSON::parse(s).unwrap_or(JsValue::NULL)
 }
 
 // =============================================================================

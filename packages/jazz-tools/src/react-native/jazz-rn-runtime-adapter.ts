@@ -3,7 +3,6 @@ import type {
   BatchFate,
   DirectInsertResult,
   DirectMutationResult,
-  LocalBatchRecord,
   MutationErrorEvent,
   Runtime,
 } from "../runtime/client.js";
@@ -42,8 +41,6 @@ export interface JazzRnRuntimeBinding {
     writeContextJson: string | undefined,
     objectId: string | undefined,
   ): string;
-  loadLocalBatchRecord?(batchId: string): string | null;
-  loadLocalBatchRecords?(): string;
   loadBatchFate(batchId: string): string | null | undefined;
   waitForBatch(batchId: string, tier: string): Promise<void>;
   onMutationError(callback: { onError(eventJson: string): void }): void;
@@ -82,7 +79,6 @@ export interface JazzRnRuntimeBinding {
     valuesJson: string,
     writeContextJson: string | undefined,
   ): string;
-  acknowledgeRejectedBatch?(batchId: string): boolean;
   sealBatch(batchId: string): void;
   uniffiDestroy?(): void;
 }
@@ -186,16 +182,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
   }
 
-  private requireBatchRecordMethod<
-    T extends "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch",
-  >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
-    const runtimeMethod = this.binding[method];
-    if (!runtimeMethod) {
-      throw new Error(`${method} is not supported by this RN runtime binding`);
-    }
-    return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
-  }
-
   insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult {
     try {
       const rowJson = this.binding.insert(
@@ -270,24 +256,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
         write_context_json ?? undefined,
       );
       return JSON.parse(resultJson) as DirectMutationResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  loadLocalBatchRecord(batch_id: string): LocalBatchRecord | null {
-    try {
-      const recordJson = this.requireBatchRecordMethod("loadLocalBatchRecord")(batch_id);
-      return recordJson ? (JSON.parse(recordJson) as LocalBatchRecord) : null;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  loadLocalBatchRecords(): LocalBatchRecord[] {
-    try {
-      const recordsJson = this.requireBatchRecordMethod("loadLocalBatchRecords")();
-      return JSON.parse(recordsJson) as LocalBatchRecord[];
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
@@ -436,14 +404,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
         }
       },
     });
-  }
-
-  acknowledgeRejectedBatch(batch_id: string): boolean {
-    try {
-      return this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batch_id);
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
   }
 
   sealBatch(batch_id: string): void {
