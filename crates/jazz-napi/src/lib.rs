@@ -54,8 +54,8 @@ use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
-    QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta,
-    SubscriptionHandle,
+    MutationErrorCallback, QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler,
+    SubscriptionDelta, SubscriptionHandle,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
@@ -424,18 +424,18 @@ type MutationErrorTsfn = ThreadsafeFunction<serde_json::Value>;
 
 pub struct NapiScheduler {
     scheduled: Arc<AtomicBool>,
+    mutation_error_delivery_scheduled: Arc<AtomicBool>,
     core_ref: Weak<Mutex<NapiCoreType>>,
     tsfn: Option<SchedulerTsfn>,
-    mutation_error_callback: Arc<Mutex<Option<MutationErrorTsfn>>>,
 }
 
 impl NapiScheduler {
     fn new() -> Self {
         Self {
             scheduled: Arc::new(AtomicBool::new(false)),
+            mutation_error_delivery_scheduled: Arc::new(AtomicBool::new(false)),
             core_ref: Weak::new(),
             tsfn: None,
-            mutation_error_callback: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -453,46 +453,60 @@ impl Scheduler for NapiScheduler {
         if !self.scheduled.swap(true, Ordering::SeqCst) {
             let scheduled = Arc::clone(&self.scheduled);
             let core_ref = self.core_ref.clone();
-            let mutation_error_callback = Arc::clone(&self.mutation_error_callback);
             std::thread::spawn(move || {
                 // Give bursts of inbound websocket frames a chance to coalesce
                 // before the runtime drains the queue.
                 std::thread::sleep(Duration::from_millis(1));
                 scheduled.store(false, Ordering::SeqCst);
-                if let Some(core_arc) = core_ref.upgrade() {
-                    if let Ok(mut core) = core_arc.lock() {
-                        core.batched_tick();
-                    }
-                    emit_pending_mutation_errors(&core_arc, &mutation_error_callback);
+                if let Some(core_arc) = core_ref.upgrade()
+                    && let Ok(mut core) = core_arc.lock()
+                {
+                    core.batched_tick();
                 }
             });
         }
     }
+
+    fn schedule_mutation_error_delivery(&self) {
+        if self
+            .mutation_error_delivery_scheduled
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let scheduled = Arc::clone(&self.mutation_error_delivery_scheduled);
+        let core_ref = self.core_ref.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1));
+            scheduled.store(false, Ordering::SeqCst);
+            if let Some(core_arc) = core_ref.upgrade() {
+                deliver_pending_mutation_errors(&core_arc);
+            }
+        });
+    }
 }
 
-fn emit_pending_mutation_errors(
-    core_arc: &Arc<Mutex<NapiCoreType>>,
-    mutation_error_callback: &Arc<Mutex<Option<MutationErrorTsfn>>>,
-) {
-    let Ok(callback_guard) = mutation_error_callback.lock() else {
-        return;
-    };
-    let Some(callback) = callback_guard.as_ref() else {
-        return;
-    };
-
-    let events = {
+fn deliver_pending_mutation_errors(core_arc: &Arc<Mutex<NapiCoreType>>) {
+    let delivery = {
         let Ok(mut core) = core_arc.lock() else {
             return;
         };
-        core.drain_mutation_error_events()
+        core.pending_mutation_error_delivery()
+    };
+
+    let Some((callback, events)) = delivery else {
+        return;
     };
 
     for event in events {
-        callback.call(
-            Ok(serialize_mutation_error_event(&event)),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
+        let batch_id = event.batch.batch_id;
+        if callback(&event)
+            && let Ok(mut core) = core_arc.lock()
+            && let Err(error) = core.acknowledge_handled_rejected_batch(batch_id)
+        {
+            tracing::warn!("acknowledge handled rejected batch: {error:?}");
+        }
     }
 }
 
@@ -537,7 +551,6 @@ fn build_napi_runtime(
 
     // Create components
     let scheduler = NapiScheduler::new();
-    let mutation_error_callback = Arc::clone(&scheduler.mutation_error_callback);
 
     // Create RuntimeCore and wrap
     let core = RuntimeCore::new(schema_manager, storage, scheduler);
@@ -555,16 +568,14 @@ fn build_napi_runtime(
 
         let core_ref_for_tsfn = core_weak.clone();
         let flag_for_tsfn = scheduled_flag;
-        let mutation_error_callback_for_tsfn = Arc::clone(&mutation_error_callback);
 
         let tick_fn = env.create_function_from_closure("__groove_tick", move |_ctx| {
             // Reset flag first so new ticks can be scheduled
             flag_for_tsfn.store(false, Ordering::SeqCst);
-            if let Some(core_arc) = core_ref_for_tsfn.upgrade() {
-                if let Ok(mut core) = core_arc.lock() {
-                    core.batched_tick();
-                }
-                emit_pending_mutation_errors(&core_arc, &mutation_error_callback_for_tsfn);
+            if let Some(core_arc) = core_ref_for_tsfn.upgrade()
+                && let Ok(mut core) = core_arc.lock()
+            {
+                core.batched_tick();
             }
             Ok(())
         })?;
@@ -587,7 +598,6 @@ fn build_napi_runtime(
         upstream_server_id: Mutex::new(None),
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
-        mutation_error_callback,
     })
 }
 
@@ -601,7 +611,6 @@ pub struct NapiRuntime {
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
-    mutation_error_callback: Arc<Mutex<Option<MutationErrorTsfn>>>,
 }
 
 #[napi]
@@ -835,14 +844,17 @@ impl NapiRuntime {
         ts_args_type = "callback: (event: any) => void"
     )]
     pub fn on_mutation_error(&self, callback: MutationErrorTsfn) -> napi::Result<()> {
-        {
-            let mut slot = self
-                .mutation_error_callback
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            *slot = Some(callback);
-        }
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
+        let callback: MutationErrorCallback = Arc::new(move |event| {
+            callback.call(
+                Ok(serialize_mutation_error_event(event)),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
+            true
+        });
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .set_mutation_error_callback(Some(callback));
         Ok(())
     }
 

@@ -57,6 +57,20 @@ pub struct MutationErrorEvent {
     pub batch: crate::batch_fate::LocalBatchRecord,
 }
 
+#[cfg(target_arch = "wasm32")]
+pub type MutationErrorCallback = std::rc::Rc<dyn Fn(&MutationErrorEvent) -> bool + 'static>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type MutationErrorCallback =
+    std::sync::Arc<dyn Fn(&MutationErrorEvent) -> bool + Send + Sync + 'static>;
+
+#[cfg(target_arch = "wasm32")]
+pub type RejectedBatchAcknowledgedCallback = std::rc::Rc<dyn Fn(BatchId) + 'static>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type RejectedBatchAcknowledgedCallback =
+    std::sync::Arc<dyn Fn(BatchId) + Send + Sync + 'static>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryLocalOverlay {
     pub batch_id: BatchId,
@@ -74,6 +88,8 @@ pub struct QueryLocalOverlay {
 /// Tokio enforces `Send` at the point of use (`Arc<Mutex<...>>`).
 pub trait Scheduler {
     fn schedule_batched_tick(&self);
+
+    fn schedule_mutation_error_delivery(&self) {}
 }
 
 /// Sends sync messages to the network.
@@ -327,6 +343,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Per-batch durability bookkeeping: ack watchers + rejection set.
     pub(crate) durability: DurabilityTracker,
 
+    mutation_error_callback: Option<MutationErrorCallback>,
+    rejected_batch_acknowledged_callback: Option<RejectedBatchAcknowledgedCallback>,
+
     acknowledged_rejected_batches: HashSet<BatchId>,
 
     /// Recently mutated local batch records. Large direct batches append one
@@ -431,6 +450,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
             durability: DurabilityTracker::with_initial_mutation_error_events(BTreeMap::new()),
+            mutation_error_callback: None,
+            rejected_batch_acknowledged_callback: None,
             acknowledged_rejected_batches,
             local_batch_record_cache: HashMap::new(),
             tier_label: "unknown",
@@ -462,6 +483,53 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// and all inbox entries it receives will be recorded under `name`.
     pub fn set_sync_tracer(&mut self, tracer: crate::sync_tracer::SyncTracer, name: String) {
         self.sync_tracer = Some((tracer, name));
+    }
+
+    pub fn set_mutation_error_callback(&mut self, callback: Option<MutationErrorCallback>) {
+        self.mutation_error_callback = callback;
+        self.schedule_mutation_error_delivery_if_needed();
+    }
+
+    pub fn set_rejected_batch_acknowledged_callback(
+        &mut self,
+        callback: Option<RejectedBatchAcknowledgedCallback>,
+    ) {
+        self.rejected_batch_acknowledged_callback = callback;
+    }
+
+    pub fn pending_mutation_error_delivery(
+        &mut self,
+    ) -> Option<(MutationErrorCallback, Vec<MutationErrorEvent>)> {
+        let callback = self.mutation_error_callback.clone()?;
+        let events = self.durability.drain_mutation_error_events();
+        if events.is_empty() {
+            return None;
+        }
+        Some((callback, events))
+    }
+
+    pub fn acknowledge_handled_rejected_batch(
+        &mut self,
+        batch_id: BatchId,
+    ) -> Result<bool, RuntimeError> {
+        let acknowledged = self.acknowledge_rejected_batch(batch_id)?;
+        if let Some(callback) = &self.rejected_batch_acknowledged_callback {
+            callback(batch_id);
+        }
+        Ok(acknowledged)
+    }
+
+    fn queue_mutation_error_event(&mut self, event: MutationErrorEvent) {
+        self.durability.queue_mutation_error_event(event);
+        self.schedule_mutation_error_delivery_if_needed();
+    }
+
+    fn schedule_mutation_error_delivery_if_needed(&self) {
+        if self.mutation_error_callback.is_some()
+            && self.durability.has_pending_mutation_error_events()
+        {
+            self.scheduler.schedule_mutation_error_delivery();
+        }
     }
 
     /// Get mutable reference to the Storage.
