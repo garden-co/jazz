@@ -445,7 +445,7 @@ jobs:
 
   build-macos:
     name: Build CLI macOS (${{ matrix.arch }})
-    runs-on: macos-14
+    runs-on: blacksmith-6vcpu-macos-15
     needs: [release-push-gate, resolve-preview-artifacts]
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     strategy:
@@ -636,7 +636,7 @@ jobs:
 
   build-rn-ios:
     name: Build jazz-rn iOS payload
-    runs-on: macos-14
+    runs-on: blacksmith-6vcpu-macos-15
     needs: [release-push-gate, resolve-preview-artifacts]
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     env:
