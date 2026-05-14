@@ -71,9 +71,13 @@ identity ID, so the Jazz principal carries over seamlessly.
 Both sides use the audience string `"react-localfirst-signup"` — the
 client proof and the server verification must match.
 
-`BetterAuthProvider` in `src/main.tsx` watches the Better Auth session. When a
-session exists, it fetches a JWT and passes it to `<JazzProvider>` as
-`jwtToken`. The Jazz dev server verifies that JWT against the JWKS endpoint.
+`HybridProvider` in `src/main.tsx` watches the Better Auth session via
+`authClient.useSession()`. When there is no session, it reads `secret`
+from `useLocalFirstAuth()` (a React hook from `jazz-tools/react`) and
+passes it to `<JazzProvider>` as `secret`. When a session exists, it
+fetches a Better Auth JWT and passes it to `<JazzProvider>` as
+`jwtToken` instead. The Jazz dev server verifies that JWT against the
+JWKS endpoint.
 
 ## Extending the schema
 

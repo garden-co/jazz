@@ -47,10 +47,11 @@ permissions.ts                 ← row-level access policy ($createdBy)
 
 Every browser gets its own Ed25519 secret, generated and stored by
 `BrowserAuthSecretStore` on first load. That secret becomes the identity
-Jazz uses for all subsequent writes. `LocalFirstProvider` in
+Jazz uses for all subsequent writes. The `JazzProvider` in
 `components/jazz-provider.tsx` does exactly one thing: call
-`BrowserAuthSecretStore.getOrCreateSecret()` and hand the result to
-`<JazzProvider>` as `secret`.
+`useLocalFirstAuth()` (a React hook from `jazz-tools/react` that loads
+or generates the secret client-side) and hand `secret` to the underlying
+`<JazzProvider>`.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the

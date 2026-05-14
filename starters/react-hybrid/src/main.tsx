@@ -1,7 +1,7 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { JazzProvider as JazzBaseProvider, useDb } from "jazz-tools/react";
-import { type DbConfig, BrowserAuthSecretStore } from "jazz-tools";
+import { JazzProvider as JazzBaseProvider, useDb, useLocalFirstAuth } from "jazz-tools/react";
+import type { DbConfig } from "jazz-tools";
 import { authClient } from "./auth-client";
 import { App } from "./App";
 import "./App.css";
@@ -24,54 +24,48 @@ function JwtRefresh() {
   return null;
 }
 
-function baseConfig(): Omit<DbConfig, "jwtToken" | "secret"> {
-  if (!APP_ID || !SERVER_URL) {
-    const missing = [!APP_ID && "VITE_JAZZ_APP_ID", !SERVER_URL && "VITE_JAZZ_SERVER_URL"]
-      .filter((v) => !!v)
-      .join(" & ");
-    throw new Error(
-      `${missing} not set. The jazzPlugin Vite plugin injects these at dev time; in production, set them explicitly in your environment.`,
-    );
-  }
-  return { appId: APP_ID, serverUrl: SERVER_URL };
-}
-
-async function buildLocalFirstConfig(): Promise<DbConfig> {
-  const secret = await BrowserAuthSecretStore.getOrCreateSecret();
-  return { ...baseConfig(), secret };
-}
-
-async function buildJwtConfig(): Promise<DbConfig | null> {
-  const { data, error } = await authClient.token();
-  if (error || !data?.token) return null;
-  return { ...baseConfig(), jwtToken: data.token };
-}
-
 /**
  * Hybrid provider: renders JazzProvider regardless of BetterAuth session state.
- * Anonymous visitors get a local-first identity (from BrowserAuthSecretStore);
+ * Anonymous visitors get a local-first identity (from useLocalFirstAuth);
  * signed-in users get a BetterAuth-issued JWT. Switching between the two
  * triggers JazzProvider to rebuild against the new config.
  */
 function HybridProvider({ children }: React.PropsWithChildren) {
   const { data: authSession, isPending } = authClient.useSession();
-  const [config, setConfig] = useState<DbConfig | null>(null);
+  const { secret, isLoading: secretLoading } = useLocalFirstAuth();
+  const [jwtToken, setJwtToken] = useState<string | null>(null);
   const authenticated = Boolean(authSession?.session);
 
   useEffect(() => {
-    if (isPending) return;
+    if (!authenticated) {
+      setJwtToken(null);
+      return;
+    }
     let cancelled = false;
-    setConfig(null);
-
-    (async () => {
-      const next = authenticated ? await buildJwtConfig() : await buildLocalFirstConfig();
-      if (!cancelled && next) setConfig(next);
-    })();
-
+    authClient.token().then(({ data, error }) => {
+      if (cancelled) return;
+      if (!error && data?.token) setJwtToken(data.token);
+    });
     return () => {
       cancelled = true;
     };
-  }, [isPending, authenticated]);
+  }, [authenticated]);
+
+  const config = useMemo<DbConfig | null>(() => {
+    if (!APP_ID || !SERVER_URL) {
+      const missing = [!APP_ID && "VITE_JAZZ_APP_ID", !SERVER_URL && "VITE_JAZZ_SERVER_URL"]
+        .filter((v) => !!v)
+        .join(" & ");
+      throw new Error(
+        `${missing} not set. The jazzPlugin Vite plugin injects these at dev time; in production, set them explicitly in your environment.`,
+      );
+    }
+    if (authenticated) {
+      return jwtToken ? { appId: APP_ID, serverUrl: SERVER_URL, jwtToken } : null;
+    }
+    if (secretLoading || !secret) return null;
+    return { appId: APP_ID, serverUrl: SERVER_URL, secret };
+  }, [authenticated, jwtToken, secret, secretLoading]);
 
   if (isPending || !config) return null;
 
