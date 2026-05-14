@@ -57,16 +57,16 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           toolchain: 1.93.1
 
       - name: Prepare libclang for bindgen
         run: bash dev/benchmarks/realistic/prepare_libclang_env.sh
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version-file: .nvmrc
 
@@ -198,7 +198,7 @@ jobs:
           done
 
       - name: Upload native artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: realistic-native-${{ github.run_id }}-${{ github.run_attempt }}
           path: bench-out/native
@@ -225,9 +225,9 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
@@ -235,14 +235,14 @@ jobs:
       - name: Prepare libclang for bindgen
         run: bash dev/benchmarks/realistic/prepare_libclang_env.sh
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version-file: .nvmrc
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - name: Set up CMake
-        uses: jwlawson/actions-setup-cmake@v2
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3
         with:
           cmake-version: "3.31.x"
       - run: pnpm --filter jazz-napi build
@@ -350,7 +350,7 @@ jobs:
             }' > bench-out/browser/manifest.json
 
       - name: Upload browser artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
           path: bench-out/browser
@@ -373,23 +373,23 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version-file: .nvmrc
 
       - name: Download native artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           name: realistic-native-${{ github.run_id }}-${{ github.run_attempt }}
           path: site-input/native
 
       - name: Download browser artifacts
         if: ${{ needs.browser.result == 'success' }}
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
           path: site-input/browser
@@ -601,7 +601,7 @@ jobs:
           cat bench-out/pr-report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload site artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: realistic-site-${{ github.run_id }}-${{ github.run_attempt }}
           path: dev/benchmarks/realistic/site
@@ -610,7 +610,7 @@ jobs:
       - name: Update PR benchmark comment
         if: ${{ github.event_name == 'pull_request' }}
         continue-on-error: true
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         env:
           REPORT_PATH: bench-out/pr-report.md
         with:
