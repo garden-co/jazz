@@ -181,55 +181,30 @@ Conflicts are surfaced by diff only. They do not block merge.
 If a parent link or common ancestor cannot be resolved, diff should report an error for that row
 instead of guessing.
 
-Diff should also expose a preview-shaped result that callers can render or inspect before merging.
-The exact names can follow existing project style during implementation, but the shape should carry
-these concepts:
+Diff should return query-shaped rows with a small diff sidecar. The main value should be the same
+row shape callers already get from ordinary queries.
 
 ```ts
-type BranchDiffPreview = {
-  sourceBranch: string;
-  targetBranch: string;
-  rows: BranchDiffRowPreview[];
-  summary: {
-    inserted: number;
-    updated: number;
-    deleted: number;
-    unchanged: number;
-    conflicts: number;
-    warnings: number;
-    errors: number;
+type QueryDiffRow<Row> = Row & {
+  _jazz_diff: {
+    kind: "insert" | "update" | "delete" | "unchanged" | "error";
+    changed: string[];
+    conflicts: string[];
+    warnings: string[];
+    error?: {
+      code: "unresolved_parent" | "missing_common_ancestor" | "schema_error" | "merge_strategy_error";
+      message: string;
+    };
   };
-};
-
-type BranchDiffRowPreview = {
-  rowId: string;
-  table: string;
-  kind: "insert" | "update" | "delete" | "unchanged" | "error";
-  merged?: Record<string, unknown>;
-  columns: BranchDiffColumnPreview[];
-  errors: BranchDiffError[];
-};
-
-type BranchDiffColumnPreview = {
-  column: string;
-  strategy: string;
-  base: unknown;
-  source: unknown;
-  target: unknown;
-  preview: unknown;
-  status: "source_only" | "target_only" | "same_change" | "auto_merged" | "conflict" | "warning";
-  explanation: string;
-};
-
-type BranchDiffError = {
-  code: "unresolved_parent" | "missing_common_ancestor" | "schema_error" | "merge_strategy_error";
-  message: string;
 };
 ```
 
-`preview` is the value that `mergeBranch(source, target)` would write for that column if the merge
-ran at the same observed source and target tips. It is a preview, not a lock. A later merge may
-produce a different value if either side changed after the diff was computed.
+For inserts and updates, the row fields are the values that `mergeBranch(source, target)` would
+write if the merge ran at the same observed source and target tips. For deletes, the row fields are
+the target-side row being removed, marked with `_jazz_diff.kind = "delete"`.
+
+The preview is not a lock. A later merge may produce a different value if either side changed after
+the diff was computed.
 
 ## Merge Semantics
 
@@ -299,7 +274,7 @@ Required coverage:
 - repeated merge may create extra history while visible result remains stable
 - cross-branch parent links resolve correctly
 - diff reports an error for unresolved parent/common-ancestor state
-- diff returns preview values for each changed column
+- diff returns query-shaped rows with `_jazz_diff` metadata
 - schema/lens failures produce clear diff/merge errors
 
 ## Main Implementation Risk
