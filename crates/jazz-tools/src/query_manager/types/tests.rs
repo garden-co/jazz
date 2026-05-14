@@ -651,6 +651,47 @@ fn schema_hash_ignores_policies() {
 }
 
 #[test]
+fn schema_hash_preserves_historical_default_index_behavior() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+
+    assert_eq!(
+        SchemaHash::compute(&schema).to_string(),
+        "bfd77d25b0696da75df2ca82ab129c6289432decaaad8b86adcb31a366bdd217",
+    );
+}
+
+#[test]
+fn schema_hash_changes_when_indexed_columns_override_changes() {
+    let default_indexes = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+
+    let explicit_subset = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean)
+                .index_only(["done"]),
+        )
+        .build();
+
+    assert_ne!(
+        SchemaHash::compute(&default_indexes),
+        SchemaHash::compute(&explicit_subset),
+    );
+}
+
+#[test]
 fn schema_hash_changes_when_column_default_changes() {
     let schema1 = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("role", ColumnType::Text))
