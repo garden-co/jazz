@@ -92,12 +92,18 @@ Expose branch names directly.
 
 ```ts
 db.branch("draft/alice");
+db.table("todos").branch("draft/alice");
 db.diffBranch("draft/alice", "main");
 db.mergeBranch("draft/alice", "main");
 ```
 
 `db.branch(name)` returns a branch-scoped database view. Reads use overlay behavior. Writes target
 the branch name.
+
+The query builder must also accept a branch selector. Query-builder branch selection uses the same
+overlay semantics as `db.branch(name)`. If a query is built from a branch-scoped database view and
+also selects a branch directly, the query-level branch wins because it is the closest explicit
+choice.
 
 The MVP should only support merge target `main` unless the implementation explicitly supports more.
 `mergeBranch(source, target)` must reject `source === target`.
@@ -159,6 +165,59 @@ Conflicts are surfaced by diff only. They do not block merge.
 If a parent link or common ancestor cannot be resolved, diff should report an error for that row
 instead of guessing.
 
+Diff should also expose a preview-shaped result that callers can render or inspect before merging.
+The exact names can follow existing project style during implementation, but the shape should carry
+these concepts:
+
+```ts
+type BranchDiffPreview = {
+  sourceBranch: string;
+  targetBranch: string;
+  rows: BranchDiffRowPreview[];
+  summary: {
+    inserted: number;
+    updated: number;
+    deleted: number;
+    unchanged: number;
+    conflicts: number;
+    warnings: number;
+    errors: number;
+  };
+};
+
+type BranchDiffRowPreview = {
+  rowId: string;
+  table: string;
+  kind: "insert" | "update" | "delete" | "unchanged" | "error";
+  baseBatchIds: string[];
+  sourceBatchIds: string[];
+  targetBatchIds: string[];
+  merged?: Record<string, unknown>;
+  columns: BranchDiffColumnPreview[];
+  errors: BranchDiffError[];
+};
+
+type BranchDiffColumnPreview = {
+  column: string;
+  strategy: string;
+  base: unknown;
+  source: unknown;
+  target: unknown;
+  preview: unknown;
+  status: "source_only" | "target_only" | "same_change" | "auto_merged" | "conflict" | "warning";
+  explanation: string;
+};
+
+type BranchDiffError = {
+  code: "unresolved_parent" | "missing_common_ancestor" | "schema_error" | "merge_strategy_error";
+  message: string;
+};
+```
+
+`preview` is the value that `mergeBranch(source, target)` would write for that column if the merge
+ran at the same observed source and target tips. It is a preview, not a lock. A later merge may
+produce a different value if either side changed after the diff was computed.
+
 ## Merge Semantics
 
 `mergeBranch(source, target)` uses the same three inputs as diff:
@@ -213,6 +272,8 @@ Required coverage:
 
 - branch write is invisible from `main`
 - branch read falls back to current `main`
+- query-builder branch selection uses branch overlay reads
+- query-level branch selection overrides a branch-scoped database default
 - branch edit overrides current `main`
 - branch delete hides current `main`
 - first branch write parents to the current `main` frontier
@@ -223,6 +284,8 @@ Required coverage:
 - repeated merge may create extra history while visible result remains stable
 - cross-branch parent links resolve correctly
 - diff reports an error for unresolved parent/common-ancestor state
+- diff returns preview values for each changed column
+- diff preview reports source, target, and base frontiers
 - schema/lens failures produce clear diff/merge errors
 
 ## Main Implementation Risk
