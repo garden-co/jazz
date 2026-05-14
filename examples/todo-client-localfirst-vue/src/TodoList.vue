@@ -45,20 +45,11 @@ function deleteTodo(todoId: string) {
 
 <template>
   <form @submit="handleSubmit">
-    <input
-      type="text"
-      v-model="title"
-      placeholder="What needs to be done?"
-      required
-    />
+    <input type="text" v-model="title" placeholder="What needs to be done?" required />
     <button type="submit" :disabled="!sessionUserId">Add</button>
   </form>
   <ul id="todo-list">
-    <li
-      v-for="todo in todos ?? []"
-      :key="todo.id"
-      :class="{ done: todo.done }"
-    >
+    <li v-for="todo in todos ?? []" :key="todo.id" :class="{ done: todo.done }">
       <input
         type="checkbox"
         :checked="todo.done"
