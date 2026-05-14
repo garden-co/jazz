@@ -45,8 +45,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use jazz_tools::binding_support::serialize_mutation_error_event;
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
+use serde_bytes::ByteBuf;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
@@ -470,14 +470,28 @@ fn make_peer_routing_lookup() -> Function {
 // =============================================================================
 
 fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>) {
-    match runtime.load_local_batch_records() {
-        Ok(batches) => {
-            post_to_main(&WorkerToMainWire::LocalBatchRecordsSync {
-                batches_json: js_value_to_json(&batches),
-            });
+    match retained_local_batch_records_payload(runtime) {
+        Ok(encoded_records) => {
+            post_to_main(&WorkerToMainWire::LocalBatchRecordsSync { encoded_records })
         }
-        Err(err) => tracing::warn!("loadLocalBatchRecords failed: {err:?}"),
+        Err(err) => tracing::warn!("load retained local batch records failed: {err:?}"),
     }
+}
+
+fn retained_local_batch_records_payload(runtime: &Rc<WasmRuntime>) -> Result<Vec<ByteBuf>, String> {
+    let records = runtime
+        .core
+        .borrow()
+        .local_batch_records_for_worker_sync()
+        .map_err(|err| format!("{err:?}"))?;
+    let mut encoded_records = Vec::with_capacity(records.len());
+    for record in &records {
+        match record.encode_storage_row() {
+            Ok(row) => encoded_records.push(ByteBuf::from(row)),
+            Err(err) => tracing::warn!("encode local batch record for sync: {err:?}"),
+        }
+    }
+    Ok(encoded_records)
 }
 
 /// Drain mutation errors restored from persistent storage on startup and post
@@ -485,10 +499,13 @@ fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>) {
 /// live worker rejections must reach main through sync `BatchFate` payloads.
 fn replay_startup_mutation_errors(runtime: &Rc<WasmRuntime>) {
     for event in runtime.drain_pending_mutation_error_events() {
+        let batch_id = event.batch.batch_id.to_string();
         post_to_main(&WorkerToMainWire::MutationErrorReplay {
-            event_json: serialize_mutation_error_event(&event).to_string(),
+            batch_id: batch_id.clone(),
+            code: event.code,
+            reason: event.reason,
         });
-        if let Err(err) = runtime.acknowledge_rejected_batch(&event.batch.batch_id.to_string()) {
+        if let Err(err) = runtime.acknowledge_rejected_batch(&batch_id) {
             tracing::warn!("acknowledge startup mutation error replay: {err:?}");
         }
     }
@@ -697,7 +714,7 @@ fn process_main_message(msg: MainToWorkerMessage) {
         MainToWorkerWire::AcknowledgeRejectedBatch { batch_id } => {
             if let Some(rt) = runtime.as_ref() {
                 if let Err(err) = rt.acknowledge_rejected_batch(&batch_id) {
-                    tracing::warn!("acknowledgeRejectedBatch: {err:?}");
+                    tracing::warn!("acknowledge rejected batch: {err:?}");
                 }
             }
         }

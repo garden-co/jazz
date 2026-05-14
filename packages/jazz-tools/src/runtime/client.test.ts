@@ -59,16 +59,9 @@ function makeFakeRuntime() {
       >(),
     executeSubscription: vi.fn<(handle: number, on_update: Function) => void>(),
     unsubscribe: vi.fn<(handle: number) => void>(),
-    loadLocalBatchRecord: vi.fn<
-      (batch_id: string) => ReturnType<NonNullable<Runtime["loadLocalBatchRecord"]>>
-    >(() => null),
-    loadLocalBatchRecords: vi.fn<() => ReturnType<NonNullable<Runtime["loadLocalBatchRecords"]>>>(
-      () => [],
-    ),
     loadBatchFate: vi.fn<(batch_id: string) => ReturnType<NonNullable<Runtime["loadBatchFate"]>>>(
       () => null,
     ),
-    acknowledgeRejectedBatch: vi.fn<(batch_id: string) => boolean>(() => false),
     onMutationError: vi.fn<(callback: (event: MutationErrorEvent) => void) => void>((callback) => {
       mutationErrorCallback = callback;
     }),
@@ -223,86 +216,6 @@ describe("JazzClient.updateCookieSession", () => {
     expect(runtime.updateAuth).toHaveBeenCalledTimes(1);
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({ jwt_token: null });
-  });
-});
-
-describe("JazzClient worker batch hydration", () => {
-  it("unblocks edge waits when the worker has a stronger durable settlement", async () => {
-    const batchId = "batch-chat";
-    const runtime = makeFakeRuntime();
-    const runtimeRecord = makeLocalBatchRecord(batchId, {
-      kind: "durableDirect",
-      batchId,
-      confirmedTier: "local",
-    });
-    runtime.loadLocalBatchRecord.mockImplementation((requestedBatchId: string) => {
-      if (requestedBatchId !== batchId) return null;
-      return runtimeRecord;
-    });
-    runtime.loadLocalBatchRecords.mockReturnValue([runtimeRecord]);
-    runtime.loadBatchFate.mockImplementation((requestedBatchId: string) => {
-      if (requestedBatchId !== batchId) return null;
-      return {
-        kind: "durableDirect",
-        batchId,
-        confirmedTier: "local",
-      };
-    });
-    runtime.waitForBatch.mockImplementation(() => new Promise(() => {}));
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-
-    client.hydrateLocalBatchRecords([
-      makeLocalBatchRecord(batchId, {
-        kind: "durableDirect",
-        batchId,
-        confirmedTier: "global",
-      }),
-    ]);
-
-    // Current result: this still returns the runtime's older "local" settlement.
-    expect(client.localBatchRecord(batchId)?.latestSettlement).toMatchObject({
-      confirmedTier: "global",
-    });
-    expect(client.hasPendingHydratedBatchReconciliation("edge")).toBe(false);
-    await expect(client.waitForBatch(batchId, "edge")).resolves.toBeUndefined();
-    expect(runtime.waitForBatch).not.toHaveBeenCalled();
-  });
-
-  it("merges hydrated worker settlement with runtime batch fate", async () => {
-    const batchId = "batch-chat-fate";
-    const runtime = makeFakeRuntime();
-    runtime.loadBatchFate.mockImplementation((requestedBatchId: string) => {
-      if (requestedBatchId !== batchId) return null;
-      return {
-        kind: "durableDirect",
-        batchId,
-        confirmedTier: "local",
-      };
-    });
-    runtime.loadLocalBatchRecord.mockReturnValue(
-      makeLocalBatchRecord(batchId, {
-        kind: "durableDirect",
-        batchId,
-        confirmedTier: "local",
-      }),
-    );
-    runtime.waitForBatch.mockImplementation(() => new Promise(() => {}));
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-
-    client.hydrateLocalBatchRecords([
-      makeLocalBatchRecord(batchId, {
-        kind: "durableDirect",
-        batchId,
-        confirmedTier: "global",
-      }),
-    ]);
-
-    expect(client.batchFate(batchId)).toMatchObject({
-      kind: "durableDirect",
-      confirmedTier: "global",
-    });
-    await expect(client.waitForBatch(batchId, "edge")).resolves.toBeUndefined();
-    expect(runtime.waitForBatch).not.toHaveBeenCalled();
   });
 });
 
@@ -611,32 +524,8 @@ describe("JazzClient transactions", () => {
 });
 
 describe("JazzClient runtime batch waits", () => {
-  function makePendingBatchRecord(batchId: string): LocalBatchRecord {
-    return {
-      batchId,
-      mode: "direct" as const,
-      sealed: true,
-      latestSettlement: null,
-    };
-  }
-
-  function makeRejectedBatchRecord(batchId: string): LocalBatchRecord {
-    return {
-      batchId,
-      mode: "direct" as const,
-      sealed: true,
-      latestSettlement: {
-        kind: "rejected" as const,
-        batchId,
-        code: "permission_denied",
-        reason: "write rejected by policy",
-      },
-    };
-  }
-
   it("delegates unsettled waits to the runtime", async () => {
     const runtime = makeFakeRuntime();
-    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makePendingBatchRecord(batchId));
     runtime.waitForBatch = vi.fn(async () => undefined);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
@@ -648,16 +537,13 @@ describe("JazzClient runtime batch waits", () => {
   it("lets a runtime wait handle rejection without replaying onMutationError", async () => {
     const runtime = makeFakeRuntime();
     const batchId = "batch-runtime-rejected";
-    let record = makePendingBatchRecord(batchId);
     let rejectWait!: (error: unknown) => void;
-    runtime.loadLocalBatchRecord = vi.fn(() => record);
     runtime.waitForBatch = vi.fn(
       () =>
         new Promise<void>((_resolve, reject) => {
           rejectWait = reject;
         }),
     );
-    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
     const seen: MutationErrorEvent[] = [];
     client.onMutationError((event) => {
@@ -666,7 +552,6 @@ describe("JazzClient runtime batch waits", () => {
 
     const waitPromise = client.waitForBatch(batchId, "edge");
     await Promise.resolve();
-    record = makeRejectedBatchRecord(batchId);
 
     rejectWait({
       kind: "rejected",
@@ -676,7 +561,6 @@ describe("JazzClient runtime batch waits", () => {
     });
 
     await expect(waitPromise).rejects.toBeInstanceOf(PersistedWriteRejectedError);
-    expect(runtime.acknowledgeRejectedBatch).not.toHaveBeenCalled();
     expect(seen).toEqual([]);
   });
 });
@@ -698,11 +582,6 @@ describe("JazzClient mutation error handling", () => {
 
   it("receives pushed runtime mutation errors without scanning all batch records", async () => {
     const runtime = makeFakeRuntime();
-    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
-    runtime.loadLocalBatchRecords = vi.fn(() => {
-      throw new Error("should not scan all local batch records");
-    });
-    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
     const client = JazzClient.connectWithRuntime(runtime as any, {
       appId: "queued-rejection-app",
       schema: {},
@@ -721,8 +600,6 @@ describe("JazzClient mutation error handling", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
-    expect(runtime.acknowledgeRejectedBatch).not.toHaveBeenCalled();
     expect(seen).toEqual([
       {
         code: "permission_denied",
@@ -735,10 +612,6 @@ describe("JazzClient mutation error handling", () => {
   it("logs pushed runtime mutation errors when no listener is registered", async () => {
     const runtime = makeFakeRuntime();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    runtime.loadLocalBatchRecords = vi.fn(() => {
-      throw new Error("should not scan all local batch records");
-    });
-    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
     JazzClient.connectWithRuntime(runtime as any, {
       appId: "sync-rejection-app",
       schema: {},
@@ -752,9 +625,7 @@ describe("JazzClient mutation error handling", () => {
     runtime.emitMutationError(event);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
     expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
-    expect(runtime.acknowledgeRejectedBatch).not.toHaveBeenCalled();
 
     consoleError.mockRestore();
   });
@@ -768,7 +639,6 @@ describe("JazzClient mutation error handling", () => {
         batch: makeRejectedBatchRecord("batch-rejected"),
       });
     });
-    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
 
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     JazzClient.connectWithRuntime(runtime as any, {
@@ -778,7 +648,6 @@ describe("JazzClient mutation error handling", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(consoleError).toHaveBeenCalledTimes(1);
-    expect(runtime.acknowledgeRejectedBatch).not.toHaveBeenCalled();
     consoleError.mockRestore();
   });
 });

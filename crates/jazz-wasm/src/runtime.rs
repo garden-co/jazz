@@ -88,8 +88,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::batch_fate::LocalBatchRecord;
 use jazz_tools::binding_support::{
-    parse_batch_id_input, serialize_batch_fate, serialize_local_batch_record,
-    serialize_local_batch_records, serialize_mutation_error_event,
+    parse_batch_id_input, serialize_batch_fate, serialize_mutation_error_event,
 };
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
@@ -1113,6 +1112,19 @@ impl WasmRuntime {
         self.core.borrow_mut().drain_mutation_error_events()
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn acknowledge_rejected_batch(&self, batch_id: &str) -> Result<bool, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let acknowledged = {
+            let mut core = self.core.borrow_mut();
+            core.acknowledge_rejected_batch(batch_id)
+                .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))?
+        };
+        self.notify_rejected_batch_acknowledged(batch_id);
+        Ok(acknowledged)
+    }
+
+    #[cfg(target_arch = "wasm32")]
     fn notify_rejected_batch_acknowledged(&self, batch_id: BatchId) {
         let callback = self.rejected_batch_acknowledged_callback.borrow().clone();
         if let Some(callback) = callback {
@@ -1663,25 +1675,6 @@ impl WasmRuntime {
         }))
     }
 
-    #[wasm_bindgen(js_name = loadLocalBatchRecord)]
-    pub fn load_local_batch_record(&self, batch_id: &str) -> Result<JsValue, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let core = self.core.borrow();
-        let record = core
-            .local_batch_record_for_rejection_replay(batch_id)
-            .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
-        match record {
-            Some(record) => {
-                let serializer =
-                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-                serialize_local_batch_record(&record)
-                    .serialize(&serializer)
-                    .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
-            }
-            None => Ok(JsValue::null()),
-        }
-    }
-
     #[wasm_bindgen(js_name = hydrateLocalBatchRecordStorageRow)]
     pub fn hydrate_local_batch_record_storage_row(&self, bytes: Uint8Array) -> Result<(), JsError> {
         let mut data = vec![0; bytes.length() as usize];
@@ -1723,30 +1716,6 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.replay_batch_rejection(batch_id, code, reason)
             .map_err(|e| JsError::new(&format!("Replay batch rejection failed: {e}")))
-    }
-
-    #[wasm_bindgen(js_name = loadLocalBatchRecords)]
-    pub fn load_local_batch_records(&self) -> Result<JsValue, JsError> {
-        let core = self.core.borrow();
-        let records = core
-            .local_batch_records_for_worker_sync()
-            .map_err(|e| JsError::new(&format!("Load local batch records failed: {e}")))?;
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        serialize_local_batch_records(&records)
-            .serialize(&serializer)
-            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
-    }
-
-    #[wasm_bindgen(js_name = acknowledgeRejectedBatch)]
-    pub fn acknowledge_rejected_batch(&self, batch_id: &str) -> Result<bool, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let acknowledged = {
-            let mut core = self.core.borrow_mut();
-            core.acknowledge_rejected_batch(batch_id)
-                .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))?
-        };
-        self.notify_rejected_batch_acknowledged(batch_id);
-        Ok(acknowledged)
     }
 
     #[wasm_bindgen(js_name = discardLocalBatch)]

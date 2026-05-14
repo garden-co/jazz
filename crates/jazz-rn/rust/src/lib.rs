@@ -19,8 +19,7 @@ use jazz_tools::binding_support::{
     generate_id as generate_binding_id, parse_batch_id_input,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_batch_fate, serialize_local_batch_record, serialize_local_batch_records,
-    serialize_mutation_error_event, subscription_delta_to_json,
+    serialize_batch_fate, serialize_mutation_error_event, subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -1013,42 +1012,6 @@ impl RnRuntime {
         })
     }
 
-    pub fn load_local_batch_record(&self, batch_id: String) -> Result<Option<String>, JazzRnError> {
-        with_panic_boundary("load_local_batch_record", || {
-            let batch_id = parse_batch_id_input(&batch_id)
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            let record = core.local_batch_record(batch_id).map_err(runtime_err)?;
-            record
-                .map(|record| {
-                    serde_json::to_string(&serialize_local_batch_record(&record)).map_err(|error| {
-                        JazzRnError::Internal {
-                            message: format!(
-                                "load_local_batch_record serialization failed: {error}"
-                            ),
-                        }
-                    })
-                })
-                .transpose()
-        })
-    }
-
-    pub fn load_local_batch_records(&self) -> Result<String, JazzRnError> {
-        with_panic_boundary("load_local_batch_records", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            let records = core.local_batch_records().map_err(runtime_err)?;
-            serde_json::to_string(&serialize_local_batch_records(&records)).map_err(|error| {
-                JazzRnError::Internal {
-                    message: format!("load_local_batch_records serialization failed: {error}"),
-                }
-            })
-        })
-    }
-
     pub fn load_batch_fate(&self, batch_id: String) -> Result<Option<String>, JazzRnError> {
         with_panic_boundary("load_batch_fate", || {
             let batch_id = parse_batch_id_input(&batch_id)
@@ -1065,18 +1028,6 @@ impl RnRuntime {
                 })
             })
             .transpose()
-        })
-    }
-
-    pub fn acknowledge_rejected_batch(&self, batch_id: String) -> Result<bool, JazzRnError> {
-        with_panic_boundary("acknowledge_rejected_batch", || {
-            let batch_id = parse_batch_id_input(&batch_id)
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.acknowledge_rejected_batch(batch_id)
-                .map_err(runtime_err)
         })
     }
 

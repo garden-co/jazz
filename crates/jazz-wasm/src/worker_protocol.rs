@@ -9,11 +9,10 @@
 //!
 //! Variant fields use `serde_bytes::ByteBuf` for binary payloads so postcard
 //! serialises them as length-prefixed bytes rather than Vec<u8>'s default
-//! sequence-of-u8s. Heterogeneous JS-shaped fields (`LocalBatchRecord`,
-//! `DebugSchemaState`) ride as JSON strings inside the binary envelope and
-//! are `JSON.parse`-d on the JS side — it's the cheapest way to preserve
-//! the existing TS listener shapes without re-serialising via
-//! `serde-wasm-bindgen` on every receive.
+//! sequence-of-u8s. Worker-retained local batch records ride as encoded
+//! storage rows so the main-thread Rust runtime can hydrate them directly.
+//! Debug-only JS-shaped fields still ride as JSON strings inside the binary
+//! envelope.
 
 #![allow(dead_code)]
 
@@ -152,13 +151,16 @@ pub enum WorkerToMainWire {
         term: u32,
         payloads: Vec<ByteBuf>,
     },
-    /// `Vec<LocalBatchRecord>` serialised as JSON. JS side does `JSON.parse`.
+    /// Encoded `LocalBatchRecord` storage rows for Rust-side main-runtime
+    /// hydration.
     LocalBatchRecordsSync {
-        batches_json: String,
+        encoded_records: Vec<ByteBuf>,
     },
-    /// `MutationErrorEvent` (`{ code, reason, batch }`) serialised as JSON.
+    /// Startup/restart replay for a rejected batch retained by the worker.
     MutationErrorReplay {
-        event_json: String,
+        batch_id: String,
+        code: String,
+        reason: String,
     },
     Error {
         message: String,
@@ -548,7 +550,7 @@ mod tests {
             payloads: vec![ByteBuf::from(vec![0xff])],
         });
         rt_worker(&WorkerToMainWire::LocalBatchRecordsSync {
-            batches_json: "[]".into(),
+            encoded_records: Vec::new(),
         });
         rt_worker(&WorkerToMainWire::SyncAck {
             ack_id: 1,
@@ -556,7 +558,9 @@ mod tests {
             batch_reconciled: false,
         });
         rt_worker(&WorkerToMainWire::MutationErrorReplay {
-            event_json: "{}".into(),
+            batch_id: "b1".into(),
+            code: "rejected".into(),
+            reason: "boom".into(),
         });
         rt_worker(&WorkerToMainWire::Error {
             message: "oops".into(),

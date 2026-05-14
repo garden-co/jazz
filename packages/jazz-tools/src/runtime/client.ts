@@ -6,13 +6,7 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type {
-  InsertValues,
-  Value,
-  RowDelta,
-  SubscriptionWireDelta,
-  WasmSchema,
-} from "../drivers/types.js";
+import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { applyUserAuthHeaders, type AuthFailureReason } from "./sync-transport.js";
 import {
@@ -62,15 +56,10 @@ export interface Runtime {
   ): DirectMutationResult;
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
-  loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
-  hydrateLocalBatchRecordStorageRow?(bytes: Uint8Array): void;
-  loadLocalBatchRecords?(): LocalBatchRecord[];
-  acknowledgeRejectedBatch?(batch_id: string): boolean;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   sealBatch(batch_id: string): void;
   waitForBatch(batch_id: string, tier: string): Promise<void>;
   loadBatchFate(batch_id: string): BatchFate | null;
-  replayBatchRejection?(batch_id: string, code: string, reason: string): void;
   discardLocalBatch?(batch_id: string): boolean;
   query(
     query_json: string,
@@ -723,62 +712,6 @@ function settlementSatisfiesTier(
   return durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier);
 }
 
-function mergeBatchFates(
-  current: BatchFate | null | undefined,
-  incoming: BatchFate | null | undefined,
-): BatchFate | null {
-  if (!current) {
-    return incoming ?? null;
-  }
-  if (!incoming) {
-    return current;
-  }
-
-  if (current.kind === "rejected") {
-    return current;
-  }
-  if (incoming.kind === "rejected") {
-    return incoming;
-  }
-
-  if (incoming.kind === "missing") {
-    return current;
-  }
-  if (current.kind === "missing") {
-    return incoming;
-  }
-
-  if (current.kind === incoming.kind) {
-    return durabilityTierRank(incoming.confirmedTier) >= durabilityTierRank(current.confirmedTier)
-      ? incoming
-      : current;
-  }
-
-  return durabilityTierRank(incoming.confirmedTier) >= durabilityTierRank(current.confirmedTier)
-    ? incoming
-    : current;
-}
-
-function mergeLocalBatchRecords(
-  current: LocalBatchRecord | null | undefined,
-  incoming: LocalBatchRecord | null | undefined,
-): LocalBatchRecord | null {
-  if (!current) {
-    return incoming ?? null;
-  }
-  if (!incoming) {
-    return current;
-  }
-
-  const latestSettlement = mergeBatchFates(current.latestSettlement, incoming.latestSettlement);
-  const base = latestSettlement === incoming.latestSettlement ? incoming : current;
-  return {
-    ...base,
-    sealed: current.sealed || incoming.sealed,
-    latestSettlement,
-  };
-}
-
 function rejectionFromSettlement(
   settlement: BatchFate | null | undefined,
 ): PersistedWriteRejectedError | null {
@@ -1083,10 +1016,6 @@ abstract class BatchHandleBase {
     this.ensureActive();
     return this.client.queryInternal(query, this.session, this.queryOptions(options));
   }
-
-  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
 }
 
 /**
@@ -1297,10 +1226,6 @@ export class SessionClient {
     const batch = this.beginBatch();
     return runInBatch(batch, callback, this.client);
   }
-
-  localBatchRecord(batchId: string): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
 }
 
 /**
@@ -1318,10 +1243,6 @@ export class JazzClient {
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
   private readonly waitHandledBatchIds = new Set<string>();
-  private readonly replayedRejectedBatchRecords = new Map<string, LocalBatchRecord>();
-  private readonly rejectedBatchRollbackRecords = new Map<string, LocalBatchRecord>();
-  private readonly hydratedWorkerBatchIds = new Set<string>();
-  private readonly hydratedWorkerBatchRecords = new Map<string, LocalBatchRecord>();
   /**
    * Keeps track of batches/transactions that were completed without issuing any writes to the runtime.
    * Necessary to resolve {@link waitForBatch} promises on these batches.
@@ -1567,60 +1488,8 @@ export class JazzClient {
     );
   }
 
-  localBatchRecord(batchId: string): LocalBatchRecord | null {
-    const runtimeRecord = this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
-    const hydratedRecord = this.hydratedWorkerBatchRecords.get(batchId) ?? null;
-    const replayedRecord = this.replayedRejectedBatchRecords.get(batchId) ?? null;
-    return mergeLocalBatchRecords(
-      mergeLocalBatchRecords(runtimeRecord, hydratedRecord),
-      replayedRecord,
-    );
-  }
-
-  runtimeLocalBatchRecord(batchId: string): LocalBatchRecord | null {
-    return this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
-  }
-
   batchFate(batchId: string): BatchFate | null {
-    const runtimeFate = this.runtime.loadBatchFate(batchId);
-    const hydratedFate = this.hydratedWorkerBatchRecords.get(batchId)?.latestSettlement ?? null;
-    const replayedFate = this.replayedRejectedBatchRecords.get(batchId)?.latestSettlement ?? null;
-    return mergeBatchFates(mergeBatchFates(runtimeFate, hydratedFate), replayedFate);
-  }
-
-  private batchRecordForFate(fate: BatchFate): LocalBatchRecord {
-    return {
-      batchId: fate.batchId,
-      mode: fate.kind === "acceptedTransaction" ? "transactional" : "direct",
-      sealed: true,
-      latestSettlement: fate,
-    };
-  }
-
-  hasPendingHydratedBatchReconciliation(tier: DurabilityTier): boolean {
-    return this.pendingHydratedBatchReconciliationIds(tier).length > 0;
-  }
-
-  pendingHydratedBatchReconciliationIds(tier: DurabilityTier): string[] {
-    const pending: string[] = [];
-    for (const batchId of this.hydratedWorkerBatchIds) {
-      const settlement = this.batchFate(batchId);
-      if (rejectionFromSettlement(settlement)) {
-        continue;
-      }
-      if (!settlementSatisfiesTier(settlement, tier)) {
-        pending.push(batchId);
-      }
-    }
-    return pending;
-  }
-
-  hasHydratedWorkerBatch(batchId: string): boolean {
-    return this.hydratedWorkerBatchIds.has(batchId);
-  }
-
-  hasHandledRejectedBatch(batchId: string): boolean {
-    return this.acknowledgedRejectedBatchErrors.has(batchId);
+    return this.runtime.loadBatchFate(batchId);
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
@@ -1634,89 +1503,14 @@ export class JazzClient {
     batchId: string,
     rejection = rejectionFromSettlement(this.batchFate(batchId)),
   ): boolean {
-    const acknowledgedReplayed = this.replayedRejectedBatchRecords.delete(batchId);
-    const hydratedRecord = this.hydratedWorkerBatchRecords.get(batchId);
-    const acknowledgedHydrated =
-      hydratedRecord?.latestSettlement?.kind === "rejected" &&
-      this.hydratedWorkerBatchRecords.delete(batchId);
-    const acknowledged = !!rejection || acknowledgedReplayed || acknowledgedHydrated;
-    if (acknowledged && rejection) {
+    if (rejection) {
       this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
     }
-    return acknowledged;
+    return !!rejection;
   }
 
   markMutationErrorHandled(event: MutationErrorEvent): void {
     this.markRejectedBatchHandledInJs(event.batch.batchId, rejectionFromMutationErrorEvent(event));
-  }
-
-  hydrateLocalBatchRecords(records: LocalBatchRecord[]): void {
-    for (const record of records) {
-      const publicRecord = this.hydrateEncodedLocalBatchRecord(record);
-      this.hydratedWorkerBatchIds.add(record.batchId);
-      this.hydratedWorkerBatchRecords.set(
-        record.batchId,
-        mergeLocalBatchRecords(this.hydratedWorkerBatchRecords.get(record.batchId), publicRecord) ??
-          publicRecord,
-      );
-      this.replayRejectedBatchRows(publicRecord);
-      if (publicRecord.latestSettlement?.kind !== "rejected") {
-        continue;
-      }
-      this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
-      this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
-    }
-  }
-
-  replayRejectedBatchRecord(record: LocalBatchRecord): void {
-    const publicRecord = this.hydrateEncodedLocalBatchRecord(record);
-    this.hydratedWorkerBatchIds.add(record.batchId);
-    this.hydratedWorkerBatchRecords.set(
-      record.batchId,
-      mergeLocalBatchRecords(this.hydratedWorkerBatchRecords.get(record.batchId), publicRecord) ??
-        publicRecord,
-    );
-    if (publicRecord.latestSettlement?.kind !== "rejected") {
-      return;
-    }
-    this.replayRejectedBatchRows(publicRecord);
-    this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
-    this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
-  }
-
-  private hydrateEncodedLocalBatchRecord(record: LocalBatchRecord): LocalBatchRecord {
-    if (record.encodedRecord) {
-      this.runtime.hydrateLocalBatchRecordStorageRow?.(record.encodedRecord);
-    }
-    const { encodedRecord: _encodedRecord, ...publicRecord } = record;
-    return publicRecord;
-  }
-
-  private replayRejectedBatchRows(record: LocalBatchRecord): void {
-    const settlement = record.latestSettlement;
-    if (settlement?.kind !== "rejected") {
-      return;
-    }
-    this.runtime.replayBatchRejection?.(record.batchId, settlement.code, settlement.reason);
-  }
-
-  private replayRejectedBatchRowsById(batchId: string): boolean {
-    const fate = this.batchFate(batchId);
-    if (fate?.kind !== "rejected") {
-      return false;
-    }
-    const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(fate);
-    this.replayRejectedBatchRows(batch);
-    return true;
-  }
-
-  private replayRejectedBatchRollbacks(): void {
-    for (const record of this.rejectedBatchRollbackRecords.values()) {
-      this.replayRejectedBatchRows(record);
-    }
-    for (const batchId of this.hydratedWorkerBatchIds) {
-      this.replayRejectedBatchRowsById(batchId);
-    }
   }
 
   sealBatch(batchId: string): WriteHandle {
@@ -1827,16 +1621,6 @@ export class JazzClient {
   private requireSessionWriteMethod<
     T extends keyof Pick<Runtime, "insertWithSession" | "updateWithSession" | "deleteWithSession">,
   >(method: T): NonNullable<Runtime[T]> {
-    const runtimeMethod = this.runtime[method];
-    if (!runtimeMethod) {
-      throw new Error(`${String(method)} is not supported by this runtime`);
-    }
-    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
-  }
-
-  private requireBatchRecordMethod<T extends keyof Pick<Runtime, "loadLocalBatchRecord">>(
-    method: T,
-  ): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
     if (!runtimeMethod) {
       throw new Error(`${String(method)} is not supported by this runtime`);
@@ -2217,7 +2001,6 @@ export class JazzClient {
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const effectiveRuntimeSchema =
       runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
-    this.replayRejectedBatchRollbacks();
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
@@ -2572,9 +2355,6 @@ export class JazzClient {
     const knownRejection = rejectionFromSettlement(settlement);
     if (!knownRejection && settlementSatisfiesTier(settlement, tier)) {
       return;
-    }
-    if (knownRejection) {
-      this.replayRejectedBatchRowsById(batchId);
     }
 
     this.waitHandledBatchIds.add(batchId);

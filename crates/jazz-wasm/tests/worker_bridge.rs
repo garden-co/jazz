@@ -27,6 +27,9 @@ use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 use web_sys::Worker;
 
+use jazz_tools::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
+use jazz_tools::row_histories::BatchId;
+use jazz_tools::sync_manager::DurabilityTier;
 use jazz_wasm::worker_protocol::{
     encode_main_to_worker, encode_worker_to_main, MainToWorkerWire, WorkerToMainWire,
 };
@@ -587,37 +590,6 @@ fn send_peer_sync_drops_empty_payload() {
 }
 
 #[wasm_bindgen_test]
-fn runtime_rejected_batch_acknowledgement_is_forwarded_by_bridge() {
-    let fw = FakeWorker::new();
-    let runtime = fresh_runtime();
-    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
-        .expect("attach");
-    let batch_id = "00000000000000000000000000000007";
-
-    runtime
-        .replay_batch_rejection(batch_id, "rejected", "server denied write")
-        .expect("replay rejected batch");
-    let posted_before = fw.posted.borrow().len();
-
-    assert!(
-        runtime
-            .acknowledge_rejected_batch(batch_id)
-            .expect("acknowledge rejected batch"),
-        "runtime should acknowledge persisted rejected fate"
-    );
-
-    let posted = fw.posted_decoded();
-    assert!(
-        posted[posted_before..].iter().any(|wire| matches!(
-            wire,
-            MainToWorkerWire::AcknowledgeRejectedBatch { batch_id: posted_batch_id }
-                if posted_batch_id == batch_id
-        )),
-        "runtime acknowledgement should be forwarded to worker, got {posted:?}"
-    );
-}
-
-#[wasm_bindgen_test]
 fn runtime_mutation_error_emission_acknowledges_and_forwards_to_worker() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
@@ -839,80 +811,64 @@ fn auth_failed_fires_listener() {
 }
 
 #[wasm_bindgen_test]
-fn local_batch_records_sync_listener_decodes_json() {
+fn local_batch_records_sync_hydrates_main_runtime() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
         .expect("attach");
 
-    let captured = Rc::new(RefCell::new(Option::<JsValue>::None));
-    let captured_clone = Rc::clone(&captured);
-    let on_records = Closure::<dyn FnMut(JsValue)>::new(move |batches: JsValue| {
-        *captured_clone.borrow_mut() = Some(batches);
-    });
-    let listeners = Object::new();
-    Reflect::set(
-        &listeners,
-        &"onLocalBatchRecordsSync".into(),
-        on_records.as_ref().unchecked_ref(),
-    )
-    .unwrap();
-    bridge.set_listeners(listeners.into());
+    let batch_id = BatchId::new();
+    let record = LocalBatchRecord::new(
+        batch_id,
+        BatchMode::Direct,
+        true,
+        Some(BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+        }),
+    );
+    let encoded_record = record.encode_storage_row().expect("encode record");
 
-    // Worker host serialises `Vec<LocalBatchRecord>` as JSON inside the
-    // postcard envelope; bridge `JSON.parse`s on receive and hands the JS
-    // shape to the listener.
     fw.emit_wire(&WorkerToMainWire::LocalBatchRecordsSync {
-        batches_json: r#"[{"batchId":"b1"}]"#.into(),
+        encoded_records: vec![ByteBuf::from(encoded_record)],
     });
 
-    let batches = captured.borrow().clone().expect("listener fired");
-    let arr: js_sys::Array = batches.dyn_into().expect("batches array");
-    assert_eq!(arr.length(), 1);
-    let first = arr.get(0);
-    let batch_id = Reflect::get(&first, &"batchId".into())
+    let fate = runtime
+        .load_batch_fate(&batch_id.to_string())
+        .expect("load fate");
+    let kind = Reflect::get(&fate, &"kind".into())
         .ok()
-        .and_then(|v| v.as_string());
-    assert_eq!(batch_id.as_deref(), Some("b1"));
-    drop(on_records);
+        .and_then(|value| value.as_string());
+    let tier = Reflect::get(&fate, &"confirmedTier".into())
+        .ok()
+        .and_then(|value| value.as_string());
+    assert_eq!(kind.as_deref(), Some("durableDirect"));
+    assert_eq!(tier.as_deref(), Some("global"));
 }
 
 #[wasm_bindgen_test]
-fn mutation_error_replay_listener_decodes_json() {
+fn mutation_error_replay_hydrates_main_runtime() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
         .expect("attach");
-
-    let captured = Rc::new(RefCell::new(Option::<JsValue>::None));
-    let captured_clone = Rc::clone(&captured);
-    let on_replay = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
-        *captured_clone.borrow_mut() = Some(event);
-    });
-    let listeners = Object::new();
-    Reflect::set(
-        &listeners,
-        &"onMutationErrorReplay".into(),
-        on_replay.as_ref().unchecked_ref(),
-    )
-    .unwrap();
-    bridge.set_listeners(listeners.into());
+    let batch_id = "00000000000000000000000000000009";
 
     fw.emit_wire(&WorkerToMainWire::MutationErrorReplay {
-        event_json: r#"{"code":"rejected","reason":"boom","batch":{"batchId":"b9"}}"#.into(),
+        batch_id: batch_id.into(),
+        code: "rejected".into(),
+        reason: "boom".into(),
     });
 
-    let event = captured.borrow().clone().expect("listener fired");
-    let code = Reflect::get(&event, &"code".into())
+    let fate = runtime.load_batch_fate(batch_id).expect("load fate");
+    let kind = Reflect::get(&fate, &"kind".into())
         .ok()
-        .and_then(|v| v.as_string());
+        .and_then(|value| value.as_string());
+    let code = Reflect::get(&fate, &"code".into())
+        .ok()
+        .and_then(|value| value.as_string());
+    assert_eq!(kind.as_deref(), Some("rejected"));
     assert_eq!(code.as_deref(), Some("rejected"));
-    let batch = Reflect::get(&event, &"batch".into()).expect("event.batch");
-    let batch_id = Reflect::get(&batch, &"batchId".into())
-        .ok()
-        .and_then(|v| v.as_string());
-    assert_eq!(batch_id.as_deref(), Some("b9"));
-    drop(on_replay);
 }
 
 // =============================================================================
