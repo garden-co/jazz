@@ -27,15 +27,15 @@ jobs:
       SCCACHE_CACHE_SIZE: 8G
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
 
@@ -45,18 +45,18 @@ jobs:
       - name: Install Rust prerequisites
         run: pnpm run ensure:rust-toolchain
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
           prefix-key: rocksdb-v1
           key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
-      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: sccache
 
       - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
@@ -75,15 +75,15 @@ jobs:
       SCCACHE_CACHE_SIZE: 8G
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
 
@@ -93,18 +93,18 @@ jobs:
       - name: Install Rust prerequisites
         run: pnpm run ensure:rust-toolchain
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
           prefix-key: rocksdb-v1
           key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
-      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: sccache
 
       - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
@@ -122,15 +122,15 @@ jobs:
       SCCACHE_CACHE_SIZE: 8G
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
 
@@ -140,31 +140,31 @@ jobs:
       - name: Install Rust prerequisites
         run: pnpm run ensure:rust-toolchain
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
           prefix-key: rocksdb-v1
           key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
-      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
           tool: sccache
 
       - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
 
       - name: Mount Turbo sticky disk
-        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: turbo-cache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: ${{ github.workspace }}/.turbo/cache
 
       - run: pnpm build:ci
       - name: Mount Playwright sticky disk
-        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: playwright-browsers-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: /home/runner/.cache/ms-playwright
