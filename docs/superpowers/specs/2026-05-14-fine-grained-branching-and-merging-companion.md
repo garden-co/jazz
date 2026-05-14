@@ -52,7 +52,7 @@ Branch names are passed directly. There is no branch registry in the first versi
 ```ts
 const draft = db.branch("draft/alice");
 
-await draft.table("todos").insert({
+await draft.insert(app.todos, {
   projectId,
   title: "Write API docs",
   done: false,
@@ -66,11 +66,11 @@ The inserted row is visible through `draft`, but not through normal `db` reads f
 Queries can select a branch directly.
 
 ```ts
-const rows = await db
-  .table("todos")
-  .branch("draft/alice")
-  .where({ projectId })
-  .all();
+const rows = await db.all(
+  app.todos
+    .branch("draft/alice")
+    .where({ projectId }),
+);
 ```
 
 Query-level branch selection uses the same overlay behavior as `db.branch(name)`.
@@ -80,11 +80,11 @@ If both are present, the query-level branch wins:
 ```ts
 const draft = db.branch("draft/alice");
 
-const rows = await draft
-  .table("todos")
-  .branch("draft/bob")
-  .where({ projectId })
-  .all();
+const rows = await draft.all(
+  app.todos
+    .branch("draft/bob")
+    .where({ projectId }),
+);
 ```
 
 This query reads `draft/bob`, not `draft/alice`.
@@ -94,11 +94,12 @@ This query reads `draft/bob`, not `draft/alice`.
 Diff is exposed on the query builder.
 
 ```ts
-const diff = await db
-  .table("todos")
-  .branch("draft/alice")
-  .where({ projectId })
-  .diff("main");
+const diff = await db.all(
+  app.todos
+    .branch("draft/alice")
+    .where({ projectId })
+    .diff("main"),
+);
 ```
 
 This means:
@@ -142,13 +143,18 @@ edit moved it out of the query filter.
 Merging writes branch changes back to `main`.
 
 ```ts
-await db.mergeBranch("draft/alice", "main");
+await db.branch("draft/alice").merge();
+await db.branch("draft/alice").merge("main");
 ```
 
 Merge uses the same merge strategies as diff, but it does not stop just because diff would report
 conflicts. Conflicts are for review and UI. Merge still resolves through the configured strategies.
 
-The first version only supports merging into `main`.
+The merge target defaults to `main`. The first version only supports merging into `main`.
+
+Merge only includes the local version of the branch that is visible when merge starts. It does not
+wait for remote sync. If another device has written to `draft/alice` but that write has not arrived
+locally yet, this merge does not include it.
 
 Repeated merges are allowed. They may create extra history, and concurrent repeated merges may
 create a diamond in `main` history. Jazz should still show one correct visible result and must not
@@ -162,4 +168,4 @@ An app can use the APIs like this:
 2. Render draft views with query-builder `.branch("draft/alice")`.
 3. Preview publish impact with query-builder `.diff("main")`.
 4. Show changed rows using the normal row fields plus `$diff`.
-5. Publish with `db.mergeBranch("draft/alice", "main")`.
+5. Publish with `db.branch("draft/alice").merge()`.

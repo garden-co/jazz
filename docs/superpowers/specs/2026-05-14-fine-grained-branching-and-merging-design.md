@@ -95,8 +95,8 @@ Expose branch names directly.
 
 ```ts
 db.branch("draft/alice");
-db.table("todos").branch("draft/alice").where({ projectId }).diff("main");
-db.mergeBranch("draft/alice", "main");
+app.todos.branch("draft/alice").where({ projectId }).diff("main");
+db.branch("draft/alice").merge();
 ```
 
 `db.branch(name)` returns a branch-scoped database view. Reads use overlay behavior. Writes target
@@ -110,8 +110,10 @@ choice.
 Diff is exposed through the query builder, not as a whole-branch API. Callers scope the diff by
 building the query they want to inspect, then call `.diff(targetBranch)`.
 
-The MVP should only support merge target `main` unless the implementation explicitly supports more.
-`mergeBranch(source, target)` must reject `source === target`.
+Merge is exposed on the branch-scoped database view. `db.branch(source).merge(target?)` merges the
+source branch into the target branch. `target` defaults to `"main"`. The MVP should only support
+target `"main"` unless the implementation explicitly supports more. `merge(...)` must reject a
+target equal to the source branch.
 
 ## Read Semantics
 
@@ -144,7 +146,7 @@ the corresponding main row.
 Query-builder diff compares a source branch query with a target branch.
 
 ```ts
-db.table("todos").branch("draft/alice").where({ projectId }).diff("main");
+app.todos.branch("draft/alice").where({ projectId }).diff("main");
 ```
 
 The source branch comes from the query builder's `.branch(...)` selection, or from the enclosing
@@ -208,7 +210,7 @@ type QueryDiffRow<Row> = Row & {
 };
 ```
 
-For inserts and updates, the row fields are the values that `mergeBranch(source, target)` would
+For inserts and updates, the row fields are the values that `db.branch(source).merge(target)` would
 write if the merge ran at the same observed source and target tips. For deletes, the row fields are
 the target-side row being removed, marked with `$diff.kind = "delete"`.
 
@@ -217,7 +219,7 @@ the diff was computed.
 
 ## Merge Semantics
 
-`mergeBranch(source, target)` uses the same three inputs as diff:
+`db.branch(source).merge(target = "main")` uses the same three inputs as diff:
 
 ```text
 base, source, target
@@ -225,6 +227,11 @@ base, source, target
 
 It computes the merged row using the column merge strategies and writes the result to `target` as
 normal row-history entries.
+
+Merge only considers the branch and target versions visible in the local runtime at the time the
+merge starts. It does not wait for remote sync or include remote branch changes that have not
+arrived locally yet. If another device writes to the same branch but that write is not visible
+locally when `merge(...)` runs, that write is not part of this merge.
 
 Merge does not stop because diff would have reported conflicts. Conflicts are informational for
 diff. Merge always resolves through the merge strategies.
@@ -287,7 +294,9 @@ Required coverage:
 - branch delete hides current `main`
 - first branch write parents to the current `main` frontier
 - later branch write parents to the previous branch tip
-- merge writes to `main` with parents from both current `main` and branch tip
+- `db.branch(source).merge()` defaults target to `main`
+- merge writes to `main` with parents from both locally visible current `main` and locally visible branch tip
+- merge excludes branch writes that are not locally visible when merge starts
 - diff detects strategy-defined overlap
 - merge resolves through merge strategies
 - repeated merge may create extra history while visible result remains stable
