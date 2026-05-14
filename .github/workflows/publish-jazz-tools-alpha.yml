@@ -28,6 +28,9 @@ on:
         required: false
         type: string
 
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+
 jobs:
   release-push-gate:
     name: Gate release push trigger
@@ -420,12 +423,12 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
-          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: 0.14.0
-          cache-key: ${{ matrix.target }}
+          cache-key: ${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ matrix.target }}
 
       - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
         with:
@@ -471,7 +474,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
-          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Build CLI binary
         run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
@@ -504,11 +507,16 @@ jobs:
           version: 10.14.0
           run_install: false
 
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version-file: .nvmrc
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
@@ -520,7 +528,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
-          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
         with:
@@ -533,7 +541,7 @@ jobs:
       - name: Mount sccache sticky disk
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88
         with:
-          key: release-wasm-sccache-${{ github.repository_id }}-v1
+          key: release-wasm-sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-v1
           path: /home/runner/.cache/sccache
 
       - name: Build jazz-wasm npm package
@@ -581,11 +589,16 @@ jobs:
           version: 10.14.0
           run_install: false
 
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version-file: .nvmrc
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
@@ -597,7 +610,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
-          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - if: ${{ matrix.use_sccache }}
         uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
@@ -608,7 +621,7 @@ jobs:
         name: Mount sccache sticky disk
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88
         with:
-          key: release-napi-sccache-${{ github.repository_id }}-${{ matrix.platform }}-v1
+          key: release-napi-sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ matrix.platform }}-v1
           path: /home/runner/.cache/sccache
 
       - name: Build jazz-napi binding (Linux)
@@ -654,11 +667,16 @@ jobs:
           version: 10.14.0
           run_install: false
 
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version-file: .nvmrc
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
@@ -670,7 +688,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
-          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - name: Install/build React Native iOS prerequisites
         env:
@@ -723,11 +741,16 @@ jobs:
           version: 10.14.0
           run_install: false
 
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version-file: .nvmrc
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
@@ -738,7 +761,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-on-failure: true
-          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
       - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9
         with:
@@ -809,12 +832,17 @@ jobs:
           version: 10.14.0
           run_install: false
 
+      - name: Write cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
 
       - run: pnpm install --frozen-lockfile
 
