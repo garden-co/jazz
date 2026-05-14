@@ -42,17 +42,8 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
         .expect("persisted direct insert should materialize a visible row")
         .batch_id;
 
-    core.push_sync_inbox(InboxEntry {
-        source: Source::Server(ServerId::new()),
-        payload: SyncPayload::BatchFate {
-            fate: crate::batch_fate::BatchFate::Rejected {
-                batch_id,
-                code: "permission_denied".to_string(),
-                reason: "writer lacks publish rights".to_string(),
-            },
-        },
-    });
-    core.immediate_tick();
+    core.replay_batch_rejection(batch_id, "permission_denied", "writer lacks publish rights")
+        .unwrap();
 
     assert_eq!(
         receiver.try_recv(),
@@ -1099,6 +1090,32 @@ fn rc_acknowledge_rejected_batch_prunes_pending_mutation_error_event() {
         s.a.drain_mutation_error_events().is_empty(),
         "acknowledgement should also remove a queued mutation error event"
     );
+}
+
+#[test]
+fn rc_restart_replays_unacknowledged_rejected_local_batch_record() {
+    let mut core = create_runtime_with_schema(test_schema(), "restart-rejected-batch-replay-test");
+    let ((_row_id, _row_values), batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    core.replay_batch_rejection(batch_id, "permission_denied", "writer lacks publish rights")
+        .unwrap();
+
+    let storage = core.into_storage();
+    let mut restarted =
+        create_runtime_with_storage(test_schema(), "restart-rejected-batch-replay-test", storage);
+
+    let events = restarted.drain_mutation_error_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].code, "permission_denied");
+    assert_eq!(events[0].reason, "writer lacks publish rights");
+    assert_eq!(events[0].batch.batch_id, batch_id);
+    assert!(events[0].batch.sealed);
+    assert!(matches!(
+        events[0].batch.latest_fate,
+        Some(crate::batch_fate::BatchFate::Rejected { .. })
+    ));
 }
 
 #[test]

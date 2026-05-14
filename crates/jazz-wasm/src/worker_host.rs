@@ -45,6 +45,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+use jazz_tools::runtime_core::MutationErrorCallback;
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde_bytes::ByteBuf;
 use wasm_bindgen::prelude::*;
@@ -294,8 +295,11 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         .set_sync_sender(Box::new(sender.clone()));
 
     // 4b. Replay only mutation errors buffered from persistent storage. Live
-    //     worker rejections travel to main through normal sync `BatchFate`
-    //     payloads so the main runtime owns delivery and acknowledgement.
+    //     worker rejections are forwarded through the same main-runtime path:
+    //     normal sync `BatchFate` payloads only reach currently interested
+    //     main clients, while pending batches may have been written by an old
+    //     main runtime before restart.
+    install_worker_mutation_error_forwarder(&runtime_rc);
     replay_startup_mutation_errors(&runtime_rc);
 
     // 5. Bootstrap catalogue (addServer/removeServer dance forwards catalogue
@@ -348,8 +352,8 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     }
 
     // 7. Sync retained local batch records to main. Rejected-batch error
-    //    replay already happened in step 4b; live rejections are handled by
-    //    normal sync payloads reaching the main runtime.
+    //    replay already happened in step 4b; live rejections are forwarded by
+    //    the worker mutation-error callback installed there.
     sync_retained_local_batch_records(&runtime_rc);
 
     // 8. Flip state to Ready before draining (so message handlers process
@@ -468,6 +472,18 @@ fn make_peer_routing_lookup() -> Function {
 // =============================================================================
 // Mutation-error replay
 // =============================================================================
+
+fn install_worker_mutation_error_forwarder(runtime: &Rc<WasmRuntime>) {
+    let callback: MutationErrorCallback = Rc::new(|event| {
+        post_to_main(&WorkerToMainWire::MutationErrorReplay {
+            batch_id: event.batch.batch_id.to_string(),
+            code: event.code.clone(),
+            reason: event.reason.clone(),
+        });
+        false
+    });
+    runtime.set_mutation_error_callback(Some(callback));
+}
 
 fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>) {
     match retained_local_batch_records_payload(runtime) {
