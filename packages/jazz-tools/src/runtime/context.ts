@@ -93,7 +93,7 @@ export interface AppContext {
 
   /**
    * Backend secret for session impersonation.
-   * Enables `forSession()` to act as any user.
+   * Enables backend session-scoped operations as any user.
    */
   backendSecret?: string;
 
