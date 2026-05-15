@@ -1,6 +1,6 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
-import { ManagedDevRuntime } from "./managed-runtime.js";
+import { ManagedDevRuntime, type ManagedRuntime } from "./managed-runtime.js";
 import { resolveJazzWasmEntry } from "./vite.js";
 import type {
   JazzServerOptions as BaseJazzServerOptions,
@@ -23,8 +23,25 @@ export interface JazzPluginOptions extends Omit<BaseJazzPluginOptions, "server">
   server?: boolean | string | JazzServerOptions;
 }
 
-function resolveViteOrigin(viteServer: ViteDevServer): string {
-  const server = viteServer.config.server;
+interface ViteServerConfigLike {
+  port?: number;
+  host?: string | boolean;
+  https?: unknown;
+}
+
+interface ViteUserConfigLike {
+  root?: string;
+  server?: ViteServerConfigLike;
+  ssr?: { external?: true | string[] };
+  optimizeDeps?: { exclude?: string[] };
+}
+
+interface ViteConfigEnvLike {
+  command: "build" | "serve";
+  mode?: string;
+}
+
+function resolveOrigin(server: ViteServerConfigLike | undefined): string {
   const port = server?.port ?? 5173;
   const hostOpt = server?.host;
   // Vite's `server.host` accepts boolean (true = listen on all, undefined/false
@@ -42,96 +59,110 @@ const runtime = new ManagedDevRuntime({
 });
 
 export function jazzSvelteKit(options: JazzPluginOptions = {}) {
+  // Set once configureServer runs. The schema watcher's reload/error callbacks
+  // read it lazily: the runtime is started in the `config` hook (before any
+  // dev server exists), but watch pushes only fire later, by which point this
+  // is populated. Initial-push callbacks during `config` see `null` and no-op,
+  // which is correct — there's no browser to reload yet.
+  let viteServerRef: ViteDevServer | null = null;
+  let managed: ManagedRuntime | null = null;
+
+  function buildMergedConfig(config: ViteUserConfigLike) {
+    const existingSsr = config.ssr?.external;
+    const existingExclude = config.optimizeDeps?.exclude ?? [];
+    const jazzWasmEntry = resolveJazzWasmEntry();
+    // `ssr.external: true` means "externalize everything", so jazz-napi is
+    // already covered — preserve the bool rather than coercing to an array.
+    const ssrExternal: true | string[] =
+      existingSsr === true ? true : Array.from(new Set([...(existingSsr ?? []), "jazz-napi"]));
+    return {
+      worker: { format: "es" as const },
+      optimizeDeps: {
+        exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])),
+      },
+      ssr: { external: ssrExternal },
+      ...(jazzWasmEntry
+        ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
+        : {}),
+    };
+  }
+
+  function buildInitOptions(serverConfig: ViteServerConfigLike | undefined, root: string) {
+    const schemaDir = options.schemaDir ?? join(root, "src", "lib");
+    const serverOpt = options.server ?? true;
+
+    // Extract backendSecret from the server config object (SvelteKit-only option).
+    const serverConfigObj: JazzServerOptions =
+      typeof serverOpt === "object" && serverOpt !== null ? serverOpt : {};
+    const backendSecret = serverConfigObj.backendSecret ?? process.env.BACKEND_SECRET;
+
+    return {
+      server: resolveServerWithJwks(serverOpt, serverConfig),
+      schemaDir,
+      envDir: root,
+      adminSecret: options.adminSecret,
+      appId: options.appId,
+      telemetry: options.telemetry,
+      backendSecret,
+      onSchemaError: (error: Error) => {
+        viteServerRef?.ws.send({
+          type: "error",
+          err: {
+            message: `${LOG_PREFIX} schema push failed: ${error.message}`,
+            stack: error.stack,
+          },
+        });
+      },
+      onSchemaPush: () => {
+        viteServerRef?.ws.send({ type: "full-reload" });
+      },
+    };
+  }
+
+  // Start the managed runtime and populate process.env exactly once. Called
+  // from the `config` hook in real usage (so SvelteKit's later env capture
+  // sees the vars on the first pass — no restart needed); also reachable from
+  // configureServer for direct/programmatic callers that never run `config`.
+  // runtime.initialize() is idempotent, but we additionally cache here so a
+  // second caller does not re-run the env-file backfill or re-resolve jwks.
+  async function ensureInitialised(
+    serverConfig: ViteServerConfigLike | undefined,
+    root: string,
+  ): Promise<ManagedRuntime> {
+    if (managed) return managed;
+    loadEnvFileIntoProcessEnv(root);
+    managed = await runtime.initialize(buildInitOptions(serverConfig, root));
+    return managed;
+  }
+
   return {
     name: "jazz-sveltekit",
+    // `enforce: "pre"` puts this plugin's `config` hook in Vite's pre bucket,
+    // which runs before SvelteKit's `vite-plugin-sveltekit-setup` (a normal-
+    // bucket plugin whose `config({order:'pre'})` hook captures env via
+    // loadEnv into the static `$env/dynamic/public` module). Vite awaits each
+    // config hook in order, so by the time SvelteKit captures env, the runtime
+    // has started and PUBLIC_JAZZ_* are in process.env — first paint is
+    // correct with no dev-server restart. Mirrors how the Next plugin awaits
+    // runtime.initialize() inside the next-config factory.
+    enforce: "pre" as const,
 
-    config(config: {
-      ssr?: { external?: true | string[] };
-      optimizeDeps?: { exclude?: string[] };
-    }) {
-      const existingSsr = config.ssr?.external;
-      const existingExclude = config.optimizeDeps?.exclude ?? [];
-      const jazzWasmEntry = resolveJazzWasmEntry();
-      // `ssr.external: true` means "externalize everything", so jazz-napi is
-      // already covered — preserve the bool rather than coercing to an array.
-      const ssrExternal: true | string[] =
-        existingSsr === true ? true : Array.from(new Set([...(existingSsr ?? []), "jazz-napi"]));
-      return {
-        worker: { format: "es" as const },
-        optimizeDeps: {
-          exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])),
-        },
-        ssr: { external: ssrExternal },
-        ...(jazzWasmEntry
-          ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
-          : {}),
-      };
+    config(config: ViteUserConfigLike, env?: ViteConfigEnvLike) {
+      const merged = buildMergedConfig(config);
+      if (env?.command !== "serve" || options.server === false) {
+        return merged;
+      }
+      const root = config.root ? resolve(config.root) : process.cwd();
+      return ensureInitialised(config.server, root).then(() => merged);
     },
 
     async configureServer(viteServer: ViteDevServer): Promise<void> {
+      viteServerRef = viteServer;
       if (viteServer.config.command !== "serve" || options.server === false) return;
 
-      // Vite (and SvelteKit-via-Vite) doesn't populate process.env from .env
-      // for unprefixed keys, so the managed runtime's env-driven cloud-mode check
-      // would otherwise never fire. Backfill before reading.
-      loadEnvFileIntoProcessEnv(viteServer.config.root);
-
-      // SvelteKit's vite-plugin captures env in its `config: { order: 'pre' }`
-      // hook, before configureServer ever runs. That capture sources from
-      // .env files plus process.env, so anything missing here is also missing
-      // from `$env/dynamic/public` at runtime. PUBLIC_JAZZ_APP_ID is missing
-      // on the first-ever run (no persisted .env yet). PUBLIC_JAZZ_SERVER_URL
-      // is missing every warm start — the port is allocated dynamically and
-      // is never persisted to .env. In either case we restart after the
-      // managed runtime populates process.env, so SvelteKit's config hook
-      // re-runs and the captured env picks up the fresh values. process.env
-      // survives the restart (same Node process) and runtime.initialize() is
-      // idempotent, so the restarted pass reuses the in-flight Jazz server.
-      //
-      // Strict `=== undefined` check: an explicitly empty string is a user
-      // assertion that the var has no value, and managed-runtime would write
-      // that empty back to process.env post-restart — looping forever.
-      const appIdMissingFromCapturedEnv = process.env.PUBLIC_JAZZ_APP_ID === undefined;
-      const serverUrlMissingFromCapturedEnv = process.env.PUBLIC_JAZZ_SERVER_URL === undefined;
-
-      const schemaDir = options.schemaDir ?? join(viteServer.config.root, "src", "lib");
-      const serverOpt = options.server ?? true;
-
-      // Extract backendSecret from the server config object (SvelteKit-only option).
-      const serverConfig: JazzServerOptions =
-        typeof serverOpt === "object" && serverOpt !== null ? serverOpt : {};
-      const backendSecret = serverConfig.backendSecret ?? process.env.BACKEND_SECRET;
-
-      // Pre-resolve jwksUrl from Vite's configured host/port when starting a
-      // local server. Precedence: explicit option → APP_ORIGIN env → Vite config
-      // → localhost:5173. Known limitation: Vite auto-port-increment means the
-      // configured port may differ from the actual one; set APP_ORIGIN explicitly
-      // to work around that.
-      const resolvedServer = resolveServerWithJwks(serverOpt, viteServer);
-
-      let managed;
+      let resolvedRuntime: ManagedRuntime;
       try {
-        managed = await runtime.initialize({
-          server: resolvedServer,
-          schemaDir,
-          envDir: viteServer.config.root,
-          adminSecret: options.adminSecret,
-          appId: options.appId,
-          telemetry: options.telemetry,
-          backendSecret,
-          onSchemaError: (error) => {
-            viteServer.ws.send({
-              type: "error",
-              err: {
-                message: `${LOG_PREFIX} schema push failed: ${error.message}`,
-                stack: error.stack,
-              },
-            });
-          },
-          onSchemaPush: () => {
-            viteServer.ws.send({ type: "full-reload" });
-          },
-        });
+        resolvedRuntime = await ensureInitialised(viteServer.config.server, viteServer.config.root);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         viteServer.ws.send({
@@ -145,20 +176,11 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       }
 
       viteServer.config.env ??= {};
-      viteServer.config.env.PUBLIC_JAZZ_APP_ID = managed.appId;
-      viteServer.config.env.PUBLIC_JAZZ_SERVER_URL = managed.serverUrl;
-      if (managed.telemetryCollectorUrl) {
-        viteServer.config.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
-      }
-
-      if (
-        (appIdMissingFromCapturedEnv && managed.appId) ||
-        (serverUrlMissingFromCapturedEnv && managed.serverUrl)
-      ) {
-        console.log(
-          `${LOG_PREFIX} restarting dev server so SvelteKit's $env captures the populated PUBLIC_JAZZ_* vars`,
-        );
-        void viteServer.restart?.();
+      viteServer.config.env.PUBLIC_JAZZ_APP_ID = resolvedRuntime.appId;
+      viteServer.config.env.PUBLIC_JAZZ_SERVER_URL = resolvedRuntime.serverUrl;
+      if (resolvedRuntime.telemetryCollectorUrl) {
+        viteServer.config.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL =
+          resolvedRuntime.telemetryCollectorUrl;
       }
     },
   };
@@ -170,18 +192,23 @@ export async function __resetJazzSvelteKitPluginForTests(): Promise<void> {
 
 function resolveServerWithJwks(
   serverOpt: JazzPluginOptions["server"] | true,
-  viteServer: ViteDevServer,
+  serverConfig: ViteServerConfigLike | undefined,
 ): BaseJazzPluginOptions["server"] {
   if (serverOpt === false || typeof serverOpt === "string") return serverOpt;
 
-  const serverConfig: JazzServerOptions =
+  const serverConfigObj: JazzServerOptions =
     typeof serverOpt === "object" && serverOpt !== null ? serverOpt : {};
 
-  if (serverConfig.jwksUrl !== undefined) return serverConfig as BaseJazzServerOptions;
+  if (serverConfigObj.jwksUrl !== undefined) return serverConfigObj as BaseJazzServerOptions;
 
-  const appOrigin = process.env.APP_ORIGIN ?? resolveViteOrigin(viteServer);
+  // Pre-resolve jwksUrl from the configured host/port when starting a local
+  // server. Precedence: explicit option → APP_ORIGIN env → Vite config →
+  // localhost:5173. Known limitation: Vite auto-port-increment means the
+  // configured port may differ from the actual one; set APP_ORIGIN explicitly
+  // to work around that.
+  const appOrigin = process.env.APP_ORIGIN ?? resolveOrigin(serverConfig);
   return {
-    ...serverConfig,
+    ...serverConfigObj,
     jwksUrl: `${appOrigin}/api/auth/jwks`,
   } as BaseJazzServerOptions;
 }
