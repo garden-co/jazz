@@ -137,6 +137,15 @@ struct WorkerHost {
     /// Buffered messages that arrived before `Ready`. Drained in arrival order
     /// once init completes.
     pending_messages: VecDeque<MainToWorkerMessage>,
+    /// Buffered follower-tab `MessagePort`s from `attach-tab-port` messages
+    /// that arrived before the runtime was open. The leader-tab supervisor
+    /// claims leadership immediately upon winning the `navigator.locks`
+    /// lease — so the broker can start routing follower tabs to the leader
+    /// even before the leader's main thread has called `bridge.init`. The
+    /// resulting `attach-tab-port` arrivals are buffered (with their
+    /// transferred ports preserved by the JS shim) and processed after
+    /// `run_init` transitions to `Ready`.
+    pending_ports: Vec<MessagePort>,
     on_message_closure: Option<Closure<dyn FnMut(MessageEvent)>>,
     current_auth_jwt: Option<String>,
     current_admin_secret: Option<String>,
@@ -148,6 +157,7 @@ impl WorkerHost {
         Self {
             state: HostState::Initializing,
             pending_messages: VecDeque::new(),
+            pending_ports: Vec::new(),
             on_message_closure: None,
             current_auth_jwt: None,
             current_admin_secret: None,
@@ -190,8 +200,27 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
 
     // Drain JS-side pending bag: parse each, buffer ALL message types in
     // arrival order. Drop only Init duplicates (post error per spec).
+    //
+    // Each entry is `{ data, ports }` (see the JS shim). `attach-tab-port`
+    // messages carry a transferred `MessagePort` via `ports[0]`, so we have
+    // to look at the wrapper rather than parsing `data` directly with
+    // `parse_main_to_worker` (which only knows postcard envelopes and the
+    // `init` JS-object). For everything else we still parse `data` the same
+    // way the post-init `onmessage` handler does.
     for entry in pending_messages.iter() {
-        match parse_main_to_worker(&entry) {
+        let (data, ports) = unpack_pending_entry(&entry);
+
+        if is_attach_tab_port_message(&data) {
+            match extract_first_port(&ports) {
+                Some(port) => host.pending_ports.push(port),
+                None => {
+                    tracing::warn!("attach-tab-port arrived without a MessagePort");
+                }
+            }
+            continue;
+        }
+
+        match parse_main_to_worker(&data) {
             Ok(MainToWorkerMessage::Init(_)) => {
                 tracing::warn!("ignoring duplicate init in pending pre-bootstrap messages");
                 post_to_main(&WorkerToMainWire::Error {
@@ -422,6 +451,15 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     //    process on the next microtask via batched_tick.
     drain_pending_messages();
 
+    // 9b. Drain pre-Ready follower-tab `MessagePort`s. The leader-tab
+    //     supervisor claims leadership as soon as it spawns the dedicated
+    //     worker, so the broker may have already routed follower tabs to us
+    //     via `attach-tab-port` messages that the JS shim buffered in
+    //     `pending_messages`. We extracted their `MessagePort`s above into
+    //     `host.pending_ports`; now that the runtime is open and Ready, we
+    //     can finally call `handle_attach_tab_port` for each.
+    drain_pending_ports();
+
     // 10. If a buffered `Shutdown` was drained, `handle_shutdown` already
     //     posted `ShutdownOk`, called `global.close()`, and cleared `HOST`.
     //     Don't post `InitOk` to a worker that is already closing — main
@@ -439,6 +477,48 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// Drain `host.pending_ports`, calling `handle_attach_tab_port` for each.
+/// Called once after the host transitions to `Ready` so follower-tab port
+/// adoptions buffered during bootstrap can finally register their peers
+/// against the now-open runtime.
+fn drain_pending_ports() {
+    let ports = HOST.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|h| std::mem::take(&mut h.pending_ports))
+            .unwrap_or_default()
+    });
+    for port in ports {
+        handle_attach_tab_port(port);
+    }
+}
+
+/// Unwrap a JS-side `{ data, ports }` entry produced by the worker shim's
+/// `pendingMessages.push({ data, ports: [...event.ports] })`. The JS shim
+/// adopted this wrapper shape so that `attach-tab-port` messages arriving
+/// before `runAsWorker` is invoked still carry their transferred
+/// `MessagePort`s — `event.data` alone loses them. Returns the inner data
+/// payload plus the (possibly empty) ports list.
+fn unpack_pending_entry(entry: &JsValue) -> (JsValue, Array) {
+    // Defensive: if the JS side ever regresses and pushes raw data (no
+    // wrapper), fall back to treating the entry as the data with no ports.
+    let data = Reflect::get(entry, &JsValue::from_str("data")).ok();
+    let ports = Reflect::get(entry, &JsValue::from_str("ports"))
+        .ok()
+        .and_then(|v| v.dyn_into::<Array>().ok());
+    match (data, ports) {
+        (Some(data), Some(ports)) if !data.is_undefined() => (data, ports),
+        _ => (entry.clone(), Array::new()),
+    }
+}
+
+fn extract_first_port(ports: &Array) -> Option<MessagePort> {
+    if ports.length() == 0 {
+        return None;
+    }
+    ports.get(0).dyn_into::<MessagePort>().ok()
 }
 
 fn drain_pending_messages() {

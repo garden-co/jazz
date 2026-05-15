@@ -83,7 +83,19 @@ let initMessage: InitMessage | null = null;
 // Pre-handoff buffer. Init arrives as a JS object; everything else now arrives
 // as Uint8Array (postcard-encoded `MainToWorkerWire`). Rust parses each entry
 // post-handoff inside `runAsWorker`.
-const pendingMessages: unknown[] = [];
+//
+// Each entry is `{ data, ports }`. We must preserve `event.ports` (not just
+// `event.data`) because the leader-tab topology routes follower-tab
+// `MessagePort`s via `attach-tab-port` messages on the dedicated worker, and
+// those can arrive *before* the leader's main thread has called `bridge.init`
+// (which is what triggers `runAsWorker` and lets Rust take over `onmessage`).
+// If we dropped `event.ports` here, the port reference would be lost and the
+// follower tab would be permanently disconnected.
+interface PendingWorkerMessage {
+  data: unknown;
+  ports: MessagePort[];
+}
+const pendingMessages: PendingWorkerMessage[] = [];
 let wasmInitialized = false;
 
 self.onmessage = (event: MessageEvent) => {
@@ -99,7 +111,7 @@ self.onmessage = (event: MessageEvent) => {
     void bootstrapAndHandoff(initMessage);
     return;
   }
-  pendingMessages.push(data);
+  pendingMessages.push({ data, ports: [...event.ports] });
 };
 
 function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
@@ -190,6 +202,10 @@ async function bootstrapAndHandoff(init: InitMessage): Promise<void> {
     // Hand control to Rust. `runAsWorker` synchronously installs its own
     // `self.onmessage` (replacing ours), then spawns an async task that
     // opens the runtime, drains the buffered messages, and posts `init-ok`.
+    //
+    // Pass `pendingMessages` as `{ data, ports }[]` so attach-tab-port
+    // messages that arrived during bootstrap still carry their transferred
+    // ports — see the comment on `pendingMessages` above.
     wasmModule.runAsWorker(init, pendingMessages.slice());
     pendingMessages.length = 0;
   } catch (e: any) {

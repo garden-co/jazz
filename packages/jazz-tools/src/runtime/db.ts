@@ -1276,10 +1276,11 @@ export class Db {
       }, 0);
     });
     this.workerBridge = bridge;
+    // `notifyLeaderReady` is now a no-op — the supervisor claims leadership
+    // eagerly upon winning the lock. Kept here for forward-compat with any
+    // future supervisor that goes back to deferring claim until the worker
+    // bootstraps.
     const bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => {
-      // The leader's worker is now `Ready` and can adopt follower-tab
-      // ports — unblock the supervisor's `claim-leader` so the broker can
-      // start routing `follower-port` deliveries to us.
       this.supervisor?.notifyLeaderReady();
     });
     bridgeReady.catch(() => undefined);

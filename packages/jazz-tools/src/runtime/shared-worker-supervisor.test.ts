@@ -173,7 +173,7 @@ describe("createTabSupervisor", () => {
     expect(sup.state.endpoint).toBe(port);
   });
 
-  it("becomes leader on lock grant: spawns a worker, exposes the worker as endpoint, withholds claim-leader until ready", async () => {
+  it("becomes leader on lock grant: spawns a worker, exposes it as endpoint, and claims leadership eagerly", async () => {
     const { brokerPort, locks, boot } = brokerHandshake();
     const sup = boot();
 
@@ -184,32 +184,34 @@ describe("createTabSupervisor", () => {
     expect(String(worker.url)).toBe("jazz-worker.js");
     expect(worker.options).toEqual({ type: "module", name: "jazz-runtime" });
 
-    // Claim is deferred until the worker is bootstrapped — otherwise the
-    // broker could route a follower port to it before Rust owns onmessage.
-    expect(brokerPort.postedTypes()).not.toContain("claim-leader");
+    // Claim happens eagerly: without it, a second tab whose own
+    // `createDb()` is awaiting an endpoint can never become follower
+    // because the broker has no claimed leader to attach to. The race the
+    // old withheld-claim guarded against (a follower port arriving before
+    // Rust owns `onmessage`) is now handled by the JS shim buffering
+    // `event.ports` and Rust draining them after Ready.
+    expect(brokerPort.postedTypes()).toContain("claim-leader");
     expect(sup.state.role).toBe("leader");
     expect(sup.state.endpoint).toBe(worker);
-
-    sup.notifyLeaderReady();
-    expect(brokerPort.postedTypes()).toContain("claim-leader");
   });
 
-  it("notifyLeaderReady is idempotent and a no-op when not leader", async () => {
+  it("notifyLeaderReady is a retained-for-compat no-op", async () => {
     const { brokerPort, locks, boot } = brokerHandshake();
     const sup = boot();
 
-    // No-op before lock is granted (role === "none").
+    // Before lock grant: harmless no-op, no extra claims.
     sup.notifyLeaderReady();
     expect(brokerPort.postedTypes()).not.toContain("claim-leader");
 
     await locks.grant();
-    sup.notifyLeaderReady();
-    const firstClaimCount = brokerPort.postedTypes().filter((t) => t === "claim-leader").length;
-    expect(firstClaimCount).toBe(1);
+    const claimsAfterGrant = brokerPort.postedTypes().filter((t) => t === "claim-leader").length;
+    expect(claimsAfterGrant).toBe(1);
 
+    // After grant: still a no-op; does not duplicate the eager claim.
     sup.notifyLeaderReady();
-    const secondClaimCount = brokerPort.postedTypes().filter((t) => t === "claim-leader").length;
-    expect(secondClaimCount).toBe(1);
+    sup.notifyLeaderReady();
+    const claimsAfterCalls = brokerPort.postedTypes().filter((t) => t === "claim-leader").length;
+    expect(claimsAfterCalls).toBe(1);
   });
 
   it("forwards follower-port deliveries to the dedicated worker with the port in the transfer list", async () => {
@@ -279,11 +281,10 @@ describe("createTabSupervisor", () => {
     expect(states).toEqual(["none", "leader"]);
   });
 
-  it("shutdown while leader (after claim): posts release-leader, terminates the worker, and clears state", async () => {
+  it("shutdown while leader: posts release-leader, terminates the worker, and clears state", async () => {
     const { brokerPort, locks, boot } = brokerHandshake();
     const sup = boot();
     await locks.grant();
-    sup.notifyLeaderReady();
     const worker = FakeWorker.instances[0]!;
 
     await sup.shutdown();
@@ -292,19 +293,6 @@ describe("createTabSupervisor", () => {
     expect(worker.terminated).toBe(true);
     expect(sup.state.role).toBe("none");
     expect(sup.state.endpoint).toBeNull();
-  });
-
-  it("shutdown while leader (before claim): terminates the worker but skips release-leader", async () => {
-    const { brokerPort, locks, boot } = brokerHandshake();
-    const sup = boot();
-    await locks.grant();
-    const worker = FakeWorker.instances[0]!;
-
-    await sup.shutdown();
-
-    expect(brokerPort.postedTypes()).not.toContain("release-leader");
-    expect(worker.terminated).toBe(true);
-    expect(sup.state.role).toBe("none");
   });
 
   it("shutdown while follower: does not post release-leader, just clears state", () => {

@@ -45,13 +45,20 @@ export interface TabSupervisor {
   readonly state: TabSupervisorState;
   subscribe(listener: (state: TabSupervisorState) => void): () => void;
   /**
-   * Signal that the leader's dedicated worker has completed its bootstrap
-   * (i.e., its `WorkerBridge` reached `init-ok`) and is ready to adopt
-   * follower-tab ports. Until this is called while leader, the supervisor
-   * withholds `claim-leader` from the broker so no `follower-port` delivery
-   * can race the worker's init — the JS shim buffers `event.data` only
-   * (transferred ports are lost) and Rust rejects `attach-tab-port` before
-   * `Ready`. Idempotent. No-op when not leader or already claimed.
+   * Historical hook used by `Db` after `WorkerBridge.init()` completed. Kept
+   * as a no-op so existing callers compile, but no longer needed for
+   * correctness: the supervisor now claims leadership eagerly as soon as
+   * the dedicated worker is constructed.
+   *
+   * The race the old withhold prevented (a follower-port delivered before
+   * Rust owns `onmessage` would lose its transferred `MessagePort`) is now
+   * handled in two places downstream: the JS worker shim buffers
+   * `event.ports` alongside `event.data`, and Rust `runAsWorker` extracts
+   * those ports into `host.pending_ports` and drains them after the runtime
+   * transitions to `Ready`. With those in place, eager claim is safe and
+   * lets a second tab become follower without waiting for the leader's
+   * main thread to call `bridge.init` (which only happens when user code
+   * invokes `getClient` — i.e., possibly never).
    */
   notifyLeaderReady(): void;
   shutdown(): Promise<void>;
@@ -204,10 +211,22 @@ export function createTabSupervisor(options: TabSupervisorOptions): TabSuperviso
       const worker = new options.WorkerCtor(options.workerUrl, options.workerOptions);
       ownWorker = worker;
       setState({ role: "leader", endpoint: worker });
-      // Withhold `claim-leader` until {@link TabSupervisor.notifyLeaderReady}
-      // signals the worker has finished its bootstrap — otherwise the broker
-      // could deliver a follower port before Rust owns `onmessage`, dropping
-      // the transferred port (the JS shim only buffers `event.data`).
+      // Claim leadership at the broker eagerly, before the dedicated worker
+      // has finished its WASM bootstrap. Follower tabs that connect now will
+      // get a port mapped to this worker, and their handshake messages will
+      // buffer on the channel until the worker installs `onmessage`. The
+      // worker's JS shim preserves `event.ports` in its pending buffer (see
+      // jazz-worker.ts) and Rust's `runAsWorker` drains those ports into
+      // `handle_attach_tab_port` after the runtime is Ready — so no port is
+      // lost across the race.
+      //
+      // Eager claim is what unblocks the multi-tab pattern where the second
+      // tab's `createDb()` returns before the first tab has called
+      // `bridge.init()`. Without it, the first tab holds the Web Lock but
+      // hasn't told the broker, and the second tab is stranded: not leader
+      // (the lock is held) and not follower (no claimed leader to attach to).
+      leaderClaimed = true;
+      options.brokerPort.postMessage({ type: CLAIM_LEADER });
       await new Promise<void>((resolve) => {
         releaseLockHold = resolve;
       });
@@ -248,11 +267,10 @@ export function createTabSupervisor(options: TabSupervisorOptions): TabSuperviso
       };
     },
     notifyLeaderReady() {
-      if (shutdownInvoked) return;
-      if (state.role !== "leader") return;
-      if (leaderClaimed) return;
-      leaderClaimed = true;
-      options.brokerPort.postMessage({ type: CLAIM_LEADER });
+      // No-op. Claim happens eagerly in the lock-grant callback above; the
+      // method is retained so callers (and tests) that still invoke it
+      // compile, but it does no work. See the comment on
+      // {@link TabSupervisor.notifyLeaderReady}.
     },
     async shutdown() {
       if (shutdownInvoked) return;
