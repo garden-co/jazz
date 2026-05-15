@@ -146,8 +146,7 @@ async function fetchFlow(
   payloadFilter: string,
 ): Promise<FlowRow[]> {
   const sql = buildFlowSql({ minutes, limit, payloadFilter });
-  const rows = await runQuery<any>(sql);
-  return rows.map((row) => ({ ...row, Timestamp: row.ts_str })) as FlowRow[];
+  return await runQuery<FlowRow>(sql);
 }
 
 function Field(props: { label: string; children: React.ReactNode }) {
