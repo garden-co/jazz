@@ -10,13 +10,17 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::schema_manager::{Lens, generate_lens};
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
+use reqwest::StatusCode;
+use serde::Deserialize;
+use serde_json::json;
 use support::{
-    TestingClient, deny_all_select_permissions, has_added, has_removed,
+    PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added, has_removed,
     publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
     wait_for_edge_query_ready, wait_for_query, wait_for_subscription_update,
 };
@@ -61,6 +65,28 @@ fn v1_to_v2_lens() -> Lens {
     generate_lens(&schema_v1(), &schema_v2())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSchemaHttpResponse {
+    hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaHashesHttpResponse {
+    hashes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSchemaHttpResponse {
+    schema: jazz_tools::Schema,
+}
+
+#[derive(Debug, Deserialize)]
+struct PermissionsHeadHttpResponse {
+    head: Option<PublishedPermissionsHead>,
+}
+
 async fn seed_schema_catalogue(server: &TestingServer, schema: &jazz_tools::Schema) {
     push_catalogue_in_memory(
         server.server_state(),
@@ -72,6 +98,141 @@ async fn seed_schema_catalogue(server: &TestingServer, schema: &jazz_tools::Sche
     )
     .await
     .expect("push schema catalogue");
+}
+
+// Test topology:
+//
+//   admin HTTP client
+//          |
+//          | publish/read catalogue over HTTP
+//          v
+//   edge TestingServer
+//          |
+//          | forwards after local admin-secret validation
+//          v
+//   core TestingServer
+//
+// The assertions verify that writes sent to the edge are persisted by the real
+// core, and reads sent to the edge return the core catalogue state.
+#[tokio::test]
+async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
+    let app_id = TestingServer::default_app_id();
+    let core = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret("cluster-peer-secret")
+        .start()
+        .await;
+    let edge = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret("cluster-peer-secret")
+        .with_upstream_url(core.base_url())
+        .start()
+        .await;
+    let schema = schema_v1();
+    let schema_hash = SchemaHash::compute(&schema).to_string();
+    let client = reqwest::Client::new();
+
+    let publish_schema_response = client
+        .post(format!("{}/apps/{app_id}/admin/schemas", edge.base_url()))
+        .header("X-Jazz-Admin-Secret", edge.admin_secret())
+        .json(&json!({ "schema": schema }))
+        .send()
+        .await
+        .expect("publish schema through edge");
+    assert_eq!(publish_schema_response.status(), StatusCode::CREATED);
+    let published_schema: PublishSchemaHttpResponse = publish_schema_response
+        .json()
+        .await
+        .expect("decode edge schema publish response");
+    assert_eq!(published_schema.hash, schema_hash);
+
+    let core_schema_response = client
+        .get(format!(
+            "{}/apps/{app_id}/schema/{schema_hash}",
+            core.base_url()
+        ))
+        .header("X-Jazz-Admin-Secret", core.admin_secret())
+        .send()
+        .await
+        .expect("fetch schema from core");
+    assert_eq!(core_schema_response.status(), StatusCode::OK);
+    let core_schema: StoredSchemaHttpResponse = core_schema_response
+        .json()
+        .await
+        .expect("decode core schema response");
+    assert_eq!(
+        SchemaHash::compute(&core_schema.schema).to_string(),
+        schema_hash
+    );
+
+    let edge_hashes_response = client
+        .get(format!("{}/apps/{app_id}/schemas", edge.base_url()))
+        .header("X-Jazz-Admin-Secret", edge.admin_secret())
+        .send()
+        .await
+        .expect("fetch schema hashes through edge");
+    assert_eq!(edge_hashes_response.status(), StatusCode::OK);
+    let edge_hashes: SchemaHashesHttpResponse = edge_hashes_response
+        .json()
+        .await
+        .expect("decode edge schema hashes response");
+    assert!(edge_hashes.hashes.contains(&schema_hash));
+
+    let edge_schema_response = client
+        .get(format!(
+            "{}/apps/{app_id}/schema/{schema_hash}",
+            edge.base_url()
+        ))
+        .header("X-Jazz-Admin-Secret", edge.admin_secret())
+        .send()
+        .await
+        .expect("fetch schema through edge");
+    assert_eq!(edge_schema_response.status(), StatusCode::OK);
+    let edge_schema: StoredSchemaHttpResponse = edge_schema_response
+        .json()
+        .await
+        .expect("decode edge schema response");
+    assert_eq!(
+        SchemaHash::compute(&edge_schema.schema).to_string(),
+        schema_hash
+    );
+
+    let published_permissions =
+        publish_allow_all_permissions(&edge.base_url(), app_id, edge.admin_secret(), &schema).await;
+    let core_head_response = client
+        .get(format!(
+            "{}/apps/{app_id}/admin/permissions/head",
+            core.base_url()
+        ))
+        .header("X-Jazz-Admin-Secret", core.admin_secret())
+        .send()
+        .await
+        .expect("fetch core permissions head");
+    assert_eq!(core_head_response.status(), StatusCode::OK);
+    let core_head: PermissionsHeadHttpResponse = core_head_response
+        .json()
+        .await
+        .expect("decode core permissions head");
+    assert_eq!(core_head.head, Some(published_permissions));
+
+    let edge_head_response = client
+        .get(format!(
+            "{}/apps/{app_id}/admin/permissions/head",
+            edge.base_url()
+        ))
+        .header("X-Jazz-Admin-Secret", edge.admin_secret())
+        .send()
+        .await
+        .expect("fetch permissions head through edge");
+    assert_eq!(edge_head_response.status(), StatusCode::OK);
+    let edge_head: PermissionsHeadHttpResponse = edge_head_response
+        .json()
+        .await
+        .expect("decode edge permissions head");
+    assert_eq!(edge_head.head, core_head.head);
+
+    edge.shutdown().await;
+    core.shutdown().await;
 }
 
 /// A dynamic server should fail closed before any permissions head is

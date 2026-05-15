@@ -69,7 +69,7 @@ mod tests {
     use super::*;
 
     use axum::extract::{Path, Query};
-    use axum::http::{HeaderMap, StatusCode};
+    use axum::http::{HeaderMap, StatusCode, Uri};
     use axum::response::Json;
 
     use uuid::Uuid;
@@ -102,7 +102,7 @@ mod tests {
     use tracing_subscriber::{Layer, Registry};
 
     use crate::middleware::AuthConfig;
-    use crate::server::{CatalogueAuthorityMode, ServerBuilder, ServerState, StorageBackend};
+    use crate::server::{ServerBuilder, ServerState, StorageBackend};
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {
@@ -159,18 +159,21 @@ mod tests {
             .state
     }
 
-    async fn make_state_with_schema_and_authority(
+    async fn make_edge_state_with_schema(
         schema: crate::query_manager::types::Schema,
-        catalogue_authority: CatalogueAuthorityMode,
+        upstream_url: String,
     ) -> Arc<ServerState> {
+        let mut auth_config = test_auth_config();
+        auth_config.peer_secret = Some("cluster-secret".to_string());
+
         ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(test_auth_config())
-            .with_catalogue_authority(catalogue_authority)
+            .with_auth_config(auth_config)
+            .with_upstream_url(upstream_url)
             .with_storage(StorageBackend::InMemory)
             .with_schema(schema)
             .build()
             .await
-            .expect("build state with schema and authority")
+            .expect("build edge state with schema")
             .state
     }
 
@@ -756,7 +759,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalogue_authority_forwarding_proxies_schema_and_permissions_requests() {
+    async fn edge_upstream_forwarding_proxies_schema_and_permissions_requests() {
         use std::sync::{Arc, Mutex};
 
         let forwarded = Arc::new(Mutex::new(Vec::<ForwardedAdminRequest>::new()));
@@ -1008,12 +1011,9 @@ mod tests {
                     .column("name", ColumnType::Text),
             )
             .build();
-        let state = make_state_with_schema_and_authority(
+        let state = make_edge_state_with_schema(
             schema.clone(),
-            CatalogueAuthorityMode::Forward {
-                base_url: format!("http://{authority_addr}/authority-prefix"),
-                admin_secret: "authority-secret".to_string(),
-            },
+            format!("http://{authority_addr}/authority-prefix"),
         )
         .await;
         let app = make_test_router(state);
@@ -1162,7 +1162,7 @@ mod tests {
         assert!(
             forwarded
                 .iter()
-                .all(|request| request.admin_secret.as_deref() == Some("authority-secret"))
+                .all(|request| request.admin_secret.as_deref() == Some("admin-secret"))
         );
         assert_eq!(forwarded[0].path, test_app_route("/schemas"));
         assert_eq!(
@@ -1189,6 +1189,142 @@ mod tests {
                 .and_then(Value::as_str),
             Some("44444444-4444-4444-4444-444444444444")
         );
+
+        authority_task.abort();
+    }
+
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_rejects_invalid_admin_secret_before_upstream() {
+        use std::sync::{Arc, Mutex};
+
+        let forwarded_calls = Arc::new(Mutex::new(0usize));
+        let forwarded_calls_for_router = forwarded_calls.clone();
+        let authority_app = axum::Router::new().route(
+            &test_app_route("/schemas"),
+            get(move || {
+                let forwarded_calls = forwarded_calls_for_router.clone();
+                async move {
+                    *forwarded_calls.lock().unwrap() += 1;
+                    Json(serde_json::json!({ "hashes": [] }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind authority listener");
+        let authority_addr = listener.local_addr().expect("authority local addr");
+        let authority_task = tokio::spawn(async move {
+            axum::serve(listener, authority_app)
+                .await
+                .expect("serve authority app");
+        });
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let state = make_edge_state_with_schema(schema, format!("http://{authority_addr}")).await;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/schemas"))
+                    .header("X-Jazz-Admin-Secret", "wrong-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(*forwarded_calls.lock().unwrap(), 0);
+
+        authority_task.abort();
+    }
+
+    #[tokio::test]
+    async fn edge_schema_connectivity_forwarding_encodes_reserved_query_values() {
+        use std::sync::{Arc, Mutex};
+
+        let forwarded = Arc::new(Mutex::new(Vec::<ForwardedAdminRequest>::new()));
+        let forwarded_for_router = forwarded.clone();
+        let authority_app = axum::Router::new().route(
+            &test_app_route("/admin/schema-connectivity"),
+            get(move |uri: Uri, headers: HeaderMap| {
+                let forwarded = forwarded_for_router.clone();
+                async move {
+                    forwarded.lock().unwrap().push(ForwardedAdminRequest {
+                        method: "GET".to_string(),
+                        path: uri
+                            .path_and_query()
+                            .map(|path_and_query| path_and_query.as_str().to_string())
+                            .unwrap_or_else(|| uri.path().to_string()),
+                        admin_secret: headers
+                            .get("X-Jazz-Admin-Secret")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                        body: None,
+                    });
+                    Json(serde_json::json!({ "connected": true }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind authority listener");
+        let authority_addr = listener.local_addr().expect("authority local addr");
+        let authority_task = tokio::spawn(async move {
+            axum::serve(listener, authority_app)
+                .await
+                .expect("serve authority app");
+        });
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let state = make_edge_state_with_schema(schema, format!("http://{authority_addr}")).await;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "{}?fromHash=aaa%26evil=1&toHash=bbb",
+                        test_app_route("/admin/schema-connectivity")
+                    ))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let forwarded = forwarded.lock().unwrap().clone();
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(forwarded[0].admin_secret.as_deref(), Some("admin-secret"));
+        assert!(
+            !forwarded[0].path.contains("&evil=1"),
+            "reserved characters must remain inside fromHash, got {}",
+            forwarded[0].path
+        );
+        let forwarded_url =
+            reqwest::Url::parse(&format!("http://upstream.test{}", forwarded[0].path))
+                .expect("forwarded URL should parse");
+        let query_pairs: Vec<_> = forwarded_url.query_pairs().collect();
+        assert_eq!(query_pairs.len(), 2);
+        assert_eq!(query_pairs[0], ("fromHash".into(), "aaa&evil=1".into()));
+        assert_eq!(query_pairs[1], ("toHash".into(), "bbb".into()));
 
         authority_task.abort();
     }
@@ -1538,7 +1674,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edge_mode_rejects_local_admin_catalogue_publishing() {
+    async fn edge_mode_forwards_admin_catalogue_publishing() {
+        use std::sync::{Arc, Mutex};
+
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -1546,21 +1684,50 @@ mod tests {
                     .column("name", ColumnType::Text),
             )
             .build();
-        let auth_config = AuthConfig {
-            admin_secret: Some("admin-secret".to_string()),
-            peer_secret: Some("cluster-peer-secret".to_string()),
-            allow_local_first_auth: true,
-            ..Default::default()
-        };
-        let state = ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .with_schema(schema.clone())
-            .with_upstream_url("ws://127.0.0.1:9")
-            .build()
+
+        let forwarded = Arc::new(Mutex::new(Vec::<ForwardedAdminRequest>::new()));
+        let forwarded_for_router = forwarded.clone();
+        let authority_routes = axum::Router::new().route(
+            &test_app_route("/admin/schemas"),
+            post(move |headers: HeaderMap, body: Json<Value>| {
+                let forwarded = forwarded_for_router.clone();
+                async move {
+                    forwarded.lock().unwrap().push(ForwardedAdminRequest {
+                        method: "POST".to_string(),
+                        path: test_app_route("/admin/schemas"),
+                        admin_secret: headers
+                            .get("X-Jazz-Admin-Secret")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                        body: Some(body.0),
+                    });
+                    (
+                        StatusCode::CREATED,
+                        Json(serde_json::json!({
+                            "objectId": "11111111-1111-1111-1111-111111111111",
+                            "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        })),
+                    )
+                }
+            }),
+        );
+        let authority_app = axum::Router::new().nest("/authority-prefix", authority_routes);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("build edge state")
-            .state;
+            .expect("bind authority listener");
+        let authority_addr = listener.local_addr().expect("authority local addr");
+        let authority_task = tokio::spawn(async move {
+            axum::serve(listener, authority_app)
+                .await
+                .expect("serve authority app");
+        });
+
+        let state = make_edge_state_with_schema(
+            schema.clone(),
+            format!("http://{authority_addr}/authority-prefix"),
+        )
+        .await;
         let app = make_test_router(state);
 
         let response = app
@@ -1578,18 +1745,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("response body");
-        let error: Value = serde_json::from_slice(&body).expect("error json");
-        assert!(
-            error["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("publish catalogue to the core server"),
-            "unexpected edge publish rejection: {error}"
-        );
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let forwarded = forwarded.lock().unwrap().clone();
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(forwarded[0].method, "POST");
+        assert_eq!(forwarded[0].path, test_app_route("/admin/schemas"));
+        assert_eq!(forwarded[0].admin_secret.as_deref(), Some("admin-secret"));
+
+        authority_task.abort();
     }
 
     #[tokio::test]

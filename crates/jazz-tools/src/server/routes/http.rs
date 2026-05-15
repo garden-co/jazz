@@ -17,7 +17,7 @@ use crate::query_manager::types::{
     ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::schema_manager::{Lens, LensOp, LensTransform};
-use crate::server::{CatalogueAuthorityMode, ServerState};
+use crate::server::ServerState;
 
 use super::utils::{
     parse_app_id_param, parse_object_id_param, parse_schema_hash_param, permissions_head_view,
@@ -154,27 +154,22 @@ pub(super) struct PublishMigrationResponse {
 
 async fn forward_catalogue_request(
     state: &Arc<ServerState>,
+    admin_secret: &str,
     method: reqwest::Method,
     path: &str,
     body: Option<Vec<u8>>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    let (base_url, authority_admin_secret) = match &state.catalogue_authority {
-        CatalogueAuthorityMode::Local => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(
-                    "catalogue forwarding requested without a configured authority".to_string(),
-                )),
-            ));
-        }
-        CatalogueAuthorityMode::Forward {
-            base_url,
-            admin_secret,
-        } => (base_url.as_str(), admin_secret.as_str()),
+    let Some(base_url) = state.upstream_http_url.as_deref() else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(
+                "catalogue forwarding requested without a configured upstream".to_string(),
+            )),
+        ));
     };
 
     let app_scoped_path = format!("/apps/{}/{}", state.app_id, path.trim_start_matches('/'));
-    let authority_url = authority_endpoint_url(base_url, &app_scoped_path).map_err(|message| {
+    let upstream_url = upstream_endpoint_url(base_url, &app_scoped_path).map_err(|message| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(message)),
@@ -183,8 +178,8 @@ async fn forward_catalogue_request(
 
     let mut request = state
         .http_client
-        .request(method, authority_url)
-        .header("X-Jazz-Admin-Secret", authority_admin_secret);
+        .request(method, upstream_url)
+        .header("X-Jazz-Admin-Secret", admin_secret);
     if let Some(body) = body {
         request = request.header(CONTENT_TYPE, "application/json").body(body);
     }
@@ -193,7 +188,7 @@ async fn forward_catalogue_request(
         (
             StatusCode::BAD_GATEWAY,
             Json(ErrorResponse::internal(format!(
-                "failed to reach catalogue authority: {err}"
+                "failed to reach catalogue upstream: {err}"
             ))),
         )
     })?;
@@ -205,7 +200,7 @@ async fn forward_catalogue_request(
         (
             StatusCode::BAD_GATEWAY,
             Json(ErrorResponse::internal(format!(
-                "failed to read authority response: {err}"
+                "failed to read upstream response: {err}"
             ))),
         )
     })?;
@@ -227,21 +222,9 @@ async fn forward_catalogue_request(
         })
 }
 
-fn reject_edge_catalogue_publish(state: &ServerState) -> Option<Response> {
-    state.topology.is_edge().then(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request(
-                "edge servers cannot publish catalogue locally; publish catalogue to the core server".to_string(),
-            )),
-        )
-            .into_response()
-    })
-}
-
-fn authority_endpoint_url(base_url: &str, path: &str) -> Result<String, String> {
+fn upstream_endpoint_url(base_url: &str, path: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(base_url)
-        .map_err(|err| format!("invalid catalogue authority URL '{base_url}': {err}"))?;
+        .map_err(|err| format!("invalid catalogue upstream URL '{base_url}': {err}"))?;
     let mut origin = parsed.clone();
     origin.set_query(None);
     origin.set_fragment(None);
@@ -265,6 +248,21 @@ fn authority_endpoint_url(base_url: &str, path: &str) -> Result<String, String> 
     Ok(origin.to_string())
 }
 
+fn schema_connectivity_forward_path(params: &SchemaConnectivityParams) -> String {
+    let mut url = reqwest::Url::parse("http://jazz.local/admin/schema-connectivity")
+        .expect("static schema-connectivity URL should parse");
+    url.query_pairs_mut()
+        .append_pair("fromHash", &params.from_hash)
+        .append_pair("toHash", &params.to_hash);
+
+    format!(
+        "{}?{}",
+        url.path(),
+        url.query()
+            .expect("schema-connectivity forward URL should have query")
+    )
+}
+
 /// Return the catalogue schema for the given hash plus its publish timestamp.
 ///
 /// Requires a valid admin secret; returns 404 if no schema exists for the hash.
@@ -284,12 +282,10 @@ pub(super) async fn schema_handler(
         }
     }
 
-    if matches!(
-        &state.catalogue_authority,
-        CatalogueAuthorityMode::Forward { .. }
-    ) {
+    if state.topology.is_edge() {
         return match forward_catalogue_request(
             &state,
+            admin_secret.expect("validated admin secret"),
             reqwest::Method::GET,
             &format!("/schema/{hash_text}"),
             None,
@@ -372,11 +368,15 @@ pub(super) async fn schema_hashes_handler(
         }
     }
 
-    if matches!(
-        &state.catalogue_authority,
-        CatalogueAuthorityMode::Forward { .. }
-    ) {
-        return match forward_catalogue_request(&state, reqwest::Method::GET, "/schemas", None).await
+    if state.topology.is_edge() {
+        return match forward_catalogue_request(
+            &state,
+            admin_secret.expect("validated admin secret"),
+            reqwest::Method::GET,
+            "/schemas",
+            None,
+        )
+        .await
         {
             Ok(response) => response,
             Err(error) => error.into_response(),
@@ -419,16 +419,16 @@ pub(super) async fn schema_connectivity_handler(
         }
     }
 
-    if matches!(
-        &state.catalogue_authority,
-        CatalogueAuthorityMode::Forward { .. }
-    ) {
-        let forwarded_path = format!(
-            "/admin/schema-connectivity?fromHash={}&toHash={}",
-            params.from_hash, params.to_hash
-        );
-        return match forward_catalogue_request(&state, reqwest::Method::GET, &forwarded_path, None)
-            .await
+    if state.topology.is_edge() {
+        let forwarded_path = schema_connectivity_forward_path(&params);
+        return match forward_catalogue_request(
+            &state,
+            admin_secret.expect("validated admin secret"),
+            reqwest::Method::GET,
+            &forwarded_path,
+            None,
+        )
+        .await
         {
             Ok(response) => response,
             Err(error) => error.into_response(),
@@ -493,14 +493,7 @@ pub(super) async fn publish_schema_handler(
         }
     }
 
-    if let Some(response) = reject_edge_catalogue_publish(&state) {
-        return response;
-    }
-
-    if matches!(
-        &state.catalogue_authority,
-        CatalogueAuthorityMode::Forward { .. }
-    ) {
+    if state.topology.is_edge() {
         let body = match serde_json::to_vec(&request) {
             Ok(body) => body,
             Err(err) => {
@@ -515,6 +508,7 @@ pub(super) async fn publish_schema_handler(
         };
         return match forward_catalogue_request(
             &state,
+            admin_secret.expect("validated admin secret"),
             reqwest::Method::POST,
             "/admin/schemas",
             Some(body),
@@ -575,12 +569,10 @@ pub(super) async fn permissions_head_handler(
         }
     }
 
-    if matches!(
-        &state.catalogue_authority,
-        CatalogueAuthorityMode::Forward { .. }
-    ) {
+    if state.topology.is_edge() {
         return match forward_catalogue_request(
             &state,
+            admin_secret.expect("validated admin secret"),
             reqwest::Method::GET,
             "/admin/permissions/head",
             None,
@@ -623,12 +615,10 @@ pub(super) async fn permissions_handler(
         }
     }
 
-    if matches!(
-        &state.catalogue_authority,
-        CatalogueAuthorityMode::Forward { .. }
-    ) {
+    if state.topology.is_edge() {
         return match forward_catalogue_request(
             &state,
+            admin_secret.expect("validated admin secret"),
             reqwest::Method::GET,
             "/admin/permissions",
             None,
@@ -684,14 +674,7 @@ pub(super) async fn publish_permissions_handler(
         }
     }
 
-    if let Some(response) = reject_edge_catalogue_publish(&state) {
-        return response;
-    }
-
-    if matches!(
-        &state.catalogue_authority,
-        CatalogueAuthorityMode::Forward { .. }
-    ) {
+    if state.topology.is_edge() {
         let body = match serde_json::to_vec(&request) {
             Ok(body) => body,
             Err(err) => {
@@ -706,6 +689,7 @@ pub(super) async fn publish_permissions_handler(
         };
         return match forward_catalogue_request(
             &state,
+            admin_secret.expect("validated admin secret"),
             reqwest::Method::POST,
             "/admin/permissions",
             Some(body),
@@ -831,14 +815,7 @@ pub(super) async fn publish_migration_handler(
         }
     }
 
-    if let Some(response) = reject_edge_catalogue_publish(&state) {
-        return response;
-    }
-
-    if matches!(
-        &state.catalogue_authority,
-        CatalogueAuthorityMode::Forward { .. }
-    ) {
+    if state.topology.is_edge() {
         let body = match serde_json::to_vec(&request) {
             Ok(body) => body,
             Err(err) => {
@@ -853,6 +830,7 @@ pub(super) async fn publish_migration_handler(
         };
         return match forward_catalogue_request(
             &state,
+            admin_secret.expect("validated admin secret"),
             reqwest::Method::POST,
             "/admin/migrations",
             Some(body),

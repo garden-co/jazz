@@ -2,14 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
-function response(ok: boolean, statusText: string, body: unknown = {}): Response {
-  return {
-    ok,
-    statusText,
-    json: async () => body,
-  } as Response;
-}
-
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const insertCalls: Array<[string, Record<string, unknown>]> = [];
   const insertWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
@@ -390,64 +382,5 @@ describe("JazzClient mutation durability split", () => {
     ).toThrow(validationError);
 
     expect(updateWithSession).not.toHaveBeenCalled();
-  });
-
-  it("uses create then update-on-conflict for SessionClient upsert", async () => {
-    const { client } = makeClient();
-    const session: Session = {
-      user_id: "backend-user",
-      claims: { role: "admin" },
-      authMode: "external",
-    };
-    const values = { title: { type: "Text" as const, value: "Backend todo" } };
-    const sendRequest = vi
-      .spyOn(client, "sendRequest")
-      .mockResolvedValueOnce(response(true, "Created", { object_id: "todo-session" }))
-      .mockResolvedValueOnce(response(false, "Conflict"))
-      .mockResolvedValueOnce(response(true, "OK"));
-    const scoped = client.forSession(session);
-
-    await expect(scoped.upsert("todos", values, { id: "todo-session-create" })).resolves.toBe(
-      undefined,
-    );
-    await expect(scoped.upsert("todos", values, { id: "todo-session-existing" })).resolves.toBe(
-      undefined,
-    );
-
-    expect(sendRequest.mock.calls.map((call) => call[1])).toEqual(["POST", "POST", "PUT"]);
-    expect(sendRequest.mock.calls[0]?.[2]).toMatchObject({
-      table: "todos",
-      values,
-      object_id: "todo-session-create",
-    });
-    expect(sendRequest.mock.calls[2]?.[2]).toMatchObject({
-      object_id: "todo-session-existing",
-      updates: Object.entries(values),
-    });
-  });
-
-  it("does not fall back to SessionClient update when insert shape validation fails", async () => {
-    const { client } = makeClient();
-    const session: Session = {
-      user_id: "backend-user",
-      claims: { role: "admin" },
-      authMode: "external",
-    };
-    const sendRequest = vi
-      .spyOn(client, "sendRequest")
-      .mockResolvedValueOnce(response(false, "Bad Request"));
-
-    await expect(
-      client
-        .forSession(session)
-        .upsert(
-          "todos",
-          { done: { type: "Boolean" as const, value: true } },
-          { id: "todo-missing-title" },
-        ),
-    ).rejects.toThrow("Create failed: Bad Request");
-
-    expect(sendRequest).toHaveBeenCalledTimes(1);
-    expect(sendRequest.mock.calls[0]?.[1]).toBe("POST");
   });
 });

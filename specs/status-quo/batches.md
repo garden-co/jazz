@@ -549,7 +549,6 @@ storage compatibility boundary.
 The batch-aware TS surface lives in:
 
 - `JazzClient`
-- `SessionClient`
 - `Db`
 - `DbTransaction`
 - `DbDirectBatch`
@@ -611,7 +610,7 @@ The Rust client layer exposes the same model through:
 - `Transaction::commit()`
 - `DirectBatch` and `Transaction` CRUD helpers
 
-`SessionClient` mirrors the same explicit batch APIs for backend/session-scoped writes.
+Backend session-scoped writes use the `Db` returned by `createJazzContext().forSession(...)`.
 
 ## Related Docs
 

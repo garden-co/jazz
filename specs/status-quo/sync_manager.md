@@ -22,8 +22,8 @@ forwarded queries.
 
 Catalogue updates use the same sync payload lane, but publication authority is
 core-only in edge deployments. Edges receive schema, migration, and permissions
-catalogue entries from core; they do not accept local admin catalogue writes and
-proxy them upstream.
+catalogue entries from core through sync. Catalogue HTTP reads and writes
+received by an edge validate the admin secret locally and proxy upstream.
 
 ### Downward, toward clients
 

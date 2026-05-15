@@ -326,9 +326,6 @@ export class ManagedDevRuntime {
             dataDir,
             inMemory: serverConfig.inMemory,
             jwksUrl: serverConfig.jwksUrl,
-            catalogueAuthority: serverConfig.catalogueAuthority,
-            catalogueAuthorityUrl: serverConfig.catalogueAuthorityUrl,
-            catalogueAuthorityAdminSecret: serverConfig.catalogueAuthorityAdminSecret,
             telemetryCollectorUrl,
           });
 

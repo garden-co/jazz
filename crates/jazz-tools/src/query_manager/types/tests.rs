@@ -692,6 +692,32 @@ fn schema_hash_changes_when_indexed_columns_override_changes() {
 }
 
 #[test]
+fn schema_hash_distinguishes_explicit_empty_index_override() {
+    let schema_without_override = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+
+    let schema_with_empty_override = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean)
+                .index_only(std::iter::empty::<&str>()),
+        )
+        .build();
+
+    assert_ne!(
+        SchemaHash::compute(&schema_without_override),
+        SchemaHash::compute(&schema_with_empty_override),
+        "an explicit empty index override changes indexing semantics",
+    );
+}
+
+#[test]
 fn schema_hash_changes_when_column_default_changes() {
     let schema1 = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("role", ColumnType::Text))

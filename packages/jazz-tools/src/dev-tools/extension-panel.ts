@@ -5,11 +5,9 @@ import {
   DurabilityTier,
   QueryExecutionOptions,
   QueryInput,
-  RequestLike,
   Row,
   Runtime,
   Session,
-  SessionClient,
   SubscriptionCallback,
   UpdateOptions,
   Value,
@@ -496,12 +494,6 @@ class DevToolsJazzClient {
     this.fallbackSchema = schema;
   }
 
-  forSession(_session: Session): SessionClient {
-    throw new Error("Method not implemented.");
-  }
-  forRequest(_request: RequestLike): SessionClient {
-    throw new Error("Method not implemented.");
-  }
   create(table: string, values: InsertValues): DirectInsertResult {
     throw new Error("DevTools client does not support non-durable create().");
   }
@@ -615,12 +607,6 @@ class DevToolsJazzClient {
     return this.fallbackSchema;
   }
   getRuntime(): Runtime {
-    throw new Error("Method not implemented.");
-  }
-  getServerUrl(): string | undefined {
-    throw new Error("Method not implemented.");
-  }
-  getRequestUrl(path: string): string {
     throw new Error("Method not implemented.");
   }
   getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {

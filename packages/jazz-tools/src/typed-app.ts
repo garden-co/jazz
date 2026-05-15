@@ -887,15 +887,30 @@ export class TypedTableQueryBuilder<
     return clone;
   }
 
-  hopTo(
-    relation: RelationNameFromMeta<TMeta>,
-  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+  hopTo<TRelation extends RelationNameFromMeta<TMeta>>(
+    relation: TRelation,
+  ): MetaQueryHandle<
+    RelationTargetFromMeta<TMeta, TRelation>,
+    {},
+    DefaultTableSelection<RelationTargetFromMeta<TMeta, TRelation>>,
+    TRequired
+  > {
     if (this._unionVal) {
       throw new Error("union(...) currently only supports gather(...) in MVP.");
     }
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._hops.push(relation as string);
-    return clone;
+    // The type now represents the destination table while `_table` at runtime
+    // is still the source — the destination is encoded in `_hops` and resolved
+    // by the query adapter. Aligning runtime `_table` with the type is a
+    // separate change (it touches `_build()` and hop lowering) and is out of
+    // scope here; `_table` is internal and not part of the public surface.
+    return clone as unknown as MetaQueryHandle<
+      RelationTargetFromMeta<TMeta, TRelation>,
+      {},
+      DefaultTableSelection<RelationTargetFromMeta<TMeta, TRelation>>,
+      TRequired
+    >;
   }
 
   gather(options: {
@@ -1085,9 +1100,14 @@ export interface Query<
   ): Query<TTable, TInclude, TSelection, TSchema>;
   limit(n: number): Query<TTable, TInclude, TSelection, TSchema>;
   offset(n: number): Query<TTable, TInclude, TSelection, TSchema>;
-  hopTo(
-    relation: RelationNameFromMeta<SchemaMeta<TTable, TSchema>>,
-  ): Query<TTable, TInclude, TSelection, TSchema>;
+  hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
+    relation: TRelation,
+  ): Query<
+    RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>["name"],
+    {},
+    DefaultTableSelection<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>>,
+    TSchema
+  >;
   gather(options: {
     start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
@@ -1117,9 +1137,14 @@ export interface RequiredQuery<
   ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
   limit(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
   offset(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  hopTo(
-    relation: RelationNameFromMeta<SchemaMeta<TTable, TSchema>>,
-  ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
+  hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
+    relation: TRelation,
+  ): RequiredQuery<
+    RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>["name"],
+    {},
+    DefaultTableSelection<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>>,
+    TSchema
+  >;
   gather(options: {
     start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
