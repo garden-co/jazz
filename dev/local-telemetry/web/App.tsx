@@ -8,7 +8,7 @@ export function App() {
   return (
     <div style={styles.app}>
       <header style={styles.header}>
-        <h1 style={styles.title}>Jazz Sync Viewer</h1>
+        <h1 style={styles.title}>Sync Flow</h1>
         <label style={styles.timeWindow}>
           <span style={styles.fieldLabel}>Window (min)</span>
           <input

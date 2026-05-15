@@ -35,31 +35,52 @@ export type FlowSqlFilters = {
 };
 
 export function buildFlowSql(filters: FlowSqlFilters): string {
-  const where: string[] = [
-    `Timestamp > now() - INTERVAL ${Math.max(1, Math.floor(filters.minutes) || 1)} MINUTE`,
-    `ServiceName IN ('jazz-browser', 'jazz-dev-server', 'jazz-server')`,
-    `SpanName IN ('sync.send', 'sync.recv')`,
+  const minutes = Math.max(1, Math.floor(filters.minutes) || 1);
+  const limit = Math.max(1, Math.floor(filters.limit) || 100);
+  const cutoffNs = (Date.now() - minutes * 60_000) * 1_000_000;
+
+  const where = [
+    `start_time_unix_nano > ${cutoffNs}`,
+    `service_name IN ('jazz-browser', 'jazz-dev-server', 'jazz-server')`,
+    `name IN ('sync.send', 'sync.recv')`,
   ];
+
   const payload = filters.payloadFilter.trim();
-  if (payload) where.push(`SpanAttributes['payload'] = '${escapeSqlString(payload)}'`);
+  if (payload) where.push(`${attr("payload")} = '${escapeSqlString(payload)}'`);
 
   return `
     SELECT
-      toString(Timestamp) AS ts_str,
-      ServiceName,
-      SpanName,
-      SpanAttributes['jazz.runtime_thread'] AS thread,
-      SpanAttributes['jazz.span.fields'] AS fields,
-      SpanAttributes['payload'] AS payload,
-      SpanAttributes['payload_json'] AS payload_json,
-      SpanAttributes['peer_kind'] AS peer_kind,
-      SpanAttributes['peer_id'] AS peer_id,
-      SpanAttributes['tier'] AS tier
-    FROM otel_traces
+      strftime(to_timestamp(start_time_unix_nano / 1e9), '%Y-%m-%dT%H:%M:%S.%gZ') AS Timestamp,
+      service_name AS ServiceName,
+      name AS SpanName,
+      ${attr("jazz.runtime_thread")} AS thread,
+      ${attr("jazz.span.fields")} AS fields,
+      ${attr("payload")} AS payload,
+      ${attr("payload_json")} AS payload_json,
+      ${attr("peer_kind")} AS peer_kind,
+      ${attr("peer_id")} AS peer_id,
+      ${attr("tier")} AS tier
+    FROM spans
     WHERE ${where.join(" AND ")}
-    ORDER BY Timestamp DESC
-    LIMIT ${Math.max(1, Math.floor(filters.limit) || 100)}
+    ORDER BY start_time_unix_nano DESC
+    LIMIT ${limit}
   `;
+}
+
+// Pulls a single attribute value out of the OTLP-shaped `attributes` JSON array
+// on a span row, falling back across the common value variants.
+function attr(key: string): string {
+  return `(
+    SELECT COALESCE(
+      json_extract_string(a, '$.value.stringValue'),
+      CAST(json_extract(a, '$.value.intValue') AS VARCHAR),
+      CAST(json_extract(a, '$.value.doubleValue') AS VARCHAR),
+      CAST(json_extract(a, '$.value.boolValue') AS VARCHAR)
+    )
+    FROM UNNEST(attributes::JSON[]) AS u(a)
+    WHERE json_extract_string(a, '$.key') = '${escapeSqlString(key)}'
+    LIMIT 1
+  )`;
 }
 
 export function resolveFlowAttrs(row: FlowAttributeSource): FlowAttrs {
