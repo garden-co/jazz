@@ -159,7 +159,7 @@ const { value: branch } = db.insert(app.branches, {
 });
 
 db.branch(branch.id);
-app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff("main");
+app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff();
 db.branch(branch.id).merge();
 ```
 
@@ -172,7 +172,8 @@ and also selects a branch directly, the query-level branch wins because it is th
 choice.
 
 Diff is exposed through the query builder, not as a whole-branch API. Callers scope the diff by
-building the query they want to inspect, then call `.diff(targetBranch)`.
+building the query they want to inspect, then call `.diff()`. The MVP does not expose a diff target
+argument; diff previews against `main`.
 
 Merge is exposed on the branch-scoped database view. `db.branch(sourceObjectId).merge()` merges the
 source branch into `main`. The MVP does not expose a merge target argument.
@@ -205,20 +206,19 @@ the corresponding main row.
 
 ## Diff Semantics
 
-Query-builder diff compares a source branch query with a target branch.
+Query-builder diff compares a source branch query with `main`.
 
 ```ts
-app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff("main");
+app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff();
 ```
 
 The source branch comes from the query builder's `.branch(...)` selection, or from the enclosing
-branch-scoped database view if the query does not select a branch directly. The target branch is the
-argument passed to `.diff(...)`.
+branch-scoped database view if the query does not select a branch directly. The target is `main`.
 
 The diff candidate set is concrete and non-circular:
 
 1. Evaluate the query against the source branch overlay.
-2. Evaluate the same query against the target branch.
+2. Evaluate the same query against `main`.
 3. Take the union of those row ids.
 4. Compute the merged preview only for that candidate set.
 
@@ -358,7 +358,7 @@ Required coverage:
 - merge requires update permission on the backing object plus normal target-row write permission
 - query-builder branch selection uses branch overlay reads
 - query-level branch selection overrides a branch-scoped database default
-- query-builder diff compares the selected source branch with the target branch
+- query-builder diff compares the selected source branch with `main`
 - query-builder diff includes rows matching the query on the source or target side
 - branch edit overrides current `main`
 - branch delete hides current `main`
