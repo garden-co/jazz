@@ -332,7 +332,7 @@ fn rc_wait_for_batch_after_pending_rejection_consumes_mutation_error_event() {
     let ((_row_id, _row_values), batch_id) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
-    s.a.set_mutation_error_callback(Some(Arc::new(|_| true)));
+    s.a.set_mutation_error_callback(Some(Arc::new(|_| {})));
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),

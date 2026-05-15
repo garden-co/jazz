@@ -497,13 +497,7 @@ fn deliver_pending_mutation_errors(core_arc: &Arc<Mutex<NapiCoreType>>) {
     };
 
     for event in events {
-        let batch_id = event.batch.batch_id;
-        if callback(&event)
-            && let Ok(mut core) = core_arc.lock()
-            && let Err(error) = core.acknowledge_handled_rejected_batch(batch_id)
-        {
-            tracing::warn!("acknowledge handled rejected batch: {error:?}");
-        }
+        callback(&event);
     }
 }
 
@@ -846,7 +840,6 @@ impl NapiRuntime {
                 Ok(serialize_mutation_error_event(event)),
                 ThreadsafeFunctionCallMode::NonBlocking,
             );
-            true
         });
         self.core
             .lock()

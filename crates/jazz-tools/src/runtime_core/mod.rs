@@ -58,11 +58,11 @@ pub struct MutationErrorEvent {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub type MutationErrorCallback = std::rc::Rc<dyn Fn(&MutationErrorEvent) -> bool + 'static>;
+pub type MutationErrorCallback = std::rc::Rc<dyn Fn(&MutationErrorEvent) + 'static>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type MutationErrorCallback =
-    std::sync::Arc<dyn Fn(&MutationErrorEvent) -> bool + Send + Sync + 'static>;
+    std::sync::Arc<dyn Fn(&MutationErrorEvent) + Send + Sync + 'static>;
 
 #[cfg(target_arch = "wasm32")]
 pub type RejectedBatchAcknowledgedCallback = std::rc::Rc<dyn Fn(BatchId) + 'static>;
@@ -504,6 +504,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let events = self.durability.drain_mutation_error_events();
         if events.is_empty() {
             return None;
+        }
+        for event in &events {
+            if let Err(error) = self.acknowledge_handled_rejected_batch(event.batch.batch_id) {
+                tracing::warn!(
+                    batch_id = ?event.batch.batch_id,
+                    %error,
+                    "acknowledge delivered mutation error"
+                );
+            }
         }
         Some((callback, events))
     }

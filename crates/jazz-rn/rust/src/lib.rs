@@ -367,14 +367,7 @@ fn deliver_pending_mutation_errors(core: &Arc<Mutex<RnCoreType>>) -> Result<(), 
     };
 
     for event in events {
-        let batch_id = event.batch.batch_id;
-        if callback(&event) {
-            let mut core = core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.acknowledge_handled_rejected_batch(batch_id)
-                .map_err(runtime_err)?;
-        }
+        callback(&event);
     }
 
     Ok(())
@@ -1070,12 +1063,11 @@ impl RnRuntime {
             let callback: CoreMutationErrorCallback = Arc::new(move |event| {
                 let Ok(event_json) = serde_json::to_string(&serialize_mutation_error_event(event))
                 else {
-                    return false;
+                    return;
                 };
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     callback.on_error(event_json);
-                }))
-                .is_ok()
+                }));
             });
             self.core
                 .lock()
