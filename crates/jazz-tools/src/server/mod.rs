@@ -143,28 +143,6 @@ pub struct DisconnectCandidate {
     pub disconnected_at: Instant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum CatalogueAuthorityMode {
-    #[default]
-    Local,
-    Forward {
-        base_url: String,
-        admin_secret: String,
-    },
-}
-
-impl CatalogueAuthorityMode {
-    pub fn forward_target(&self) -> Option<(&str, &str)> {
-        match self {
-            Self::Local => None,
-            Self::Forward {
-                base_url,
-                admin_secret,
-            } => Some((base_url.as_str(), admin_secret.as_str())),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServerTopology {
     #[default]
@@ -189,8 +167,8 @@ pub struct ServerState {
     pub connection_event_hub: Arc<ConnectionEventHub>,
     /// Authentication configuration.
     pub auth_config: AuthConfig,
-    /// Whether catalogue admin requests are handled locally or forwarded to an authority.
-    pub catalogue_authority: CatalogueAuthorityMode,
+    /// Upstream HTTP base URL used by edge servers to forward catalogue HTTP requests.
+    pub upstream_http_url: Option<String>,
     /// Whether this process is the core/global node or an edge syncing upstream.
     pub topology: ServerTopology,
     /// Shared HTTP client for forwarding admin requests to a remote authority.

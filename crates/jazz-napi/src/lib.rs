@@ -59,7 +59,7 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
-    CatalogueAuthorityMode, HostedServer as JazzHostedServer, ServerBuilder, StorageBackend,
+    HostedServer as JazzHostedServer, ServerBuilder, StorageBackend,
     TestingServer as JazzTestingServer,
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
@@ -371,9 +371,6 @@ struct DevServerStartOptions {
     upstream_url: Option<String>,
     peer_secret: Option<String>,
     allow_local_first_auth: Option<bool>,
-    catalogue_authority: Option<String>,
-    catalogue_authority_url: Option<String>,
-    catalogue_authority_admin_secret: Option<String>,
     telemetry_collector_url: Option<String>,
 }
 
@@ -1617,7 +1614,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; peerSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string; telemetryCollectorUrl?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; peerSecret?: string; telemetryCollectorUrl?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1626,26 +1623,6 @@ impl DevServer {
 
         let app_id =
             AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
-
-        let catalogue_authority = match opts.catalogue_authority.as_deref() {
-            Some("forward") => {
-                let base_url = opts.catalogue_authority_url.ok_or_else(|| {
-                    napi::Error::from_reason(
-                        "catalogueAuthorityUrl is required when catalogueAuthority is 'forward'",
-                    )
-                })?;
-                let admin_secret = opts.catalogue_authority_admin_secret.ok_or_else(|| {
-                    napi::Error::from_reason(
-                        "catalogueAuthorityAdminSecret is required when catalogueAuthority is 'forward'",
-                    )
-                })?;
-                CatalogueAuthorityMode::Forward {
-                    base_url,
-                    admin_secret,
-                }
-            }
-            _ => CatalogueAuthorityMode::Local,
-        };
 
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
@@ -1663,9 +1640,7 @@ impl DevServer {
             opts.data_dir.unwrap_or_else(|| "./data".to_string())
         };
 
-        let mut server_builder = ServerBuilder::new(app_id)
-            .with_auth_config(auth_config)
-            .with_catalogue_authority(catalogue_authority);
+        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         if let Some(upstream_url) = opts.upstream_url.clone() {
             server_builder = server_builder.with_upstream_url(upstream_url);
         }
