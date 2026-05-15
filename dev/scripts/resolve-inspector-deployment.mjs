@@ -2,12 +2,7 @@ import fs from "node:fs";
 import { setTimeout as sleepTimer } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
-const REQUIRED_ENV = [
-  "VERCEL_ORG_ID",
-  "VERCEL_PROJECT_ID",
-  "VERCEL_TOKEN",
-  "GITHUB_OUTPUT",
-];
+const REQUIRED_ENV = ["VERCEL_ORG_ID", "VERCEL_PROJECT_ID", "VERCEL_TOKEN", "GITHUB_OUTPUT"];
 
 const DEFAULT_ATTEMPTS = 30;
 const DEFAULT_DELAY_MS = 20_000;
@@ -117,9 +112,7 @@ export async function resolveInspectorDeployment({
       return result;
     }
 
-    log(
-      `No staged inspector production deployment on main yet (${attempt}/${attempts}).`,
-    );
+    log(`No staged inspector production deployment on main yet (${attempt}/${attempts}).`);
 
     if (lastDeployments.length > 0) {
       log("Matching READY production deployments:");

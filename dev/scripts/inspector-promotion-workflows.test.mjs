@@ -3,10 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 test("standalone inspector promotion workflow can be triggered manually", () => {
-  const workflow = fs.readFileSync(
-    ".github/workflows/promote-inspector-production.yml",
-    "utf8",
-  );
+  const workflow = fs.readFileSync(".github/workflows/promote-inspector-production.yml", "utf8");
 
   assert.match(workflow, /^name: Promote inspector production$/m);
   assert.match(workflow, /^  workflow_dispatch:$/m);
@@ -19,19 +16,13 @@ test("standalone inspector promotion workflow can be triggered manually", () => 
 });
 
 test("release workflow delegates inspector promotion to the standalone workflow", () => {
-  const workflow = fs.readFileSync(
-    ".github/workflows/publish-jazz-tools-alpha.yml",
-    "utf8",
-  );
+  const workflow = fs.readFileSync(".github/workflows/publish-jazz-tools-alpha.yml", "utf8");
 
   const deployJob = workflow.match(
     /deploy-inspector-production:[\s\S]*?(?=\n  [a-zA-Z0-9_-]+:|\n?$)/,
   )?.[0];
 
   assert.ok(deployJob);
-  assert.match(
-    deployJob,
-    /uses: \.\/\.github\/workflows\/promote-inspector-production\.yml/,
-  );
+  assert.match(deployJob, /uses: \.\/\.github\/workflows\/promote-inspector-production\.yml/);
   assert.match(deployJob, /secrets: inherit/);
 });
