@@ -1,4 +1,4 @@
-import type { LocalBatchRecord, MutationErrorEvent } from "../runtime/client.js";
+import type { MutationErrorEvent } from "../runtime/client.js";
 
 declare module "jazz-wasm" {
   type InsertValues = Record<string, unknown>;
@@ -78,11 +78,9 @@ declare module "jazz-wasm" {
     ): void;
     applyIncomingServerPayload(payload: Uint8Array): void;
     waitForUpstreamServerConnection(): Promise<void>;
-    waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
     replayServerConnection(): void;
     disconnectUpstream(): void;
     reconnectUpstream(): void;
-    acknowledgeRejectedBatch(batchId: string): void;
     simulateCrash(): Promise<void>;
     setListeners(listeners: object): void;
     shutdown(): Promise<void>;
@@ -97,6 +95,7 @@ declare module "jazz-wasm" {
       userBranch: string,
       tier?: string,
       useBinaryEncoding?: boolean,
+      nonDurableClient?: boolean,
     );
     schedule?: (task: () => void) => void;
 
@@ -119,20 +118,13 @@ declare module "jazz-wasm" {
     ): { batchId: string };
     delete(objectId: string): { batchId: string };
     deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
-    loadLocalBatchRecord(batchId: string): LocalBatchRecord | null;
-    loadLocalBatchRecordStorageRow(batchId: string): Uint8Array | null;
     hydrateLocalBatchRecordStorageRow(bytes: Uint8Array): void;
-    loadLocalBatchRecords(): LocalBatchRecord[];
-    acknowledgeRejectedBatch(batchId: string): boolean;
     onMutationError(callback: (event: MutationErrorEvent) => void): void;
     loadBatchFate(batchId: string): BatchFate | null;
     replayBatchRejection(batchId: string, code: string, reason: string): void;
     discardLocalBatch(batchId: string): boolean;
     sealBatch(batchId: string): void;
     waitForBatch(batchId: string, tier: string): Promise<void>;
-    retransmitLocalBatch(batchId: string): void;
-    replayLocalBatchPayloads(batchId: string): Uint8Array[];
-    reconcileLocalBatchWithServer(batchId: string): void;
     query(
       queryJson: string,
       sessionJson?: string | null,
@@ -160,7 +152,6 @@ declare module "jazz-wasm" {
     createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
     addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
-    reconcileLocalBatchWithServer?(batchId: string): void;
     batchedTick?(): void;
     addClient(): string;
     getSchema(): unknown;

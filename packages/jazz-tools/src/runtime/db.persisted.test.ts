@@ -57,7 +57,6 @@ function makeHandleClient(localBatchRecord: LocalBatchRecord) {
   return {
     waitForBatch: vi.fn(async () => undefined),
     localBatchRecord: vi.fn(() => localBatchRecord),
-    acknowledgeRejectedBatch: vi.fn(() => false),
   };
 }
 

@@ -17,11 +17,14 @@
 #![allow(dead_code)]
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use futures::channel::oneshot;
 use futures::future::{select, Either};
+use jazz_tools::batch_fate::{BatchFate, LocalBatchRecord};
+use jazz_tools::binding_support::parse_batch_id_input;
+use jazz_tools::row_histories::BatchId;
+use jazz_tools::sync_manager::DurabilityTier;
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
@@ -37,10 +40,6 @@ use crate::worker_protocol::{
 
 const INIT_RESPONSE_TIMEOUT_MS: i32 = 12_000;
 const SHUTDOWN_ACK_TIMEOUT_MS: i32 = 5_000;
-/// Deadline budget for `wait_for_local_sync_flush` (mirrors the JS path).
-const LOCAL_SYNC_ACK_TIMEOUT_MS: i32 = 2_000;
-/// Inter-attempt sleep when retrying because the batch is not yet reconciled.
-const LOCAL_SYNC_ACK_RETRY_MS: i32 = 10;
 
 fn parse_lifecycle_event(s: &str) -> Option<WorkerLifecycleEvent> {
     Some(match s {
@@ -60,6 +59,17 @@ fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
         return;
     };
     let _ = worker.post_message_with_transfer(&value, transfer.as_ref());
+}
+
+fn local_batch_record_needs_fate_reconciliation(record: &LocalBatchRecord) -> bool {
+    match record.latest_fate.as_ref() {
+        None => true,
+        Some(BatchFate::DurableDirect { confirmed_tier, .. })
+        | Some(BatchFate::AcceptedTransaction { confirmed_tier, .. }) => {
+            *confirmed_tier < DurabilityTier::EdgeServer
+        }
+        Some(BatchFate::Missing { .. } | BatchFate::Rejected { .. }) => false,
+    }
 }
 
 // =============================================================================
@@ -112,6 +122,12 @@ impl WasmWorkerBridge {
             init_message,
             expects_upstream,
         ));
+        let weak_inner = Rc::downgrade(&inner);
+        runtime.set_rejected_batch_acknowledged_callback(Some(Rc::new(move |batch_id| {
+            if let Some(inner) = weak_inner.upgrade() {
+                inner.acknowledge_rejected_batch(batch_id);
+            }
+        })));
 
         // Install Rust onmessage handler.
         let on_message = {
@@ -309,78 +325,6 @@ impl WasmWorkerBridge {
             .on_sync_message_received(payload.into(), None)
     }
 
-    /// Mirror of the TS-side `waitForLocalSyncFlush(batchId?)` from main: drive
-    /// the main runtime's outbox to the worker, await a `SyncAck`, optionally
-    /// retry while the batch is still reconciling. Returns once the worker
-    /// confirms reconciliation, the 2s budget expires, or any ack times out.
-    #[wasm_bindgen(js_name = waitForLocalSyncFlush)]
-    pub fn wait_for_local_sync_flush(&self, batch_id: Option<String>) -> js_sys::Promise {
-        let inner = Rc::clone(&self.inner);
-        wasm_bindgen_futures::future_to_promise(async move {
-            if inner.is_inactive() {
-                return Ok(JsValue::UNDEFINED);
-            }
-            let init_promise = inner.init_promise.borrow().clone();
-            if let Some(promise) = init_promise {
-                let _ = JsFuture::from(promise).await;
-            }
-            let start = now_ms();
-            loop {
-                if inner.is_inactive() {
-                    return Ok(JsValue::UNDEFINED);
-                }
-                // Push any accumulated outbox traffic to the worker before
-                // posting the ack envelope so the ack covers the whole batch.
-                // `batched_tick` only drains the runtime's outbox into the
-                // sender's pending queue; `flush_now` is what synchronously
-                // postMessages it. Without the flush, the ack envelope posted
-                // below would race ahead of the writes it is meant to cover.
-                inner.runtime.batched_tick();
-                inner.sender.flush_now();
-
-                let payloads = collect_replay_payloads(&inner.runtime, batch_id.as_deref());
-
-                let ack_id = inner.next_sync_ack_id.get();
-                inner.next_sync_ack_id.set(ack_id.wrapping_add(1));
-                let (tx, rx) = oneshot::channel::<SyncAckOutcome>();
-                inner.pending_sync_acks.borrow_mut().insert(ack_id, tx);
-
-                post_wire(
-                    &inner.worker,
-                    &MainToWorkerWire::Sync {
-                        payloads,
-                        ack_id: Some(ack_id),
-                        ack_batch_id: batch_id.clone(),
-                    },
-                );
-
-                let remaining_ms = remaining_deadline(start, LOCAL_SYNC_ACK_TIMEOUT_MS);
-                let timeout = make_timeout(remaining_ms);
-                let outcome = match select(rx, timeout).await {
-                    Either::Left((Ok(ack), _)) => Some(ack),
-                    _ => None,
-                };
-                inner.pending_sync_acks.borrow_mut().remove(&ack_id);
-
-                if outcome.is_none() || inner.is_inactive() {
-                    return Ok(JsValue::UNDEFINED);
-                }
-                let outcome = outcome.expect("checked above");
-
-                // No batch in flight → first ack is enough.
-                if batch_id.is_none() {
-                    return Ok(JsValue::UNDEFINED);
-                }
-                if outcome.batch_reconciled || elapsed_exceeded(start, LOCAL_SYNC_ACK_TIMEOUT_MS) {
-                    return Ok(JsValue::UNDEFINED);
-                }
-
-                // Still reconciling; back off briefly and try again.
-                let _ = JsFuture::from(make_timeout_promise(LOCAL_SYNC_ACK_RETRY_MS)).await;
-            }
-        })
-    }
-
     #[wasm_bindgen(js_name = waitForUpstreamServerConnection)]
     pub async fn wait_for_upstream_server_connection(&self) -> Result<(), JsValue> {
         if !self.inner.expects_upstream.get() {
@@ -439,28 +383,11 @@ impl WasmWorkerBridge {
         })
     }
 
-    #[wasm_bindgen(js_name = acknowledgeRejectedBatch)]
-    pub fn acknowledge_rejected_batch(&self, batch_id: &str) {
-        if self.inner.is_inactive() {
-            return;
-        }
-        post_wire(
-            &self.inner.worker,
-            &MainToWorkerWire::AcknowledgeRejectedBatch {
-                batch_id: batch_id.to_string(),
-            },
-        );
-    }
-
     #[wasm_bindgen(js_name = setListeners)]
     pub fn set_listeners(&self, listeners: JsValue) {
         let mut slots = self.inner.listeners.borrow_mut();
         slots.on_peer_sync = read_optional_function(&listeners, "onPeerSync");
         slots.on_auth_failure = read_optional_function(&listeners, "onAuthFailure");
-        slots.on_local_batch_records_sync =
-            read_optional_function(&listeners, "onLocalBatchRecordsSync");
-        slots.on_mutation_error_replay =
-            read_optional_function(&listeners, "onMutationErrorReplay");
     }
 
     /// Get the worker-assigned client id (post-init), or `null`.
@@ -581,8 +508,6 @@ enum BridgeState {
 struct Listeners {
     on_peer_sync: Option<Function>,
     on_auth_failure: Option<Function>,
-    on_local_batch_records_sync: Option<Function>,
-    on_mutation_error_replay: Option<Function>,
 }
 
 struct BridgeInner {
@@ -606,17 +531,6 @@ struct BridgeInner {
     has_forwarder: Cell<bool>,
     upstream_ready_promise: RefCell<js_sys::Promise>,
     upstream_ready_resolver: RefCell<Option<Function>>,
-    /// Outstanding `wait_for_local_sync_flush` ack waiters keyed by ack_id.
-    /// The worker host replies with `WorkerToMainWire::SyncAck` after running
-    /// the local-batch reconciliation pass; the dispatch resolves the matching
-    /// oneshot to wake the awaiting promise.
-    pending_sync_acks: RefCell<HashMap<u32, oneshot::Sender<SyncAckOutcome>>>,
-    next_sync_ack_id: Cell<u32>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SyncAckOutcome {
-    batch_reconciled: bool,
 }
 
 impl BridgeInner {
@@ -645,8 +559,6 @@ impl BridgeInner {
             has_forwarder: Cell::new(false),
             upstream_ready_promise: RefCell::new(promise),
             upstream_ready_resolver: RefCell::new(Some(resolver)),
-            pending_sync_acks: RefCell::new(HashMap::new()),
-            next_sync_ack_id: Cell::new(1),
         }
     }
 
@@ -668,6 +580,71 @@ impl BridgeInner {
             self.state.get(),
             BridgeState::Failed | BridgeState::Disposed | BridgeState::ShuttingDown
         )
+    }
+
+    fn acknowledge_rejected_batch(&self, batch_id: BatchId) {
+        if self.is_inactive() {
+            return;
+        }
+        post_wire(
+            &self.worker,
+            &MainToWorkerWire::AcknowledgeRejectedBatch {
+                batch_id: batch_id.to_string(),
+            },
+        );
+    }
+
+    fn hydrate_worker_local_batch_records(&self, encoded_records: Vec<serde_bytes::ByteBuf>) {
+        for row in encoded_records {
+            match LocalBatchRecord::decode_storage_row(row.as_ref()) {
+                Ok(record) => self.hydrate_worker_local_batch_record(record),
+                Err(error) => tracing::warn!("decode worker local batch record: {error:?}"),
+            }
+        }
+    }
+
+    fn hydrate_worker_local_batch_record(&self, record: LocalBatchRecord) {
+        let should_reconcile = local_batch_record_needs_fate_reconciliation(&record);
+        let batch_id = record.batch_id;
+        let mut core = self.runtime.core.borrow_mut();
+        if let Some(BatchFate::Rejected { code, reason, .. }) = record.latest_fate.clone() {
+            if let Err(error) = core.replay_batch_rejection(record.batch_id, &code, &reason) {
+                tracing::warn!(
+                    batch_id = ?record.batch_id,
+                    %error,
+                    "replay worker rejected batch during hydration failed"
+                );
+            }
+        }
+        if let Err(error) = core.hydrate_local_batch_record(record) {
+            tracing::warn!("hydrate worker local batch record: {error:?}");
+            return;
+        }
+        if should_reconcile {
+            core.reconcile_local_batch_with_server(batch_id);
+        }
+    }
+
+    fn replay_worker_mutation_error(&self, batch_id: &str, code: &str, reason: &str) {
+        let batch_id = match parse_batch_id_input(batch_id) {
+            Ok(batch_id) => batch_id,
+            Err(error) => {
+                tracing::warn!("decode worker mutation error batch id: {error:?}");
+                return;
+            }
+        };
+        if let Err(error) = self
+            .runtime
+            .core
+            .borrow_mut()
+            .replay_batch_rejection(batch_id, code, reason)
+        {
+            tracing::warn!(
+                ?batch_id,
+                %error,
+                "replay worker mutation error failed"
+            );
+        }
     }
 
     fn transition_init_called(&self) -> bool {
@@ -804,19 +781,15 @@ impl BridgeInner {
                     let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&reason));
                 }
             }
-            WorkerToMainWire::LocalBatchRecordsSync { batches_json } => {
-                let cb = self.listeners.borrow().on_local_batch_records_sync.clone();
-                if let Some(cb) = cb {
-                    let batches = json_parse(&batches_json);
-                    let _ = cb.call1(&JsValue::NULL, &batches);
-                }
+            WorkerToMainWire::LocalBatchRecordsSync { encoded_records } => {
+                self.hydrate_worker_local_batch_records(encoded_records);
             }
-            WorkerToMainWire::MutationErrorReplay { event_json } => {
-                let cb = self.listeners.borrow().on_mutation_error_replay.clone();
-                if let Some(cb) = cb {
-                    let event = json_parse(&event_json);
-                    let _ = cb.call1(&JsValue::NULL, &event);
-                }
+            WorkerToMainWire::MutationErrorReplay {
+                batch_id,
+                code,
+                reason,
+            } => {
+                self.replay_worker_mutation_error(&batch_id, &code, &reason);
             }
             WorkerToMainWire::PeerSync {
                 peer_id,
@@ -871,16 +844,6 @@ impl BridgeInner {
                     self.runtime.batched_tick();
                 }
             }
-            WorkerToMainWire::SyncAck {
-                ack_id,
-                has_batch_record: _,
-                batch_reconciled,
-            } => {
-                let waiter = self.pending_sync_acks.borrow_mut().remove(&ack_id);
-                if let Some(tx) = waiter {
-                    let _ = tx.send(SyncAckOutcome { batch_reconciled });
-                }
-            }
             WorkerToMainWire::ShutdownOk => {
                 if let Some(tx) = self.shutdown_resolver.borrow_mut().take() {
                     let _ = tx.send(());
@@ -892,10 +855,6 @@ impl BridgeInner {
             }
         }
     }
-}
-
-fn json_parse(s: &str) -> JsValue {
-    js_sys::JSON::parse(s).unwrap_or(JsValue::NULL)
 }
 
 // =============================================================================
@@ -1003,55 +962,4 @@ fn make_timeout_promise(ms: i32) -> js_sys::Promise {
     js_sys::Promise::new(&mut |resolve, _reject| {
         let _ = set_timeout.call2(&JsValue::NULL, &resolve, &JsValue::from_f64(ms as f64));
     })
-}
-
-fn now_ms() -> f64 {
-    let global = js_sys::global();
-    let date_ctor = Reflect::get(&global, &"Date".into()).expect("Date global");
-    let now_fn: Function = Reflect::get(&date_ctor, &"now".into())
-        .expect("Date.now")
-        .dyn_into()
-        .expect("Date.now is a function");
-    now_fn
-        .call0(&JsValue::NULL)
-        .ok()
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
-}
-
-fn remaining_deadline(start_ms: f64, total_budget_ms: i32) -> i32 {
-    let elapsed = (now_ms() - start_ms).max(0.0);
-    let remaining = (total_budget_ms as f64) - elapsed;
-    if remaining <= 0.0 {
-        0
-    } else {
-        remaining as i32
-    }
-}
-
-fn elapsed_exceeded(start_ms: f64, total_budget_ms: i32) -> bool {
-    (now_ms() - start_ms) >= total_budget_ms as f64
-}
-
-/// Gather replay payloads for a batch from the main runtime as raw bytes
-/// suitable for the postcard wire. Errors and missing batches collapse to an
-/// empty vec — `wait_for_local_sync_flush` calls without a batch id also pass
-/// an empty payload set just to drain the runtime outbox.
-fn collect_replay_payloads(
-    runtime: &WasmRuntime,
-    batch_id: Option<&str>,
-) -> Vec<serde_bytes::ByteBuf> {
-    let Some(batch_id) = batch_id else {
-        return Vec::new();
-    };
-    let Ok(array) = runtime.replay_local_batch_payloads(batch_id) else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(array.length() as usize);
-    for i in 0..array.length() {
-        if let Some(arr) = array.get(i).dyn_ref::<Uint8Array>() {
-            out.push(serde_bytes::ByteBuf::from(arr.to_vec()));
-        }
-    }
-    out
 }

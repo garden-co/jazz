@@ -307,7 +307,7 @@ impl SyncManager {
             }
         }
 
-        let mut clients = self.interested_clients_for_batch_fate(storage, &fate);
+        let mut clients = self.interested_clients_for_batch_fate(&fate);
         self.queue_batch_fate_to_client_unfiltered(origin_client_id, fate.clone());
         clients.remove(&origin_client_id);
         for client_id in clients {

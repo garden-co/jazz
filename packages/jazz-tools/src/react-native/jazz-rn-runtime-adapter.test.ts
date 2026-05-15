@@ -20,6 +20,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
+    loadBatchFate: vi.fn(() => null),
     waitForBatch: vi.fn(async () => undefined),
     insert: vi.fn((_table, _valuesJson) =>
       JSON.stringify({ id: "row-1", values: [], batchId: "batch-1" }),
@@ -486,58 +487,30 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(listener).toHaveBeenCalledWith("token expired");
   });
 
-  it("bridges rejected batch helpers and mutation error callback", () => {
+  it("bridges batch fate, mutation error callback, and batch sealing", () => {
     let capturedMutationError: { onError: (eventJson: string) => void } | null = null;
     const binding = createBinding({
       onMutationError: vi.fn((callback: { onError: (eventJson: string) => void }) => {
         capturedMutationError = callback;
       }),
-      loadLocalBatchRecord: vi.fn(() =>
+      loadBatchFate: vi.fn(() =>
         JSON.stringify({
+          kind: "rejected",
           batchId: "batch-1",
-          latestSettlement: {
-            kind: "rejected",
-            code: "WriteRejected",
-            reason: "nope",
-          },
+          code: "WriteRejected",
+          reason: "nope",
         }),
       ),
-      loadLocalBatchRecords: vi.fn(() =>
-        JSON.stringify([
-          {
-            batchId: "batch-1",
-            latestSettlement: {
-              kind: "rejected",
-              code: "WriteRejected",
-              reason: "nope",
-            },
-          },
-        ]),
-      ),
-      acknowledgeRejectedBatch: vi.fn(() => true),
       sealBatch: vi.fn(),
     });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    expect(adapter.loadLocalBatchRecord("batch-1")).toEqual({
+    expect(adapter.loadBatchFate("batch-1")).toEqual({
+      kind: "rejected",
       batchId: "batch-1",
-      latestSettlement: {
-        kind: "rejected",
-        code: "WriteRejected",
-        reason: "nope",
-      },
+      code: "WriteRejected",
+      reason: "nope",
     });
-    expect(adapter.loadLocalBatchRecords()).toEqual([
-      {
-        batchId: "batch-1",
-        latestSettlement: {
-          kind: "rejected",
-          code: "WriteRejected",
-          reason: "nope",
-        },
-      },
-    ]);
-    expect(adapter.acknowledgeRejectedBatch("batch-1")).toBe(true);
     const mutationErrorListener = vi.fn();
     adapter.onMutationError(mutationErrorListener);
     capturedMutationError!.onError(
@@ -556,9 +529,7 @@ describe("JazzRnRuntimeAdapter", () => {
     );
     adapter.sealBatch("batch-1");
 
-    expect(binding.loadLocalBatchRecord).toHaveBeenCalledWith("batch-1");
-    expect(binding.loadLocalBatchRecords).toHaveBeenCalledTimes(1);
-    expect(binding.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-1");
+    expect(binding.loadBatchFate).toHaveBeenCalledWith("batch-1");
     expect(binding.onMutationError).toHaveBeenCalledTimes(1);
     expect(mutationErrorListener).toHaveBeenCalledWith({
       code: "WriteRejected",
