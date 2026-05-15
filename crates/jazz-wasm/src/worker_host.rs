@@ -944,15 +944,34 @@ fn is_attach_tab_port_message(data: &JsValue) -> bool {
 /// the port that parses each incoming message as `MainToWorkerMessage` and
 /// dispatches to {@link handle_port_message}.
 ///
-/// Refuses to adopt before the worker is `Ready` — port traffic arriving
-/// during the leader's own init would race the bootstrap catalogue dance.
-/// In practice the broker only hands out ports after the leader has called
-/// `claim-leader`, which happens after `init-ok`.
+/// During bootstrap (`HostState::Initializing` — Rust owns `onmessage` but
+/// `run_init` hasn't reached `Ready` yet) the port is buffered into
+/// `host.pending_ports` instead of being adopted directly: the runtime isn't
+/// open yet, so `runtime.add_client` would fail. The supervisor now claims
+/// leadership at the broker as soon as the dedicated worker is spawned, so
+/// this window is reachable in normal multi-tab use — without the buffer the
+/// follower's `MessagePort` would be silently dropped and its bridge would
+/// hang waiting for `init-ok`. After `run_init` flips to `Ready`,
+/// `drain_pending_ports()` re-invokes this function for every buffered port.
 fn handle_attach_tab_port(port: MessagePort) {
     let state = HOST.with(|c| c.borrow().as_ref().map(|h| h.state));
-    if state != Some(HostState::Ready) {
-        tracing::warn!("attach-tab-port arrived before worker Ready; ignoring");
-        return;
+    match state {
+        Some(HostState::Ready) => {}
+        Some(HostState::Initializing) => {
+            HOST.with(|cell| {
+                if let Some(h) = cell.borrow_mut().as_mut() {
+                    h.pending_ports.push(port);
+                }
+            });
+            return;
+        }
+        _ => {
+            tracing::warn!(
+                "attach-tab-port arrived in unexpected host state ({:?}); ignoring",
+                state,
+            );
+            return;
+        }
     }
 
     let runtime = match RUNTIME.with(|c| c.borrow().clone()) {
