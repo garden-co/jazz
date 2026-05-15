@@ -511,15 +511,7 @@ fn deliver_pending_mutation_errors(core_rc: &Rc<RefCell<WasmCoreType>>) {
     };
 
     for event in events {
-        let batch_id = event.batch.batch_id;
-        if callback(&event) {
-            if let Err(err) = core_rc
-                .borrow_mut()
-                .acknowledge_handled_rejected_batch(batch_id)
-            {
-                tracing::warn!("acknowledge handled rejected batch: {err:?}");
-            }
-        }
+        callback(&event);
     }
 }
 
@@ -1347,9 +1339,9 @@ impl WasmRuntime {
         let callback: MutationErrorCallback = Rc::new(move |event| {
             let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
             let Ok(value) = serialize_mutation_error_event(event).serialize(&serializer) else {
-                return false;
+                return;
             };
-            callback.call1(&JsValue::UNDEFINED, &value).is_ok()
+            let _ = callback.call1(&JsValue::UNDEFINED, &value);
         });
         self.core
             .borrow_mut()
