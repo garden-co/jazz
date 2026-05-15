@@ -20,7 +20,6 @@ use clap::{Parser, Subcommand};
 use jazz_tools::middleware::AuthConfig;
 #[cfg(feature = "otel")]
 use jazz_tools::otel;
-use jazz_tools::server::CatalogueAuthorityMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeEnvMode {
@@ -72,12 +71,6 @@ fn resolve_jwt_public_key_input(value: String) -> Result<String, String> {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-}
-
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum CatalogueAuthorityArg {
-    Local,
-    Forward,
 }
 
 #[derive(Subcommand)]
@@ -140,18 +133,6 @@ enum Commands {
         #[arg(long, env = "JAZZ_PEER_SECRET")]
         peer_secret: Option<String>,
 
-        /// Whether this server is the catalogue authority or forwards admin catalogue requests upstream.
-        #[arg(long, env = "JAZZ_CATALOGUE_AUTHORITY", default_value = "local")]
-        catalogue_authority: CatalogueAuthorityArg,
-
-        /// Base URL for the upstream catalogue authority when --catalogue-authority=forward.
-        #[arg(long, env = "JAZZ_CATALOGUE_AUTHORITY_URL")]
-        catalogue_authority_url: Option<String>,
-
-        /// Admin secret used by this server when forwarding catalogue requests upstream.
-        #[arg(long, env = "JAZZ_CATALOGUE_AUTHORITY_ADMIN_SECRET")]
-        catalogue_authority_admin_secret: Option<String>,
-
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -199,9 +180,6 @@ async fn main() {
             admin_secret,
             upstream_url,
             peer_secret,
-            catalogue_authority,
-            catalogue_authority_url,
-            catalogue_authority_admin_secret,
             bound_port_file,
         } => {
             let node_env_mode = resolve_node_env_mode();
@@ -229,35 +207,6 @@ async fn main() {
                 peer_secret,
                 ..Default::default()
             };
-            let catalogue_authority = match catalogue_authority {
-                CatalogueAuthorityArg::Local => CatalogueAuthorityMode::Local,
-                CatalogueAuthorityArg::Forward => {
-                    let base_url = match catalogue_authority_url {
-                        Some(base_url) => base_url,
-                        None => {
-                            eprintln!(
-                                "Server error: missing --catalogue-authority-url for --catalogue-authority=forward"
-                            );
-                            shutdown_tracing();
-                            std::process::exit(1);
-                        }
-                    };
-                    let admin_secret = match catalogue_authority_admin_secret {
-                        Some(admin_secret) => admin_secret,
-                        None => {
-                            eprintln!(
-                                "Server error: missing --catalogue-authority-admin-secret for --catalogue-authority=forward"
-                            );
-                            shutdown_tracing();
-                            std::process::exit(1);
-                        }
-                    };
-                    CatalogueAuthorityMode::Forward {
-                        base_url,
-                        admin_secret,
-                    }
-                }
-            };
             if let Err(e) = commands::server::run(
                 &app_id,
                 port,
@@ -265,7 +214,6 @@ async fn main() {
                 in_memory,
                 auth_config,
                 upstream_url,
-                catalogue_authority,
                 bound_port_file,
             )
             .await
@@ -283,6 +231,7 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
     let Commands::Server {
         upstream_url,
         peer_secret,
+        admin_secret,
         ..
     } = command
     else {
@@ -291,6 +240,9 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
 
     if upstream_url.is_some() && peer_secret.is_none() {
         return Err("--peer-secret / JAZZ_PEER_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
+    }
+    if upstream_url.is_some() && admin_secret.is_none() {
+        return Err("--admin-secret / JAZZ_ADMIN_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
     }
 
     Ok(())
@@ -384,6 +336,26 @@ mod tests {
             .expect_err("edge mode without peer secret should fail validation");
 
         assert!(error.contains("--peer-secret"));
+        assert!(error.contains("--upstream-url"));
+    }
+
+    #[test]
+    fn server_cli_validation_requires_admin_secret_in_edge_mode() {
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "00000000-0000-0000-0000-000000000001",
+            "--upstream-url",
+            "https://core.example.com",
+            "--peer-secret",
+            "cluster-secret",
+        ])
+        .expect("server command should parse");
+
+        let error = validate_server_cli_options(&cli.command)
+            .expect_err("edge mode without admin secret should fail validation");
+
+        assert!(error.contains("--admin-secret"));
         assert!(error.contains("--upstream-url"));
     }
 
