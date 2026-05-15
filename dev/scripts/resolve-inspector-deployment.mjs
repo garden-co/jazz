@@ -6,7 +6,6 @@ const REQUIRED_ENV = [
   "VERCEL_ORG_ID",
   "VERCEL_PROJECT_ID",
   "VERCEL_TOKEN",
-  "RELEASE_SHA",
   "GITHUB_OUTPUT",
 ];
 
@@ -27,7 +26,6 @@ export function buildDeploymentsUrl(env) {
     target: "production",
     state: "READY",
     branch: "main",
-    sha: env.RELEASE_SHA,
     limit: "20",
     teamId: env.VERCEL_ORG_ID,
   });
@@ -45,20 +43,19 @@ export function describeDeployment(deployment) {
 }
 
 function findDeploymentToPromote(deployments) {
-  const staged = deployments.find(
-    (deployment) => deployment.url && deployment.readySubstate === "STAGED",
-  );
-  const alreadyPromoted = deployments.find(
-    (deployment) => deployment.url && deployment.readySubstate === "PROMOTED",
+  const latest = deployments.find(
+    (deployment) =>
+      deployment.url &&
+      (deployment.readySubstate === "STAGED" || deployment.readySubstate === "PROMOTED"),
   );
 
-  if (!staged && !alreadyPromoted) {
+  if (!latest) {
     return null;
   }
 
   return {
-    deployment: staged ?? alreadyPromoted,
-    alreadyPromoted: !staged,
+    deployment: latest,
+    alreadyPromoted: latest.readySubstate === "PROMOTED",
   };
 }
 
@@ -121,7 +118,7 @@ export async function resolveInspectorDeployment({
     }
 
     log(
-      `No staged inspector production deployment for ${env.RELEASE_SHA} yet (${attempt}/${attempts}).`,
+      `No staged inspector production deployment on main yet (${attempt}/${attempts}).`,
     );
 
     if (lastDeployments.length > 0) {
@@ -138,8 +135,8 @@ export async function resolveInspectorDeployment({
 
   throw new Error(
     [
-      `No staged inspector production deployment found for ${env.RELEASE_SHA}.`,
-      "Make sure the inspector Vercel project builds main as production and has auto-assign custom production domains disabled.",
+      "No staged inspector production deployment found on main.",
+      "Make sure the inspector Vercel project has a ready production deployment from main and has auto-assign custom production domains disabled.",
       lastDeployments.length > 0
         ? `Last matching deployments:\n${lastDeployments
             .map((deployment) => `- ${describeDeployment(deployment)}`)
