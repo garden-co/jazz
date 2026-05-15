@@ -45,51 +45,56 @@ These are future improvements. The first version keeps branches sparse and simpl
 ## User-Facing APIs
 
 Branch ids are passed directly to the core APIs. A non-`main` branch id must be a Jazz object id.
-There is no required branch registry in the first version.
+There is no required Jazz-managed branch registry in the first version.
 
-The object id can come from whatever app object scopes the draft. For example, if a project owns the
-draft workflow, use the project row id as the branch id.
+Most apps that want branch metadata can model it with their own `branches` table.
 
 This keeps branch creation simple: create the app object, then branch on that object's id. Jazz
 creates the row id; the app does not manually create a branch id.
 
 ```ts
-const { value: project } = db.insert(app.projects, {
-  name: "Website redesign",
+const { value: branch } = db.insert(app.branches, {
+  projectId,
+  name: "Alice's draft",
   ownerId: session.user_id,
 });
 
-const draft = db.branch(project.id);
+const draft = db.branch(branch.id);
 ```
 
-Here `project.id` is both the project row id and the branch id.
+Here `branch.id` is both the branch metadata row id and the branch id.
+
+The id does not have to come from a `branches` table. Any Jazz-created row id can identify a branch:
+`db.branch(project.id)`, `db.branch(document.id)`, and `db.branch(branch.id)` all use the same core
+API. The table that owns the id defines the permission anchor, leaving branch management and naming
+as app-level choices.
 
 ### Inherited Permissions
 
 Branch access inherits from the normal permissions on the backing object.
 
-For `db.branch(project.id)`, the backing object is the `projects` row with id `project.id`.
+For `db.branch(branch.id)`, the backing object is the `branches` row with id `branch.id`.
 
 ```ts
 export default definePermissions(app, ({ policy, session }) => {
-  policy.projects.allowRead.where({ ownerId: session.user_id });
-  policy.projects.allowInsert.where({ ownerId: session.user_id });
-  policy.projects.allowUpdate.where({ ownerId: session.user_id });
+  policy.branches.allowRead.where({ ownerId: session.user_id });
+  policy.branches.allowInsert.where({ ownerId: session.user_id });
+  policy.branches.allowUpdate.where({ ownerId: session.user_id });
 });
 ```
 
 In this example:
 
-- creating a project creates an object id that can be used as a branch id
-- the common pattern is that the created project is readable and updatable by its creator
-- reading from `db.branch(project.id)` requires read permission on the project
-- writing through `db.branch(project.id)` requires update permission on the project
-- diffing from `db.branch(project.id)` requires read permission on the project
-- merging `db.branch(project.id)` requires update permission on the project and normal write
+- creating a branch metadata row creates an object id that can be used as a branch id
+- the common pattern is that the created branch row is readable and updatable by its creator
+- reading from `db.branch(branch.id)` requires read permission on the branch row
+- writing through `db.branch(branch.id)` requires update permission on the branch row
+- diffing from `db.branch(branch.id)` requires read permission on the branch row
+- merging `db.branch(branch.id)` requires update permission on the branch row and normal write
   permission for the rows written to `main`
 
 Normal row permissions still apply to the data inside the branch. Being allowed to use
-`db.branch(project.id)` does not bypass table permissions for todos, comments, or other rows.
+`db.branch(branch.id)` does not bypass table permissions for todos, comments, or other rows.
 
 Branch-specific permission hooks are future work. The first version only uses inherited object
 permissions.
@@ -99,10 +104,10 @@ permissions.
 `db.branch(branchId)` returns a database view where reads and writes use that branch.
 
 ```ts
-const draft = db.branch(project.id);
+const draft = db.branch(branch.id);
 
 await draft.insert(app.todos, {
-  projectId,
+  projectId: branch.projectId,
   title: "Write API docs",
   done: false,
 });
@@ -115,11 +120,7 @@ The inserted row is visible through `draft`, but not through normal `db` reads f
 Queries can select a branch directly.
 
 ```ts
-const rows = await db.all(
-  app.todos
-    .branch(project.id)
-    .where({ projectId: project.id }),
-);
+const rows = await db.all(app.todos.branch(branch.id).where({ projectId: branch.projectId }));
 ```
 
 Query-level branch selection uses the same overlay behavior as `db.branch(branchId)`.
@@ -127,16 +128,14 @@ Query-level branch selection uses the same overlay behavior as `db.branch(branch
 If both are present, the query-level branch wins:
 
 ```ts
-const draft = db.branch(aliceProject.id);
+const draft = db.branch(aliceBranch.id);
 
 const rows = await draft.all(
-  app.todos
-    .branch(bobProject.id)
-    .where({ projectId: bobProject.id }),
+  app.todos.branch(bobBranch.id).where({ projectId: bobBranch.projectId }),
 );
 ```
 
-This query reads `bobProject.id`, not `aliceProject.id`.
+This query reads `bobBranch.id`, not `aliceBranch.id`.
 
 ### Query Builder Diff
 
@@ -144,10 +143,7 @@ Diff is exposed on the query builder.
 
 ```ts
 const diff = await db.all(
-  app.todos
-    .branch(project.id)
-    .where({ projectId: project.id })
-    .diff("main"),
+  app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff("main"),
 );
 ```
 
@@ -168,7 +164,11 @@ type QueryDiffRow<Row> = Row & {
     changed: string[];
     conflicts: string[];
     error?: {
-      code: "unresolved_parent" | "missing_common_ancestor" | "schema_error" | "merge_strategy_error";
+      code:
+        | "unresolved_parent"
+        | "missing_common_ancestor"
+        | "schema_error"
+        | "merge_strategy_error";
       message: string;
     };
   };
@@ -192,8 +192,8 @@ edit moved it out of the query filter.
 Merging writes branch changes back to `main`.
 
 ```ts
-await db.branch(project.id).merge();
-await db.branch(project.id).merge("main");
+await db.branch(branch.id).merge();
+await db.branch(branch.id).merge("main");
 ```
 
 Merge uses the same merge strategies as diff, but it does not stop just because diff would report
@@ -214,9 +214,10 @@ double-apply the same branch change.
 An app can use the APIs like this:
 
 1. Create the app object that scopes the draft, such as a project.
-2. Use that object's Jazz-created row id as the branch id.
-3. Write draft changes through `db.branch(project.id)`.
-4. Render draft views with query-builder `.branch(project.id)`.
-5. Preview publish impact with query-builder `.diff("main")`.
-6. Show changed rows using the normal row fields plus `$diff`.
-7. Publish with `db.branch(project.id).merge()`.
+2. Create a branch metadata row, such as `app.branches`, for that draft.
+3. Use that branch row's Jazz-created id as the branch id.
+4. Write draft changes through `db.branch(branch.id)`.
+5. Render draft views with query-builder `.branch(branch.id)`.
+6. Preview publish impact with query-builder `.diff("main")`.
+7. Show changed rows using the normal row fields plus `$diff`.
+8. Publish with `db.branch(branch.id).merge()`.

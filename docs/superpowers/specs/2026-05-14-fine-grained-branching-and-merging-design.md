@@ -13,7 +13,8 @@ a branch query to `main`, and merges from a branch to `main`.
 
 ## Non-Goals
 
-- No durable branch registry in the MVP.
+- No durable Jazz-managed branch registry in the MVP. Apps may create their own branch metadata
+  tables.
 - No branch lifecycle state such as open, closed, or archived.
 - No formal idempotence guarantee for merge. Repeating the same merge may create extra history.
 - No supported branch-of-branch API in the MVP.
@@ -33,7 +34,7 @@ Example:
 main
   todo-1: m3
 
-project-1
+branch-1
   todo-1: b1, parent = main:m3
 ```
 
@@ -54,21 +55,29 @@ mechanism.
 
 Branch permissions inherit from the branch backing object.
 
-There is no separate branch creation API. Creating a branch means creating the backing object through
-normal `db.insert(...)`, then using that object's Jazz-created id as the branch id.
+There is no separate branch creation API. Creating a branch means creating the backing object
+through normal `db.insert(...)`, then using that object's Jazz-created id as the branch id.
+
+Most apps that want branch metadata can create an app-level `branches` table and use its row ids as
+branch ids.
 
 ```ts
-const { value: project } = db.insert(app.projects, {
-  name: "Website redesign",
+const { value: branch } = db.insert(app.branches, {
+  projectId,
+  name: "Alice's draft",
   ownerId: session.user_id,
 });
 
-const draft = db.branch(project.id);
+const draft = db.branch(branch.id);
 ```
 
-The common app pattern is that a user who can insert a project also creates it with fields that make
-the project readable and updatable by that same user. After creation, branch access follows the
-normal read/update policy for the created project row.
+The common app pattern is that a user who can insert a branch metadata row also creates it with
+fields that make the row readable and updatable by that same user. After creation, branch access
+follows the normal read/update policy for the created branch row.
+
+The backing object does not have to live in `app.branches`. Any Jazz-created row id can identify a
+branch, such as a project id, document id, or app-specific workflow row id. The table that owns the
+id defines the permission anchor.
 
 In enforcing runtimes:
 
@@ -112,16 +121,16 @@ Example:
 main
   m3
 
-project-1
+branch-1
   b1 parent = main:m3
-  b2 parent = project-1:b1
+  b2 parent = branch-1:b1
 ```
 
 For merge, write normal rows to `main` with parents from both sides:
 
 ```text
 main
-  m4 parent = [main:m3, project-1:b2]
+  m4 parent = [main:m3, branch-1:b2]
 ```
 
 That records that `main` incorporated the branch state.
@@ -143,9 +152,15 @@ const { value: project } = db.insert(app.projects, {
   ownerId: session.user_id,
 });
 
-db.branch(project.id);
-app.todos.branch(project.id).where({ projectId: project.id }).diff("main");
-db.branch(project.id).merge();
+const { value: branch } = db.insert(app.branches, {
+  projectId: project.id,
+  name: "Alice's draft",
+  ownerId: session.user_id,
+});
+
+db.branch(branch.id);
+app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff("main");
+db.branch(branch.id).merge();
 ```
 
 `db.branch(objectId)` returns a branch-scoped database view. Reads use overlay behavior. Writes
@@ -184,8 +199,8 @@ minus main rows overridden or deleted on branch
 plus branch rows that match the query
 ```
 
-Deletes require branch tombstones. If `main` has `todo-1` and `project-1` deletes it, reads from
-`project-1` must hide `todo-1` even though it still exists on `main`.
+Deletes require branch tombstones. If `main` has `todo-1` and `branch-1` deletes it, reads from
+`branch-1` must hide `todo-1` even though it still exists on `main`.
 
 Branch indexes must reflect branch rows. Query planning must understand that a branch row overrides
 the corresponding main row.
@@ -195,7 +210,7 @@ the corresponding main row.
 Query-builder diff compares a source branch query with a target branch.
 
 ```ts
-app.todos.branch(project.id).where({ projectId: project.id }).diff("main");
+app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff("main");
 ```
 
 The source branch comes from the query builder's `.branch(...)` selection, or from the enclosing
@@ -252,7 +267,11 @@ type QueryDiffRow<Row> = Row & {
     changed: string[];
     conflicts: string[];
     error?: {
-      code: "unresolved_parent" | "missing_common_ancestor" | "schema_error" | "merge_strategy_error";
+      code:
+        | "unresolved_parent"
+        | "missing_common_ancestor"
+        | "schema_error"
+        | "merge_strategy_error";
       message: string;
     };
   };
@@ -321,7 +340,7 @@ branch's visible row, the same way MVP branch writes parent to `main`.
 The missing piece is read fallback ancestry:
 
 ```text
-task-1 -> project-1 -> main
+branch-2 -> branch-1 -> main
 ```
 
 Without explicit parent branch metadata, this chain is ambiguous. Do not expose branch-of-branch
@@ -348,7 +367,8 @@ Required coverage:
 - first branch write parents to the current `main` frontier
 - later branch write parents to the previous branch tip
 - `db.branch(source).merge()` defaults target to `main`
-- merge writes to `main` with parents from both locally visible current `main` and locally visible branch tip
+- merge writes to `main` with parents from both locally visible current `main` and locally visible
+  branch tip
 - merge excludes branch writes that are not locally visible when merge starts
 - diff detects strategy-defined overlap
 - merge resolves through merge strategies
