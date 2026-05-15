@@ -14,12 +14,8 @@ import type {
   WasmSchema,
 } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import { applyUserAuthHeaders, type AuthFailureReason } from "./sync-transport.js";
-import {
-  resolveClientSessionStateSync,
-  LOCAL_FIRST_JWT_ISSUER,
-  ANONYMOUS_JWT_ISSUER,
-} from "./client-session.js";
+import type { AuthFailureReason } from "./sync-transport.js";
+import { resolveClientSessionStateSync } from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
@@ -27,10 +23,10 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
-import { appScopedUrl, httpUrlToWs } from "./url.js";
+import { httpUrlToWs } from "./url.js";
 
 /**
- * Minimal request shape supported by `JazzClient.forRequest()`.
+ * Minimal request shape supported by backend request helpers.
  *
  * Works with common server frameworks (Express, Fastify, Hono, Web Request wrappers)
  * as long as Authorization headers are exposed through `header(name)` or `headers`.
@@ -542,31 +538,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   return JSON.stringify(payload);
 }
 
-function readHeader(request: RequestLike, name: string): string | undefined {
-  const lower = name.toLowerCase();
-
-  const fromMethod = request.header?.(name) ?? request.header?.(lower);
-  if (typeof fromMethod === "string") {
-    return fromMethod;
-  }
-
-  const headers = request.headers;
-  if (!headers) {
-    return undefined;
-  }
-
-  if (typeof Headers !== "undefined" && headers instanceof Headers) {
-    return headers.get(name) ?? headers.get(lower) ?? undefined;
-  }
-
-  const record = headers as Record<string, string | string[] | undefined>;
-  const raw = record[name] ?? record[lower];
-  if (Array.isArray(raw)) {
-    return raw[0];
-  }
-  return raw;
-}
-
 function normalizeSubscriptionCallbackArgs(
   args: unknown[],
 ): SubscriptionWireDelta | string | undefined {
@@ -580,73 +551,6 @@ function normalizeSubscriptionCallbackArgs(
 
   console.error("Invalid subscription callback arguments", args);
   return undefined;
-}
-
-function decodeBase64Url(value: string): string {
-  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-
-  if (typeof atob === "function") {
-    return atob(padded);
-  }
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(padded, "base64").toString("utf8");
-  }
-
-  throw new Error("No base64 decoder available in this runtime");
-}
-
-export function sessionFromRequest(request: RequestLike): Session {
-  const authHeader = readHeader(request, "authorization");
-  if (!authHeader?.startsWith("Bearer ")) {
-    throw new Error("Missing or invalid Authorization header");
-  }
-
-  const token = authHeader.slice("Bearer ".length).trim();
-  const parts = token.split(".");
-  if (parts.length < 2) {
-    throw new Error("Invalid JWT format");
-  }
-  const payloadPart = parts[1];
-  if (payloadPart === undefined) {
-    throw new Error("Invalid JWT format");
-  }
-
-  let payload: unknown;
-  try {
-    payload = JSON.parse(decodeBase64Url(payloadPart));
-  } catch {
-    throw new Error("Invalid JWT payload");
-  }
-
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error("Invalid JWT payload");
-  }
-
-  const typedPayload = payload as { sub?: unknown; iss?: unknown; claims?: unknown };
-  if (typeof typedPayload.sub !== "string" || typedPayload.sub.length === 0) {
-    throw new Error("JWT payload missing sub");
-  }
-
-  const claims =
-    typedPayload.claims &&
-    typeof typedPayload.claims === "object" &&
-    !Array.isArray(typedPayload.claims)
-      ? (typedPayload.claims as Record<string, unknown>)
-      : {};
-
-  // Derive authMode from the issuer claim
-  const issuer = typeof typedPayload.iss === "string" ? typedPayload.iss.trim() : undefined;
-  let authMode: Session["authMode"];
-  if (issuer === LOCAL_FIRST_JWT_ISSUER) {
-    authMode = "local-first";
-  } else if (issuer === ANONYMOUS_JWT_ISSUER) {
-    authMode = "anonymous";
-  } else {
-    authMode = "external";
-  }
-
-  return { user_id: typedPayload.sub, claims, authMode };
 }
 
 function shouldFallbackToUpsertUpdate(error: unknown): boolean {
@@ -1085,187 +989,6 @@ export class DirectBatch extends BatchHandleBase {
 export type BatchScope = Scoped<DirectBatch>;
 
 /**
- * Session-scoped client for backend operations.
- *
- * Created by `JazzClient.forSession()`. Allows backend applications
- * to perform operations as a specific user via header-based authentication.
- */
-export class SessionClient {
-  private client: JazzClient;
-  private session: Session;
-
-  constructor(client: JazzClient, session: Session) {
-    this.client = client;
-    this.session = session;
-  }
-
-  /**
-   * Create a new row as this session's user.
-   */
-  async create(table: string, values: InsertValues, options?: CreateOptions): Promise<string> {
-    if (!this.client.getServerUrl()) {
-      throw new Error("No server connection");
-    }
-
-    const response = await this.client.sendRequest(
-      this.client.getRequestUrl("/sync/object"),
-      "POST",
-      {
-        table,
-        values,
-        schema_context: this.client.getSchemaContext(),
-        ...(options?.id ? { object_id: options.id } : {}),
-        ...(options?.updatedAt !== undefined
-          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
-          : {}),
-      },
-      this.session,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Create failed: ${response.statusText}`);
-    }
-
-    const result = await response.json();
-    return result.object_id;
-  }
-
-  /**
-   * Create or update a row as this session's user using a caller-supplied id.
-   */
-  async upsert(table: string, values: InsertValues, options: UpsertOptions): Promise<void> {
-    try {
-      await this.create(table, values, options);
-      return;
-    } catch (error) {
-      if (!shouldFallbackToUpsertUpdate(error)) {
-        throw error;
-      }
-    }
-
-    await this.update(options.id, values as Record<string, Value>, {
-      updatedAt: options.updatedAt,
-    });
-  }
-
-  /**
-   * Update a row as this session's user.
-   */
-  async update(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: UpdateOptions,
-  ): Promise<void> {
-    if (!this.client.getServerUrl()) {
-      throw new Error("No server connection");
-    }
-
-    const updateArray = Object.entries(updates);
-
-    const response = await this.client.sendRequest(
-      this.client.getRequestUrl("/sync/object"),
-      "PUT",
-      {
-        object_id: objectId,
-        updates: updateArray,
-        schema_context: this.client.getSchemaContext(),
-        ...(options?.updatedAt !== undefined
-          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
-          : {}),
-      },
-      this.session,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Update failed: ${response.statusText}`);
-    }
-  }
-
-  /**
-   * Delete a row as this session's user.
-   */
-  async delete(objectId: string): Promise<void> {
-    if (!this.client.getServerUrl()) {
-      throw new Error("No server connection");
-    }
-
-    const response = await this.client.sendRequest(
-      this.client.getRequestUrl("/sync/object/delete"),
-      "POST",
-      {
-        object_id: objectId,
-        schema_context: this.client.getSchemaContext(),
-      },
-      this.session,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Delete failed: ${response.statusText}`);
-    }
-  }
-
-  /**
-   * Query as this session's user.
-   */
-  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
-    return this.client.queryInternal(query, this.session, options);
-  }
-
-  /**
-   * Subscribe to a query as this session's user.
-   */
-  subscribe(
-    query: string | QueryInput,
-    callback: SubscriptionCallback,
-    options?: QueryExecutionOptions,
-  ): number {
-    return this.client.subscribeInternal(query, callback, this.session, options);
-  }
-
-  beginTransaction(): Transaction {
-    return this.client.beginTransactionInternal(this.session);
-  }
-
-  transaction<TResult>(
-    callback: (tx: TransactionScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
-  transaction<TResult>(
-    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const transaction = this.beginTransaction();
-    return runInBatch(transaction, callback, this.client);
-  }
-
-  beginBatch(): DirectBatch {
-    return this.client.beginBatchInternal(this.session);
-  }
-
-  batch<TResult>(
-    callback: (batch: BatchScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
-  batch<TResult>(
-    callback: (batch: BatchScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginBatch();
-    return runInBatch(batch, callback, this.client);
-  }
-
-  localBatchRecord(batchId: string): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId: string): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
-  }
-}
-
-/**
  * High-level Jazz client.
  */
 export class JazzClient {
@@ -1425,50 +1148,6 @@ export class JazzClient {
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ): JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
-  }
-
-  /**
-   * Create a session-scoped client for backend operations.
-   *
-   * This allows backend applications to perform operations as a specific user.
-   * Requires `backendSecret` to be configured in the `AppContext`.
-   *
-   * @param session Session to impersonate
-   * @returns SessionClient for performing operations as the given user
-   * @throws Error if backendSecret is not configured
-   *
-   * @example
-   * ```typescript
-   * const userSession = { user_id: "user-123", claims: {} };
-   * const userClient = client.forSession(userSession);
-   * const id = await userClient.create("todos", {
-   *   title: { type: "Text", value: "Buy milk" },
-   *   done: { type: "Boolean", value: false },
-   * });
-   * ```
-   */
-  forSession(session: Session): SessionClient {
-    if (!this.context.backendSecret) {
-      throw new Error("backendSecret required for session impersonation");
-    }
-    if (!this.context.serverUrl) {
-      throw new Error("serverUrl required for session impersonation");
-    }
-    return new SessionClient(this, session);
-  }
-
-  /**
-   * Create a session-scoped client from an authenticated HTTP request.
-   *
-   * Extracts `Authorization: Bearer <jwt>` and maps payload fields:
-   * - `sub` -> `session.user_id`
-   * - `claims` -> `session.claims` (defaults to `{}`)
-   *
-   * This helper only extracts payload fields and does not validate JWT signatures.
-   * JWT verification should happen in your auth middleware before request handling.
-   */
-  forRequest(request: RequestLike): SessionClient {
-    return this.forSession(sessionFromRequest(request));
   }
 
   beginTransaction(): Transaction {
@@ -2466,25 +2145,6 @@ export class JazzClient {
   }
 
   /**
-   * Get the server URL (for SessionClient).
-   * @internal
-   */
-  getServerUrl(): string | undefined {
-    return this.context.serverUrl;
-  }
-
-  /**
-   * Build a fully-qualified endpoint URL against the configured server.
-   * @internal
-   */
-  getRequestUrl(path: string): string {
-    if (!this.context.serverUrl) {
-      throw new Error("No server connection");
-    }
-    return appScopedUrl(this.context.serverUrl, this.context.appId, path);
-  }
-
-  /**
    * Get schema context for server requests.
    * @internal
    */
@@ -2498,39 +2158,6 @@ export class JazzClient {
       schema_hash: this.runtime.getSchemaHash(),
       user_branch: this.context.userBranch ?? "main",
     };
-  }
-
-  /**
-   * Send an HTTP request with appropriate auth headers.
-   * @internal
-   */
-  async sendRequest(
-    url: string,
-    method: string,
-    body: unknown,
-    session?: Session,
-  ): Promise<Response> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-
-    // Priority 1: Backend impersonation (via SessionClient)
-    if (session && this.context.backendSecret) {
-      headers["X-Jazz-Backend-Secret"] = this.context.backendSecret;
-      headers["X-Jazz-Session"] = btoa(JSON.stringify(session));
-    }
-    // Priority 2: frontend auth (JWT bearer token)
-    else {
-      applyUserAuthHeaders(headers, {
-        jwtToken: this.context.jwtToken,
-      });
-    }
-
-    return fetch(url, {
-      method,
-      headers,
-      body: JSON.stringify(body),
-    });
   }
 
   private batchWaitOutcome(
