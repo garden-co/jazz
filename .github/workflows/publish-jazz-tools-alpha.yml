@@ -1242,7 +1242,6 @@ jobs:
 
   deploy-inspector-production:
     name: Promote inspector production
-    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs:
       - release-push-gate
       - publish-npm
@@ -1251,46 +1250,5 @@ jobs:
       needs.release-push-gate.outputs.should_run == 'true' &&
       needs.publish-npm.result == 'success' &&
       (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
-    concurrency:
-      group: inspector-production
-      cancel-in-progress: false
-    permissions:
-      contents: read
-    env:
-      VERCEL_ORG_ID: ${{ secrets.VERCEL_INSPECTOR_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
-      VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.14.0
-          run_install: false
-
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version-file: .nvmrc
-
-      - name: Guard Vercel credentials
-        run: |
-          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing ${name}. Configure the matching Vercel inspector GitHub secret."
-              exit 1
-            fi
-          done
-
-      - name: Resolve staged inspector deployment
-        id: inspector-deployment
-        env:
-          RELEASE_SHA: ${{ github.sha }}
-        run: node dev/scripts/resolve-inspector-deployment.mjs
-
-      - name: Promote staged inspector deployment
-        if: steps.inspector-deployment.outputs.already_promoted != 'true'
-        run: pnpm dlx vercel@latest promote "${{ steps.inspector-deployment.outputs.deployment_url }}" --yes --timeout=5m --token="${VERCEL_TOKEN}"
-
-      - name: Skip already promoted inspector deployment
-        if: steps.inspector-deployment.outputs.already_promoted == 'true'
-        run: echo "Inspector deployment ${{ steps.inspector-deployment.outputs.deployment_url }} is already promoted."
+    uses: ./.github/workflows/promote-inspector-production.yml
+    secrets: inherit
