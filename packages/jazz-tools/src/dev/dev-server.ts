@@ -29,9 +29,6 @@ export interface StartLocalJazzServerOptions {
   upstreamUrl?: string;
   peerSecret?: string;
   allowLocalFirstAuth?: boolean;
-  catalogueAuthority?: "local" | "forward";
-  catalogueAuthorityUrl?: string;
-  catalogueAuthorityAdminSecret?: string;
   telemetryCollectorUrl?: string;
   enableLogs?: boolean;
 }
@@ -114,9 +111,6 @@ export async function startLocalJazzServer(
       upstreamUrl: options.upstreamUrl,
       peerSecret: options.peerSecret,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
-      catalogueAuthority: options.catalogueAuthority,
-      catalogueAuthorityUrl: options.catalogueAuthorityUrl,
-      catalogueAuthorityAdminSecret: options.catalogueAuthorityAdminSecret,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
     });
   } catch (error) {
