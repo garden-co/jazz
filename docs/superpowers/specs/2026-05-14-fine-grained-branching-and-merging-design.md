@@ -2,11 +2,11 @@
 
 ## Goal
 
-Add named, sparse branches for draft and collaborative editing.
+Add sparse branches for draft and collaborative editing.
 
 Branches provide write isolation by visibility only. A normal read from `main` does not see branch
-writes. Branch data is not secret: a caller with normal read permission may read a branch if they
-explicitly query that branch name.
+writes. Non-main branch ids are Jazz object ids, and access to a branch inherits from the normal
+permissions on that backing object.
 
 The first implementation supports branch reads and writes as overlays on `main`, scoped diffs from
 a branch query to `main`, and merges from a branch to `main`.
@@ -17,12 +17,15 @@ a branch query to `main`, and merges from a branch to `main`.
 - No branch lifecycle state such as open, closed, or archived.
 - No formal idempotence guarantee for merge. Repeating the same merge may create extra history.
 - No supported branch-of-branch API in the MVP.
-- No branch-level access control.
+- No branch-specific permission API in the MVP. Branch permissions inherit from backing object
+  permissions.
 
 ## Branch Model
 
-A branch is a normal branch name used in row history. It exists because rows have been written with
-that branch name.
+`main` is the reserved system branch. Every non-main branch id must be a Jazz object id. The object
+that owns that id is the branch's backing object for permissions.
+
+A branch exists because rows have been written with that branch id.
 
 Example:
 
@@ -30,7 +33,7 @@ Example:
 main
   todo-1: m3
 
-draft/alice
+project-1
   todo-1: b1, parent = main:m3
 ```
 
@@ -43,8 +46,49 @@ The MVP fallback chain is always:
 branch -> main
 ```
 
-Because there is no branch registry, the system has no durable source for a longer fallback chain.
-Branch-of-branch can be added later, but it needs an explicit ancestry mechanism.
+Because there is no branch registry or branch ancestry metadata, the system has no durable source
+for a longer fallback chain. Branch-of-branch can be added later, but it needs an explicit ancestry
+mechanism.
+
+## Permission Model
+
+Branch permissions inherit from the branch backing object.
+
+There is no separate branch creation API. Creating a branch means creating the backing object through
+normal `db.insert(...)`, then using that object's Jazz-created id as the branch id.
+
+```ts
+const { value: project } = db.insert(app.projects, {
+  name: "Website redesign",
+  ownerId: session.user_id,
+});
+
+const draft = db.branch(project.id);
+```
+
+The common app pattern is that a user who can insert a project also creates it with fields that make
+the project readable and updatable by that same user. After creation, branch access follows the
+normal read/update policy for the created project row.
+
+In enforcing runtimes:
+
+- `db.branch(objectId)` must resolve `objectId` to a visible backing object.
+- Branch reads and query-builder branch reads require read permission on the backing object.
+- Branch writes require update permission on the backing object.
+- Branch diff requires read permission on the backing object.
+- Branch merge requires update permission on the backing object and must also pass normal target-row
+  write permissions on `main`.
+
+Normal row and table permissions still apply to the data read or written through the branch. The
+backing object permission is an additional gate for using the branch id; it does not grant access to
+unrelated rows.
+
+In permissive local runtimes without a loaded permission bundle, branch id object resolution may be
+best-effort, matching existing local permissive behavior. Enforcing runtimes must fail closed if the
+backing object cannot be resolved or is not allowed by policy.
+
+Branch-specific permission hooks, such as `allowBranchRead` or `allowBranchMerge`, are future work.
+The MVP keeps the rule simple by inheriting from normal object permissions.
 
 ## Parent Links
 
@@ -68,52 +112,57 @@ Example:
 main
   m3
 
-draft/alice
+project-1
   b1 parent = main:m3
-  b2 parent = draft/alice:b1
+  b2 parent = project-1:b1
 ```
 
 For merge, write normal rows to `main` with parents from both sides:
 
 ```text
 main
-  m4 parent = [main:m3, draft/alice:b2]
+  m4 parent = [main:m3, project-1:b2]
 ```
 
 That records that `main` incorporated the branch state.
 
 Parent references must be resolvable across branches. For branch and merge ancestry, the logical
-parent reference is `(branch_name, batch_id)`. The row id is implicit because parent lists are
+parent reference is `(branch_id, batch_id)`. The row id is implicit because parent lists are
 row-local.
 
 Durable storage may compact same-branch parents, but cross-branch parents must preserve the branch
-name. Implementations must not rely on a bare `batch_id` being enough to resolve parent history.
+id. Implementations must not rely on a bare `batch_id` being enough to resolve parent history.
 
 ## API Shape
 
-Expose branch names directly.
+Expose branch object ids directly.
 
 ```ts
-db.branch("draft/alice");
-app.todos.branch("draft/alice").where({ projectId }).diff("main");
-db.branch("draft/alice").merge();
+const { value: project } = db.insert(app.projects, {
+  name: "Website redesign",
+  ownerId: session.user_id,
+});
+
+db.branch(project.id);
+app.todos.branch(project.id).where({ projectId: project.id }).diff("main");
+db.branch(project.id).merge();
 ```
 
-`db.branch(name)` returns a branch-scoped database view. Reads use overlay behavior. Writes target
-the branch name.
+`db.branch(objectId)` returns a branch-scoped database view. Reads use overlay behavior. Writes
+target the branch id.
 
 The query builder must also accept a branch selector. Query-builder branch selection uses the same
-overlay semantics as `db.branch(name)`. If a query is built from a branch-scoped database view and
-also selects a branch directly, the query-level branch wins because it is the closest explicit
+overlay semantics as `db.branch(objectId)`. If a query is built from a branch-scoped database view
+and also selects a branch directly, the query-level branch wins because it is the closest explicit
 choice.
 
 Diff is exposed through the query builder, not as a whole-branch API. Callers scope the diff by
 building the query they want to inspect, then call `.diff(targetBranch)`.
 
-Merge is exposed on the branch-scoped database view. `db.branch(source).merge(target?)` merges the
-source branch into the target branch. `target` defaults to `"main"`. The MVP should only support
-target `"main"` unless the implementation explicitly supports more. `merge(...)` must reject a
-target equal to the source branch.
+Merge is exposed on the branch-scoped database view. `db.branch(sourceObjectId).merge(target?)`
+merges the source branch into the target branch. `target` defaults to `"main"`. The MVP should only
+support target `"main"` unless the implementation explicitly supports more. `merge(...)` must
+reject a target equal to the source branch.
 
 ## Read Semantics
 
@@ -135,8 +184,8 @@ minus main rows overridden or deleted on branch
 plus branch rows that match the query
 ```
 
-Deletes require branch tombstones. If `main` has `todo-1` and `draft/alice` deletes it, reads from
-`draft/alice` must hide `todo-1` even though it still exists on `main`.
+Deletes require branch tombstones. If `main` has `todo-1` and `project-1` deletes it, reads from
+`project-1` must hide `todo-1` even though it still exists on `main`.
 
 Branch indexes must reflect branch rows. Query planning must understand that a branch row overrides
 the corresponding main row.
@@ -146,7 +195,7 @@ the corresponding main row.
 Query-builder diff compares a source branch query with a target branch.
 
 ```ts
-app.todos.branch("draft/alice").where({ projectId }).diff("main");
+app.todos.branch(project.id).where({ projectId: project.id }).diff("main");
 ```
 
 The source branch comes from the query builder's `.branch(...)` selection, or from the enclosing
@@ -272,11 +321,11 @@ branch's visible row, the same way MVP branch writes parent to `main`.
 The missing piece is read fallback ancestry:
 
 ```text
-feature/bob -> draft/alice -> main
+task-1 -> project-1 -> main
 ```
 
-Without a branch registry or explicit parent branch argument, this chain is ambiguous. Do not expose
-branch-of-branch until there is a clear ancestry source.
+Without explicit parent branch metadata, this chain is ambiguous. Do not expose branch-of-branch
+until there is a clear ancestry source.
 
 ## Testing
 
@@ -286,6 +335,10 @@ Required coverage:
 
 - branch write is invisible from `main`
 - branch read falls back to current `main`
+- non-main branch ids must be Jazz object ids
+- enforcing runtimes deny branch access when the backing object is not readable
+- branch writes require update permission on the backing object
+- merge requires update permission on the backing object plus normal target-row write permission
 - query-builder branch selection uses branch overlay reads
 - query-level branch selection overrides a branch-scoped database default
 - query-builder diff compares the selected source branch with the target branch
@@ -302,7 +355,7 @@ Required coverage:
 - repeated merge may create extra history while visible result remains stable
 - concurrent repeated merges can produce a diamond without double-applying the same source change
 - cross-branch parent links resolve correctly
-- cross-branch parent refs include branch name plus batch id
+- cross-branch parent refs include branch id plus batch id
 - diff reports an error for unresolved parent/common-ancestor state
 - query-builder diff scope is the union of source-query and target-query matches
 - diff returns query-shaped rows with `$diff` magic-column metadata

@@ -5,7 +5,7 @@ This spec explains the user-facing shape of branches in Jazz. The technical desi
 
 ## What Branches Mean In Jazz
 
-Branches are draft spaces for app data, identified by stable branch ids.
+Branches are draft spaces for app data, identified by stable Jazz object ids.
 
 A branch lets an app or user make changes without changing what normal `main` readers see. This is
 useful for draft workflows, collaborative editing, review screens, and "try this before publishing"
@@ -15,8 +15,7 @@ The first version provides **write visibility isolation**:
 
 - Writes made on a branch id do not appear in normal `main` reads.
 - Reads from that branch id see current `main` plus the branch's own changed rows.
-- Branch data is not secret. A caller with normal read permission can read a branch if they
-  explicitly ask for that branch id.
+- Branch access inherits from the normal permissions on the object id passed to `db.branch(...)`.
 - Branches are sparse. Jazz stores only rows changed on the branch, not a full copy of `main`.
 
 That means a branch initially behaves like a lightweight overlay:
@@ -36,42 +35,71 @@ Future improvements can strengthen this model:
 - **Branch ancestry:** a branch could be based on another branch, not only on `main`.
 - **Query-based isolation:** a branch-like workflow could be scoped to one query or subset of data,
   instead of a named branch that can touch any row.
-- **Built-in branch metadata helpers:** Jazz could provide a default branch metadata schema and
-  helpers for branch listing, display names, closed branches, or explicit branch cleanup later.
+- **Branch-specific permissions:** apps could later override the inherited object permissions with
+  explicit branch permission hooks.
+- **Built-in branch metadata helpers:** Jazz could later provide optional helpers for branch
+  listing, display names, closed branches, or explicit branch cleanup.
 
 These are future improvements. The first version keeps branches sparse and simple.
 
 ## User-Facing APIs
 
-Branch ids are passed directly to the core APIs. There is no required branch registry in the first
-version.
+Branch ids are passed directly to the core APIs. A non-`main` branch id must be a Jazz object id.
+There is no required branch registry in the first version.
 
-Real apps should usually store branch metadata in a normal app table and use that row's Jazz-created
-id as the branch id. This avoids global name collisions, lets apps rename branches by updating a
-display field, and gives apps a normal place to store permissions and lifecycle state.
+The object id can come from whatever app object scopes the draft. For example, if a project owns the
+draft workflow, use the project row id as the branch id.
 
-Jazz can provide a default branch metadata schema later, but it should be userland data, not a
-required part of core branch reads, diffs, or merges. Apps should be able to extend it with their
-own fields.
+This keeps branch creation simple: create the app object, then branch on that object's id. Jazz
+creates the row id; the app does not manually create a branch id.
 
 ```ts
-const { value: branch } = db.insert(app.branches, {
-  name: "Alice draft",
-  ownerId: alice.id,
-  status: "open",
+const { value: project } = db.insert(app.projects, {
+  name: "Website redesign",
+  ownerId: session.user_id,
 });
 
-const draft = db.branch(branch.id);
+const draft = db.branch(project.id);
 ```
 
-Here Jazz creates `branch.id`. The app does not manually create the branch id.
+Here `project.id` is both the project row id and the branch id.
+
+### Inherited Permissions
+
+Branch access inherits from the normal permissions on the backing object.
+
+For `db.branch(project.id)`, the backing object is the `projects` row with id `project.id`.
+
+```ts
+export default definePermissions(app, ({ policy, session }) => {
+  policy.projects.allowRead.where({ ownerId: session.user_id });
+  policy.projects.allowInsert.where({ ownerId: session.user_id });
+  policy.projects.allowUpdate.where({ ownerId: session.user_id });
+});
+```
+
+In this example:
+
+- creating a project creates an object id that can be used as a branch id
+- the common pattern is that the created project is readable and updatable by its creator
+- reading from `db.branch(project.id)` requires read permission on the project
+- writing through `db.branch(project.id)` requires update permission on the project
+- diffing from `db.branch(project.id)` requires read permission on the project
+- merging `db.branch(project.id)` requires update permission on the project and normal write
+  permission for the rows written to `main`
+
+Normal row permissions still apply to the data inside the branch. Being allowed to use
+`db.branch(project.id)` does not bypass table permissions for todos, comments, or other rows.
+
+Branch-specific permission hooks are future work. The first version only uses inherited object
+permissions.
 
 ### Branch-Scoped Database View
 
 `db.branch(branchId)` returns a database view where reads and writes use that branch.
 
 ```ts
-const draft = db.branch(branch.id);
+const draft = db.branch(project.id);
 
 await draft.insert(app.todos, {
   projectId,
@@ -89,8 +117,8 @@ Queries can select a branch directly.
 ```ts
 const rows = await db.all(
   app.todos
-    .branch(branch.id)
-    .where({ projectId }),
+    .branch(project.id)
+    .where({ projectId: project.id }),
 );
 ```
 
@@ -99,16 +127,16 @@ Query-level branch selection uses the same overlay behavior as `db.branch(branch
 If both are present, the query-level branch wins:
 
 ```ts
-const draft = db.branch(aliceBranch.id);
+const draft = db.branch(aliceProject.id);
 
 const rows = await draft.all(
   app.todos
-    .branch(bobBranch.id)
-    .where({ projectId }),
+    .branch(bobProject.id)
+    .where({ projectId: bobProject.id }),
 );
 ```
 
-This query reads `bobBranch.id`, not `aliceBranch.id`.
+This query reads `bobProject.id`, not `aliceProject.id`.
 
 ### Query Builder Diff
 
@@ -117,8 +145,8 @@ Diff is exposed on the query builder.
 ```ts
 const diff = await db.all(
   app.todos
-    .branch(branch.id)
-    .where({ projectId })
+    .branch(project.id)
+    .where({ projectId: project.id })
     .diff("main"),
 );
 ```
@@ -164,8 +192,8 @@ edit moved it out of the query filter.
 Merging writes branch changes back to `main`.
 
 ```ts
-await db.branch(branch.id).merge();
-await db.branch(branch.id).merge("main");
+await db.branch(project.id).merge();
+await db.branch(project.id).merge("main");
 ```
 
 Merge uses the same merge strategies as diff, but it does not stop just because diff would report
@@ -185,9 +213,10 @@ double-apply the same branch change.
 
 An app can use the APIs like this:
 
-1. Create a normal `branches` row and use its Jazz-created row id as the branch id.
-2. Write draft changes through `db.branch(branch.id)`.
-3. Render draft views with query-builder `.branch(branch.id)`.
-4. Preview publish impact with query-builder `.diff("main")`.
-5. Show changed rows using the normal row fields plus `$diff`.
-6. Publish with `db.branch(branch.id).merge()`.
+1. Create the app object that scopes the draft, such as a project.
+2. Use that object's Jazz-created row id as the branch id.
+3. Write draft changes through `db.branch(project.id)`.
+4. Render draft views with query-builder `.branch(project.id)`.
+5. Preview publish impact with query-builder `.diff("main")`.
+6. Show changed rows using the normal row fields plus `$diff`.
+7. Publish with `db.branch(project.id).merge()`.
