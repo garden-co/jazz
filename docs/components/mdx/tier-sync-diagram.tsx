@@ -109,20 +109,31 @@ const INITIAL_COLORS: ColorState = {
   charlie: INITIAL_COLOR,
 };
 
-const PALETTE = [
-  "#ef4444",
-  "#f97316",
-  "#eab308",
-  "#22c55e",
-  "#06b6d4",
-  "#3b82f6",
-  "#8b5cf6",
-  "#ec4899",
-];
+// Random saturated HSL. Reject anything within MIN_HUE_GAP of the writer's
+// previous hue so consecutive clicks visibly change colour.
+const MIN_HUE_GAP = 40;
+
+function parseHue(color: string | null): number | null {
+  if (!color) return null;
+  const m = /hsl\(\s*(-?\d+(?:\.\d+)?)/.exec(color);
+  return m ? Number(m[1]) : null;
+}
+
+function hueDistance(a: number, b: number): number {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
 
 function pickNextColor(current: string | null): string {
-  const choices = PALETTE.filter((c) => c !== current);
-  return choices[Math.floor(Math.random() * choices.length)];
+  const prev = parseHue(current);
+  let hue = Math.floor(Math.random() * 360);
+  if (prev !== null) {
+    for (let i = 0; i < 8 && hueDistance(hue, prev) < MIN_HUE_GAP; i++) {
+      hue = Math.floor(Math.random() * 360);
+    }
+  }
+  const saturation = 75 + Math.floor(Math.random() * 20); // 75–94%
+  return `hsl(${hue} ${saturation}% 50%)`;
 }
 
 type WriteEvent = {
