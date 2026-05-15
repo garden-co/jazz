@@ -10,7 +10,6 @@ const requiredEnv = {
   VERCEL_ORG_ID: "team_alice",
   VERCEL_PROJECT_ID: "project_inspector",
   VERCEL_TOKEN: "vercel_token",
-  RELEASE_SHA: "abc123",
 };
 
 function makeOutputFile() {
@@ -31,7 +30,7 @@ function jsonResponse(body, init = {}) {
   };
 }
 
-test("resolveInspectorDeployment writes GitHub output for a staged deployment", async () => {
+test("resolveInspectorDeployment writes GitHub output for the latest staged deployment from main", async () => {
   const outputFile = makeOutputFile();
   const requests = [];
   const logs = [];
@@ -71,13 +70,14 @@ test("resolveInspectorDeployment writes GitHub output for a staged deployment", 
   );
   assert.equal(requests.length, 1);
   assert.equal(requests[0].authorization, "Bearer vercel_token");
-  assert.match(requests[0].url, /^https:\/\/api\.vercel\.com\/v6\/deployments\?/);
-  assert.match(requests[0].url, /projectId=project_inspector/);
-  assert.match(requests[0].url, /target=production/);
-  assert.match(requests[0].url, /state=READY/);
-  assert.match(requests[0].url, /branch=main/);
-  assert.match(requests[0].url, /sha=abc123/);
-  assert.match(requests[0].url, /teamId=team_alice/);
+  const requestUrl = new URL(requests[0].url);
+  assert.equal(requestUrl.origin + requestUrl.pathname, "https://api.vercel.com/v6/deployments");
+  assert.equal(requestUrl.searchParams.get("projectId"), "project_inspector");
+  assert.equal(requestUrl.searchParams.get("target"), "production");
+  assert.equal(requestUrl.searchParams.get("state"), "READY");
+  assert.equal(requestUrl.searchParams.get("branch"), "main");
+  assert.equal(requestUrl.searchParams.has("sha"), false);
+  assert.equal(requestUrl.searchParams.get("teamId"), "team_alice");
   assert.deepEqual(logs, [
     "Resolved inspector deployment: jazz-inspector-git-main-alice.vercel.app state=READY target=production substate=STAGED",
   ]);
@@ -112,6 +112,45 @@ test("resolveInspectorDeployment marks an already promoted deployment", async ()
   );
 });
 
+test("resolveInspectorDeployment uses the latest main deployment before older staged deployments", async () => {
+  const outputFile = makeOutputFile();
+
+  const result = await resolveInspectorDeployment({
+    env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+    fetchImpl: async () =>
+      jsonResponse({
+        deployments: [
+          {
+            url: "jazz-inspector-latest-main.vercel.app",
+            readyState: "READY",
+            target: "production",
+            readySubstate: "PROMOTED",
+          },
+          {
+            url: "jazz-inspector-older-main.vercel.app",
+            readyState: "READY",
+            target: "production",
+            readySubstate: "STAGED",
+          },
+        ],
+      }),
+    log: () => {},
+  });
+
+  assert.deepEqual(result, {
+    deploymentUrl: "https://jazz-inspector-latest-main.vercel.app",
+    alreadyPromoted: true,
+  });
+  assert.equal(
+    fs.readFileSync(outputFile, "utf8"),
+    [
+      "deployment_url=https://jazz-inspector-latest-main.vercel.app",
+      "already_promoted=true",
+      "",
+    ].join("\n"),
+  );
+});
+
 test("resolveInspectorDeployment reports the last matching deployments when none is staged", async () => {
   const outputFile = makeOutputFile();
   const sleeps = [];
@@ -137,7 +176,7 @@ test("resolveInspectorDeployment reports the last matching deployments when none
         sleeps.push(delayMs);
       },
     }),
-    /No staged inspector production deployment found for abc123\.[\s\S]*jazz-inspector-main\.vercel\.app state=READY target=production substate=QUEUED/,
+    /No staged inspector production deployment found on main\.[\s\S]*jazz-inspector-main\.vercel\.app state=READY target=production substate=QUEUED/,
   );
   assert.deepEqual(sleeps, [5]);
   assert.equal(fs.existsSync(outputFile), false);
