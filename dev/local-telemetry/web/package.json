@@ -1,0 +1,20 @@
+{
+  "name": "local-telemetry-viewer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Embedded sync-flow viewer for the dev/local-telemetry collector. Sources are bundled in-process by the Go binary via esbuild — this package exists for type-checking and dependency hoisting only.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.62.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "catalog:default"
+  }
+}

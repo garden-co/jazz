@@ -129,15 +129,24 @@ Histograms and exponential histograms aren't pre-flattened — query them from
 
 ```
 dev/local-telemetry/
-├── main.go          flags, signals, errgroup
-├── collector.go     embedded OTel collector + in-memory confmap
-├── sql.go           DuckDB views + /sql + /health handlers
-├── ui.go            esbuild bundle + /, /main.js handlers
-├── web/             TSX sources (//go:embed-ed)
-│   ├── index.html   import-map + #root
-│   ├── main.tsx, App.tsx, Flow.tsx, flowRows.ts, api.ts
-└── data/            JSONL output (gitignored)
+├── main.go              flags, signals, errgroup
+├── collector.go         embedded OTel collector + in-memory confmap
+├── sql.go               DuckDB views + /sql + /health handlers
+├── ui.go                esbuild bundle + /, /main.js handlers
+├── web/                 pnpm workspace package: local-telemetry-viewer
+│   ├── package.json     react / react-dom / @tanstack/react-query (for type-checking)
+│   ├── tsconfig.json
+│   └── src/             TSX sources (//go:embed-ed by ui.go)
+│       ├── index.html   import-map + #root
+│       └── main.tsx, App.tsx, Flow.tsx, flowRows.ts, api.ts
+└── data/                JSONL output (gitignored)
 ```
+
+The `web/` package exists for type-checking and editor integration only —
+`pnpm --filter local-telemetry-viewer typecheck` runs `tsc --noEmit`. The
+deps in its `package.json` are never bundled into the runtime output:
+esbuild marks them `external` and the browser resolves them via the
+import-map in `index.html`.
 
 ## Retention
 
