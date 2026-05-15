@@ -376,62 +376,69 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     pub(crate) auth_failure_callback: Option<Box<dyn Fn(String) + Send + 'static>>,
 }
 
+fn recover_pending_mutation_error_events<S: Storage>(
+    storage: &S,
+    acknowledged_rejected_batches: &HashSet<BatchId>,
+) -> BTreeMap<BatchId, MutationErrorEvent> {
+    let mut events = BTreeMap::new();
+
+    for mut record in storage.scan_local_batch_records().unwrap_or_default() {
+        let fate = record.latest_fate.clone().or_else(|| {
+            storage
+                .load_authoritative_batch_fate(record.batch_id)
+                .ok()
+                .flatten()
+        });
+        let Some(fate) = fate else {
+            continue;
+        };
+        let crate::batch_fate::BatchFate::Rejected {
+            batch_id,
+            code,
+            reason,
+        } = &fate
+        else {
+            continue;
+        };
+        if acknowledged_rejected_batches.contains(batch_id) {
+            continue;
+        }
+        record.latest_fate = Some(fate.clone());
+        events.insert(
+            *batch_id,
+            MutationErrorEvent {
+                code: code.clone(),
+                reason: reason.clone(),
+                batch: record,
+            },
+        );
+    }
+
+    events
+}
+
+fn should_recover_pending_mutation_error_events(schema_manager: &SchemaManager) -> bool {
+    schema_manager
+        .query_manager()
+        .sync_manager()
+        .max_local_durability_tier()
+        .is_none_or(|tier| tier < DurabilityTier::EdgeServer)
+}
+
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
-        // let rejected_batch_fates = storage
-        //     .scan_authoritative_batch_fates()
-        //     .map(|fates| {
-        //         fates
-        //             .into_iter()
-        //             .filter(|fate| matches!(fate, crate::batch_fate::BatchFate::Rejected { .. }))
-        //             .collect::<Vec<_>>()
-        //     })
-        //     .unwrap_or_default();
         let acknowledged_rejected_batches: HashSet<BatchId> = storage
             .scan_acknowledged_rejected_batch_fates()
             .map(|batch_ids| batch_ids.into_iter().collect())
             .unwrap_or_default();
-        // let pending_mutation_error_events: BTreeMap<BatchId, MutationErrorEvent> =
-        //     rejected_batch_fates
-        //         .iter()
-        //         .filter_map(|fate| {
-        //             let crate::batch_fate::BatchFate::Rejected {
-        //                 batch_id,
-        //                 code,
-        //                 reason,
-        //             } = fate
-        //             else {
-        //                 return None;
-        //             };
-        //             if acknowledged_rejected_batches.contains(batch_id) {
-        //                 return None;
-        //             }
-        //             Some((
-        //                 *batch_id,
-        //                 MutationErrorEvent {
-        //                     code: code.clone(),
-        //                     reason: reason.clone(),
-        //                     batch: crate::batch_fate::LocalBatchRecord::new(
-        //                         *batch_id,
-        //                         crate::batch_fate::BatchMode::Direct,
-        //                         true,
-        //                         Some(fate.clone()),
-        //                     ),
-        //                 },
-        //             ))
-        //         })
-        //         .collect();
-
-        // If a crash landed between "persist rejection settlement" and
-        // "delete visible row + retract subscriptions", lingering visible
-        // rows would render on reload and then get retracted by the next
-        // network-delivered settlement — a visible flash. Re-apply stored
-        // rejections before any query can observe the visible region.
-        // for fate in rejected_batch_fates {
-        //     core.mark_local_batch_rows_rejected(fate.batch_id());
-        // }
+        let pending_mutation_error_events =
+            if should_recover_pending_mutation_error_events(&schema_manager) {
+                recover_pending_mutation_error_events(&storage, &acknowledged_rejected_batches)
+            } else {
+                BTreeMap::new()
+            };
 
         Self {
             schema_manager,
@@ -449,7 +456,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             next_subscription_handle: 0,
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
-            durability: DurabilityTracker::with_initial_mutation_error_events(BTreeMap::new()),
+            durability: DurabilityTracker::with_initial_mutation_error_events(
+                pending_mutation_error_events,
+            ),
             mutation_error_callback: None,
             rejected_batch_acknowledged_callback: None,
             acknowledged_rejected_batches,
