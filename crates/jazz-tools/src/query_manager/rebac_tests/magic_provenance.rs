@@ -146,6 +146,23 @@ fn magic_columns_return_null_without_session_and_do_not_change_default_output_sh
 }
 
 #[test]
+fn diff_magic_column_projects_as_nullable_json_placeholder() {
+    let schema = magic_introspection_schema();
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    qm.insert(&mut storage, "protected", &[Value::Text("initial".into())])
+        .expect("seed protected row");
+
+    let query = qm.query("protected").select(&["data", "$diff"]).build();
+    let rows = query_rows(&mut qm, &mut storage, query, None);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, vec![Value::Text("initial".into()), Value::Null]);
+}
+
+#[test]
 fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     let sync_manager = SyncManager::new();
     let schema = provenance_notes_schema();

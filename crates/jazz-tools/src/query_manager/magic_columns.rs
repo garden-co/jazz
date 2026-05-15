@@ -9,6 +9,7 @@ pub enum MagicColumnKind {
     CreatedAt,
     UpdatedBy,
     UpdatedAt,
+    Diff,
 }
 
 impl MagicColumnKind {
@@ -21,6 +22,7 @@ impl MagicColumnKind {
             MagicColumnKind::CreatedAt => "$createdAt",
             MagicColumnKind::UpdatedBy => "$updatedBy",
             MagicColumnKind::UpdatedAt => "$updatedAt",
+            MagicColumnKind::Diff => "$diff",
         }
     }
 }
@@ -34,6 +36,7 @@ pub fn magic_column_kind(name: &str) -> Option<MagicColumnKind> {
         "$createdAt" => Some(MagicColumnKind::CreatedAt),
         "$updatedBy" => Some(MagicColumnKind::UpdatedBy),
         "$updatedAt" => Some(MagicColumnKind::UpdatedAt),
+        "$diff" => Some(MagicColumnKind::Diff),
         _ => None,
     }
 }

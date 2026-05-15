@@ -1105,6 +1105,13 @@ impl WasmRuntime {
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
+    #[wasm_bindgen(js_name = mergeBranch)]
+    pub fn merge_branch(&self, source_branch_name: &str) -> Result<(), JsError> {
+        let mut core = self.core.borrow_mut();
+        core.merge_branch(source_branch_name)
+            .map_err(|e| JsError::new(&format!("Merge branch failed: {e}")))
+    }
+
     // =========================================================================
     // Persisted CRUD Operations
     // =========================================================================

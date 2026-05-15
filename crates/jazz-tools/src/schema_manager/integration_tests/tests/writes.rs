@@ -284,6 +284,154 @@ fn transactional_insert_uses_frozen_target_branch_schema() {
 }
 
 #[test]
+fn insert_accepts_same_schema_app_branch_target() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text),
+        )
+        .build();
+
+    let mut manager =
+        SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+    let mut storage = MemoryStorage::new();
+    let current_branch = manager.branch_name().as_str().to_string();
+    let app_branch = ObjectId::new().to_string();
+    let target_branch = format!("dev-{}-{app_branch}", manager.current_hash().short());
+    let mixed_case_target_branch = format!(
+        "dev-{}-{}",
+        manager.current_hash().short(),
+        app_branch.to_uppercase()
+    );
+
+    let write_context = WriteContext::default().with_target_branch_name(mixed_case_target_branch);
+    let inserted = manager
+        .insert_with_write_context(
+            &mut storage,
+            "users",
+            HashMap::from([
+                ("id".to_string(), Value::Uuid(ObjectId::new())),
+                ("name".to_string(), Value::Text("Alice".to_string())),
+            ]),
+            Some(&write_context),
+        )
+        .expect("same-schema app branch target should be accepted");
+
+    let target_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users").branch(&target_branch).build(),
+    );
+    assert_eq!(target_rows.len(), 1);
+    assert_eq!(target_rows[0].0, inserted.row_id);
+    assert!(
+        target_rows[0]
+            .1
+            .iter()
+            .any(|value| value == &Value::Text("Alice".to_string()))
+    );
+
+    manager
+        .update_with_write_context(
+            &mut storage,
+            inserted.row_id,
+            &[("name".to_string(), Value::Text("Alice Draft".to_string()))],
+            Some(&write_context),
+        )
+        .expect("same-schema app branch update should find the branch-only row");
+
+    let target_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users")
+            .branch(target_branch.clone())
+            .build(),
+    );
+    assert_eq!(target_rows.len(), 1);
+    assert!(
+        target_rows[0]
+            .1
+            .iter()
+            .any(|value| value == &Value::Text("Alice Draft".to_string()))
+    );
+
+    manager
+        .delete(&mut storage, inserted.row_id, Some(&write_context))
+        .expect("same-schema app branch delete should find the branch-only row");
+
+    let target_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users").branch(target_branch).build(),
+    );
+    assert!(
+        target_rows.is_empty(),
+        "app branch delete should hide the branch-only row"
+    );
+
+    let current_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users").branch(current_branch).build(),
+    );
+    assert!(
+        current_rows.is_empty(),
+        "app branch write should not land on the runtime current branch"
+    );
+}
+
+#[test]
+fn insert_rejects_app_branch_target_with_wrong_env_or_hash() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text),
+        )
+        .build();
+
+    let mut manager =
+        SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+    let app_branch = ObjectId::new().to_string();
+    let current_hash = manager.current_hash();
+
+    let wrong_env = format!("prod-{}-{app_branch}", current_hash.short());
+    let err = manager
+        .insert_with_write_context(
+            &mut MemoryStorage::new(),
+            "users",
+            HashMap::from([
+                ("id".to_string(), Value::Uuid(ObjectId::new())),
+                ("name".to_string(), Value::Text("Alice".to_string())),
+            ]),
+            Some(&WriteContext::default().with_target_branch_name(wrong_env)),
+        )
+        .expect_err("wrong-env app branch target should be rejected");
+    assert!(
+        matches!(err, QueryError::EncodingError(ref msg) if msg.contains("outside the current environment")),
+        "unexpected error: {err:?}"
+    );
+
+    let wrong_hash = format!("dev-111111111111-{app_branch}");
+    let err = manager
+        .insert_with_write_context(
+            &mut MemoryStorage::new(),
+            "users",
+            HashMap::from([
+                ("id".to_string(), Value::Uuid(ObjectId::new())),
+                ("name".to_string(), Value::Text("Alice".to_string())),
+            ]),
+            Some(&WriteContext::default().with_target_branch_name(wrong_hash)),
+        )
+        .expect_err("wrong-schema app branch target should be rejected");
+    assert!(
+        matches!(err, QueryError::UnknownSchema(_)),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
 fn transactional_insert_rejects_target_branch_outside_current_family() {
     let schema = SchemaBuilder::new()
         .table(
@@ -317,7 +465,7 @@ fn transactional_insert_rejects_target_branch_outside_current_family() {
         .expect_err("cross-family target branch should be rejected");
 
     assert!(
-        matches!(err, QueryError::EncodingError(ref msg) if msg.contains("outside the current schema family")),
+        matches!(err, QueryError::EncodingError(ref msg) if msg.contains("outside the current environment")),
         "unexpected error: {err:?}"
     );
 }

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { Db, createDbFromClient, type TableProxy } from "./db.js";
+import { Db, createDbFromClient, type QueryBuilder, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import {
   WriteResult,
   WriteHandle,
+  composeStorageBranchName,
   type JazzClient,
   type LocalBatchRecord,
   type Row,
@@ -44,6 +45,41 @@ function todoTable() {
   >;
 }
 
+function todoQuery(extra: Record<string, unknown> = {}): QueryBuilder<{
+  id: string;
+  title: string;
+  done: boolean;
+}> {
+  const schema = todoSchema();
+  return {
+    _table: "todos",
+    _schema: schema,
+    _rowType: {} as { id: string; title: string; done: boolean },
+    _build() {
+      return JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        ...extra,
+      });
+    },
+  };
+}
+
+const TEST_SCHEMA_HASH = "aaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+function testBranchTargetName(branchId: string): string {
+  return composeStorageBranchName({ env: "dev", schema_hash: TEST_SCHEMA_HASH }, branchId);
+}
+
+function branchTargetNameSupport() {
+  return {
+    getSchemaHash: () => TEST_SCHEMA_HASH,
+    branchTargetName: vi.fn((branchId: string) => testBranchTargetName(branchId)),
+  };
+}
+
 function makeLocalBatchRecord(batchId: string): LocalBatchRecord {
   return {
     batchId,
@@ -82,6 +118,199 @@ function makeWriteHandle(batchId: string, localBatchRecord = makeLocalBatchRecor
 }
 
 describe("Db write handles", () => {
+  it("validates branch ids for branch-scoped views", () => {
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    expect(db.branch("main").branchId).toBe("main");
+    expect(db.branch("01963f3e-5cbe-7a62-8d7c-123456789abc").branchId).toBe(
+      "01963f3e-5cbe-7a62-8d7c-123456789abc",
+    );
+    expect(db.branch("01963F3E-5CBE-7A62-8D7C-123456789ABC").branchId).toBe(
+      "01963f3e-5cbe-7a62-8d7c-123456789abc",
+    );
+    expect(() => db.branch("")).toThrow("Invalid branch id");
+    expect(() => db.branch("feature")).toThrow("Invalid branch id");
+  });
+
+  it("routes branch-scoped writes through branch write context", () => {
+    const table = todoTable();
+    const branchId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const { handle: insertHandle } = makeWriteResult(
+      {
+        id: "todo-branch",
+        values: [
+          { type: "Text", value: "Branch write" },
+          { type: "Boolean", value: false },
+        ],
+      },
+      "batch-branch-insert",
+    );
+    const { handle: updateHandle } = makeWriteHandle("batch-branch-update");
+    const { handle: deleteHandle } = makeWriteHandle("batch-branch-delete");
+    const createHandleInternal = vi.fn(() => insertHandle);
+    const updateHandleInternal = vi.fn(() => updateHandle);
+    const deleteHandleInternal = vi.fn(() => deleteHandle);
+    const client = {
+      ...branchTargetNameSupport(),
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      createHandleInternal,
+      updateHandleInternal,
+      deleteHandleInternal,
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const branch = db.branch(branchId);
+
+    branch.insert(table, { title: "Branch write", done: false });
+    branch.update(table, "todo-branch", { done: true });
+    branch.delete(table, "todo-branch");
+
+    expect(createHandleInternal).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Branch write" },
+        done: { type: "Boolean", value: false },
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      testBranchTargetName(branchId),
+    );
+    expect(updateHandleInternal).toHaveBeenCalledWith(
+      "todo-branch",
+      {
+        done: { type: "Boolean", value: true },
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      testBranchTargetName(branchId),
+    );
+    expect(deleteHandleInternal).toHaveBeenCalledWith(
+      "todo-branch",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      testBranchTargetName(branchId),
+    );
+  });
+
+  it("routes client-backed branch writes through composed branch context", () => {
+    const table = todoTable();
+    const branchId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const { handle: insertHandle } = makeWriteResult(
+      {
+        id: "todo-client-backed-branch",
+        values: [
+          { type: "Text", value: "Client-backed branch write" },
+          { type: "Boolean", value: false },
+        ],
+      },
+      "batch-client-backed-branch-insert",
+    );
+    const createHandleInternal = vi.fn(() => insertHandle);
+    const db = createDbFromClient({ appId: "client-backed-branch-write-test" }, {
+      ...branchTargetNameSupport(),
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      createHandleInternal,
+    } as unknown as JazzClient);
+
+    db.branch(branchId).insert(table, {
+      title: "Client-backed branch write",
+      done: false,
+    });
+
+    expect(createHandleInternal).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Client-backed branch write" },
+        done: { type: "Boolean", value: false },
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      testBranchTargetName(branchId),
+    );
+  });
+
+  it("adds branch selection to branch-scoped queries only when query has no branch metadata", async () => {
+    const branchId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const queryCalls: string[] = [];
+    const client = {
+      ...branchTargetNameSupport(),
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      query: vi.fn(async (queryJson: string) => {
+        queryCalls.push(queryJson);
+        return [];
+      }),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const branch = db.branch(branchId);
+
+    await branch.all(todoQuery());
+    await branch.all(todoQuery({ branches: ["main"] }));
+
+    expect(JSON.parse(queryCalls[0] ?? "{}").branches).toEqual([testBranchTargetName(branchId)]);
+    expect(JSON.parse(queryCalls[1] ?? "{}").branches).toEqual([testBranchTargetName("main")]);
+  });
+
+  it("resolves branch ids in subscription queries", () => {
+    const branchId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const subscribe = vi.fn((_query: string) => 7);
+    const client = {
+      ...branchTargetNameSupport(),
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      subscribe,
+      unsubscribe: vi.fn(),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const unsubscribe = db.subscribeAll(todoQuery({ branches: [branchId] }), () => undefined);
+
+    expect(JSON.parse(subscribe.mock.calls[0]?.[0] ?? "{}").branches).toEqual([
+      testBranchTargetName(branchId),
+    ]);
+    unsubscribe();
+  });
+
+  it("rejects invalid branch ids from raw query metadata", async () => {
+    const client = {
+      ...branchTargetNameSupport(),
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      query: vi.fn(async () => []),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    await expect(db.all(todoQuery({ branches: ["draft"] }))).rejects.toThrow("Invalid branch id");
+  });
+
+  it("exposes honest branch merge plumbing", () => {
+    const mergeBranch = vi.fn();
+    const db = createDbFromClient({ appId: "branch-merge-test" }, {
+      ...branchTargetNameSupport(),
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      mergeBranch,
+    } as unknown as JazzClient);
+
+    db.branch("main").merge();
+
+    expect(mergeBranch).toHaveBeenCalledWith(testBranchTargetName("main"));
+
+    const dbWithoutMerge = createDbFromClient({ appId: "branch-merge-missing-test" }, {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+    } as unknown as JazzClient);
+
+    expect(() => dbWithoutMerge.branch("main").merge()).toThrow(
+      "Branch merge is not implemented by this runtime yet.",
+    );
+  });
+
   it("transforms inserted rows and waits for durability on the insert handle", async () => {
     const table = todoTable();
     const runtimeRow: Row = {

@@ -121,6 +121,38 @@ describe("typed app prototype", () => {
     });
   });
 
+  it("serializes branch and diff metadata without codegen", () => {
+    const branchId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const query = app.todos.branch(branchId).where({ title: "Write docs" }).diff();
+
+    expect(JSON.parse(query._build())).toEqual({
+      table: "todos",
+      conditions: [{ column: "title", op: "eq", value: "Write docs" }],
+      includes: {},
+      orderBy: [],
+      hops: [],
+      branches: [branchId],
+      diff: true,
+    });
+  });
+
+  it("rejects non-object branch ids in typed query builders", () => {
+    expect(() => app.todos.branch("draft")).toThrow("Invalid branch id");
+  });
+
+  it("types diff output as normal rows plus diff metadata", () => {
+    const query = app.todos.select("title").diff();
+    type DiffRow = (typeof query)["_rowType"];
+
+    expectTypeOf<DiffRow["id"]>().toEqualTypeOf<string>();
+    expectTypeOf<DiffRow["title"]>().toEqualTypeOf<string>();
+    expectTypeOf<NonNullable<DiffRow["$diff"]>["kind"]>().toEqualTypeOf<
+      "insert" | "update" | "delete" | "unchanged" | "error"
+    >();
+    expectTypeOf<NonNullable<DiffRow["$diff"]>["changed"]>().toEqualTypeOf<string[]>();
+    expectTypeOf<NonNullable<DiffRow["$diff"]>["conflicts"]>().toEqualTypeOf<string[]>();
+  });
+
   it("serializes nested include builders as query objects", () => {
     expect(
       JSON.parse(app.projects.include({ todosViaProject: app.todos.select("title") })._build()),

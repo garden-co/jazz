@@ -62,7 +62,8 @@ impl<'a> PolicyGraphBuildOptions<'a> {
 impl PolicyGraph {
     fn exists_rel_output_table(rel: &RelExpr, branch: &str) -> Option<TableName> {
         let branches = vec![branch.to_string()];
-        let plan = lower_relation_to_execution_plan(rel, &branches, false, Vec::new(), None)?;
+        let plan =
+            lower_relation_to_execution_plan(rel, &branches, false, false, Vec::new(), None)?;
         match plan.result_element_index {
             None | Some(0) => Some(plan.table),
             Some(index) => plan.joins.get(index - 1).map(|join| join.table),

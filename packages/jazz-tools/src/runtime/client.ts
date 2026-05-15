@@ -80,6 +80,7 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): PersistedMutationResult;
+  mergeBranch?(branch_id: string): void | Promise<void>;
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
   loadLocalBatchRecords?(): LocalBatchRecord[];
   drainRejectedBatchIds?(): string[];
@@ -360,7 +361,50 @@ type ArraySubqueryPlan = {
   nested: ArraySubqueryPlan[];
 };
 
-function resolveQueryJson(query: string | QueryInput): string {
+function builderBranchIds(value: Record<string, unknown>): string[] {
+  if (Array.isArray(value.branches)) {
+    return value.branches.filter((branch): branch is string => typeof branch === "string");
+  }
+  for (const key of ["branch", "branchId", "branch_id"]) {
+    const branch = value[key];
+    if (typeof branch === "string") {
+      return [branch];
+    }
+  }
+  return [];
+}
+
+function resolveBuilderBranchIds(
+  builderJson: string,
+  resolveBranch: (branchId: string) => string,
+): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(builderJson) as unknown;
+  } catch {
+    return builderJson;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return builderJson;
+  }
+  const value = parsed as Record<string, unknown>;
+  if ("relation_ir" in value) {
+    return builderJson;
+  }
+  const branches = builderBranchIds(value);
+  if (branches.length === 0) {
+    return builderJson;
+  }
+  return JSON.stringify({
+    ...value,
+    branches: branches.map(resolveBranch),
+  });
+}
+
+function resolveQueryJson(
+  query: string | QueryInput,
+  resolveBranch?: (branchId: string) => string,
+): string {
   if (typeof query === "string") {
     return query;
   }
@@ -381,7 +425,10 @@ function resolveQueryJson(query: string | QueryInput): string {
     return builtQuery;
   }
 
-  return translateQuery(builtQuery, schema);
+  const runtimeBuilderJson = resolveBranch
+    ? resolveBuilderBranchIds(builtQuery, resolveBranch)
+    : builtQuery;
+  return translateQuery(runtimeBuilderJson, schema);
 }
 
 function resolveRelationIrOutputTable(node: unknown): string | null {
@@ -666,12 +713,36 @@ type BatchWriteContext = {
   targetBranchName: string;
 };
 
+export const JAZZ_OBJECT_ID_PATTERN =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+export function normalizePublicBranchId(branchId: string): string {
+  const trimmed = branchId.trim();
+  if (trimmed === "main") {
+    return trimmed;
+  }
+  if (JAZZ_OBJECT_ID_PATTERN.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  throw new Error('Invalid branch id: expected "main" or a Jazz object id.');
+}
+
 function composeTargetBranchName(schemaContext: {
   env: string;
   schema_hash: string;
   user_branch: string;
 }): string {
   return `${schemaContext.env}-${schemaContext.schema_hash.slice(0, 12)}-${schemaContext.user_branch}`;
+}
+
+export function composeStorageBranchName(
+  schemaContext: {
+    env: string;
+    schema_hash: string;
+  },
+  branchId: string,
+): string {
+  return `${schemaContext.env}-${schemaContext.schema_hash.slice(0, 12)}-${normalizePublicBranchId(branchId)}`;
 }
 
 function generateBatchId(): string {
@@ -1724,11 +1795,24 @@ export class JazzClient {
     attribution?: string,
     batchContext?: BatchWriteContext,
     updatedAt?: number,
+    targetBranchName?: string,
   ): string | undefined {
-    if (!session && attribution === undefined && !batchContext && updatedAt === undefined) {
+    if (
+      !session &&
+      attribution === undefined &&
+      !batchContext &&
+      updatedAt === undefined &&
+      targetBranchName === undefined
+    ) {
       return undefined;
     }
-    if (attribution === undefined && session && !batchContext && updatedAt === undefined) {
+    if (
+      attribution === undefined &&
+      session &&
+      !batchContext &&
+      updatedAt === undefined &&
+      targetBranchName === undefined
+    ) {
       return JSON.stringify(session);
     }
 
@@ -1745,7 +1829,10 @@ export class JazzClient {
     if (batchContext) {
       payload.batch_mode = batchContext.batchMode;
       payload.batch_id = batchContext.batchId;
-      payload.target_branch_name = batchContext.targetBranchName;
+    }
+    const effectiveTargetBranchName = targetBranchName ?? batchContext?.targetBranchName;
+    if (effectiveTargetBranchName !== undefined) {
+      payload.target_branch_name = effectiveTargetBranchName;
     }
     return JSON.stringify(payload);
   }
@@ -1988,8 +2075,17 @@ export class JazzClient {
     attribution?: string,
     options?: CreateOptions,
     batchContext?: BatchWriteContext,
+    targetBranchName?: string,
   ): WriteResult<Row> {
-    const row = this.createInternal(table, values, session, attribution, options, batchContext);
+    const row = this.createInternal(
+      table,
+      values,
+      session,
+      attribution,
+      options,
+      batchContext,
+      targetBranchName,
+    );
     if (!batchContext) {
       this.sealBatch(row.batchId);
     }
@@ -2018,6 +2114,7 @@ export class JazzClient {
     attribution?: string,
     updatedAt?: number,
     batchContext?: BatchWriteContext,
+    targetBranchName?: string,
   ): WriteHandle {
     const result = this.upsertInternal(
       table,
@@ -2027,6 +2124,7 @@ export class JazzClient {
       attribution,
       updatedAt,
       batchContext,
+      targetBranchName,
     );
     if (!batchContext) {
       this.sealBatch(result.batchId);
@@ -2045,13 +2143,15 @@ export class JazzClient {
     attribution?: string,
     options?: CreateOptions,
     batchContext?: BatchWriteContext,
+    targetBranchName?: string,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession ||
       attribution !== undefined ||
       batchContext ||
-      options?.updatedAt !== undefined
+      options?.updatedAt !== undefined ||
+      targetBranchName !== undefined
         ? options?.id
           ? this.requireSessionWriteMethod("insertWithSession")(
               table,
@@ -2061,6 +2161,7 @@ export class JazzClient {
                 attribution,
                 batchContext,
                 options.updatedAt,
+                targetBranchName,
               ),
               options.id,
             )
@@ -2072,6 +2173,7 @@ export class JazzClient {
                 attribution,
                 batchContext,
                 options?.updatedAt,
+                targetBranchName,
               ),
             )
         : options?.id
@@ -2099,6 +2201,7 @@ export class JazzClient {
     attribution?: string,
     updatedAt?: number,
     batchContext?: BatchWriteContext,
+    targetBranchName?: string,
   ): DirectMutationResult {
     try {
       const created = this.createInternal(
@@ -2111,6 +2214,7 @@ export class JazzClient {
           updatedAt,
         },
         batchContext,
+        targetBranchName,
       );
       return { batchId: created.batchId };
     } catch (error) {
@@ -2126,6 +2230,7 @@ export class JazzClient {
       attribution,
       batchContext,
       updatedAt,
+      targetBranchName,
     );
   }
 
@@ -2151,7 +2256,7 @@ export class JazzClient {
     runtimeSchema?: WasmSchema,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    const queryJson = resolveQueryJson(query);
+    const queryJson = resolveQueryJson(query, (branchId) => this.branchTargetName(branchId));
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const effectiveRuntimeSchema =
@@ -2186,6 +2291,7 @@ export class JazzClient {
     attribution?: string,
     batchContext?: BatchWriteContext,
     updatedAt?: number,
+    targetBranchName?: string,
   ): WriteHandle {
     const result = this.updateInternal(
       objectId,
@@ -2194,6 +2300,7 @@ export class JazzClient {
       attribution,
       batchContext,
       updatedAt,
+      targetBranchName,
     );
     if (!batchContext) {
       this.sealBatch(result.batchId);
@@ -2212,13 +2319,26 @@ export class JazzClient {
     attribution?: string,
     batchContext?: BatchWriteContext,
     updatedAt?: number,
+    targetBranchName?: string,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
+    if (
+      effectiveSession ||
+      attribution !== undefined ||
+      batchContext ||
+      updatedAt !== undefined ||
+      targetBranchName !== undefined
+    ) {
       return this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
+        this.encodeWriteContext(
+          effectiveSession,
+          attribution,
+          batchContext,
+          updatedAt,
+          targetBranchName,
+        ),
       );
     }
     return this.runtime.update(objectId, updates);
@@ -2237,8 +2357,16 @@ export class JazzClient {
     attribution?: string,
     batchContext?: BatchWriteContext,
     updatedAt?: number,
+    targetBranchName?: string,
   ): WriteHandle {
-    const result = this.deleteInternal(objectId, session, attribution, batchContext, updatedAt);
+    const result = this.deleteInternal(
+      objectId,
+      session,
+      attribution,
+      batchContext,
+      updatedAt,
+      targetBranchName,
+    );
     if (!batchContext) {
       this.sealBatch(result.batchId);
     }
@@ -2255,15 +2383,36 @@ export class JazzClient {
     attribution?: string,
     batchContext?: BatchWriteContext,
     updatedAt?: number,
+    targetBranchName?: string,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
+    if (
+      effectiveSession ||
+      attribution !== undefined ||
+      batchContext ||
+      updatedAt !== undefined ||
+      targetBranchName !== undefined
+    ) {
       return this.requireSessionWriteMethod("deleteWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
+        this.encodeWriteContext(
+          effectiveSession,
+          attribution,
+          batchContext,
+          updatedAt,
+          targetBranchName,
+        ),
       );
     }
     return this.runtime.delete(objectId);
+  }
+
+  mergeBranch(branchId: string): void | Promise<void> {
+    const mergeBranch = this.runtime.mergeBranch;
+    if (!mergeBranch) {
+      throw new Error("Branch merge is not implemented by this runtime yet.");
+    }
+    return mergeBranch.call(this.runtime, branchId);
   }
 
   /**
@@ -2429,6 +2578,14 @@ export class JazzClient {
       schema_hash: this.runtime.getSchemaHash(),
       user_branch: this.context.userBranch ?? "main",
     };
+  }
+
+  /**
+   * Compose a public branch id into the runtime storage branch name.
+   * @internal
+   */
+  branchTargetName(branchId: string): string {
+    return composeStorageBranchName(this.getSchemaContext(), branchId);
   }
 
   /**

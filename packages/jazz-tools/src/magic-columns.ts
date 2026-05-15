@@ -9,10 +9,12 @@ export const PROVENANCE_MAGIC_COLUMNS = [
   "$updatedBy",
   "$updatedAt",
 ] as const;
+export const DIFF_MAGIC_COLUMN = "$diff" as const;
 export const PROVENANCE_MAGIC_TIMESTAMP_COLUMNS = ["$createdAt", "$updatedAt"] as const;
 
 export type PermissionIntrospectionColumn = (typeof PERMISSION_INTROSPECTION_COLUMNS)[number];
 export type ProvenanceMagicColumn = (typeof PROVENANCE_MAGIC_COLUMNS)[number];
+export type DiffMagicColumn = typeof DIFF_MAGIC_COLUMN;
 export type ProvenanceMagicTimestampColumn = (typeof PROVENANCE_MAGIC_TIMESTAMP_COLUMNS)[number];
 
 export function isPermissionIntrospectionColumn(
@@ -29,6 +31,10 @@ export function isProvenanceMagicTimestampColumn(
   column: string,
 ): column is ProvenanceMagicTimestampColumn {
   return PROVENANCE_MAGIC_TIMESTAMP_COLUMNS.includes(column as ProvenanceMagicTimestampColumn);
+}
+
+export function isDiffMagicColumn(column: string): column is DiffMagicColumn {
+  return column === DIFF_MAGIC_COLUMN;
 }
 
 export function isReservedMagicColumnName(column: string): boolean {
@@ -52,6 +58,9 @@ export function magicColumnType(column: string): ColumnType | undefined {
   }
   if (column === "$createdAt" || column === "$updatedAt") {
     return { type: "Timestamp" };
+  }
+  if (isDiffMagicColumn(column)) {
+    return { type: "Json" };
   }
   return undefined;
 }

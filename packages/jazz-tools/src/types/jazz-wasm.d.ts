@@ -79,6 +79,7 @@ declare module "jazz-wasm" {
     ): { batchId: string };
     delete(objectId: string): { batchId: string };
     deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
+    mergeBranch(sourceBranchName: string): void;
     loadLocalBatchRecord(batchId: string): LocalBatchRecord | null;
     loadLocalBatchRecords(): LocalBatchRecord[];
     drainRejectedBatchIds(): string[];

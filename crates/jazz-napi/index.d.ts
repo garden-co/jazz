@@ -22,6 +22,7 @@ export declare class NapiRuntime {
   updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): any
   delete(objectId: string): any
   deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
+  mergeBranch(sourceBranchName: string): void
   loadLocalBatchRecord(batchId: string): any | null
   loadLocalBatchRecords(): any[]
   drainRejectedBatchIds(): string[]

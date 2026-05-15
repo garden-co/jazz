@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
@@ -13,7 +13,7 @@ use crate::sync_manager::{DurabilityTier, QueryId, ServerId};
 use super::encoding::decode_row;
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::manager::{
-    CatalogueUpdate, LocalUpdates, QueryError, QueryManager, QuerySubscription,
+    BranchOverlay, CatalogueUpdate, LocalUpdates, QueryError, QueryManager, QuerySubscription,
     QuerySubscriptionFailure, QueryUpdate,
 };
 use super::query::{Query, QueryBuilder};
@@ -55,6 +55,75 @@ impl QueryManager {
     /// Create a query builder for a table.
     pub fn query(&self, table: &str) -> QueryBuilder {
         QueryBuilder::new(table)
+    }
+
+    pub(super) fn branch_overlay_for_query(
+        query: &Query,
+        schema_context: &crate::schema_manager::SchemaContext,
+    ) -> Option<BranchOverlay> {
+        if query.branches.len() != 1 {
+            return None;
+        }
+
+        let selected = ComposedBranchName::parse(&BranchName::new(&query.branches[0]))?;
+        if selected.user_branch == "main" || selected.env != schema_context.env {
+            return None;
+        }
+
+        let mut base_branches = Vec::new();
+        let mut source_branches = Vec::new();
+        for hash in schema_context.all_live_hashes() {
+            base_branches.push(
+                ComposedBranchName::new(&schema_context.env, hash, "main")
+                    .to_branch_name()
+                    .as_str()
+                    .to_string(),
+            );
+            source_branches.push(
+                ComposedBranchName::new(&schema_context.env, hash, &selected.user_branch)
+                    .to_branch_name()
+                    .as_str()
+                    .to_string(),
+            );
+        }
+
+        Some(BranchOverlay {
+            source_branches,
+            base_branches,
+        })
+    }
+
+    pub(super) fn resolved_query_branches(
+        query: &Query,
+        schema_context: &crate::schema_manager::SchemaContext,
+    ) -> Result<(Vec<String>, Option<BranchOverlay>), QueryError> {
+        if !query.branches.is_empty() {
+            if let Some(overlay) = Self::branch_overlay_for_query(query, schema_context) {
+                let branches = overlay
+                    .base_branches
+                    .iter()
+                    .chain(overlay.source_branches.iter())
+                    .cloned()
+                    .collect();
+                return Ok((branches, Some(overlay)));
+            }
+            return Ok((query.branches.clone(), None));
+        }
+
+        if !schema_context.is_initialized() {
+            return Err(QueryError::QueryCompilationError(
+                "schema context not initialized - call set_current_schema() first".into(),
+            ));
+        }
+
+        Ok((
+            schema_context
+                .all_branch_names()
+                .into_iter()
+                .map(|b| b.as_str().to_string())
+                .collect(),
+            None,
+        ))
     }
 
     /// Subscribe to query results (delta mode).
@@ -121,20 +190,11 @@ impl QueryManager {
         } = options;
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?durability_tier).entered();
-        // Determine branches
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
-        } else if self.schema_context.is_initialized() {
-            self.schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        } else {
-            return Err(QueryError::QueryCompilationError(
-                "schema context not initialized - call set_current_schema() first".into(),
-            ));
-        };
+        let (branches, branch_overlay) =
+            Self::resolved_query_branches(&query, &self.schema_context)?;
+        let mut compile_query = query.clone();
+        compile_query.branches = branches.clone();
+        compile_query.branch_overlay = branch_overlay.is_some();
 
         let uses_explicit_authorization_filtering =
             self.local_subscription_uses_explicit_authorization(session.as_ref());
@@ -145,7 +205,7 @@ impl QueryManager {
             self.row_policy_mode
         };
         let graph = Self::compile_graph(
-            &query,
+            &compile_query,
             &compile_schema,
             session.clone(),
             &self.schema_context,
@@ -172,6 +232,7 @@ impl QueryManager {
                 query,
                 graph,
                 branches,
+                branch_overlay,
                 session,
                 needs_recompile: false,
                 settled_once: false,
@@ -223,20 +284,14 @@ impl QueryManager {
             })
             .collect();
 
-        // Determine branches from query or context
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
-        } else {
-            schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        };
+        let (branches, branch_overlay) = Self::resolved_query_branches(&query, schema_context)?;
+        let mut compile_query = query.clone();
+        compile_query.branches = branches.clone();
+        compile_query.branch_overlay = branch_overlay.is_some();
 
         // Compile query graph with explicit schema context
         let graph = Self::compile_graph(
-            &query,
+            &compile_query,
             &compile_schema,
             session.clone(),
             schema_context,
@@ -254,6 +309,7 @@ impl QueryManager {
                 query,
                 graph,
                 branches,
+                branch_overlay,
                 session,
                 needs_recompile: false,
                 settled_once: false,

@@ -1,7 +1,7 @@
 use ahash::{AHashMap, AHashSet};
 use std::collections::HashSet;
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::graph_nodes::policy_eval::{
     PolicyContextEvaluator, collect_policy_dependency_tables,
@@ -10,9 +10,12 @@ use crate::query_manager::magic_columns::MagicColumnKind;
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnName, ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema,
-    TableName, Tuple, TupleDelta, TupleDescriptor, TupleElement, Value,
+    ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDescriptor,
+    RowPolicyMode, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor, TupleElement,
+    Value,
 };
+use crate::row_histories::QueryRowBatch;
+use crate::schema_manager::{LensTransformer, SchemaContext, translate_table_name_to_schema};
 use crate::storage::Storage;
 
 use super::RowNode;
@@ -52,6 +55,12 @@ struct ElementMagicColumns {
     kinds: Vec<MagicColumnKind>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiffContext {
+    pub source_branches: Vec<String>,
+    pub base_branches: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct MagicColumnsNode {
     input_tuple_descriptor: TupleDescriptor,
@@ -60,7 +69,9 @@ pub struct MagicColumnsNode {
     element_requests: Vec<ElementMagicColumns>,
     session: Option<Session>,
     schema: Schema,
+    schema_context: SchemaContext,
     branch: String,
+    diff_context: Option<DiffContext>,
     row_policy_mode: RowPolicyMode,
     dependency_tables: HashSet<String>,
     dependency_dirty: bool,
@@ -76,7 +87,9 @@ impl MagicColumnsNode {
         requests: &[MagicColumnRequest],
         session: Option<Session>,
         schema: Schema,
+        schema_context: SchemaContext,
         branch: impl Into<String>,
+        diff_context: Option<DiffContext>,
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         if requests.is_empty() {
@@ -118,12 +131,14 @@ impl MagicColumnsNode {
                             MagicColumnKind::CreatedAt | MagicColumnKind::UpdatedAt => {
                                 ColumnType::Timestamp
                             }
+                            MagicColumnKind::Diff => ColumnType::Json { schema: None },
                         },
                         nullable: matches!(
                             kind,
                             MagicColumnKind::CanRead
                                 | MagicColumnKind::CanEdit
                                 | MagicColumnKind::CanDelete
+                                | MagicColumnKind::Diff
                         ),
                         references: None,
                         default: None,
@@ -154,7 +169,8 @@ impl MagicColumnsNode {
                                 MagicColumnKind::CreatedBy
                                 | MagicColumnKind::CreatedAt
                                 | MagicColumnKind::UpdatedBy
-                                | MagicColumnKind::UpdatedAt => None,
+                                | MagicColumnKind::UpdatedAt
+                                | MagicColumnKind::Diff => None,
                             };
                             if let Some(policy) = policy {
                                 dependency_tables.extend(collect_policy_dependency_tables(
@@ -180,7 +196,9 @@ impl MagicColumnsNode {
             element_requests: grouped.into_values().collect(),
             session,
             schema,
+            schema_context,
             branch: branch.into(),
+            diff_context,
             row_policy_mode,
             dependency_tables,
             dependency_dirty: false,
@@ -379,6 +397,7 @@ impl MagicColumnsNode {
             MagicColumnKind::CreatedAt => Value::Timestamp(row.provenance.created_at),
             MagicColumnKind::UpdatedBy => Value::Text(row.provenance.updated_by.clone()),
             MagicColumnKind::UpdatedAt => Value::Timestamp(row.provenance.updated_at),
+            MagicColumnKind::Diff => self.evaluate_diff_column(table_name, row, descriptor, io),
             MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete => {
                 let Some(session) = self.session.as_ref() else {
                     return Value::Null;
@@ -397,7 +416,8 @@ impl MagicColumnsNode {
                     MagicColumnKind::CreatedBy
                     | MagicColumnKind::CreatedAt
                     | MagicColumnKind::UpdatedBy
-                    | MagicColumnKind::UpdatedAt => unreachable!(),
+                    | MagicColumnKind::UpdatedAt
+                    | MagicColumnKind::Diff => unreachable!(),
                 };
                 let mut visited = HashSet::new();
                 let allowed = evaluator.evaluate_row_access(
@@ -413,6 +433,153 @@ impl MagicColumnsNode {
                 );
                 Value::Boolean(allowed)
             }
+        }
+    }
+
+    fn branch_schema_hash(&self, branch: &str) -> Option<SchemaHash> {
+        let composed = ComposedBranchName::parse(&BranchName::new(branch))?;
+        self.schema_context
+            .all_live_hashes()
+            .into_iter()
+            .find(|hash| hash.short() == composed.schema_hash.short())
+    }
+
+    fn load_best_visible_query_row(
+        &self,
+        io: &dyn Storage,
+        table_name: TableName,
+        branches: &[String],
+        row_id: ObjectId,
+    ) -> Option<QueryRowBatch> {
+        let mut best: Option<QueryRowBatch> = None;
+        for branch in branches {
+            let branch_schema_hash = self.branch_schema_hash(branch);
+            let branch_table = branch_schema_hash
+                .filter(|hash| *hash != self.schema_context.current_hash)
+                .and_then(|hash| {
+                    translate_table_name_to_schema(&self.schema_context, table_name.as_str(), &hash)
+                })
+                .unwrap_or_else(|| table_name.as_str().to_string());
+            let Some(row) = io
+                .load_visible_query_row(&branch_table, branch, row_id)
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            if !row.state.is_visible() {
+                continue;
+            }
+            let row = if let Some(source_hash) = branch_schema_hash
+                && source_hash != self.schema_context.current_hash
+            {
+                let mut transformed = row;
+                transformed.data = LensTransformer::new(&self.schema_context, table_name.as_str())
+                    .transform(&transformed.data, transformed.batch_id, source_hash)
+                    .ok()?
+                    .data
+                    .into();
+                transformed
+            } else {
+                row
+            };
+            match &best {
+                None => best = Some(row),
+                Some(best_row)
+                    if (row.updated_at, row.batch_id)
+                        > (best_row.updated_at, best_row.batch_id) =>
+                {
+                    best = Some(row);
+                }
+                _ => {}
+            }
+        }
+        best
+    }
+
+    fn diff_all_columns(descriptor: &RowDescriptor) -> Vec<String> {
+        descriptor
+            .columns
+            .iter()
+            .map(|column| column.name.as_str().to_string())
+            .collect()
+    }
+
+    fn changed_columns(
+        descriptor: &RowDescriptor,
+        base: &[Value],
+        source: &[Value],
+    ) -> Vec<String> {
+        descriptor
+            .columns
+            .iter()
+            .zip(base.iter().zip(source.iter()))
+            .filter_map(|(column, (base, source))| {
+                (base != source).then(|| column.name.as_str().to_string())
+            })
+            .collect()
+    }
+
+    fn diff_json(kind: &str, changed: Vec<String>) -> Value {
+        let value = serde_json::json!({
+            "kind": kind,
+            "changed": changed,
+            "conflicts": [],
+        });
+        Value::Text(value.to_string())
+    }
+
+    fn evaluate_diff_column(
+        &self,
+        table_name: TableName,
+        row: &Row,
+        descriptor: &RowDescriptor,
+        io: &dyn Storage,
+    ) -> Value {
+        let Some(diff_context) = &self.diff_context else {
+            return Value::Null;
+        };
+
+        let source =
+            self.load_best_visible_query_row(io, table_name, &diff_context.source_branches, row.id);
+        let base =
+            self.load_best_visible_query_row(io, table_name, &diff_context.base_branches, row.id);
+
+        match (source, base) {
+            (Some(source), Some(base)) if source.is_soft_deleted() || source.is_hard_deleted() => {
+                if base.is_soft_deleted() || base.is_hard_deleted() {
+                    Self::diff_json("unchanged", Vec::new())
+                } else {
+                    Self::diff_json("delete", Self::diff_all_columns(descriptor))
+                }
+            }
+            (Some(source), Some(base)) if base.is_soft_deleted() || base.is_hard_deleted() => {
+                if source.is_soft_deleted() || source.is_hard_deleted() {
+                    Self::diff_json("unchanged", Vec::new())
+                } else {
+                    Self::diff_json("insert", Self::diff_all_columns(descriptor))
+                }
+            }
+            (Some(source), Some(base)) => {
+                let Ok(source_values) = decode_row(descriptor, &source.data) else {
+                    return Value::Null;
+                };
+                let Ok(base_values) = decode_row(descriptor, &base.data) else {
+                    return Value::Null;
+                };
+                let changed = Self::changed_columns(descriptor, &base_values, &source_values);
+                if changed.is_empty() {
+                    Self::diff_json("unchanged", changed)
+                } else {
+                    Self::diff_json("update", changed)
+                }
+            }
+            (Some(source), None) if source.is_soft_deleted() || source.is_hard_deleted() => {
+                Self::diff_json("unchanged", Vec::new())
+            }
+            (Some(_), None) => Self::diff_json("insert", Self::diff_all_columns(descriptor)),
+            (None, Some(_)) => Self::diff_json("unchanged", Vec::new()),
+            (None, None) => Self::diff_json("unchanged", Vec::new()),
         }
     }
 }

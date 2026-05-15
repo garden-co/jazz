@@ -2,8 +2,8 @@ use super::*;
 
 #[test]
 fn index_key_includes_branch() {
-    // Verify branch isolation through observable query results.
-    // A row inserted on the current branch should not appear on another branch.
+    // Verify storage indexes stay branch-local even though app-branch reads
+    // fall back to main rows.
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -28,13 +28,24 @@ fn index_key_includes_branch() {
     );
     assert_eq!(current_branch_results[0].1[0], Value::Text("Alice".into()));
 
-    // Verify the row is NOT visible on a different branch.
     let other_branch = get_branch_for_user_branch(&qm, "some-other-branch");
+    assert_eq!(
+        storage.index_lookup(
+            "users",
+            "_id",
+            &other_branch,
+            &Value::Uuid(current_branch_results[0].0)
+        ),
+        Vec::new(),
+        "Row should not be indexed on the other branch"
+    );
+
     let other_branch_query = qm.query("users").branch(&other_branch).build();
     let other_branch_results = execute_query(&mut qm, &mut storage, other_branch_query).unwrap();
-    assert!(
-        other_branch_results.is_empty(),
-        "Should NOT find row on a different branch"
+    assert_eq!(
+        other_branch_results.len(),
+        1,
+        "Branch read falls back to main"
     );
 }
 
@@ -57,12 +68,11 @@ fn query_builder_single_branch_uses_correct_index() {
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 1, "Should find row on main branch");
 
-    // Query specifying a different branch should return no results
-    // (since we haven't inserted on that branch)
+    // Query specifying a different app branch falls back to main.
     let draft_branch = get_branch_for_user_branch(&qm, "draft");
     let query = qm.query("users").branch(&draft_branch).build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(results.len(), 0, "Should not find row on draft branch");
+    assert_eq!(results.len(), 1, "Should find fallback row on draft branch");
 }
 
 #[test]
@@ -120,6 +130,176 @@ fn query_on_composed_noncurrent_branch_reads_rows() {
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Dora".into()));
+}
+
+#[test]
+fn branch_query_reads_main_rows_as_overlay_fallback() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let draft_branch = get_branch_for_user_branch(&qm, "draft");
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+
+    let query = qm.query("users").branch(&draft_branch).build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[0], Value::Text("Alice".into()));
+}
+
+#[test]
+fn branch_query_prefers_branch_row_over_newer_main_row() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let draft_branch = get_branch_for_user_branch(&qm, "draft");
+
+    let inserted = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let descriptor = test_schema()
+        .get(&TableName::new("users"))
+        .unwrap()
+        .columns
+        .clone();
+    let branch_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice draft".into()), Value::Integer(50)],
+    )
+    .unwrap();
+    receive_row_commit(
+        &mut qm,
+        &mut storage,
+        inserted.row_id,
+        &draft_branch,
+        stored_row_commit(smallvec![], branch_data, 2_000, "alice"),
+    );
+    qm.process(&mut storage);
+
+    qm.update(
+        &mut storage,
+        inserted.row_id,
+        &[Value::Text("Alice main".into()), Value::Integer(200)],
+    )
+    .unwrap();
+
+    let query = qm.query("users").branch(&draft_branch).build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[0], Value::Text("Alice draft".into()));
+    assert_eq!(results[0].1[1], Value::Integer(50));
+}
+
+#[test]
+fn branch_query_filters_against_overlay_row() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let draft_branch = get_branch_for_user_branch(&qm, "draft");
+
+    let inserted = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let descriptor = test_schema()
+        .get(&TableName::new("users"))
+        .unwrap()
+        .columns
+        .clone();
+    let branch_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice draft".into()), Value::Integer(50)],
+    )
+    .unwrap();
+    receive_row_commit(
+        &mut qm,
+        &mut storage,
+        inserted.row_id,
+        &draft_branch,
+        stored_row_commit(smallvec![], branch_data, 2_000, "alice"),
+    );
+    qm.process(&mut storage);
+
+    let query = qm
+        .query("users")
+        .branch(&draft_branch)
+        .filter_eq("score", Value::Integer(100))
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert!(
+        results.is_empty(),
+        "main row matches score=100, but branch overlay row has score=50"
+    );
+}
+
+#[test]
+fn branch_diff_magic_column_reports_changed_columns() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema.clone());
+    let draft_branch = get_branch_for_user_branch(&qm, "draft");
+
+    let inserted = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let descriptor = schema
+        .get(&TableName::new("users"))
+        .unwrap()
+        .columns
+        .clone();
+    let branch_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice draft".into()), Value::Integer(50)],
+    )
+    .unwrap();
+    receive_row_commit(
+        &mut qm,
+        &mut storage,
+        inserted.row_id,
+        &draft_branch,
+        stored_row_commit(smallvec![], branch_data, 2_000, "alice"),
+    );
+    qm.process(&mut storage);
+
+    let mut query = qm
+        .query("users")
+        .branch(&draft_branch)
+        .select(&["name", "score", "$diff"])
+        .build();
+    query.diff = true;
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[0], Value::Text("Alice draft".into()));
+    let Value::Text(diff_json) = &results[0].1[2] else {
+        panic!("$diff should be encoded as JSON text");
+    };
+    let diff: serde_json::Value = serde_json::from_str(diff_json).unwrap();
+    assert_eq!(diff["kind"], "update");
+    assert_eq!(diff["changed"], serde_json::json!(["name", "score"]));
+    assert_eq!(diff["conflicts"], serde_json::json!([]));
 }
 
 #[test]

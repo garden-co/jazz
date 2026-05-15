@@ -42,6 +42,7 @@ pub(crate) struct ExecutionQueryPlan {
     pub table: TableName,
     pub base_scope: String,
     pub branches: Vec<String>,
+    pub branch_overlay: bool,
     pub disjuncts: Vec<Conjunction>,
     pub joins: Vec<JoinSpec>,
     pub recursive: Option<RecursiveSpec>,
@@ -913,6 +914,7 @@ fn unwrap_query_envelope(expr: &RelExpr) -> QueryEnvelope<'_> {
 pub(crate) fn lower_relation_to_execution_plan(
     relation: &RelExpr,
     branches: &[String],
+    branch_overlay: bool,
     include_deleted: bool,
     array_subqueries: Vec<ArraySubquerySpec>,
     select_columns: Option<Vec<String>>,
@@ -931,6 +933,7 @@ pub(crate) fn lower_relation_to_execution_plan(
         table: core_plan.table,
         base_scope: core_plan.base_scope,
         branches: branches.to_vec(),
+        branch_overlay,
         disjuncts: core_plan.disjuncts,
         joins: core_plan.joins,
         recursive: core_plan.recursive,
@@ -982,8 +985,9 @@ mod tests {
         };
         let branches = vec!["main".to_string()];
 
-        let plan = lower_relation_to_execution_plan(&relation, &branches, false, Vec::new(), None)
-            .expect("scoped join filters should lower");
+        let plan =
+            lower_relation_to_execution_plan(&relation, &branches, false, false, Vec::new(), None)
+                .expect("scoped join filters should lower");
 
         assert_eq!(plan.base_scope, "u");
         assert_eq!(plan.joins.len(), 1);
@@ -1018,8 +1022,9 @@ mod tests {
         };
         let branches = vec!["main".to_string()];
 
-        let plan = lower_relation_to_execution_plan(&relation, &branches, false, Vec::new(), None)
-            .expect("single-table alias filter should lower");
+        let plan =
+            lower_relation_to_execution_plan(&relation, &branches, false, false, Vec::new(), None)
+                .expect("single-table alias filter should lower");
 
         assert_eq!(plan.base_scope, "u");
         assert_eq!(
@@ -1069,8 +1074,9 @@ mod tests {
         };
         let branches = vec!["main".to_string()];
 
-        let plan = lower_relation_to_execution_plan(&relation, &branches, false, Vec::new(), None)
-            .expect("post-projection result-element filter should lower");
+        let plan =
+            lower_relation_to_execution_plan(&relation, &branches, false, false, Vec::new(), None)
+                .expect("post-projection result-element filter should lower");
 
         assert_eq!(plan.base_scope, "user_team_edges");
         assert_eq!(plan.result_element_index, Some(1));
@@ -1146,8 +1152,9 @@ mod tests {
         };
         let branches = vec!["main".to_string()];
 
-        let plan = lower_relation_to_execution_plan(&relation, &branches, false, Vec::new(), None)
-            .expect("join-seeded gather should lower");
+        let plan =
+            lower_relation_to_execution_plan(&relation, &branches, false, false, Vec::new(), None)
+                .expect("join-seeded gather should lower");
 
         let Some(RelExpr::Project { input, columns }) = plan.seed_relation else {
             panic!("expected projected seed relation");

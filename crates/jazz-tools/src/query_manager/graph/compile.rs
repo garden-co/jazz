@@ -15,7 +15,7 @@ use super::super::graph_nodes::filter::{FilterNode, Predicate};
 use super::super::graph_nodes::index_scan::IndexScanNode;
 use super::super::graph_nodes::join::{JoinColumnRef, JoinNode};
 use super::super::graph_nodes::limit_offset::LimitOffsetNode;
-use super::super::graph_nodes::magic_columns::{MagicColumnRequest, MagicColumnsNode};
+use super::super::graph_nodes::magic_columns::{DiffContext, MagicColumnRequest, MagicColumnsNode};
 use super::super::graph_nodes::materialize::MaterializeNode;
 use super::super::graph_nodes::output::{OutputMode, OutputNode};
 use super::super::graph_nodes::policy_filter::PolicyFilterNode;
@@ -228,6 +228,20 @@ fn resolve_magic_column_requests(
     requests
 }
 
+fn diff_context_for_overlay_branches(
+    branch_overlay: bool,
+    branches: &[String],
+) -> Option<DiffContext> {
+    if !branch_overlay || branches.len() < 2 || branches.len() % 2 != 0 {
+        return None;
+    }
+    let split = branches.len() / 2;
+    Some(DiffContext {
+        base_branches: branches[..split].to_vec(),
+        source_branches: branches[split..].to_vec(),
+    })
+}
+
 fn project_columns_for_tuple_descriptor(tuple_descriptor: &TupleDescriptor) -> Vec<ProjectColumn> {
     let single_unscoped = tuple_descriptor.element_count() == 1
         && tuple_descriptor
@@ -426,6 +440,7 @@ impl QueryGraph {
         let plan = lower_relation_to_execution_plan(
             relation,
             branches,
+            features.branch_overlay,
             features.include_deleted,
             features.array_subqueries,
             features.select_columns,
@@ -537,6 +552,7 @@ impl QueryGraph {
         } else {
             plan.branches.clone()
         };
+        let diff_context = diff_context_for_overlay_branches(plan.branch_overlay, &branches);
 
         if plan.seed_relation.is_some() || !plan.joins.is_empty() {
             return Self::compile_join_plan(
@@ -575,7 +591,9 @@ impl QueryGraph {
 
             for disjunct in &plan.disjuncts {
                 // Find best index condition for this disjunct
-                let (scan_column, scan_condition) =
+                let (scan_column, scan_condition) = if plan.branch_overlay {
+                    ("_id".to_string(), ScanCondition::All)
+                } else {
                     if let Some(cond) = disjunct.best_index_condition() {
                         let column = cond.column().to_string();
                         let scan_cond = condition_to_scan(cond);
@@ -583,7 +601,8 @@ impl QueryGraph {
                     } else {
                         // No index condition, use "_id" for full scan
                         ("_id".to_string(), ScanCondition::All)
-                    };
+                    }
+                };
 
                 // Translate column name for old schema branches
                 let translated_column = if let Some(target_hash) = branch_schema_hash {
@@ -755,10 +774,12 @@ impl QueryGraph {
                     &requests,
                     session.clone(),
                     schema.clone(),
+                    schema_context.clone(),
                     branches
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    diff_context.clone(),
                     row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -826,10 +847,12 @@ impl QueryGraph {
                     &requests,
                     session.clone(),
                     schema.clone(),
+                    schema_context.clone(),
                     branches
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    diff_context.clone(),
                     row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -946,6 +969,7 @@ impl QueryGraph {
         let plan = lower_relation_to_execution_plan(
             &query.relation_ir,
             &branches,
+            query.branch_overlay,
             query.include_deleted,
             query.array_subqueries.clone(),
             query.select_columns.clone(),
@@ -1608,10 +1632,12 @@ impl QueryGraph {
                     &requests,
                     session.clone(),
                     schema.clone(),
+                    schema_context.clone(),
                     branches
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    None,
                     row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -1676,10 +1702,12 @@ impl QueryGraph {
                     &requests,
                     session.clone(),
                     schema.clone(),
+                    schema_context.clone(),
                     branches
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    None,
                     row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node

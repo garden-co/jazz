@@ -371,6 +371,16 @@ impl ComposedBranchName {
     }
 }
 
+/// Public branch ids are either the shared main branch or object-id-shaped app branches.
+pub(crate) fn normalize_public_user_branch_id(user_branch: &str) -> Option<String> {
+    if user_branch == "main" {
+        return Some("main".to_string());
+    }
+    uuid::Uuid::parse_str(user_branch)
+        .ok()
+        .map(|uuid| uuid.to_string())
+}
+
 impl std::fmt::Display for ComposedBranchName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

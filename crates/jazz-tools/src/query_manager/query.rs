@@ -646,6 +646,12 @@ pub struct Query {
     /// For multi-branch queries, results are combined with LWW merge for same ObjectId.
     #[serde(default)]
     pub branches: Vec<String>,
+    /// Query-scoped branch diff mode. Compares selected branch overlay against main.
+    #[serde(default)]
+    pub diff: bool,
+    /// Internal planner flag for sparse app-branch overlay reads.
+    #[serde(default)]
+    pub branch_overlay: bool,
     /// Joined tables.
     #[serde(default)]
     pub joins: Vec<JoinSpec>,
@@ -732,6 +738,8 @@ impl Query {
             table,
             alias: None,
             branches: Vec::new(),
+            diff: false,
+            branch_overlay: false,
             joins: Vec::new(),
             disjuncts: vec![Conjunction::new()],
             order_by: Vec::new(),

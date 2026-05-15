@@ -1,11 +1,15 @@
 use super::*;
+use std::collections::HashMap;
+
 use crate::batch_fate::{
     BatchFate, BatchMode, LocalBatchMember, LocalBatchRecord, SealedBatchMember,
     SealedBatchSubmission,
 };
 use crate::object::BranchName;
-use crate::query_manager::types::SchemaHash;
-use crate::row_histories::BatchId;
+use crate::query_manager::types::{ComposedBranchName, SchemaHash};
+use crate::query_manager::writes::RowBranchWrite;
+use crate::row_histories::{BatchId, StoredRowBatch};
+use crate::schema_manager::{LensTransformer, translate_table_name_to_schema};
 use crate::sync_manager::RowBatchKey;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -423,6 +427,170 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(batch_id)
+    }
+
+    /// Merge one local app branch into main.
+    ///
+    /// MVP behavior: copy each visible source row into the matching main schema
+    /// branch in one direct batch. This does not preserve cross-branch parent
+    /// references yet.
+    pub fn merge_branch(&mut self, source_branch_name: &str) -> Result<(), RuntimeError> {
+        let source_branch = BranchName::new(source_branch_name);
+        let Some(parsed_source) = ComposedBranchName::parse(&source_branch) else {
+            return Err(RuntimeError::WriteError(format!(
+                "invalid branch name for merge: {source_branch_name}"
+            )));
+        };
+        if parsed_source.env != self.schema_manager.env() {
+            return Err(RuntimeError::WriteError(format!(
+                "cannot merge branch from env '{}' into env '{}'",
+                parsed_source.env,
+                self.schema_manager.env()
+            )));
+        }
+        if parsed_source.user_branch == "main" {
+            return Ok(());
+        }
+        let live_hashes = self.schema_manager.all_live_hashes();
+        if !live_hashes
+            .iter()
+            .any(|hash| hash.short() == parsed_source.schema_hash.short())
+        {
+            return Err(RuntimeError::WriteError(format!(
+                "cannot merge branch from unknown schema hash '{}'",
+                parsed_source.schema_hash.short()
+            )));
+        }
+
+        let main_branch = ComposedBranchName::new(
+            self.schema_manager.env(),
+            self.schema_manager.current_hash(),
+            "main",
+        )
+        .to_branch_name();
+        let batch_id = BatchId::new();
+        let write_context = WriteContext::default()
+            .with_batch_mode(BatchMode::Direct)
+            .with_batch_id(batch_id)
+            .with_target_branch_name(main_branch.as_str());
+        let schema = self.schema_manager.current_schema().clone();
+        let mut table_names: Vec<TableName> = schema.keys().copied().collect();
+        table_names.sort_by_key(|table| table.as_str().to_string());
+        let source_branches: Vec<(SchemaHash, BranchName)> = live_hashes
+            .iter()
+            .copied()
+            .map(|hash| {
+                (
+                    hash,
+                    ComposedBranchName::new(
+                        self.schema_manager.env(),
+                        hash,
+                        &parsed_source.user_branch,
+                    )
+                    .to_branch_name(),
+                )
+            })
+            .collect();
+        let mut wrote_any = false;
+
+        for table_name in table_names {
+            let table = table_name.as_str();
+            let Some(table_schema) = schema.get(&table_name) else {
+                continue;
+            };
+            let descriptor = table_schema.columns.clone();
+            let mut source_rows_by_id: HashMap<ObjectId, (SchemaHash, String, StoredRowBatch)> =
+                HashMap::new();
+
+            for (source_hash, source_branch) in &source_branches {
+                let Some(source_table) = translate_table_name_to_schema(
+                    self.schema_manager.context(),
+                    table,
+                    source_hash,
+                ) else {
+                    continue;
+                };
+                let source_rows = self
+                    .storage
+                    .scan_visible_region(&source_table, source_branch.as_str())
+                    .map_err(|err| {
+                        RuntimeError::WriteError(format!("scan source branch: {err}"))
+                    })?;
+                for row in source_rows {
+                    if !row.state.is_visible() {
+                        continue;
+                    }
+                    let replace = source_rows_by_id
+                        .get(&row.row_id)
+                        .map(|(_, _, existing)| {
+                            (row.updated_at, row.batch_id)
+                                > (existing.updated_at, existing.batch_id)
+                        })
+                        .unwrap_or(true);
+                    if replace {
+                        source_rows_by_id
+                            .insert(row.row_id, (*source_hash, source_table.clone(), row));
+                    }
+                }
+            }
+
+            for (row_id, (source_hash, _source_table, row)) in source_rows_by_id {
+                if row.is_soft_deleted() || row.is_hard_deleted() {
+                    if self
+                        .storage
+                        .load_visible_region_row(table, main_branch.as_str(), row_id)
+                        .map_err(|err| {
+                            RuntimeError::WriteError(format!("load main row for delete: {err}"))
+                        })?
+                        .is_some()
+                    {
+                        self.delete(row_id, Some(&write_context))?;
+                        wrote_any = true;
+                    }
+                    continue;
+                }
+
+                let row_data = if source_hash == self.schema_manager.current_hash() {
+                    row.data.to_vec()
+                } else {
+                    LensTransformer::new(self.schema_manager.context(), table)
+                        .transform(&row.data, row.batch_id, source_hash)
+                        .map_err(|err| {
+                            RuntimeError::WriteError(format!("transform source row: {err}"))
+                        })?
+                        .data
+                };
+                let values = decode_row(&descriptor, &row_data)
+                    .map_err(|err| RuntimeError::WriteError(format!("decode source row: {err}")))?;
+                let old_provenance = row.row_provenance();
+                let written_batch_id = self
+                    .schema_manager
+                    .query_manager_mut()
+                    .write_existing_row_on_branch_with_schema_and_write_context(
+                        &mut self.storage,
+                        RowBranchWrite {
+                            table,
+                            branch: main_branch.as_str(),
+                            id: row_id,
+                            values: &values,
+                            old_data_for_policy: &row_data,
+                            old_provenance_for_policy: &old_provenance,
+                        },
+                        &schema,
+                        Some(&write_context),
+                    )
+                    .map_err(crate::runtime_core::write_error_from_query)?;
+                self.track_local_batch(row_id, written_batch_id, BatchMode::Direct)?;
+                wrote_any = true;
+            }
+        }
+
+        if wrote_any {
+            self.seal_batch(batch_id)?;
+            self.mark_storage_write_pending_flush();
+            self.immediate_tick();
+        }
+        Ok(())
     }
 
     // =========================================================================

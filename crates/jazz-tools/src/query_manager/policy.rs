@@ -915,9 +915,10 @@ fn provenance_value(kind: MagicColumnKind, provenance: &RowProvenance) -> Value 
         MagicColumnKind::CreatedAt => Value::Timestamp(provenance.created_at),
         MagicColumnKind::UpdatedBy => Value::Text(provenance.updated_by.clone()),
         MagicColumnKind::UpdatedAt => Value::Timestamp(provenance.updated_at),
-        MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete => {
-            Value::Null
-        }
+        MagicColumnKind::CanRead
+        | MagicColumnKind::CanEdit
+        | MagicColumnKind::CanDelete
+        | MagicColumnKind::Diff => Value::Null,
     }
 }
 
@@ -929,7 +930,10 @@ fn magic_column_value(column: &str, provenance: &RowProvenance) -> Option<Value>
         | MagicColumnKind::UpdatedAt => {
             Some(provenance_value(magic_column_kind(column)?, provenance))
         }
-        MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete => None,
+        MagicColumnKind::CanRead
+        | MagicColumnKind::CanEdit
+        | MagicColumnKind::CanDelete
+        | MagicColumnKind::Diff => None,
     }
 }
 

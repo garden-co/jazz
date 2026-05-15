@@ -2,7 +2,7 @@
  * Translate QueryBuilder JSON to WASM Query format.
  *
  * QueryBuilder produces a compact JSON structure:
- * { table, conditions, includes, orderBy, limit, offset, hops?, gather? }
+ * { table, conditions, includes, orderBy, limit, offset, hops?, gather?, branches?, diff? }
  *
  * Runtime semantics are driven by `relation_ir`. The wire payload keeps only
  * fields required for execution (`table`, `relation_ir`, and `array_subqueries`).
@@ -796,15 +796,25 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const relations = analyzeRelations(schema);
   const relation = translateBuilderToRelationIr(builderJson, schema);
   const hasExplicitSelect = builder.select.length > 0;
-  const selectColumns = hasExplicitSelect
-    ? resolveSelectedColumns(builder.table, schema, builder.select)
-    : [];
+  const selectColumns =
+    hasExplicitSelect || builder.diff
+      ? resolveSelectedColumns(
+          builder.table,
+          schema,
+          hasExplicitSelect ? builder.select : undefined,
+        )
+      : [];
   const includeProjectionColumns = hasExplicitSelect
     ? Object.keys(builder.includes).map((relationName) => hiddenIncludeColumnName(relationName))
     : [];
-  const projectedColumns = visibleSelectColumns(selectColumns, includeProjectionColumns);
+  const projectedColumns = visibleSelectColumns(
+    builder.diff && !selectColumns.includes("$diff") ? [...selectColumns, "$diff"] : selectColumns,
+    includeProjectionColumns,
+  );
   const query = {
     table: builder.table,
+    ...(builder.branches.length > 0 ? { branches: builder.branches } : {}),
+    ...(builder.diff ? { diff: true } : {}),
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
       hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: builder.requireIncludes,

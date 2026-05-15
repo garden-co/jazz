@@ -24,6 +24,25 @@ describe("basic query structure", () => {
     expect(result.joins).toBeUndefined();
   });
 
+  it("copies branch and diff metadata into the runtime query payload", () => {
+    const branchId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const builderJson = JSON.stringify({
+      table: "todos",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      branches: [branchId],
+      diff: true,
+    });
+
+    const result = parseTranslatedQuery(builderJson, basicSchema);
+
+    expect(result.branches).toEqual([branchId]);
+    expect(result.diff).toBe(true);
+    expect(result.select_columns).toContain("title");
+    expect(result.select_columns).toContain("$diff");
+  });
+
   it("translates limit and offset", () => {
     const builderJson = JSON.stringify({
       table: "todos",

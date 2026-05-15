@@ -1,5 +1,19 @@
 import type { DynamicTableRow, QueryBuilder, WasmSchema } from "jazz-tools";
 
+const JAZZ_OBJECT_ID_PATTERN =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function normalizeBranchId(branchId: string): string {
+  const trimmed = branchId.trim();
+  if (trimmed === "main") {
+    return trimmed;
+  }
+  if (JAZZ_OBJECT_ID_PATTERN.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  throw new Error('Invalid branch id: expected "main" or a Jazz object id.');
+}
+
 /**
  * Where condition value: either a scalar (implies eq) or an object of op -> value.
  */
@@ -24,6 +38,8 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal: number | undefined = undefined;
   private _offsetVal: number | undefined = undefined;
+  private _branches: string[] | undefined = undefined;
+  private _diffMode = false;
 
   constructor(tableName: string, schema: WasmSchema) {
     this._table = tableName;
@@ -71,6 +87,18 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
     return clone;
   }
 
+  branch(branchId: string): GenericQueryBuilder {
+    const clone = this._clone();
+    clone._branches = [normalizeBranchId(branchId)];
+    return clone;
+  }
+
+  diff(): GenericQueryBuilder {
+    const clone = this._clone();
+    clone._diffMode = true;
+    return clone;
+  }
+
   _build(): string {
     return JSON.stringify({
       table: this._table,
@@ -80,6 +108,8 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
       limit: this._limitVal,
       offset: this._offsetVal,
       hops: [],
+      branches: this._branches,
+      diff: this._diffMode || undefined,
     });
   }
 
@@ -89,6 +119,8 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
+    clone._branches = this._branches ? [...this._branches] : undefined;
+    clone._diffMode = this._diffMode;
     return clone;
   }
 }

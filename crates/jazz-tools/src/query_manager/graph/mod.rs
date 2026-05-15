@@ -126,6 +126,7 @@ pub(crate) struct RelationCompileFeatures {
     pub include_deleted: bool,
     pub array_subqueries: Vec<ArraySubquerySpec>,
     pub select_columns: Option<Vec<String>>,
+    pub branch_overlay: bool,
 }
 
 impl QueryGraph {

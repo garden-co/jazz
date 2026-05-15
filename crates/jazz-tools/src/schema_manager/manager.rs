@@ -21,7 +21,7 @@ use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
-    Value,
+    Value, normalize_public_user_branch_id,
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::row_format::decode_row;
@@ -365,15 +365,24 @@ impl SchemaManager {
                 ))
             })?;
 
-        if !parsed.matches_env_and_branch(&self.context.env, &self.context.user_branch) {
+        if parsed.env != self.context.env {
             return Err(QueryError::EncodingError(format!(
-                "target_branch_name `{target_branch_name}` is outside the current schema family {}/*/{}",
-                self.context.env, self.context.user_branch
+                "target_branch_name `{target_branch_name}` is outside the current environment {}",
+                self.context.env
             )));
         }
 
+        let Some(target_user_branch) = normalize_public_user_branch_id(&parsed.user_branch) else {
+            return Err(QueryError::EncodingError(format!(
+                "invalid target_branch_name `{target_branch_name}`: branch id must be `main` or a UUID"
+            )));
+        };
+
         if parsed.schema_hash.short() == current_hash.short() {
-            return Ok((current_branch, current_hash));
+            let canonical =
+                ComposedBranchName::new(&self.context.env, current_hash, &target_user_branch)
+                    .to_branch_name();
+            return Ok((canonical.as_str().to_string(), current_hash));
         }
 
         if let Some(hash) = self
@@ -383,28 +392,31 @@ impl SchemaManager {
             .copied()
             .find(|hash| hash.short() == parsed.schema_hash.short())
         {
-            let canonical =
-                ComposedBranchName::new(&self.context.env, hash, &self.context.user_branch)
-                    .to_branch_name();
+            let canonical = ComposedBranchName::new(&self.context.env, hash, &target_user_branch)
+                .to_branch_name();
             return Ok((canonical.as_str().to_string(), hash));
         }
 
         Err(QueryError::UnknownSchema(parsed.schema_hash))
     }
 
-    fn schema_context_for_hash(
+    fn user_branch_for_target_branch(&self, target_branch: &str) -> String {
+        ComposedBranchName::parse(&BranchName::new(target_branch))
+            .map(|branch| branch.user_branch)
+            .unwrap_or_else(|| self.context.user_branch.clone())
+    }
+
+    fn schema_context_for_hash_and_user_branch(
         &self,
         schema_hash: SchemaHash,
+        user_branch: &str,
     ) -> Result<SchemaContext, QueryError> {
         let target_schema = self
             .schema_for_hash(schema_hash)
             .ok_or(QueryError::UnknownSchema(schema_hash))?
             .clone();
-        let mut temp_context = SchemaContext::new(
-            target_schema.clone(),
-            &self.context.env,
-            &self.context.user_branch,
-        );
+        let mut temp_context =
+            SchemaContext::new(target_schema.clone(), &self.context.env, user_branch);
 
         for lens in self.context.lenses.values() {
             temp_context.register_lens(lens.clone());
@@ -1726,7 +1738,9 @@ impl SchemaManager {
     ) -> Result<crate::row_histories::BatchId, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
         let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
-        let target_context = self.schema_context_for_hash(target_hash)?;
+        let target_user_branch = self.user_branch_for_target_branch(&target_branch);
+        let target_context =
+            self.schema_context_for_hash_and_user_branch(target_hash, &target_user_branch)?;
         let branches = target_context
             .all_branch_names()
             .into_iter()
@@ -1792,7 +1806,9 @@ impl SchemaManager {
             .schema_for_hash(target_hash)
             .ok_or(QueryError::UnknownSchema(target_hash))?
             .clone();
-        let target_context = self.schema_context_for_hash(target_hash)?;
+        let target_user_branch = self.user_branch_for_target_branch(&target_branch);
+        let target_context =
+            self.schema_context_for_hash_and_user_branch(target_hash, &target_user_branch)?;
         let branches = target_context
             .all_branch_names()
             .into_iter()
@@ -1894,7 +1910,9 @@ impl SchemaManager {
             .schema_for_hash(target_hash)
             .ok_or(QueryError::UnknownSchema(target_hash))?
             .clone();
-        let target_context = self.schema_context_for_hash(target_hash)?;
+        let target_user_branch = self.user_branch_for_target_branch(&target_branch);
+        let target_context =
+            self.schema_context_for_hash_and_user_branch(target_hash, &target_user_branch)?;
         let branches = target_context
             .all_branch_names()
             .into_iter()

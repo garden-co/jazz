@@ -28,6 +28,8 @@ import {
   type QueryExecutionOptions,
   type QueryPropagation,
   type QueryVisibility,
+  composeStorageBranchName,
+  normalizePublicBranchId,
   resolveEffectiveQueryExecutionOptions,
   runInBatch,
   Scoped,
@@ -51,7 +53,12 @@ import {
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
-import { normalizeBuiltQuery, type BuiltRelation } from "./query-builder-shape.js";
+import {
+  normalizeBuiltQuery,
+  type BuiltRelation,
+  type NormalizedBuiltQuery,
+} from "./query-builder-shape.js";
+import { resolveSelectedColumns } from "./select-projection.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
@@ -196,6 +203,96 @@ export type QueryOptions = QueryExecutionOptions;
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
   return { localUpdates: "deferred", ...options };
+}
+
+function builderBranchIds(value: Record<string, unknown>): string[] {
+  if (Array.isArray(value.branches)) {
+    return value.branches.filter((branch): branch is string => typeof branch === "string");
+  }
+  for (const key of ["branch", "branchId", "branch_id"]) {
+    const branch = value[key];
+    if (typeof branch === "string") {
+      return [branch];
+    }
+  }
+  return [];
+}
+
+function resolveBuilderBranches(
+  builderJson: string,
+  defaultBranchId: string | undefined,
+  resolveBranch: (branchId: string) => string,
+): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(builderJson) as unknown;
+  } catch {
+    return builderJson;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return builderJson;
+  }
+  const value = parsed as Record<string, unknown>;
+  const branches = builderBranchIds(value);
+  const selectedBranches =
+    branches.length > 0 ? branches : defaultBranchId ? [defaultBranchId] : [];
+  if (selectedBranches.length === 0) {
+    return builderJson;
+  }
+  return JSON.stringify({
+    ...value,
+    branches: selectedBranches.map(resolveBranch),
+  });
+}
+
+function translateQueryWithResolvedBranches(
+  builderJson: string,
+  schema: WasmSchema,
+  resolveBranch: (branchId: string) => string,
+  defaultBranchId?: string,
+): string {
+  return translateQuery(
+    resolveBuilderBranches(builderJson, defaultBranchId, resolveBranch),
+    schema,
+  );
+}
+
+function resultProjectionForQuery(
+  schema: WasmSchema,
+  table: string,
+  builtQuery: NormalizedBuiltQuery,
+): readonly string[] {
+  if (!builtQuery.diff) {
+    return builtQuery.select;
+  }
+
+  const projectedColumns = resolveSelectedColumns(
+    table,
+    schema,
+    builtQuery.select.length > 0 ? builtQuery.select : undefined,
+  );
+  return projectedColumns.includes("$diff") ? projectedColumns : [...projectedColumns, "$diff"];
+}
+
+export interface BranchDb {
+  readonly branchId: string;
+  branch(branchId: string): BranchDb;
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T>;
+  upsert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertOptions,
+  ): WriteHandle;
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): WriteHandle;
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle;
+  all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]>;
+  one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null>;
+  merge(): void | Promise<void>;
 }
 
 export interface ActiveQuerySubscriptionTrace {
@@ -583,12 +680,13 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     const rows = await runtimeHandle.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    const resultProjection = resultProjectionForQuery(outputSchema, outputTable, builtQuery);
     const transformedRows = transformRows(
       rows,
       outputSchema,
       outputTable,
       outputIncludes,
-      builtQuery.select,
+      resultProjection,
     );
     return transformedRows.map((row) =>
       transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
@@ -978,6 +1076,71 @@ export class Db {
     }
 
     return this.clients.get(key)!;
+  }
+
+  /**
+   * Return a lightweight view that defaults reads and writes to one branch.
+   */
+  branch(branchId: string): BranchDb {
+    const normalizedBranchId = normalizePublicBranchId(branchId);
+    const root = this;
+    return {
+      branchId: normalizedBranchId,
+      branch(nextBranchId: string) {
+        return root.branch(nextBranchId);
+      },
+      insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions) {
+        return root.insertIntoBranch(normalizedBranchId, table, data, options);
+      },
+      upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions) {
+        return root.upsertIntoBranch(normalizedBranchId, table, data, options);
+      },
+      update<T, Init>(
+        table: TableProxy<T, Init>,
+        id: string,
+        data: Partial<Init>,
+        options?: UpdateOptions,
+      ) {
+        return root.updateIntoBranch(normalizedBranchId, table, id, data, options);
+      },
+      delete<T, Init>(table: TableProxy<T, Init>, id: string) {
+        return root.deleteFromBranch(normalizedBranchId, table, id);
+      },
+      all<T>(query: QueryBuilder<T>, options?: QueryOptions) {
+        return root.allFromBranch(normalizedBranchId, query, options);
+      },
+      one<T>(query: QueryBuilder<T>, options?: QueryOptions) {
+        return root.oneFromBranch(normalizedBranchId, query, options);
+      },
+      merge() {
+        return root.mergeBranch(normalizedBranchId);
+      },
+    };
+  }
+
+  protected getBranchMergeClient(): JazzClient | null {
+    const clients = [...this.clients.values()];
+    return clients.length === 1 ? clients[0] : null;
+  }
+
+  protected branchTargetName(client: JazzClient, branchId: string): string {
+    if (typeof client.branchTargetName === "function") {
+      return client.branchTargetName(branchId);
+    }
+    if (typeof client.getSchemaContext === "function") {
+      return composeStorageBranchName(client.getSchemaContext(), branchId);
+    }
+    const clientWithSchemaHash = client as JazzClient & { getSchemaHash?: () => string };
+    if (typeof clientWithSchemaHash.getSchemaHash === "function") {
+      return composeStorageBranchName(
+        {
+          env: this.config.env ?? "dev",
+          schema_hash: clientWithSchemaHash.getSchemaHash(),
+        },
+        branchId,
+      );
+    }
+    throw new Error("Branch storage name requires a JazzClient schema context.");
   }
 
   /**
@@ -1702,6 +1865,90 @@ export class Db {
     return client.delete(id);
   }
 
+  protected insertIntoBranch<T, Init>(
+    branchId: string,
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): WriteResult<T> {
+    const client = this.getClient(table._schema);
+    const targetBranchName = this.branchTargetName(client, branchId);
+    const transformedData = transformInputColumns(table, data);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
+    return client
+      .createHandleInternal(
+        table._table,
+        values,
+        undefined,
+        undefined,
+        options,
+        undefined,
+        targetBranchName,
+      )
+      .mapValue((row) => transformOutputRow(table, transformRow(row, table._schema, table._table)));
+  }
+
+  protected upsertIntoBranch<T, Init>(
+    branchId: string,
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertOptions,
+  ): WriteHandle {
+    const client = this.getClient(table._schema);
+    const targetBranchName = this.branchTargetName(client, branchId);
+    const transformedData = transformInputColumns(table, data);
+    const values = toUpdateRecord(transformedData, table._schema, table._table);
+    return client.upsertHandleInternal(
+      table._table,
+      values,
+      options.id,
+      undefined,
+      undefined,
+      options.updatedAt,
+      undefined,
+      targetBranchName,
+    );
+  }
+
+  protected updateIntoBranch<T, Init>(
+    branchId: string,
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): WriteHandle {
+    const client = this.getClient(table._schema);
+    const targetBranchName = this.branchTargetName(client, branchId);
+    const transformedData = transformInputColumns(table, data);
+    const updates = toUpdateRecord(transformedData, table._schema, table._table);
+    return client.updateHandleInternal(
+      id,
+      updates,
+      undefined,
+      undefined,
+      undefined,
+      options?.updatedAt,
+      targetBranchName,
+    );
+  }
+
+  protected deleteFromBranch<T, Init>(
+    branchId: string,
+    table: TableProxy<T, Init>,
+    id: string,
+  ): WriteHandle {
+    const client = this.getClient(table._schema);
+    const targetBranchName = this.branchTargetName(client, branchId);
+    return client.deleteHandleInternal(
+      id,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      targetBranchName,
+    );
+  }
+
   /**
    * Begin a new transaction.
    *
@@ -1842,6 +2089,22 @@ export class Db {
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    return this.allWithDefaultBranch(query, options);
+  }
+
+  protected async allFromBranch<T>(
+    branchId: string,
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+  ): Promise<T[]> {
+    return this.allWithDefaultBranch(query, options, branchId);
+  }
+
+  protected async allWithDefaultBranch<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    defaultBranchId?: string,
+  ): Promise<T[]> {
     const client = this.getClient(query._schema);
     const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(client.getSchema()),
@@ -1857,15 +2120,21 @@ export class Db {
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
     await this.ensureQueryReady(queryOptions, client);
-    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const wasmQuery = translateQueryWithResolvedBranches(
+      builderJson,
+      planningSchema,
+      (branchId) => this.branchTargetName(client, branchId),
+      defaultBranchId,
+    );
     const rows = await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    const resultProjection = resultProjectionForQuery(outputSchema, outputTable, builtQuery);
     const transformedRows = transformRows(
       rows,
       outputSchema,
       outputTable,
       outputIncludes,
-      builtQuery.select,
+      resultProjection,
     );
     return transformedRows.map((row) =>
       transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
@@ -1882,6 +2151,23 @@ export class Db {
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(query, options);
     return results[0] ?? null;
+  }
+
+  protected async oneFromBranch<T>(
+    branchId: string,
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+  ): Promise<T | null> {
+    const results = await this.allFromBranch(branchId, query, options);
+    return results[0] ?? null;
+  }
+
+  protected mergeBranch(branchId: string): void | Promise<void> {
+    const client = this.getBranchMergeClient();
+    if (!client || typeof client.mergeBranch !== "function") {
+      throw new Error("Branch merge is not implemented by this runtime yet.");
+    }
+    return client.mergeBranch(this.branchTargetName(client, branchId));
   }
 
   /**
@@ -1980,12 +2266,15 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const wasmQuery = translateQueryWithResolvedBranches(builderJson, planningSchema, (branchId) =>
+      this.branchTargetName(client, branchId),
+    );
+    const resultProjection = resultProjectionForQuery(outputSchema, outputTable, builtQuery);
 
     const transform = (row: WasmRow): T =>
       transformOutputRow(
         outputTable === builtQuery.table ? query : {},
-        transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+        transformRow(row, outputSchema, outputTable, outputIncludes, resultProjection),
       );
 
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
@@ -2269,6 +2558,86 @@ class ClientBackedDb extends Db {
     return this.runtimeClient.deleteHandleInternal(id, this.session, this.attribution);
   }
 
+  protected override insertIntoBranch<T, Init>(
+    branchId: string,
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): WriteResult<T> {
+    const targetBranchName = this.branchTargetName(this.runtimeClient, branchId);
+    const transformedData = transformInputColumns(table, data);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
+    return this.runtimeClient
+      .createHandleInternal(
+        table._table,
+        values,
+        this.session,
+        this.attribution,
+        options,
+        undefined,
+        targetBranchName,
+      )
+      .mapValue((row) => transformOutputRow(table, transformRow(row, table._schema, table._table)));
+  }
+
+  protected override upsertIntoBranch<T, Init>(
+    branchId: string,
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertOptions,
+  ): WriteHandle {
+    const targetBranchName = this.branchTargetName(this.runtimeClient, branchId);
+    const transformedData = transformInputColumns(table, data);
+    const values = toUpdateRecord(transformedData, table._schema, table._table);
+    return this.runtimeClient.upsertHandleInternal(
+      table._table,
+      values,
+      options.id,
+      this.session,
+      this.attribution,
+      options.updatedAt,
+      undefined,
+      targetBranchName,
+    );
+  }
+
+  protected override updateIntoBranch<T, Init>(
+    branchId: string,
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): WriteHandle {
+    const targetBranchName = this.branchTargetName(this.runtimeClient, branchId);
+    const transformedData = transformInputColumns(table, data);
+    const updates = toUpdateRecord(transformedData, table._schema, table._table);
+    return this.runtimeClient.updateHandleInternal(
+      id,
+      updates,
+      this.session,
+      this.attribution,
+      undefined,
+      options?.updatedAt,
+      targetBranchName,
+    );
+  }
+
+  protected override deleteFromBranch<T, Init>(
+    branchId: string,
+    _table: TableProxy<T, Init>,
+    id: string,
+  ): WriteHandle {
+    const targetBranchName = this.branchTargetName(this.runtimeClient, branchId);
+    return this.runtimeClient.deleteHandleInternal(
+      id,
+      this.session,
+      this.attribution,
+      undefined,
+      undefined,
+      targetBranchName,
+    );
+  }
+
   override beginTransaction(): DbTransaction {
     const client = this.runtimeClient;
     return new DbTransaction(
@@ -2318,6 +2687,22 @@ class ClientBackedDb extends Db {
   }
 
   override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    return this.allWithDefaultBranch(query, options);
+  }
+
+  protected override async allFromBranch<T>(
+    branchId: string,
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+  ): Promise<T[]> {
+    return this.allWithDefaultBranch(query, options, branchId);
+  }
+
+  protected override async allWithDefaultBranch<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    defaultBranchId?: string,
+  ): Promise<T[]> {
     const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(this.runtimeClient.getSchema()),
     );
@@ -2333,18 +2718,24 @@ class ClientBackedDb extends Db {
     const queryOptions = ordinaryDbQueryOptions(options);
     await this.ensureQueryReady(queryOptions, this.runtimeClient);
     const rows = await this.runtimeClient.queryInternal(
-      translateQuery(builderJson, planningSchema),
+      translateQueryWithResolvedBranches(
+        builderJson,
+        planningSchema,
+        (branchId) => this.branchTargetName(this.runtimeClient, branchId),
+        defaultBranchId,
+      ),
       this.session,
       queryOptions,
       runtimeSchema.peek(),
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    const resultProjection = resultProjectionForQuery(outputSchema, outputTable, builtQuery);
     const transformedRows = transformRows(
       rows,
       outputSchema,
       outputTable,
       outputIncludes,
-      builtQuery.select,
+      resultProjection,
     );
     return transformedRows.map((row) =>
       transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
@@ -2354,6 +2745,19 @@ class ClientBackedDb extends Db {
   override async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(query, options);
     return results[0] ?? null;
+  }
+
+  protected override async oneFromBranch<T>(
+    branchId: string,
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+  ): Promise<T | null> {
+    const results = await this.allFromBranch(branchId, query, options);
+    return results[0] ?? null;
+  }
+
+  protected override getBranchMergeClient(): JazzClient | null {
+    return this.runtimeClient;
   }
 
   override subscribeAll<T extends { id: string }>(
@@ -2376,12 +2780,15 @@ class ClientBackedDb extends Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const wasmQuery = translateQueryWithResolvedBranches(builderJson, planningSchema, (branchId) =>
+      this.branchTargetName(this.runtimeClient, branchId),
+    );
+    const resultProjection = resultProjectionForQuery(outputSchema, outputTable, builtQuery);
 
     const transform = (row: WasmRow): T =>
       transformOutputRow(
         outputTable === builtQuery.table ? query : {},
-        transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+        transformRow(row, outputSchema, outputTable, outputIncludes, resultProjection),
       );
     const queryOptions = ordinaryDbQueryOptions(options);
 

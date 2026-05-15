@@ -178,6 +178,9 @@ pub(crate) struct QuerySubscription {
     pub(crate) graph: QueryGraph,
     /// Branches to read from (updated on recompile).
     pub(crate) branches: Vec<String>,
+    /// Sparse app-branch overlay context. Source branch rows win over base
+    /// main rows, including delete tombstones.
+    pub(crate) branch_overlay: Option<BranchOverlay>,
     /// Session for policy filtering (if any).
     pub(crate) session: Option<Session>,
     /// Flag indicating this subscription needs recompilation due to schema change.
@@ -217,6 +220,12 @@ pub(crate) struct QuerySubscription {
     pub(crate) propagation: QueryPropagation,
     /// Schema mismatch warnings already emitted for the latest settled state.
     pub(crate) reported_schema_warnings: HashSet<SchemaWarningKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BranchOverlay {
+    pub(crate) source_branches: Vec<String>,
+    pub(crate) base_branches: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -819,12 +828,24 @@ impl QueryManager {
         // Recompile local subscriptions
         for (sub_id, sub) in &mut self.subscriptions {
             if sub.needs_recompile {
-                // Resolve next branches from current schema context.
-                let next_branches: Vec<String> = current_schema_context
-                    .all_branch_names()
-                    .into_iter()
-                    .map(|b| b.as_str().to_string())
-                    .collect();
+                let (next_branches, next_branch_overlay) =
+                    match Self::resolved_query_branches(&sub.query, &current_schema_context) {
+                        Ok(resolved) => resolved,
+                        Err(err) => {
+                            let reason = err.to_string();
+                            tracing::error!(
+                                sub_id = sub_id.0,
+                                table = %sub.graph.table,
+                                error = %reason,
+                                "subscription stale recompile failed; dropping subscription"
+                            );
+                            failed_local.push((*sub_id, reason));
+                            continue;
+                        }
+                    };
+                let mut compile_query = sub.query.clone();
+                compile_query.branches = next_branches.clone();
+                compile_query.branch_overlay = next_branch_overlay.is_some();
                 let uses_explicit_authorization_filtering = sub.session.is_some()
                     && authorization_schema
                         .as_ref()
@@ -850,7 +871,7 @@ impl QueryManager {
                     self.row_policy_mode
                 };
                 match Self::compile_graph(
-                    &sub.query,
+                    &compile_query,
                     &compile_schema,
                     sub.session.clone(),
                     &current_schema_context,
@@ -861,6 +882,7 @@ impl QueryManager {
                             Self::policy_context_tables_for_graph(&new_graph);
                         sub.graph = new_graph;
                         sub.branches = next_branches;
+                        sub.branch_overlay = next_branch_overlay;
                         sub.policy_context_tables = policy_context_tables;
                         sub.uses_explicit_authorization_filtering =
                             uses_explicit_authorization_filtering;
@@ -1321,25 +1343,47 @@ impl QueryManager {
                                 .then(|| self.pending_local_row_batches.get(&id).copied())
                                 .flatten()
                         };
-                        Self::load_visible_row_for_query(
-                            storage_ref,
-                            id,
-                            table_hint.as_ref().map(TableName::as_str),
-                            &branches,
-                            durability_tier,
-                            local_pending_version,
-                            !subscription.local_overlay_rows.is_empty(),
-                            !subscription.local_overlay_rows.is_empty()
-                                || (subscription.sync_backed
-                                    && subscription.durability_tier.is_some()
-                                    && subscription.local_updates == LocalUpdates::Immediate),
-                            include_deleted,
-                            schema_context,
-                            branch_schema_map,
-                            &table,
-                            sub_id,
-                            &mut schema_warnings,
-                        )
+                        if let Some(branch_overlay) = &subscription.branch_overlay {
+                            Self::load_visible_row_for_overlay_query(
+                                storage_ref,
+                                id,
+                                table_hint.as_ref().map(TableName::as_str),
+                                branch_overlay,
+                                durability_tier,
+                                local_pending_version,
+                                !subscription.local_overlay_rows.is_empty(),
+                                !subscription.local_overlay_rows.is_empty()
+                                    || (subscription.sync_backed
+                                        && subscription.durability_tier.is_some()
+                                        && subscription.local_updates == LocalUpdates::Immediate),
+                                include_deleted,
+                                schema_context,
+                                branch_schema_map,
+                                &table,
+                                sub_id,
+                                &mut schema_warnings,
+                            )
+                        } else {
+                            Self::load_visible_row_for_query(
+                                storage_ref,
+                                id,
+                                table_hint.as_ref().map(TableName::as_str),
+                                &branches,
+                                durability_tier,
+                                local_pending_version,
+                                !subscription.local_overlay_rows.is_empty(),
+                                !subscription.local_overlay_rows.is_empty()
+                                    || (subscription.sync_backed
+                                        && subscription.durability_tier.is_some()
+                                        && subscription.local_updates == LocalUpdates::Immediate),
+                                include_deleted,
+                                schema_context,
+                                branch_schema_map,
+                                &table,
+                                sub_id,
+                                &mut schema_warnings,
+                            )
+                        }
                     };
 
                 subscription.graph.settle(storage_ref, row_loader)
@@ -2202,6 +2246,37 @@ impl QueryManager {
             })
     }
 
+    fn load_best_visible_overlay_row_batch_with_hint_or_locator(
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        table_hint: Option<&str>,
+        overlay: &BranchOverlay,
+        durability_tier: Option<DurabilityTier>,
+        schema_context: &SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
+    ) -> Option<(String, QueryRowBatch)> {
+        Self::load_best_visible_row_batch_with_hint_or_locator(
+            storage,
+            row_id,
+            table_hint,
+            &overlay.source_branches,
+            durability_tier,
+            schema_context,
+            branch_schema_map,
+        )
+        .or_else(|| {
+            Self::load_best_visible_row_batch_with_hint_or_locator(
+                storage,
+                row_id,
+                table_hint,
+                &overlay.base_branches,
+                durability_tier,
+                schema_context,
+                branch_schema_map,
+            )
+        })
+    }
+
     fn load_best_visible_row_batch_from_storage_with_locator(
         storage: &dyn Storage,
         row_id: ObjectId,
@@ -2277,6 +2352,169 @@ impl QueryManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn loaded_row_from_query_batch(
+        table: String,
+        row: QueryRowBatch,
+        row_id: ObjectId,
+        include_deleted: bool,
+        schema_context: &SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
+        table_for_warnings: &str,
+        sub_id: QuerySubscriptionId,
+        schema_warnings: &mut SchemaWarningAccumulator,
+    ) -> Option<LoadedRow> {
+        if row.is_hard_deleted() {
+            return None;
+        }
+
+        if row.is_soft_deleted() && !include_deleted {
+            return None;
+        }
+
+        let batch_id = row.batch_id;
+        let row_provenance = row.row_provenance();
+        let source_branch = row.branch.as_str().to_string();
+
+        if let Some(source_hash) = Self::branch_schema_hash_for_visible_load(
+            &source_branch,
+            schema_context,
+            branch_schema_map,
+        ) && source_hash != schema_context.current_hash
+        {
+            let transformer = LensTransformer::new(schema_context, &table);
+            match transformer.transform(&row.data, batch_id, source_hash) {
+                Ok(result) => {
+                    return Some(LoadedRow::new(
+                        result.data,
+                        row_provenance,
+                        [(row_id, BranchName::new(&source_branch))]
+                            .into_iter()
+                            .collect(),
+                        result.batch_id,
+                    ));
+                }
+                Err(err) => {
+                    schema_warnings.record(
+                        table_for_warnings,
+                        source_hash,
+                        schema_context.current_hash,
+                    );
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        row_id = %row_id,
+                        table = %table,
+                        source_branch = source_branch,
+                        source_schema = %source_hash.short(),
+                        target_schema = %schema_context.current_hash.short(),
+                        error = %err,
+                        "lens transform failed; row will be counted in aggregated schema warning"
+                    );
+                    return None;
+                }
+            }
+        }
+
+        Some(LoadedRow::new(
+            row.data,
+            row_provenance,
+            [(row_id, BranchName::new(&source_branch))]
+                .into_iter()
+                .collect(),
+            row.batch_id,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn load_visible_row_for_overlay_query(
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        table_hint: Option<&str>,
+        overlay: &BranchOverlay,
+        durability_tier: Option<DurabilityTier>,
+        local_pending_version: Option<RowBatchKey>,
+        prefer_local_overlay: bool,
+        allow_staged_overlay: bool,
+        include_deleted: bool,
+        schema_context: &SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
+        table_for_warnings: &str,
+        sub_id: QuerySubscriptionId,
+        schema_warnings: &mut SchemaWarningAccumulator,
+    ) -> Option<LoadedRow> {
+        let overlay_branches: Vec<String> = overlay
+            .base_branches
+            .iter()
+            .chain(overlay.source_branches.iter())
+            .cloned()
+            .collect();
+        let exact_pending_visible_row = || {
+            let pending_version = local_pending_version?;
+            let resolved = Self::load_best_visible_row_batch_with_hint_or_locator(
+                storage,
+                row_id,
+                table_hint,
+                &overlay_branches,
+                None,
+                schema_context,
+                branch_schema_map,
+            )?;
+            let (_, row) = &resolved;
+            (row.batch_id == pending_version.batch_id
+                && row.branch.as_str() == pending_version.branch_name.as_str())
+            .then_some(resolved)
+        };
+        let pending_staged_row = || {
+            let pending_version = local_pending_version?;
+            let resolved = Self::load_local_pending_query_row_with_hint_or_locator(
+                storage,
+                pending_version,
+                table_hint,
+                schema_context,
+            )?;
+            let (_, row) = &resolved;
+            (row.batch_id == pending_version.batch_id
+                && row.branch.as_str() == pending_version.branch_name.as_str()
+                && matches!(row.state, RowState::StagingPending))
+            .then_some(resolved)
+        };
+        let overlay_visible_row = || {
+            Self::load_best_visible_overlay_row_batch_with_hint_or_locator(
+                storage,
+                row_id,
+                table_hint,
+                overlay,
+                durability_tier,
+                schema_context,
+                branch_schema_map,
+            )
+        };
+        let resolved = if prefer_local_overlay {
+            exact_pending_visible_row()
+                .or_else(pending_staged_row)
+                .or_else(overlay_visible_row)
+        } else if allow_staged_overlay {
+            overlay_visible_row()
+                .or_else(exact_pending_visible_row)
+                .or_else(pending_staged_row)
+        } else {
+            overlay_visible_row().or_else(exact_pending_visible_row)
+        }?;
+        let (table, row) = resolved;
+
+        Self::loaded_row_from_query_batch(
+            table,
+            row,
+            row_id,
+            include_deleted,
+            schema_context,
+            branch_schema_map,
+            table_for_warnings,
+            sub_id,
+            schema_warnings,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn load_visible_row_for_query(
         storage: &dyn Storage,
         row_id: ObjectId,
@@ -2347,62 +2585,17 @@ impl QueryManager {
         }?;
         let (table, row) = resolved;
 
-        if row.is_hard_deleted() {
-            return None;
-        }
-
-        if row.is_soft_deleted() && !include_deleted {
-            return None;
-        }
-
-        let batch_id = row.batch_id;
-        let row_provenance = row.row_provenance();
-        let source_branch = row.branch.as_str();
-
-        if let Some(&source_hash) = branch_schema_map.get(source_branch)
-            && source_hash != schema_context.current_hash
-        {
-            let transformer = LensTransformer::new(schema_context, &table);
-            match transformer.transform(&row.data, batch_id, source_hash) {
-                Ok(result) => {
-                    return Some(LoadedRow::new(
-                        result.data,
-                        row_provenance,
-                        [(row_id, BranchName::new(source_branch))]
-                            .into_iter()
-                            .collect(),
-                        result.batch_id,
-                    ));
-                }
-                Err(err) => {
-                    schema_warnings.record(
-                        table_for_warnings,
-                        source_hash,
-                        schema_context.current_hash,
-                    );
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        row_id = %row_id,
-                        table = %table,
-                        source_branch = source_branch,
-                        source_schema = %source_hash.short(),
-                        target_schema = %schema_context.current_hash.short(),
-                        error = %err,
-                        "lens transform failed; row will be counted in aggregated schema warning"
-                    );
-                    return None;
-                }
-            }
-        }
-
-        Some(LoadedRow::new(
-            row.data,
-            row_provenance,
-            [(row_id, BranchName::new(source_branch))]
-                .into_iter()
-                .collect(),
-            row.batch_id,
-        ))
+        Self::loaded_row_from_query_batch(
+            table,
+            row,
+            row_id,
+            include_deleted,
+            schema_context,
+            branch_schema_map,
+            table_for_warnings,
+            sub_id,
+            schema_warnings,
+        )
     }
 
     /// Check if a subscription involves a given table (base table, joined table, or array subquery inner table).

@@ -664,6 +664,7 @@ fn compile_relation_ir_with_include_deleted_adds_deleted_scan() {
             include_deleted: true,
             array_subqueries: Vec::new(),
             select_columns: None,
+            branch_overlay: false,
         },
         RowPolicyMode::PermissiveLocal,
     )
@@ -703,6 +704,7 @@ fn compile_relation_ir_with_array_subqueries_adds_array_nodes() {
             include_deleted: false,
             array_subqueries: query_with_arrays.array_subqueries,
             select_columns: None,
+            branch_overlay: false,
         },
         RowPolicyMode::PermissiveLocal,
     )
@@ -732,6 +734,7 @@ fn compile_relation_ir_with_select_columns_adds_project_node() {
             include_deleted: false,
             array_subqueries: Vec::new(),
             select_columns: Some(vec!["name".to_string()]),
+            branch_overlay: false,
         },
         RowPolicyMode::PermissiveLocal,
     )

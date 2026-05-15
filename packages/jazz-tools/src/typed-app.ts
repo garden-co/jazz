@@ -99,6 +99,26 @@ type NormalizeTableDefinition<TTable extends TableSource> =
 
 export type SchemaDefinition = Record<string, TableSource<TableDefinition>>;
 export type Simplify<T> = { [K in keyof T]: T[K] } & {};
+export type QueryDiffKind = "insert" | "update" | "delete" | "unchanged" | "error";
+export type QueryDiffErrorCode =
+  | "unresolved_parent"
+  | "missing_common_ancestor"
+  | "schema_error"
+  | "merge_strategy_error";
+export type QueryDiffMetadata = {
+  kind: QueryDiffKind;
+  changed: string[];
+  conflicts: string[];
+  error?: {
+    code: QueryDiffErrorCode;
+    message: string;
+  };
+};
+export type QueryDiffRow<Row> = Simplify<
+  Row & {
+    $diff: QueryDiffMetadata | null;
+  }
+>;
 export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
   [TTable in keyof TSchema]: NormalizeTableDefinition<TSchema[TTable]>;
 }>;
@@ -776,6 +796,8 @@ type BuiltRelation = {
   conditions?: BuiltCondition[];
   hops?: string[];
   gather?: BuiltGather;
+  branches?: string[];
+  diff?: boolean;
   union?: {
     inputs: BuiltRelation[];
   };
@@ -789,6 +811,20 @@ type BuiltGather = {
   step_hops: string[];
 };
 
+const JAZZ_OBJECT_ID_PATTERN =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function normalizeQueryBranchId(branchId: string): string {
+  const trimmed = branchId.trim();
+  if (trimmed === "main") {
+    return trimmed;
+  }
+  if (JAZZ_OBJECT_ID_PATTERN.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  throw new Error('Invalid branch id: expected "main" or a Jazz object id.');
+}
+
 function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
   return { ...condition };
 }
@@ -799,6 +835,8 @@ function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
     ...(relation.conditions ? { conditions: relation.conditions.map(cloneBuiltCondition) } : {}),
     ...(relation.hops ? { hops: [...relation.hops] } : {}),
     ...(relation.gather ? { gather: cloneBuiltGather(relation.gather) } : {}),
+    ...(relation.branches ? { branches: [...relation.branches] } : {}),
+    ...(relation.diff ? { diff: true } : {}),
     ...(relation.union
       ? {
           union: {
@@ -840,6 +878,8 @@ export class TypedTableQueryBuilder<
   private _hops: string[] = [];
   private _gatherVal?: BuiltGather;
   private _unionVal?: BuiltRelation;
+  private _branches?: string[];
+  private _diffMode = false;
   _columnTransforms?: ColumnTransformMap;
 
   constructor(
@@ -904,6 +944,22 @@ export class TypedTableQueryBuilder<
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._offsetVal = n;
     return clone;
+  }
+
+  branch(branchId: string): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    const clone = this._clone<TInclude, TSelection, TRequired>();
+    clone._branches = [normalizeQueryBranchId(branchId)];
+    return clone;
+  }
+
+  diff(): QueryBuilder<
+    QueryDiffRow<SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>>
+  > {
+    const clone = this._clone<TInclude, TSelection, TRequired>();
+    clone._diffMode = true;
+    return clone as unknown as QueryBuilder<
+      QueryDiffRow<SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>>
+    >;
   }
 
   hopTo(
@@ -1014,6 +1070,8 @@ export class TypedTableQueryBuilder<
       offset: this._offsetVal,
       hops: this._hops,
       gather: this._gatherVal,
+      branches: this._branches,
+      diff: this._diffMode || undefined,
       ...(this._unionVal ? { union: cloneBuiltRelation(this._unionVal).union } : {}),
     });
   }
@@ -1042,6 +1100,8 @@ export class TypedTableQueryBuilder<
     clone._hops = [...this._hops];
     clone._gatherVal = this._gatherVal ? cloneBuiltGather(this._gatherVal) : undefined;
     clone._unionVal = this._unionVal ? cloneBuiltRelation(this._unionVal) : undefined;
+    clone._branches = this._branches ? [...this._branches] : undefined;
+    clone._diffMode = this._diffMode;
     return clone;
   }
 
@@ -1071,6 +1131,8 @@ export class TypedTableQueryBuilder<
       conditions: this._conditions.map(cloneBuiltCondition),
       hops: [...this._hops],
       ...(this._gatherVal ? { gather: cloneBuiltGather(this._gatherVal) } : {}),
+      ...(this._branches ? { branches: [...this._branches] } : {}),
+      ...(this._diffMode ? { diff: true } : {}),
     };
   }
 }
@@ -1104,6 +1166,12 @@ export interface Query<
   ): Query<TTable, TInclude, TSelection, TSchema>;
   limit(n: number): Query<TTable, TInclude, TSelection, TSchema>;
   offset(n: number): Query<TTable, TInclude, TSelection, TSchema>;
+  branch(branchId: string): Query<TTable, TInclude, TSelection, TSchema>;
+  diff(): QueryBuilder<
+    QueryDiffRow<
+      SelectedWithIncludesFromMeta<SchemaMeta<TTable, TSchema>, TInclude, TSelection, false>
+    >
+  >;
   hopTo(
     relation: RelationNameFromMeta<SchemaMeta<TTable, TSchema>>,
   ): Query<TTable, TInclude, TSelection, TSchema>;
@@ -1136,6 +1204,12 @@ export interface RequiredQuery<
   ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
   limit(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
   offset(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
+  branch(branchId: string): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
+  diff(): QueryBuilder<
+    QueryDiffRow<
+      SelectedWithIncludesFromMeta<SchemaMeta<TTable, TSchema>, TInclude, TSelection, true>
+    >
+  >;
   hopTo(
     relation: RelationNameFromMeta<SchemaMeta<TTable, TSchema>>,
   ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;

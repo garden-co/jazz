@@ -22,6 +22,7 @@ mod tests {
         let raw = serde_json::json!({
             "table": "todos",
             "branches": ["main"],
+            "diff": true,
             "relation_ir": {
                 "Filter": {
                     "input": { "TableScan": { "table": "todos" } },
@@ -38,6 +39,7 @@ mod tests {
 
         let query = parse_query_json(&raw.to_string()).expect("parse query");
         assert_eq!(query.table.as_str(), "todos");
+        assert!(query.diff);
         match query.relation_ir {
             RelExpr::Filter { input, predicate } => {
                 assert!(matches!(*input, RelExpr::TableScan { .. }));

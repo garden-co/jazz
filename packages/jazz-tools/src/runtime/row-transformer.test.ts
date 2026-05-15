@@ -389,6 +389,49 @@ describe("transformRows", () => {
     ]);
   });
 
+  it("keeps diff magic column in projected rows", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "uuid-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+          { type: "Integer", value: 5 },
+          {
+            type: "Text",
+            value: JSON.stringify({
+              kind: "update",
+              changed: ["title"],
+              conflicts: [],
+            }),
+          },
+        ],
+      },
+    ];
+
+    const result = transformRows<{
+      id: string;
+      title: string;
+      done: boolean;
+      priority: number;
+      $diff: { kind: string; changed: string[]; conflicts: string[] };
+    }>(rows, schema, "todos", {}, ["title", "done", "priority", "$diff"]);
+
+    expect(result).toEqual([
+      {
+        id: "uuid-1",
+        title: "Buy milk",
+        done: false,
+        priority: 5,
+        $diff: {
+          kind: "update",
+          changed: ["title"],
+          conflicts: [],
+        },
+      },
+    ]);
+  });
+
   it("expands mixed wildcard and magic projections while preserving includes", () => {
     const rows: WasmRow[] = [
       {

@@ -316,6 +316,39 @@ describe("JazzClient mutation durability split", () => {
     expect(updateWithSession).toHaveBeenCalledWith("row-1", updates, updatedAtContext);
   });
 
+  it("encodes target branch context for direct mutation handles", async () => {
+    const { client, insertWithSessionCalls, updateWithSessionCalls, deleteWithSessionCalls } =
+      makeClient();
+    const insertValues = { title: { type: "Text" as const, value: "Branch draft" } };
+    const updates = { done: { type: "Boolean" as const, value: true } };
+    const branchId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const branchContext = JSON.stringify({ target_branch_name: branchId });
+
+    client.createHandleInternal(
+      "todos",
+      insertValues,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      branchId,
+    );
+    client.updateHandleInternal(
+      "row-1",
+      updates,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      branchId,
+    );
+    client.deleteHandleInternal("row-1", undefined, undefined, undefined, undefined, branchId);
+
+    expect(insertWithSessionCalls).toEqual([["todos", insertValues, branchContext]]);
+    expect(updateWithSessionCalls).toEqual([["row-1", updates, branchContext]]);
+    expect(deleteWithSessionCalls).toEqual([["row-1", branchContext]]);
+  });
+
   it("preserves custom updated_at overrides when upsert falls back to update", async () => {
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
     const insertError = new Error(`encoding error: object already exists: ${externalId}`);

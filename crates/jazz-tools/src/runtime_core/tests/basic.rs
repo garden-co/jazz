@@ -30,6 +30,39 @@ fn test_runtime_core_insert_query() {
 }
 
 #[test]
+fn merge_branch_copies_local_branch_rows_to_main() {
+    let mut core = create_test_runtime();
+    let branch_id = ObjectId::new().to_string();
+    let draft_branch = crate::query_manager::types::ComposedBranchName::new(
+        core.schema_manager().env(),
+        core.schema_manager().current_hash(),
+        &branch_id,
+    )
+    .to_branch_name();
+    let write_context =
+        WriteContext::default().with_target_branch_name(draft_branch.as_str().to_string());
+
+    let user_id = ObjectId::new();
+    let ((object_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(user_id, "Alice draft"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    let main_before = execute_query(&mut core, Query::new("users"));
+    assert!(main_before.is_empty());
+
+    core.merge_branch(draft_branch.as_str()).unwrap();
+
+    let main_after = execute_query(&mut core, Query::new("users"));
+    assert_eq!(main_after.len(), 1);
+    assert_eq!(main_after[0].0, object_id);
+    assert_eq!(main_after[0].1, user_row_values(user_id, "Alice draft"));
+}
+
+#[test]
 fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
     let mut old_runtime = create_runtime_with_schema(test_schema(), "restart-sync-test");
     let user_id = ObjectId::new();

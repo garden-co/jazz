@@ -777,6 +777,16 @@ impl NapiRuntime {
         }))
     }
 
+    #[napi(js_name = "mergeBranch")]
+    pub fn merge_branch(&self, source_branch_name: String) -> napi::Result<()> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.merge_branch(&source_branch_name)
+            .map_err(|e| napi::Error::from_reason(format!("Merge branch failed: {e}")))
+    }
+
     #[napi(js_name = "loadLocalBatchRecord", ts_return_type = "any | null")]
     pub fn load_local_batch_record(&self, batch_id: String) -> napi::Result<serde_json::Value> {
         let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
