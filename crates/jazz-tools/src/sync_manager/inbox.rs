@@ -466,11 +466,16 @@ impl SyncManager {
         match fate {
             BatchFate::DurableDirect { batch_id, .. }
             | BatchFate::AcceptedTransaction { batch_id, .. }
-            | BatchFate::Rejected { batch_id, .. } => self
-                .row_batch_interest
-                .iter()
-                .any(|(key, clients)| key.batch_id == *batch_id && clients.contains(&client_id))
-                .then(|| fate.clone()),
+            | BatchFate::Rejected { batch_id, .. } => {
+                let row_interest = self.row_batch_interest.iter().any(|(key, clients)| {
+                    key.batch_id == *batch_id && clients.contains(&client_id)
+                });
+                let fate_interest = self
+                    .batch_fate_interest
+                    .get(batch_id)
+                    .is_some_and(|clients| clients.contains(&client_id));
+                (row_interest || fate_interest).then(|| fate.clone())
+            }
             BatchFate::Missing { .. } => Some(fate.clone()),
         }
     }
@@ -486,9 +491,25 @@ impl SyncManager {
                         interested.extend(clients.iter().copied());
                     }
                 }
+                if let Some(clients) = self.batch_fate_interest.get(batch_id) {
+                    interested.extend(clients.iter().copied());
+                }
                 interested
             }
             BatchFate::Missing { .. } => HashSet::new(),
+        }
+    }
+
+    fn register_client_batch_fate_interest(
+        &mut self,
+        client_id: ClientId,
+        batch_ids: &[crate::row_histories::BatchId],
+    ) {
+        for batch_id in batch_ids {
+            self.batch_fate_interest
+                .entry(*batch_id)
+                .or_default()
+                .insert(client_id);
         }
     }
 
@@ -1562,6 +1583,7 @@ impl SyncManager {
                 }
             }
             SyncPayload::BatchFateNeeded { batch_ids } => {
+                self.register_client_batch_fate_interest(client_id, batch_ids);
                 self.respond_to_batch_fate_request(
                     storage,
                     Destination::Client(client_id),
@@ -1713,6 +1735,7 @@ impl SyncManager {
                 }
             }
             SyncPayload::BatchFateNeeded { batch_ids } => {
+                self.register_client_batch_fate_interest(client_id, &batch_ids);
                 self.respond_to_batch_fate_request(
                     storage,
                     Destination::Client(client_id),
