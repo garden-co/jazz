@@ -80,6 +80,31 @@ interface ListenerSlots {
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
 
+/**
+ * Thrown by `waitForLocalSyncFlush` / `waitForUpstreamServerConnection` when
+ * the bridge they were called on has been marked migrated — i.e. the leader
+ * tab handed off to a different tab and the supervisor swapped the
+ * underlying endpoint underneath this bridge.
+ *
+ * Callers see this synchronously (deterministic rejection) instead of
+ * silently hanging until the Rust-side timeout silently resolves. The runtime
+ * `Db` retries against the new bridge when appropriate; opaque callers
+ * should re-issue the wait against the fresh bridge.
+ *
+ * The `code` field is stable and intended for programmatic checks; the
+ * exception name and message are not.
+ */
+export class LeaderMigratedError extends Error {
+  readonly code = "leader-migrated" as const;
+  constructor(message?: string) {
+    super(
+      message ??
+        "Worker bridge endpoint replaced (leader tab handed off). Retry against the new bridge.",
+    );
+    this.name = "LeaderMigratedError";
+  }
+}
+
 export class WorkerBridge {
   private readonly endpoint: WorkerBridgeEndpoint;
   private readonly runtime: Runtime;
@@ -89,6 +114,16 @@ export class WorkerBridge {
   private clientIdPromise: Promise<string> | null = null;
   private workerClientId: string | null = null;
   private disposed = false;
+  private migrated = false;
+  /**
+   * In-flight waiters that should reject with `LeaderMigratedError` when the
+   * bridge is marked migrated. Each entry is the per-call rejector. The Rust
+   * promise underlying the wait still settles internally (usually via the
+   * ack timeout) and is left to garbage-collect; the JS-visible promise
+   * surfaces the typed rejection immediately so callers don't hang waiting
+   * for a `SyncAck` from a leader that's no longer attached.
+   */
+  private readonly pendingWaiters = new Set<(error: LeaderMigratedError) => void>();
 
   constructor(endpoint: WorkerBridgeEndpoint, runtime: Runtime) {
     this.endpoint = endpoint;
@@ -149,12 +184,65 @@ export class WorkerBridge {
   async shutdown(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.rejectPendingWaiters();
     if (this.bridge) {
       try {
         await this.bridge.shutdown();
       } finally {
         this.bridge = null;
       }
+    }
+  }
+
+  /**
+   * Mark this bridge as migrated (leader handoff). In-flight
+   * `waitForLocalSyncFlush` / `waitForUpstreamServerConnection` calls reject
+   * with {@link LeaderMigratedError}; subsequent calls reject immediately
+   * with the same error. Idempotent. Callers should retry against the fresh
+   * bridge attached after the supervisor's endpoint swap.
+   *
+   * The Rust bridge is left running for `shutdown()` to wind down (post
+   * `Shutdown`, wait for `ShutdownOk` or timeout); without this method,
+   * callers would have to wait the full Rust-side `LOCAL_SYNC_ACK_TIMEOUT_MS`
+   * before they learn the bridge is no longer authoritative.
+   */
+  notifyMigrated(): void {
+    if (this.migrated) return;
+    this.migrated = true;
+    this.rejectPendingWaiters();
+  }
+
+  isMigrated(): boolean {
+    return this.migrated;
+  }
+
+  private rejectPendingWaiters(): void {
+    if (this.pendingWaiters.size === 0) return;
+    const error = new LeaderMigratedError();
+    const waiters = Array.from(this.pendingWaiters);
+    this.pendingWaiters.clear();
+    for (const reject of waiters) {
+      try {
+        reject(error);
+      } catch {
+        // Reject handlers run user code that shouldn't crash the loop.
+      }
+    }
+  }
+
+  private async raceMigration<T>(work: Promise<T>): Promise<T> {
+    if (this.migrated) {
+      throw new LeaderMigratedError();
+    }
+    let onMigrate!: (error: LeaderMigratedError) => void;
+    const migration = new Promise<never>((_, reject) => {
+      onMigrate = reject;
+    });
+    this.pendingWaiters.add(onMigrate);
+    try {
+      return await Promise.race([work, migration]);
+    } finally {
+      this.pendingWaiters.delete(onMigrate);
     }
   }
 
@@ -180,12 +268,14 @@ export class WorkerBridge {
 
   async waitForUpstreamServerConnection(): Promise<void> {
     if (!this.bridge) return;
-    await this.bridge.waitForUpstreamServerConnection();
+    if (this.migrated) throw new LeaderMigratedError();
+    await this.raceMigration(this.bridge.waitForUpstreamServerConnection());
   }
 
   async waitForLocalSyncFlush(batchId?: string): Promise<void> {
     if (this.disposed || !this.bridge) return;
-    await this.bridge.waitForLocalSyncFlush(batchId ?? null);
+    if (this.migrated) throw new LeaderMigratedError();
+    await this.raceMigration(this.bridge.waitForLocalSyncFlush(batchId ?? null));
   }
 
   replayServerConnection(): void {

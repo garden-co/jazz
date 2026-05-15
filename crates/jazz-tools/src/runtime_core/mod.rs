@@ -352,60 +352,23 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
+    ///
+    /// Cold start does **not** replay persisted rejected `BatchFate` records.
+    /// We still load the set of acknowledged rejections so that future
+    /// network-delivered re-rejections of the same batch are dedup'd
+    /// against client-acknowledged ones, but we do not re-emit
+    /// `MutationErrorEvent`s or retract visible rows from stored rejection
+    /// fates on startup.
+    ///
+    /// See `.changeset/disable-rejected-fate-replay.md` and the positive
+    /// coverage in
+    /// `tests/write_batch/rejection_recovery.rs::rc_cold_start_does_not_replay_persisted_rejection`.
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
-        // let rejected_batch_fates = storage
-        //     .scan_authoritative_batch_fates()
-        //     .map(|fates| {
-        //         fates
-        //             .into_iter()
-        //             .filter(|fate| matches!(fate, crate::batch_fate::BatchFate::Rejected { .. }))
-        //             .collect::<Vec<_>>()
-        //     })
-        //     .unwrap_or_default();
         let acknowledged_rejected_batches: HashSet<BatchId> = storage
             .scan_acknowledged_rejected_batch_fates()
             .map(|batch_ids| batch_ids.into_iter().collect())
             .unwrap_or_default();
-        // let pending_mutation_error_events: BTreeMap<BatchId, MutationErrorEvent> =
-        //     rejected_batch_fates
-        //         .iter()
-        //         .filter_map(|fate| {
-        //             let crate::batch_fate::BatchFate::Rejected {
-        //                 batch_id,
-        //                 code,
-        //                 reason,
-        //             } = fate
-        //             else {
-        //                 return None;
-        //             };
-        //             if acknowledged_rejected_batches.contains(batch_id) {
-        //                 return None;
-        //             }
-        //             Some((
-        //                 *batch_id,
-        //                 MutationErrorEvent {
-        //                     code: code.clone(),
-        //                     reason: reason.clone(),
-        //                     batch: crate::batch_fate::LocalBatchRecord::new(
-        //                         *batch_id,
-        //                         crate::batch_fate::BatchMode::Direct,
-        //                         true,
-        //                         Some(fate.clone()),
-        //                     ),
-        //                 },
-        //             ))
-        //         })
-        //         .collect();
-
-        // If a crash landed between "persist rejection settlement" and
-        // "delete visible row + retract subscriptions", lingering visible
-        // rows would render on reload and then get retracted by the next
-        // network-delivered settlement — a visible flash. Re-apply stored
-        // rejections before any query can observe the visible region.
-        // for fate in rejected_batch_fates {
-        //     core.mark_local_batch_rows_rejected(fate.batch_id());
-        // }
 
         Self {
             schema_manager,

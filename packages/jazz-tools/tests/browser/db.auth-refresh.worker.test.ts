@@ -84,11 +84,30 @@ const allTodos: QueryBuilder<Todo> = {
 // ---------------------------------------------------------------------------
 
 /**
+ * Return the leader tab's dedicated `Worker`, or `null` if this `Db` is not
+ * (or not yet) the leader. With the leader-tab supervisor topology the
+ * dedicated `Worker` lives at `supervisor.state.endpoint` on the leader
+ * tab; followers see a `MessagePort` there and can't be probed the same way
+ * (they share the leader's worker, not their own). This test creates a
+ * single `Db` so it always wins the lock and is the leader.
+ */
+function getLeaderWorker(db: Db): Worker | null {
+  const anyDb = db as unknown as {
+    supervisor?: { state?: { role?: unknown; endpoint?: unknown } } | null;
+  };
+  const state = anyDb.supervisor?.state;
+  if (!state || state.role !== "leader") return null;
+  const endpoint = state.endpoint as Worker | null | undefined;
+  return endpoint ?? null;
+}
+
+/**
  * Wraps worker.postMessage to capture every message the main thread sends
  * to the worker.  Returns snapshot / dispose functions.
  *
  * Must be called AFTER the WorkerBridge has been initialised (i.e. after
- * at least one insert or query that triggers getClient()).
+ * at least one insert or query that triggers getClient()) AND from a leader
+ * tab.
  *
  * Each captured entry is a decoded `{type, ...}` JS object: init/ready stay
  * as the JS objects the bridge already sends, while postcard-binary
@@ -99,8 +118,7 @@ function attachOutboundMessageProbe(db: Db): {
   snapshot: () => Array<{ type: string; [k: string]: unknown }>;
   dispose: () => void;
 } {
-  // @ts-expect-error worker is private
-  const worker = (db as { worker?: Worker | null }).worker;
+  const worker = getLeaderWorker(db);
   const captured: Array<{ type: string; [k: string]: unknown }> = [];
 
   if (!worker) {
@@ -184,9 +202,11 @@ describe("Db worker-path auth refresh — update-auth dispatch chain", () => {
       }),
     );
 
-    // @ts-expect-error worker is private
-    const worker = db.worker as Worker | null;
-    expect(worker, "createDb with persistent driver in browser must spawn a worker").toBeTruthy();
+    const worker = getLeaderWorker(db);
+    expect(
+      worker,
+      "createDb with persistent driver in browser must spawn a dedicated leader-tab worker",
+    ).toBeTruthy();
 
     // Trigger lazy bridge init: WorkerBridge is created on first getClient() call.
     db.insert(todos, { title: "bridge-init-trigger", done: false });

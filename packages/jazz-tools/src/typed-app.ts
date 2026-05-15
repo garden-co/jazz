@@ -889,28 +889,21 @@ export class TypedTableQueryBuilder<
 
   hopTo<TRelation extends RelationNameFromMeta<TMeta>>(
     relation: TRelation,
-  ): MetaQueryHandle<
-    RelationTargetFromMeta<TMeta, TRelation>,
-    {},
-    DefaultTableSelection<RelationTargetFromMeta<TMeta, TRelation>>,
-    TRequired
-  > {
+  ): HopChainHandle<RelationTargetFromMeta<TMeta, TRelation>, TRequired> {
     if (this._unionVal) {
       throw new Error("union(...) currently only supports gather(...) in MVP.");
     }
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._hops.push(relation as string);
-    // The type now represents the destination table while `_table` at runtime
-    // is still the source — the destination is encoded in `_hops` and resolved
-    // by the query adapter. Aligning runtime `_table` with the type is a
-    // separate change (it touches `_build()` and hop lowering) and is out of
-    // scope here; `_table` is internal and not part of the public surface.
-    return clone as unknown as MetaQueryHandle<
-      RelationTargetFromMeta<TMeta, TRelation>,
-      {},
-      DefaultTableSelection<RelationTargetFromMeta<TMeta, TRelation>>,
-      TRequired
-    >;
+    // The exposed type represents the destination row (so `RowOf<...>` and
+    // `db.all(...)` infer the destination columns) but the runtime `_table`
+    // stays the source — the destination is encoded in `_hops` and resolved
+    // by the query adapter. Until `_build()` and hop lowering also move
+    // post-hop clauses to the destination, the return type intentionally
+    // hides destination-table chain methods (where / select / include /
+    // orderBy / limit / offset / requireIncludes / hopTo) that would
+    // type-check against destination columns but be applied to the source.
+    return clone as unknown as HopChainHandle<RelationTargetFromMeta<TMeta, TRelation>, TRequired>;
   }
 
   gather(options: {
@@ -1078,6 +1071,40 @@ interface MetaQueryHandle<
   TRequired extends boolean = false,
 > extends TypedTableQueryBuilder<TMeta, TInclude, TSelection, TRequired> {}
 
+/**
+ * Restricted handle returned by `hopTo(...)`.
+ *
+ * The runtime `_table` after a hop is still the *source* table — destination
+ * navigation is encoded in `_hops` and lowered by the query adapter. Exposing
+ * the destination table's `.where(...)` / `.select(...)` / `.orderBy(...)` /
+ * etc. on a hop result would type-check against destination columns while the
+ * runtime applied them to the source. Until the lowering also moves post-hop
+ * clauses to the destination, this handle drops those chain methods.
+ *
+ * What it keeps:
+ *  - the `QueryBuilder` shape (`_table`, `_schema`, `_rowType`, `_initType`,
+ *    `_columnTransforms`, `_build`, `toJSON`) so the result can be passed to
+ *    `db.all` / `db.one` / `db.subscribeAll` and inferred via `RowOf`.
+ *  - `gather(...)` so the existing seeded-traversal pattern
+ *    `app.table.where(...).hopTo(rel).gather(...)` continues to work.
+ *    `options.start` is ignored after a hop (matches existing runtime
+ *    semantics: `_hops.length > 0` forces an explicit seed).
+ */
+type HopChainHandle<TMeta extends AnyTableMeta, TRequired extends boolean = false> = {
+  readonly _table: string;
+  readonly _schema: WasmSchema;
+  readonly _rowType: TableRowFromMeta<TMeta>;
+  readonly _initType: TableInitFromMeta<TMeta>;
+  readonly _columnTransforms?: ColumnTransformMap;
+  _build(): string;
+  _serializeRelation(): unknown;
+  toJSON(): unknown;
+  gather(options: {
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): HopChainHandle<TMeta, TRequired>;
+};
+
 export interface Query<
   TTable extends string,
   TInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>> = {},
@@ -1102,12 +1129,7 @@ export interface Query<
   offset(n: number): Query<TTable, TInclude, TSelection, TSchema>;
   hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
     relation: TRelation,
-  ): Query<
-    RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>["name"],
-    {},
-    DefaultTableSelection<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>>,
-    TSchema
-  >;
+  ): HopChainHandle<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>, false>;
   gather(options: {
     start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
@@ -1139,12 +1161,7 @@ export interface RequiredQuery<
   offset(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
   hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
     relation: TRelation,
-  ): RequiredQuery<
-    RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>["name"],
-    {},
-    DefaultTableSelection<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>>,
-    TSchema
-  >;
+  ): HopChainHandle<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>, true>;
   gather(options: {
     start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;

@@ -768,6 +768,8 @@ export class Db {
   private supervisor: TabSupervisor | null = null;
   private supervisorUnsubscribe: (() => void) | null = null;
   private workerEndpoint: WorkerBridgeEndpoint | null = null;
+  private resetChannel: BroadcastChannel | null = null;
+  private resetChannelListener: ((event: MessageEvent) => void) | null = null;
   private disposeWasmTelemetry: (() => void) | null = null;
   private bridgeReady: Promise<void> | null = null;
   private primaryDbName: string | null = null;
@@ -986,6 +988,7 @@ export class Db {
         db.onSupervisorStateChange(state);
       });
       db.attachLifecycleHooks();
+      db.subscribeToResetChannel();
 
       await db.waitForInitialEndpoint();
 
@@ -996,6 +999,7 @@ export class Db {
       db.supervisorUnsubscribe?.();
       db.supervisorUnsubscribe = null;
       db.detachLifecycleHooks();
+      db.closeResetChannel();
       db.sharedWorker?.port.close();
       db.sharedWorker = null;
       db.workerEndpoint = null;
@@ -1036,9 +1040,14 @@ export class Db {
    * attach a fresh bridge against the new endpoint, so existing
    * `JazzClient`s keep working across a leader handoff.
    *
-   * Cross-tab handoff for *in-flight* RPCs (LeaderMigrated retry, cursor
-   * resume) is not wired yet — promises that were awaiting the old bridge
-   * never resolve. See `specs/todo/b_launch/leader_tab_runtime.md` §5.
+   * In-flight `waitForLocalSyncFlush` / `waitForUpstreamServerConnection`
+   * waiters on the *old* bridge reject synchronously with
+   * {@link LeaderMigratedError} via {@link WorkerBridge.notifyMigrated} so
+   * callers learn the bridge is no longer authoritative without waiting for
+   * the Rust-side ack timeout. Transparent retry of those waiters against
+   * the freshly-attached bridge is not yet implemented — see
+   * `specs/todo/b_launch/leader_tab_runtime.md` §5 — but rejection is
+   * deterministic and typed rather than a silent hang.
    */
   private onSupervisorStateChange(state: TabSupervisorState): void {
     const nextEndpoint = state.endpoint;
@@ -1047,6 +1056,9 @@ export class Db {
       const stale = this.workerBridge;
       this.workerBridge = null;
       this.bridgeReady = null;
+      // Reject in-flight waiters synchronously so callers see the typed
+      // `LeaderMigratedError` instead of hanging until the Rust ack timeout.
+      stale.notifyMigrated();
       void stale.shutdown().catch(() => undefined);
     }
     this.workerEndpoint = nextEndpoint;
@@ -1108,10 +1120,19 @@ export class Db {
     if (!this.runtimeModule) {
       throw new Error("Db runtime module is not initialized for this Db implementation");
     }
-    if (this.isShuttingDown) {
-      // After shutdown (including `deleteClientStorage()`'s terminal wipe) we
-      // must not lazily mint a direct main-thread client — the persistent
-      // namespace is gone and the worker topology has been torn down.
+    if (this.isShuttingDown && this.primaryDbName !== null) {
+      // SharedWorker-backed terminal contract: after `shutdown()` (including
+      // `deleteClientStorage()`'s wipe) the supervisor is gone, the
+      // dedicated worker has been terminated, and OPFS may have been
+      // deleted out from under us. Refuse to lazily mint a direct
+      // main-thread client that would silently re-use stale state.
+      //
+      // Non-SharedWorker Db instances (React Native, in-memory test
+      // harnesses) never set `primaryDbName`, and their pre-existing
+      // contract is that `shutdown()` clears cached clients but the same
+      // Db can lazily recreate them on next `insert` / `all`. Preserving
+      // that contract keeps the platform-specific terminal behavior to
+      // the path that actually needs it.
       throw new Error("Db has been shut down; create a new instance to keep working.");
     }
 
@@ -1433,6 +1454,156 @@ export class Db {
     return this.primaryDbName ?? driver.dbName ?? this.config.appId;
   }
 
+  private resetChannelName(): string | null {
+    if (!this.primaryDbName) return null;
+    return `jazz:storage-reset:${this.config.appId}:${this.primaryDbName}`;
+  }
+
+  private leaderLockName(): string | null {
+    if (!this.primaryDbName) return null;
+    return `jazz:leader:${this.config.appId}:${this.primaryDbName}:v1`;
+  }
+
+  /**
+   * Subscribe to the cross-tab reset channel for this `(appId, dbName)`. When
+   * any tab announces `storage-reset-start`, every other tab's `Db` quietly
+   * tears itself down so the originating tab can safely delete the OPFS
+   * namespace without racing a live leader worker.
+   */
+  private subscribeToResetChannel(): void {
+    if (this.resetChannel) return;
+    const name = this.resetChannelName();
+    if (!name) return;
+    if (typeof BroadcastChannel === "undefined") return;
+    const channel = new BroadcastChannel(name);
+    const listener = (event: MessageEvent): void => {
+      const data = event.data as { type?: unknown } | null;
+      if (!data || typeof data !== "object") return;
+      if ((data as { type?: unknown }).type !== "storage-reset-start") return;
+      // Another tab is about to wipe storage. Drop our local state so the
+      // leader's dedicated worker (if it lives in this tab) releases its
+      // OPFS handles, and so any further client/bridge creation refuses
+      // rather than silently re-attaching to a now-deleted namespace.
+      void this.shutdown().catch(() => undefined);
+    };
+    channel.addEventListener("message", listener);
+    this.resetChannel = channel;
+    this.resetChannelListener = listener;
+  }
+
+  private closeResetChannel(): void {
+    if (!this.resetChannel) return;
+    if (this.resetChannelListener) {
+      this.resetChannel.removeEventListener("message", this.resetChannelListener);
+    }
+    try {
+      this.resetChannel.close();
+    } catch {
+      // BroadcastChannel may already be closed.
+    }
+    this.resetChannel = null;
+    this.resetChannelListener = null;
+  }
+
+  /**
+   * Broadcast `storage-reset-start` on this Db's reset channel so every other
+   * tab on the same `(appId, dbName)` releases its leader worker / follower
+   * port before we try to delete the OPFS namespace.
+   *
+   * Throws if `BroadcastChannel` is unavailable: cross-tab coordination is a
+   * correctness requirement for follower-initiated wipes (the leader tab's
+   * dedicated worker would otherwise keep OPFS open), not a nice-to-have.
+   * Callers should surface this error to the user rather than silently
+   * removing the OPFS file while another tab is still writing to it.
+   */
+  private broadcastStorageResetStart(): void {
+    const name = this.resetChannelName();
+    if (!name) {
+      throw new Error(
+        "deleteClientStorage() cannot resolve a reset-channel name (no primaryDbName).",
+      );
+    }
+    if (typeof BroadcastChannel === "undefined") {
+      throw new Error(
+        "deleteClientStorage() requires BroadcastChannel for cross-tab reset coordination, " +
+          "but it is unavailable in this environment. Close other tabs on this origin and retry, " +
+          "or call deleteClientStorage() from a tab that does support BroadcastChannel.",
+      );
+    }
+    let channel: BroadcastChannel | null = null;
+    try {
+      channel = new BroadcastChannel(name);
+      channel.postMessage({ type: "storage-reset-start" });
+    } finally {
+      try {
+        channel?.close();
+      } catch {
+        // Already closed.
+      }
+    }
+  }
+
+  /**
+   * Default deadline for acquiring the leader lock during
+   * `deleteClientStorage()`. The supervisor's `shutdown()` is fast (low ms),
+   * and reset listeners on other tabs also call `shutdown()` synchronously;
+   * 15s is the same envelope used by `waitForInitialEndpoint`. If we hit the
+   * timeout it almost always means a peer tab is non-responsive (e.g. JS
+   * loop blocked, or it crashed while holding the lock without releasing).
+   */
+  private static readonly STORAGE_RESET_LOCK_TIMEOUT_MS = 15_000;
+
+  /**
+   * Run `fn` while holding the leader-tab lock for this namespace. Acts as a
+   * cross-tab mutual exclusion: while we hold the lock, no other tab's
+   * supervisor can win it and spawn a dedicated worker against this OPFS
+   * namespace — meaning the file is guaranteed not to be reopened mid-delete.
+   *
+   * Aborts the wait after `STORAGE_RESET_LOCK_TIMEOUT_MS` so the caller
+   * surfaces an actionable error instead of hanging when another tab fails
+   * to release the lock (e.g. a non-responsive page that ignored the
+   * `storage-reset-start` broadcast). Once the lock is granted, `fn` runs
+   * without a timeout — only the queued wait is bounded.
+   *
+   * If `navigator.locks` is unavailable, runs `fn` without the lock — the
+   * broadcast + per-tab shutdown is the only safeguard in that environment.
+   */
+  private async withLeaderLockHeld<T>(fn: () => Promise<T>): Promise<T> {
+    const lockName = this.leaderLockName();
+    const nav = (globalThis as { navigator?: { locks?: { request: Function } } }).navigator;
+    if (!lockName || !nav?.locks || typeof nav.locks.request !== "function") {
+      return await fn();
+    }
+    const ac = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ac ? setTimeout(() => ac.abort(), Db.STORAGE_RESET_LOCK_TIMEOUT_MS) : null;
+    let result!: T;
+    let acquired = false;
+    try {
+      await nav.locks.request(
+        lockName,
+        { mode: "exclusive", ...(ac ? { signal: ac.signal } : {}) },
+        async () => {
+          acquired = true;
+          result = await fn();
+        },
+      );
+    } catch (error) {
+      // `navigator.locks.request` rejects with `AbortError` when the signal
+      // fires before the lock is granted. Translate to an actionable error.
+      const name = (error as { name?: string } | undefined)?.name;
+      if (!acquired && (name === "AbortError" || ac?.signal.aborted)) {
+        throw new Error(
+          `Timed out after ${Db.STORAGE_RESET_LOCK_TIMEOUT_MS}ms waiting for the leader lock on ` +
+            `"${lockName}". Another tab is still holding the namespace open — close it and retry.`,
+        );
+      }
+      throw error;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+    return result;
+  }
+
   private async removeBrowserStorageNamespace(namespace: string): Promise<void> {
     const rootDirectory = await navigator.storage.getDirectory();
     const fileName = `${namespace}.opfsbtree`;
@@ -1744,11 +1915,38 @@ export class Db {
    * the instance to keep working. `logout({ wipeData: true })` already
    * does this; direct callers should follow the same pattern.
    *
+   * Cross-tab coordination:
+   *
+   * When called from any tab (leader *or* follower) on a namespace that is
+   * also open in other tabs, this method first broadcasts
+   * `storage-reset-start` on `jazz:storage-reset:${appId}:${dbName}`. Every
+   * other tab's `Db` reacts by shutting itself down — releasing follower
+   * ports and, critically, terminating the leader tab's dedicated worker so
+   * OPFS handles are freed. Once all tabs have stepped down we acquire the
+   * `navigator.locks` leader lock for this namespace and remove the OPFS
+   * file while holding it, so no concurrent supervisor can win the lock and
+   * spawn a worker against the namespace mid-delete.
+   *
+   * Without this coordination, a follower-initiated wipe would only tear
+   * down the caller's bridge while the leader's worker kept the OPFS file
+   * open — the subsequent `removeEntry` would either fail with
+   * `NoModificationAllowedError` or, worse, succeed and leave the leader
+   * writing into a deleted/recreated namespace.
+   *
    * Behavior:
    * - Browser persistent (SharedWorker-backed) Db only; throws otherwise
-   * - Can be initiated from either leader or follower tabs (shutdown
-   *   coordinates with the leader through the bridge)
+   * - Can be initiated from either leader or follower tabs
    * - Does not touch localStorage-based local-first auth state
+   *
+   * Failure modes (all thrown before any destructive work happens):
+   * - `BroadcastChannel` unavailable in this environment → throws; cross-tab
+   *   coordination is a correctness requirement, not a nice-to-have.
+   * - Another tab holds the leader lock beyond
+   *   {@link Db.STORAGE_RESET_LOCK_TIMEOUT_MS} (e.g. it ignored or didn't
+   *   process the `storage-reset-start` broadcast) → throws an actionable
+   *   error asking the user to close the offending tab and retry. We have
+   *   already shut down our own `Db` by this point, so the caller must
+   *   recreate the instance regardless.
    */
   async deleteClientStorage(): Promise<void> {
     if (resolveStorageDriver(this.config.driver).type !== "persistent") {
@@ -1765,12 +1963,30 @@ export class Db {
     // Capture the namespace before `shutdown()` clears the supervisor/config
     // pathway that `currentWorkerNamespace()` resolves through.
     const namespace = this.currentWorkerNamespace();
-    // Terminal: fully shut down so the leader's dedicated worker releases
-    // its OPFS handles before we delete the namespace file, and so the Db
-    // refuses further client/bridge creation rather than silently falling
-    // back to a direct main-thread client.
+
+    // 1. Tell every other tab on this namespace to release its bridge /
+    //    leader worker before we try to delete. Their reset-channel
+    //    listener calls `this.shutdown()` — terminating the leader tab's
+    //    dedicated worker, which is what actually frees OPFS.
+    this.broadcastStorageResetStart();
+
+    // 2. Tear ourselves down. If we were the leader this terminates our
+    //    own dedicated worker (and releases the lock); if we were a
+    //    follower, our port closes here while the leader is being told
+    //    to step down by step 1.
     await this.shutdown();
-    await this.removeBrowserStorageNamespace(namespace);
+
+    // 3. Hold the leader-tab lock across the delete so no other tab's
+    //    supervisor can promote itself to leader (and reopen the OPFS
+    //    file) while `removeEntry` is in flight. `navigator.locks`
+    //    serializes requests — if other tabs are queued waiting for the
+    //    lock, they'll only get it once we release, after the file is
+    //    gone. Their listener-driven shutdown also prevents them from
+    //    contending in the first place, but the lock is the belt to the
+    //    broadcast's braces.
+    await this.withLeaderLockHeld(async () => {
+      await this.removeBrowserStorageNamespace(namespace);
+    });
   }
 
   /**
@@ -2049,6 +2265,7 @@ export class Db {
     }
     this.supervisorUnsubscribe?.();
     this.supervisorUnsubscribe = null;
+    this.closeResetChannel();
     this.sharedWorker?.port.close();
     this.sharedWorker = null;
     this.workerEndpoint = null;
