@@ -109,14 +109,54 @@ const INITIAL_COLORS: ColorState = {
   charlie: INITIAL_COLOR,
 };
 
-// Random saturated HSL. Reject anything within MIN_HUE_GAP of the writer's
-// previous hue so consecutive clicks visibly change colour.
+// Random saturated colour, returned as #rrggbb so labels stay compact. Reject
+// anything within MIN_HUE_GAP of the writer's previous hue so consecutive
+// clicks visibly change colour.
 const MIN_HUE_GAP = 40;
 
-function parseHue(color: string | null): number | null {
-  if (!color) return null;
-  const m = /hsl\(\s*(-?\d+(?:\.\d+)?)/.exec(color);
-  return m ? Number(m[1]) : null;
+function hexToHue(hex: string): number | null {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  const r = ((n >> 16) & 0xff) / 255;
+  const g = ((n >> 8) & 0xff) / 255;
+  const b = (n & 0xff) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  if (d === 0) return 0;
+  let h: number;
+  if (max === r) h = ((g - b) / d) % 6;
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h *= 60;
+  return h < 0 ? h + 360 : h;
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const sat = s / 100;
+  const lit = l / 100;
+  const c = (1 - Math.abs(2 * lit - 1)) * sat;
+  const hh = (h % 360) / 60;
+  const x = c * (1 - Math.abs((hh % 2) - 1));
+  const [r1, g1, b1] =
+    hh < 1
+      ? [c, x, 0]
+      : hh < 2
+        ? [x, c, 0]
+        : hh < 3
+          ? [0, c, x]
+          : hh < 4
+            ? [0, x, c]
+            : hh < 5
+              ? [x, 0, c]
+              : [c, 0, x];
+  const m = lit - c / 2;
+  const to255 = (v: number) =>
+    Math.round((v + m) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${to255(r1)}${to255(g1)}${to255(b1)}`;
 }
 
 function hueDistance(a: number, b: number): number {
@@ -125,7 +165,7 @@ function hueDistance(a: number, b: number): number {
 }
 
 function pickNextColor(current: string | null): string {
-  const prev = parseHue(current);
+  const prev = current ? hexToHue(current) : null;
   let hue = Math.floor(Math.random() * 360);
   if (prev !== null) {
     for (let i = 0; i < 8 && hueDistance(hue, prev) < MIN_HUE_GAP; i++) {
@@ -133,7 +173,7 @@ function pickNextColor(current: string | null): string {
     }
   }
   const saturation = 75 + Math.floor(Math.random() * 20); // 75–94%
-  return `hsl(${hue} ${saturation}% 50%)`;
+  return hslToHex(hue, saturation, 50);
 }
 
 type WriteEvent = {
