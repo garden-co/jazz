@@ -1673,7 +1673,14 @@ describe("Worker Bridge with OPFS", () => {
         // Run a query to set up the runtime
         await dbAfterRestart.all(allTodos, { tier: "edge" });
 
-        expect(await dbAfterRestart.all(allTodos, { tier: "local" })).toEqual([]);
+        await waitForCondition(
+          async () => {
+            const todosAfterRevert = await dbAfterRestart.all(allTodos, { tier: "local" });
+            return todosAfterRevert.length === 0;
+          },
+          5000,
+          "restarted rejected insert should remove the previous local row",
+        );
         await waitForCondition(
           async () => mutationErrorSpy.mock.calls.length > 0,
           5000,
