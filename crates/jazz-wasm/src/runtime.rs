@@ -1070,11 +1070,6 @@ impl WasmRuntime {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
-        self.core.borrow_mut().set_mutation_error_callback(callback);
-    }
-
-    #[cfg(target_arch = "wasm32")]
     pub(crate) fn drain_pending_mutation_error_events(
         &self,
     ) -> Vec<jazz_tools::runtime_core::MutationErrorEvent> {
