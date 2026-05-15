@@ -11,8 +11,14 @@ import (
 	"github.com/evanw/esbuild/pkg/api"
 )
 
-//go:embed web
+// web/src holds the TSX sources; web/ is a pnpm workspace package, so
+// node_modules can land alongside but must not be embedded — the embed
+// directive scopes to web/src to keep the binary small.
+//
+//go:embed web/src
 var webFS embed.FS
+
+const webRoot = "web/src"
 
 type uiBundle struct {
 	indexHTML []byte
@@ -22,9 +28,9 @@ type uiBundle struct {
 // buildUIBundle unpacks the embedded TSX sources to a temp dir and bundles
 // them with esbuild. React/ReactDOM/ReactQuery are kept external — the
 // browser resolves them via the import-map in index.html (pointing at
-// esm.sh) so we never need a node_modules.
+// esm.sh) so we never need a node_modules at runtime.
 func buildUIBundle() (*uiBundle, error) {
-	indexHTML, err := webFS.ReadFile("web/index.html")
+	indexHTML, err := webFS.ReadFile(webRoot + "/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("read embedded index.html: %w", err)
 	}
@@ -35,11 +41,11 @@ func buildUIBundle() (*uiBundle, error) {
 	}
 	defer os.RemoveAll(tmp)
 
-	if err := fs.WalkDir(webFS, "web", func(path string, d fs.DirEntry, err error) error {
+	if err := fs.WalkDir(webFS, webRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel("web", path)
+		rel, _ := filepath.Rel(webRoot, path)
 		target := filepath.Join(tmp, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
@@ -50,7 +56,7 @@ func buildUIBundle() (*uiBundle, error) {
 		}
 		return os.WriteFile(target, data, 0o644)
 	}); err != nil {
-		return nil, fmt.Errorf("unpack web/: %w", err)
+		return nil, fmt.Errorf("unpack web/src: %w", err)
 	}
 
 	result := api.Build(api.BuildOptions{
