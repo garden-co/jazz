@@ -193,13 +193,12 @@ Merging writes branch changes back to `main`.
 
 ```ts
 await db.branch(branch.id).merge();
-await db.branch(branch.id).merge("main");
 ```
 
 Merge uses the same merge strategies as diff, but it does not stop just because diff would report
 conflicts. Conflicts are for review and UI. Merge still resolves through the configured strategies.
 
-The merge target defaults to `main`. The first version only supports merging into `main`.
+Merge publishes to `main`. The first version does not expose a merge target argument.
 
 Merge only includes the local version of the branch that is visible when merge starts. It does not
 wait for remote sync. If another device has written to the branch but that write has not arrived
