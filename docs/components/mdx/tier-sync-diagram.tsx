@@ -3,8 +3,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Cloud, Plus, Server, Smartphone, type LucideIcon } from "lucide-react";
 
-import { cn } from "@/lib/cn";
-
 import {
   anchorsFor,
   buildConnectionPath,
@@ -79,21 +77,6 @@ function bfsFrom(writer: NodeKey): Array<Hop[]> {
     frontier = nextFrontier;
   }
   return stages;
-}
-
-// Targets that aren't forwarded onward — leaves of the BFS spanning tree.
-function terminalsOf(stages: Hop[][]): Set<NodeKey> {
-  const sources = new Set<NodeKey>();
-  const targets = new Set<NodeKey>();
-  for (const stage of stages) {
-    for (const hop of stage) {
-      sources.add(hop.from);
-      targets.add(hop.to);
-    }
-  }
-  const out = new Set<NodeKey>();
-  for (const t of targets) if (!sources.has(t)) out.add(t);
-  return out;
 }
 
 function tierDepth(tier: Tier): number {
