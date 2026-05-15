@@ -10,7 +10,7 @@
  * `init()`.
  */
 
-import type { LocalBatchRecord, MutationErrorEvent, Runtime } from "./client.js";
+import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 
@@ -57,11 +57,9 @@ interface WasmBridgeHandle {
   ): void;
   applyIncomingServerPayload(payload: Uint8Array): void;
   waitForUpstreamServerConnection(): Promise<void>;
-  waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
   replayServerConnection(): void;
   disconnectUpstream(): void;
   reconnectUpstream(): void;
-  acknowledgeRejectedBatch(batchId: string): void;
   simulateCrash(): Promise<void>;
   setListeners(listeners: ListenerSlots): void;
   shutdown(): Promise<void>;
@@ -75,8 +73,6 @@ interface RuntimeWithWorkerBridge extends Runtime {
 interface ListenerSlots {
   onPeerSync?: (batch: PeerSyncBatch) => void;
   onAuthFailure?: (reason: AuthFailureReason) => void;
-  onLocalBatchRecordsSync?: (batches: LocalBatchRecord[]) => void;
-  onMutationErrorReplay?: (event: MutationErrorEvent) => void;
 }
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
@@ -184,11 +180,6 @@ export class WorkerBridge {
     await this.bridge.waitForUpstreamServerConnection();
   }
 
-  async waitForLocalSyncFlush(batchId?: string): Promise<void> {
-    if (this.disposed || !this.bridge) return;
-    await this.bridge.waitForLocalSyncFlush(batchId ?? null);
-  }
-
   applyIncomingServerPayload(payload: Uint8Array): void {
     this.bridge?.applyIncomingServerPayload(payload);
   }
@@ -209,10 +200,6 @@ export class WorkerBridge {
     this.reconnectUpstream();
   }
 
-  acknowledgeRejectedBatch(batchId: string): void {
-    this.bridge?.acknowledgeRejectedBatch(batchId);
-  }
-
   /** Test-only: posts `simulate-crash` so the worker releases OPFS handles
    * without a clean snapshot, and resolves on `shutdown-ok` (or after the
    * shutdown-ack timeout). Used to validate WAL replay. */
@@ -228,16 +215,6 @@ export class WorkerBridge {
 
   onAuthFailure(listener: (reason: AuthFailureReason) => void): void {
     this.listeners.onAuthFailure = listener;
-    this.bridge?.setListeners(this.listeners);
-  }
-
-  onLocalBatchRecordsSync(listener: (batches: LocalBatchRecord[]) => void): void {
-    this.listeners.onLocalBatchRecordsSync = listener;
-    this.bridge?.setListeners(this.listeners);
-  }
-
-  onMutationErrorReplay(listener: (event: MutationErrorEvent) => void): void {
-    this.listeners.onMutationErrorReplay = listener;
     this.bridge?.setListeners(this.listeners);
   }
 

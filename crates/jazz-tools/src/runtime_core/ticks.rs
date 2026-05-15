@@ -258,13 +258,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                                 Some(fate.clone()),
                             )
                         });
-                    self.durability.queue_mutation_error_event(
-                        crate::runtime_core::MutationErrorEvent {
-                            code: code.clone(),
-                            reason: reason.clone(),
-                            batch,
-                        },
-                    );
+                    self.queue_mutation_error_event(crate::runtime_core::MutationErrorEvent {
+                        code: code.clone(),
+                        reason: reason.clone(),
+                        batch,
+                    });
                 }
             }
         } else if matches!(fate, crate::batch_fate::BatchFate::Missing { .. }) {

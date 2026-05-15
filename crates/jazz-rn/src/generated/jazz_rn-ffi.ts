@@ -44,11 +44,6 @@ interface NativeModuleInterface {
     dataPath: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch(
-    ptr: bigint,
-    batchId: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): number;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_add_client(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
@@ -122,13 +117,9 @@ interface NativeModuleInterface {
     objectId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record(
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_batch_fate(
     ptr: bigint,
     batchId: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records(
-    ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
@@ -380,7 +371,6 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_func_generate_id(): number;
   ubrn_uniffi_jazz_rn_checksum_func_mint_anonymous_token(): number;
   ubrn_uniffi_jazz_rn_checksum_func_mint_local_first_token(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_client(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(): number;
@@ -395,8 +385,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_batch_fate(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error(): number;
