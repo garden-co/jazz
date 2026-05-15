@@ -143,7 +143,7 @@ Diff is exposed on the query builder.
 
 ```ts
 const diff = await db.all(
-  app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff("main"),
+  app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff(),
 );
 ```
 
@@ -217,6 +217,6 @@ An app can use the APIs like this:
 3. Use that branch row's Jazz-created id as the branch id.
 4. Write draft changes through `db.branch(branch.id)`.
 5. Render draft views with query-builder `.branch(branch.id)`.
-6. Preview publish impact with query-builder `.diff("main")`.
+6. Preview publish impact with query-builder `.diff()`.
 7. Show changed rows using the normal row fields plus `$diff`.
 8. Publish with `db.branch(branch.id).merge()`.
