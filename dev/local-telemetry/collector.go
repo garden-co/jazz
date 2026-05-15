@@ -9,6 +9,8 @@ import (
 	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/otelcol"
+	"go.opentelemetry.io/collector/processor"
+	"go.opentelemetry.io/collector/processor/batchprocessor"
 	"go.opentelemetry.io/collector/receiver"
 	"go.opentelemetry.io/collector/receiver/otlpreceiver"
 	"go.opentelemetry.io/collector/service/telemetry/otelconftelemetry"
@@ -20,9 +22,13 @@ func runCollector(ctx context.Context, host string, port int, dataDir string, re
 	factories := func() (otelcol.Factories, error) {
 		otlpRecv := otlpreceiver.NewFactory()
 		fileExp := fileexporter.NewFactory()
+		batchProc := batchprocessor.NewFactory()
 		return otelcol.Factories{
 			Receivers: map[component.Type]receiver.Factory{
 				otlpRecv.Type(): otlpRecv,
+			},
+			Processors: map[component.Type]processor.Factory{
+				batchProc.Type(): batchProc,
 			},
 			Exporters: map[component.Type]exporter.Factory{
 				fileExp.Type(): fileExp,
@@ -114,22 +120,30 @@ func buildConfigMap(host string, port int, dataDir string, retentionDays int) ma
 			"file/logs":    fileExp("logs"),
 			"file/metrics": fileExp("metrics"),
 		},
+		"processors": map[string]any{
+			"batch": map[string]any{
+				"timeout": "200ms",
+			},
+		},
 		"service": map[string]any{
 			"telemetry": map[string]any{
 				"logs": map[string]any{"level": "info"},
 			},
 			"pipelines": map[string]any{
 				"traces": map[string]any{
-					"receivers": []any{"otlp"},
-					"exporters": []any{"file/traces"},
+					"receivers":  []any{"otlp"},
+					"processors": []any{"batch"},
+					"exporters":  []any{"file/traces"},
 				},
 				"logs": map[string]any{
-					"receivers": []any{"otlp"},
-					"exporters": []any{"file/logs"},
+					"receivers":  []any{"otlp"},
+					"processors": []any{"batch"},
+					"exporters":  []any{"file/logs"},
 				},
 				"metrics": map[string]any{
-					"receivers": []any{"otlp"},
-					"exporters": []any{"file/metrics"},
+					"receivers":  []any{"otlp"},
+					"processors": []any{"batch"},
+					"exporters":  []any{"file/metrics"},
 				},
 			},
 		},
