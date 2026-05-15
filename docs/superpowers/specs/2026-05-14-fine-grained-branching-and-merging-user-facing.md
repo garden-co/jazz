@@ -5,7 +5,7 @@ This spec explains the user-facing shape of branches in Jazz. The technical desi
 
 ## What Branches Mean In Jazz
 
-Branches are named draft spaces for app data.
+Branches are draft spaces for app data, identified by stable branch ids.
 
 A branch lets an app or user make changes without changing what normal `main` readers see. This is
 useful for draft workflows, collaborative editing, review screens, and "try this before publishing"
@@ -13,10 +13,10 @@ flows.
 
 The first version provides **write visibility isolation**:
 
-- Writes made on `draft/alice` do not appear in normal `main` reads.
-- Reads from `draft/alice` see current `main` plus the branch's own changed rows.
+- Writes made on a branch id do not appear in normal `main` reads.
+- Reads from that branch id see current `main` plus the branch's own changed rows.
 - Branch data is not secret. A caller with normal read permission can read a branch if they
-  explicitly ask for that branch name.
+  explicitly ask for that branch id.
 - Branches are sparse. Jazz stores only rows changed on the branch, not a full copy of `main`.
 
 That means a branch initially behaves like a lightweight overlay:
@@ -36,21 +36,42 @@ Future improvements can strengthen this model:
 - **Branch ancestry:** a branch could be based on another branch, not only on `main`.
 - **Query-based isolation:** a branch-like workflow could be scoped to one query or subset of data,
   instead of a named branch that can touch any row.
-- **Lifecycle and discovery:** Jazz could add branch records, branch listing, closed branches, or
-  explicit branch cleanup later.
+- **Built-in branch metadata helpers:** Jazz could provide a default branch metadata schema and
+  helpers for branch listing, display names, closed branches, or explicit branch cleanup later.
 
-These are future improvements. The first version keeps branches named, sparse, and simple.
+These are future improvements. The first version keeps branches sparse and simple.
 
 ## User-Facing APIs
 
-Branch names are passed directly. There is no branch registry in the first version.
+Branch ids are passed directly to the core APIs. There is no required branch registry in the first
+version.
+
+Real apps should usually store branch metadata in a normal app table and use that row's Jazz-created
+id as the branch id. This avoids global name collisions, lets apps rename branches by updating a
+display field, and gives apps a normal place to store permissions and lifecycle state.
+
+Jazz can provide a default branch metadata schema later, but it should be userland data, not a
+required part of core branch reads, diffs, or merges. Apps should be able to extend it with their
+own fields.
+
+```ts
+const { value: branch } = db.insert(app.branches, {
+  name: "Alice draft",
+  ownerId: alice.id,
+  status: "open",
+});
+
+const draft = db.branch(branch.id);
+```
+
+Here Jazz creates `branch.id`. The app does not manually create the branch id.
 
 ### Branch-Scoped Database View
 
-`db.branch(name)` returns a database view where reads and writes use that branch.
+`db.branch(branchId)` returns a database view where reads and writes use that branch.
 
 ```ts
-const draft = db.branch("draft/alice");
+const draft = db.branch(branch.id);
 
 await draft.insert(app.todos, {
   projectId,
@@ -68,26 +89,26 @@ Queries can select a branch directly.
 ```ts
 const rows = await db.all(
   app.todos
-    .branch("draft/alice")
+    .branch(branch.id)
     .where({ projectId }),
 );
 ```
 
-Query-level branch selection uses the same overlay behavior as `db.branch(name)`.
+Query-level branch selection uses the same overlay behavior as `db.branch(branchId)`.
 
 If both are present, the query-level branch wins:
 
 ```ts
-const draft = db.branch("draft/alice");
+const draft = db.branch(aliceBranch.id);
 
 const rows = await draft.all(
   app.todos
-    .branch("draft/bob")
+    .branch(bobBranch.id)
     .where({ projectId }),
 );
 ```
 
-This query reads `draft/bob`, not `draft/alice`.
+This query reads `bobBranch.id`, not `aliceBranch.id`.
 
 ### Query Builder Diff
 
@@ -96,7 +117,7 @@ Diff is exposed on the query builder.
 ```ts
 const diff = await db.all(
   app.todos
-    .branch("draft/alice")
+    .branch(branch.id)
     .where({ projectId })
     .diff("main"),
 );
@@ -105,7 +126,7 @@ const diff = await db.all(
 This means:
 
 ```text
-source = todos in draft/alice for this query
+source = todos in the selected branch for this query
 target = todos in main
 ```
 
@@ -143,8 +164,8 @@ edit moved it out of the query filter.
 Merging writes branch changes back to `main`.
 
 ```ts
-await db.branch("draft/alice").merge();
-await db.branch("draft/alice").merge("main");
+await db.branch(branch.id).merge();
+await db.branch(branch.id).merge("main");
 ```
 
 Merge uses the same merge strategies as diff, but it does not stop just because diff would report
@@ -153,7 +174,7 @@ conflicts. Conflicts are for review and UI. Merge still resolves through the con
 The merge target defaults to `main`. The first version only supports merging into `main`.
 
 Merge only includes the local version of the branch that is visible when merge starts. It does not
-wait for remote sync. If another device has written to `draft/alice` but that write has not arrived
+wait for remote sync. If another device has written to the branch but that write has not arrived
 locally yet, this merge does not include it.
 
 Repeated merges are allowed. They may create extra history, and concurrent repeated merges may
@@ -164,8 +185,9 @@ double-apply the same branch change.
 
 An app can use the APIs like this:
 
-1. Write draft changes through `db.branch("draft/alice")`.
-2. Render draft views with query-builder `.branch("draft/alice")`.
-3. Preview publish impact with query-builder `.diff("main")`.
-4. Show changed rows using the normal row fields plus `$diff`.
-5. Publish with `db.branch("draft/alice").merge()`.
+1. Create a normal `branches` row and use its Jazz-created row id as the branch id.
+2. Write draft changes through `db.branch(branch.id)`.
+3. Render draft views with query-builder `.branch(branch.id)`.
+4. Preview publish impact with query-builder `.diff("main")`.
+5. Show changed rows using the normal row fields plus `$diff`.
+6. Publish with `db.branch(branch.id).merge()`.
