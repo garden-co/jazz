@@ -1377,6 +1377,7 @@ fn join_query_with_multiple_branches_reads_all_branches() {
         "users",
         &draft_branch,
         &[Value::Text("dora".into())],
+        None,
     )
     .unwrap();
     qm.insert_on_branch(
@@ -1384,6 +1385,7 @@ fn join_query_with_multiple_branches_reads_all_branches() {
         "posts",
         &draft_branch,
         &[Value::Text("dora".into()), Value::Text("draft post".into())],
+        None,
     )
     .unwrap();
 
