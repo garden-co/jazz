@@ -114,11 +114,14 @@ struct InsertAlignmentPlan {
 ///
 /// // Insert data
 /// let handle = manager.insert(
+///     &mut storage,
 ///     "users",
 ///     std::collections::HashMap::from([
 ///         ("id".to_string(), id),
 ///         ("name".to_string(), name),
 ///     ]),
+///     None,
+///     None,
 /// )?;
 ///
 /// // Query across all schema versions via subscription
@@ -1640,33 +1643,8 @@ impl SchemaManager {
     }
 
     /// Insert a row into the current schema's branch.
-    pub fn insert<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        values: HashMap<String, Value>,
-    ) -> Result<InsertResult, QueryError> {
-        let _span =
-            tracing::debug_span!("SM::insert", table, schema_hash = %self.context.current_hash)
-                .entered();
-        self.insert_with_write_context(storage, table, values, None)
-    }
-
-    /// Insert with session-based policy checking.
-    ///
     /// Omitted fields are filled from schema defaults or nullable nulls.
-    pub fn insert_with_write_context<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<InsertResult, QueryError> {
-        self.insert_with_write_context_and_id(storage, table, values, None, write_context)
-    }
-
-    /// Insert with session-based policy checking and an optional caller-supplied row id.
-    pub fn insert_with_write_context_and_id<H: Storage>(
+    pub fn insert<H: Storage>(
         &mut self,
         storage: &mut H,
         table: &str,
@@ -1702,22 +1680,11 @@ impl SchemaManager {
         )
     }
 
-    pub fn insert_with_session<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        values: HashMap<String, Value>,
-        session: Option<&Session>,
-    ) -> Result<InsertResult, QueryError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.insert_with_write_context(storage, table, values, owned.as_ref())
-    }
-
     /// Create or update a row with a caller-supplied UUID.
     ///
     /// If a visible row already exists for `object_id`, only the supplied
     /// columns are updated. Otherwise a new row is inserted with that id.
-    pub fn upsert_with_write_context_and_id<H: Storage>(
+    pub fn upsert<H: Storage>(
         &mut self,
         storage: &mut H,
         table: &str,
@@ -1764,22 +1731,16 @@ impl SchemaManager {
             }
 
             let updates = values.into_iter().collect::<Vec<_>>();
-            return self.update_with_write_context(storage, object_id, &updates, write_context);
+            return self.update(storage, object_id, &updates, write_context);
         }
 
-        let inserted = self.insert_with_write_context_and_id(
-            storage,
-            table,
-            values,
-            Some(object_id),
-            write_context,
-        )?;
+        let inserted = self.insert(storage, table, values, Some(object_id), write_context)?;
         Ok(inserted.batch_id)
     }
 
     /// Update a row using current-schema column names, performing copy-on-write
     /// when the latest visible row batch entry still lives on an older schema branch.
-    pub fn update_with_write_context<H: Storage>(
+    pub fn update<H: Storage>(
         &mut self,
         storage: &mut H,
         object_id: ObjectId,
@@ -1869,17 +1830,6 @@ impl SchemaManager {
         Ok(batch_id)
     }
 
-    pub fn update_with_session<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        object_id: ObjectId,
-        values: &[(String, Value)],
-        session: Option<&Session>,
-    ) -> Result<crate::row_histories::BatchId, QueryError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.update_with_write_context(storage, object_id, values, owned.as_ref())
-    }
-
     /// Delete a row (soft delete), performing copy-on-write when the latest
     /// visible row batch entry still lives on an older schema branch.
     pub fn delete<H: Storage>(
@@ -1947,16 +1897,6 @@ impl SchemaManager {
                 write_context,
                 false,
             )
-    }
-
-    pub fn delete_with_session<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        object_id: ObjectId,
-        session: Option<&Session>,
-    ) -> Result<DeleteHandle, QueryError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.delete(storage, object_id, owned.as_ref())
     }
 
     /// Process pending operations (drives SyncManager).
@@ -3023,7 +2963,9 @@ mod tests {
             ("email".to_string(), email.clone()),
         ]);
 
-        let _handle = manager.insert(&mut storage, "users", values).unwrap();
+        let _handle = manager
+            .insert(&mut storage, "users", values, None, None)
+            .unwrap();
         manager.process(&mut storage);
 
         // Query via subscribe/process/unsubscribe pattern
@@ -3053,6 +2995,8 @@ mod tests {
                 &mut storage,
                 "todos",
                 HashMap::from([("title".to_string(), Value::Text("ship default".into()))]),
+                None,
+                None,
             )
             .unwrap();
 
@@ -3087,6 +3031,8 @@ mod tests {
                 &mut storage,
                 "todos",
                 HashMap::from([("title".to_string(), Value::Text("first".into()))]),
+                None,
+                None,
             )
             .unwrap();
         manager
@@ -3094,6 +3040,8 @@ mod tests {
                 &mut storage,
                 "todos",
                 HashMap::from([("title".to_string(), Value::Text("second".into()))]),
+                None,
+                None,
             )
             .unwrap();
 
@@ -3117,6 +3065,8 @@ mod tests {
                     ("title".to_string(), Value::Text("keep null".into())),
                     ("note".to_string(), Value::Null),
                 ]),
+                None,
+                None,
             )
             .unwrap();
 
@@ -3138,7 +3088,7 @@ mod tests {
             SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
 
         let err = manager
-            .insert(&mut storage, "todos", HashMap::new())
+            .insert(&mut storage, "todos", HashMap::new(), None, None)
             .unwrap_err();
         assert!(
             matches!(err, QueryError::EncodingError(ref msg) if msg.contains("missing required field `title`")),
@@ -3160,6 +3110,8 @@ mod tests {
                 &mut storage,
                 "todos",
                 HashMap::from([("title".to_string(), Value::Null)]),
+                None,
+                None,
             )
             .unwrap_err();
         assert!(
@@ -3185,6 +3137,8 @@ mod tests {
                     ("title".to_string(), Value::Text("first".into())),
                     ("bogus".to_string(), Value::Text("second".into())),
                 ]),
+                None,
+                None,
             )
             .unwrap_err();
         assert!(
