@@ -174,10 +174,8 @@ choice.
 Diff is exposed through the query builder, not as a whole-branch API. Callers scope the diff by
 building the query they want to inspect, then call `.diff(targetBranch)`.
 
-Merge is exposed on the branch-scoped database view. `db.branch(sourceObjectId).merge(target?)`
-merges the source branch into the target branch. `target` defaults to `"main"`. The MVP should only
-support target `"main"` unless the implementation explicitly supports more. `merge(...)` must
-reject a target equal to the source branch.
+Merge is exposed on the branch-scoped database view. `db.branch(sourceObjectId).merge()` merges the
+source branch into `main`. The MVP does not expose a merge target argument.
 
 ## Read Semantics
 
@@ -278,22 +276,22 @@ type QueryDiffRow<Row> = Row & {
 };
 ```
 
-For inserts and updates, the row fields are the values that `db.branch(source).merge(target)` would
-write if the merge ran at the same observed source and target tips. For deletes, the row fields are
-the target-side row being removed, marked with `$diff.kind = "delete"`.
+For inserts and updates, the row fields are the values that `db.branch(source).merge()` would write
+if the merge ran at the same observed source and target tips. For deletes, the row fields are the
+target-side row being removed, marked with `$diff.kind = "delete"`.
 
 The preview is not a lock. A later merge may produce a different value if either side changed after
 the diff was computed.
 
 ## Merge Semantics
 
-`db.branch(source).merge(target = "main")` uses the same three inputs as diff:
+`db.branch(source).merge()` uses the same three inputs as diff, with `main` as the target:
 
 ```text
 base, source, target
 ```
 
-It computes the merged row using the column merge strategies and writes the result to `target` as
+It computes the merged row using the column merge strategies and writes the result to `main` as
 normal row-history entries.
 
 Merge only considers the branch and target versions visible in the local runtime at the time the
@@ -366,7 +364,7 @@ Required coverage:
 - branch delete hides current `main`
 - first branch write parents to the current `main` frontier
 - later branch write parents to the previous branch tip
-- `db.branch(source).merge()` defaults target to `main`
+- `db.branch(source).merge()` writes to `main`
 - merge writes to `main` with parents from both locally visible current `main` and locally visible
   branch tip
 - merge excludes branch writes that are not locally visible when merge starts
