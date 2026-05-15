@@ -41,6 +41,11 @@ export function baseOptions(): BaseLayoutProps {
         active: "nested-url",
       },
       {
+        text: "Dashboard",
+        url: "https://v2.dashboard.jazz.tools",
+        external: true,
+      },
+      {
         type: "icon",
         label: "Jazz GitHub",
         text: "GitHub",
