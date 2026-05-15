@@ -9,6 +9,7 @@ import {
   readFile,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -34,6 +35,7 @@ import {
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
 const indexPath = fileURLToPath(new URL("./index.ts", import.meta.url));
 const distIndexPath = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+const distCliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const binPath = fileURLToPath(new URL("../bin/jazz-tools.js", import.meta.url));
 const bootstrapVerifierPath = fileURLToPath(
   new URL("../scripts/verify-packed-runtime-bootstrap.mjs", import.meta.url),
@@ -3114,5 +3116,29 @@ exit 0
     expect(result.stdout).toContain("migrations push");
     expect(result.stdout).toContain("server");
     expect(result.stdout).toContain("create");
+  });
+});
+
+describe("dist/cli.js entrypoint under a pnpm symlink", () => {
+  it("dispatches when invoked through a symlinked package directory", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const root = await mkdtemp(join(tmpBase, "jazz-tools-pnpm-symlink-"));
+    tempRoots.push(root);
+
+    // pnpm symlinks node_modules/jazz-tools to node_modules/.pnpm/.../jazz-tools.
+    // Running dist/cli.js through that symlink must still run the CLI body
+    // instead of silently exiting 0.
+    const realPackageDir = dirname(dirname(distCliPath));
+    const linkedPackageDir = join(root, "jazz-tools");
+    await symlink(realPackageDir, linkedPackageDir, "dir");
+
+    const result = spawnSync(process.execPath, [join(linkedPackageDir, "dist", "cli.js")], {
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]",
+    );
   });
 });
