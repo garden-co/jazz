@@ -84,7 +84,7 @@ impl HostedServer {
                 .is_err()
         {
             shutdown_task.abort();
-            let _ = shutdown_task.await;
+            let _ = tokio::time::timeout(Duration::from_millis(50), shutdown_task).await;
         }
 
         if let Some(mut task) = self.task.take()
@@ -93,7 +93,7 @@ impl HostedServer {
                 .is_err()
         {
             task.abort();
-            let _ = task.await;
+            let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
         }
     }
 

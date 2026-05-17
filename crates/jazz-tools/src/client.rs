@@ -492,9 +492,13 @@ impl JazzClient {
         // Flush storage state to disk for persistence
         self.runtime
             .with_storage(|storage| {
-                storage.flush()?;
-                storage.flush_wal()?;
-                storage.close()
+                let flush_result = storage.flush();
+                let flush_wal_result = storage.flush_wal();
+                let close_result = storage.close();
+
+                flush_result?;
+                flush_wal_result?;
+                close_result
             })
             .map_err(|e| JazzError::Storage(e.to_string()))?
             .map_err(|e| JazzError::Storage(e.to_string()))?;

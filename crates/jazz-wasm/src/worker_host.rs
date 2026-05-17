@@ -653,10 +653,15 @@ fn process_main_message(msg: MainToWorkerMessage) {
         },
         MainToWorkerWire::DebugSeedLiveSchema { schema_json } => match runtime.as_ref() {
             Some(rt) => match rt.debug_seed_live_schema(&schema_json) {
-                Ok(()) => {
-                    let _ = rt.flush_wal();
-                    post_to_main(&WorkerToMainWire::DebugSeedLiveSchemaOk);
-                }
+                Ok(()) => match rt.flush_wal() {
+                    Ok(()) => post_to_main(&WorkerToMainWire::DebugSeedLiveSchemaOk),
+                    Err(err) => post_to_main(&WorkerToMainWire::Error {
+                        message: format!(
+                            "debug-seed-live-schema flush failed: {}",
+                            js_error_message(&err)
+                        ),
+                    }),
+                },
                 Err(err) => post_to_main(&WorkerToMainWire::Error {
                     message: format!(
                         "debug-seed-live-schema failed: {}",
@@ -767,7 +772,11 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
         // the same effect on storage; the distinction is preserved in case
         // a future storage backend introduces a separate snapshot path.
         rt.batched_tick();
-        let _ = rt.flush_wal();
+        if let Err(err) = rt.flush_wal() {
+            post_to_main(&WorkerToMainWire::Error {
+                message: format!("shutdown flush failed: {}", js_error_message(&err)),
+            });
+        }
         rt.install_noop_sync_sender();
         // (No forwarder on worker side — `install_noop_sync_sender` below
         // replaces the active sender wholesale, so any future outbox emission

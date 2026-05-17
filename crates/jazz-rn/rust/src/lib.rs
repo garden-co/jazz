@@ -1096,9 +1096,13 @@ impl RnRuntime {
             let core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.flush_storage().map_err(runtime_err)?;
-            core.storage().close().map_err(runtime_err)?;
-            Ok(())
+            let flush_result = core.flush_storage();
+            let flush_wal_result = core.flush_wal();
+            let close_result = core.storage().close();
+
+            flush_result.map_err(runtime_err)?;
+            flush_wal_result.map_err(runtime_err)?;
+            close_result.map_err(runtime_err)
         })
     }
 

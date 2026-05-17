@@ -1288,13 +1288,17 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.storage()
-            .flush()
+        let flush_result = core.storage().flush();
+        let flush_wal_result = core.storage().flush_wal();
+        let close_result = core.storage().close();
+
+        flush_result
             .map_err(|e| napi::Error::from_reason(format!("Failed to flush storage: {:?}", e)))?;
-        core.storage()
-            .close()
-            .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;
-        Ok(())
+        flush_wal_result.map_err(|e| {
+            napi::Error::from_reason(format!("Failed to flush storage WAL: {:?}", e))
+        })?;
+        close_result
+            .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))
     }
 
     #[napi(js_name = "deriveUserId")]
