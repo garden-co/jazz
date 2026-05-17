@@ -2501,6 +2501,74 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_closes_active_websocket_with_service_restart_code() {
+        let state = make_sync_test_state("test-backend-secret").await;
+        let app = create_router(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws listener");
+        let addr = listener.local_addr().expect("ws local addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve ws app");
+        });
+
+        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
+        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
+
+        let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig {
+                backend_secret: Some("test-backend-secret".to_string()),
+                ..Default::default()
+            },
+            catalogue_state_hash: None,
+            declared_schema_hash: None,
+        };
+        let payload = serde_json::to_vec(&handshake).expect("serialize handshake");
+        ws.send(WsMessage::Binary(
+            crate::transport_manager::frame_encode(&payload).into(),
+        ))
+        .await
+        .expect("send handshake");
+
+        let connected = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for ConnectedResponse")
+            .expect("ws frame")
+            .expect("ws result");
+        assert!(matches!(connected, WsMessage::Binary(_)));
+
+        assert_eq!(state.shutdown.active_websockets(), 1);
+        assert!(state.shutdown.request_shutdown());
+
+        let close_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for close")
+            .expect("ws frame")
+            .expect("ws result");
+        let WsMessage::Close(Some(close)) = close_frame else {
+            panic!("expected close frame, got {close_frame:?}");
+        };
+        assert_eq!(
+            close.code,
+            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart
+        );
+        assert_eq!(close.reason.as_ref(), "server shutting down");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.shutdown.active_websockets() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("websocket cleanup");
+
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn ws_handler_rejects_pre_versioned_handshake_loudly() {
         let state = make_sync_test_state("test-backend-secret").await;
         let app = create_router(state);

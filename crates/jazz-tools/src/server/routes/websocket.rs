@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     http::HeaderMap,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 
 use crate::middleware::auth::{
@@ -26,6 +26,16 @@ pub(super) async fn ws_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> Response {
+    if state.shutdown.is_shutting_down() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(crate::jazz_transport::ErrorResponse::internal(
+                "server is shutting down".to_string(),
+            )),
+        )
+            .into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
 }
 
@@ -274,6 +284,15 @@ async fn close_ws_with_protocol_reason(socket: &mut WebSocket, reason: &str) {
         .await;
 }
 
+async fn close_ws_for_shutdown(socket: &mut WebSocket) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: close_code::RESTART,
+            reason: "server shutting down".into(),
+        })))
+        .await;
+}
+
 async fn handle_ws_connection(
     mut socket: WebSocket,
     state: Arc<ServerState>,
@@ -349,6 +368,11 @@ async fn handle_ws_connection(
         WsClientSetup::Session(_) => "session",
     };
 
+    let Some(_websocket_guard) = state.shutdown.try_enter_websocket() else {
+        close_ws_for_shutdown(&mut socket).await;
+        return;
+    };
+
     // 4. Register with ConnectionEventHub (mirrors events_handler).
     let connection_id = state
         .next_connection_id
@@ -418,6 +442,7 @@ async fn handle_ws_connection(
 
     // 7. Bidirectional loop: inbound frames from client + outbound updates from hub.
     //    Also fires a periodic heartbeat so idle connections don't look half-open.
+    let mut shutdown_rx = state.shutdown.subscribe();
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     // Don't emit a heartbeat immediately after Connected — wait a full tick.
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -476,6 +501,12 @@ async fn handle_ws_connection(
                 let Ok(bytes) = event.encode_payload() else { continue };
                 let frame = crate::transport_manager::frame_encode(&bytes);
                 if socket.send(Message::Binary(frame)).await.is_err() {
+                    break;
+                }
+            }
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && state.shutdown.is_shutting_down() {
+                    close_ws_for_shutdown(&mut socket).await;
                     break;
                 }
             }
