@@ -287,6 +287,9 @@ fn make_env_filter() -> tracing_subscriber::EnvFilter {
 mod tests {
     use super::*;
 
+    // Clap reads env-backed args during parsing, so every Cli::try_parse_from
+    // test in this module holds this lock. The tests that mutate env vars keep
+    // it held until their EnvVarGuard restores the previous value.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvVarGuard {
@@ -297,7 +300,8 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
-            // SAFETY: tests using process env vars hold ENV_LOCK for the full mutation window.
+            // SAFETY: all CLI parser tests hold ENV_LOCK, and env-mutating tests
+            // keep holding it until EnvVarGuard restores the previous value.
             unsafe {
                 std::env::set_var(key, value);
             }
@@ -306,7 +310,8 @@ mod tests {
 
         fn remove(key: &'static str) -> Self {
             let previous = std::env::var_os(key);
-            // SAFETY: tests using process env vars hold ENV_LOCK for the full mutation window.
+            // SAFETY: all CLI parser tests hold ENV_LOCK, and env-mutating tests
+            // keep holding it until EnvVarGuard restores the previous value.
             unsafe {
                 std::env::remove_var(key);
             }
@@ -316,7 +321,8 @@ mod tests {
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            // SAFETY: tests using process env vars hold ENV_LOCK until after this guard drops.
+            // SAFETY: all CLI parser tests hold ENV_LOCK, and env-mutating tests
+            // keep holding it until EnvVarGuard restores the previous value.
             unsafe {
                 match &self.previous {
                     Some(value) => std::env::set_var(self.key, value),
@@ -328,6 +334,7 @@ mod tests {
 
     #[test]
     fn server_command_parses_allow_local_first_auth_flag() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -347,6 +354,7 @@ mod tests {
 
     #[test]
     fn server_command_parses_jwt_public_key_flag() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -380,6 +388,7 @@ mod tests {
 
     #[test]
     fn server_command_parses_shutdown_timeout_secs() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -416,6 +425,7 @@ mod tests {
 
     #[test]
     fn server_command_rejects_shutdown_timeout_secs_above_limit() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let error = match Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -436,6 +446,7 @@ mod tests {
 
     #[test]
     fn server_command_parses_upstream_url_and_peer_secret() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -462,6 +473,7 @@ mod tests {
 
     #[test]
     fn server_cli_validation_requires_peer_secret_in_edge_mode() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -480,6 +492,7 @@ mod tests {
 
     #[test]
     fn server_cli_validation_requires_admin_secret_in_edge_mode() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
