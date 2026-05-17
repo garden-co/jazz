@@ -16,6 +16,11 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    body::Body,
+    extract::State,
+    http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use tower_http::cors::CorsLayer;
@@ -30,6 +35,24 @@ use http::{
     schema_handler, schema_hashes_handler,
 };
 use websocket::ws_handler;
+
+async fn app_shutdown_gate(
+    State(state): State<Arc<ServerState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let Some(_guard) = state.shutdown.try_enter_app_request() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(crate::jazz_transport::ErrorResponse::internal(
+                "server is shutting down".to_string(),
+            )),
+        )
+            .into_response();
+    };
+
+    next.run(request).await
+}
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
     // TODO: Accept app-name aliases in app-scoped route matching
@@ -53,6 +76,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .nest("/admin", admin_routes)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            app_shutdown_gate,
+        ))
         .layer(TraceLayer::new_for_http());
 
     Router::new()
@@ -392,6 +419,42 @@ mod tests {
             state.shutdown.phase(),
             crate::server::ShutdownPhase::ShuttingDown
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_new_app_scoped_http_requests_but_keeps_internal_routes_available() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let app = make_test_router(state);
+
+        let shutdown = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
+        assert_eq!(shutdown.status(), StatusCode::ACCEPTED);
+
+        let app_scoped = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/schemas"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(app_scoped.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let repeated = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+
+        let health = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
