@@ -1,6 +1,7 @@
 //! Server command implementation.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use jazz_tools::middleware::AuthConfig;
 use jazz_tools::schema_manager::AppId;
@@ -18,6 +19,7 @@ pub async fn run(
     auth_config: AuthConfig,
     upstream_url: Option<String>,
     bound_port_file: Option<String>,
+    shutdown_timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     let app_id_string = app_id.to_string();
@@ -30,7 +32,9 @@ pub async fn run(
         info!("Data directory: {}", data_dir);
     }
 
-    let builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+    let builder = ServerBuilder::new(app_id)
+        .with_auth_config(auth_config)
+        .with_shutdown_timeout(shutdown_timeout);
     let builder = match upstream_url {
         Some(upstream_url) => builder.with_upstream_url(upstream_url),
         None => builder,

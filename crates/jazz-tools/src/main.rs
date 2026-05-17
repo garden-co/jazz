@@ -133,6 +133,10 @@ enum Commands {
         #[arg(long, env = "JAZZ_PEER_SECRET")]
         peer_secret: Option<String>,
 
+        /// Graceful shutdown network-drain timeout in seconds.
+        #[arg(long, env = "JAZZ_SHUTDOWN_TIMEOUT_SECS", default_value_t = 30)]
+        shutdown_timeout_secs: u64,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -180,6 +184,7 @@ async fn main() {
             admin_secret,
             upstream_url,
             peer_secret,
+            shutdown_timeout_secs,
             bound_port_file,
         } => {
             let node_env_mode = resolve_node_env_mode();
@@ -215,6 +220,7 @@ async fn main() {
                 auth_config,
                 upstream_url,
                 bound_port_file,
+                std::time::Duration::from_secs(shutdown_timeout_secs),
             )
             .await
             {
@@ -291,6 +297,26 @@ mod tests {
 
         match cli.command {
             Commands::Server { .. } => {}
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn server_command_parses_shutdown_timeout_secs() {
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "test-app",
+            "--shutdown-timeout-secs",
+            "7",
+        ])
+        .expect("server command should parse");
+
+        match cli.command {
+            Commands::Server {
+                shutdown_timeout_secs,
+                ..
+            } => assert_eq!(shutdown_timeout_secs, 7),
             _ => panic!("expected server command"),
         }
     }
