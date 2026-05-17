@@ -149,7 +149,11 @@ impl ShutdownController {
 
     pub async fn wait_for_websocket_drain(&self) -> bool {
         let deadline = tokio::time::Instant::now() + self.timeout();
+        let notified = self.inner.drain_notify.notified();
+        tokio::pin!(notified);
+
         loop {
+            notified.as_mut().enable();
             if self.active_websockets() == 0 {
                 return true;
             }
@@ -161,15 +165,26 @@ impl ShutdownController {
 
             let sleep = tokio::time::sleep_until(deadline);
             tokio::select! {
-                _ = self.inner.drain_notify.notified() => {}
+                _ = notified.as_mut() => {
+                    notified.set(self.inner.drain_notify.notified());
+                }
                 _ = sleep => return self.active_websockets() == 0,
             }
         }
     }
 
     pub async fn wait_for_app_request_drain(&self) {
-        while self.active_app_requests() > 0 {
-            self.inner.drain_notify.notified().await;
+        let notified = self.inner.drain_notify.notified();
+        tokio::pin!(notified);
+
+        loop {
+            notified.as_mut().enable();
+            if self.active_app_requests() == 0 {
+                return;
+            }
+
+            notified.as_mut().await;
+            notified.set(self.inner.drain_notify.notified());
         }
     }
 }
@@ -239,5 +254,48 @@ mod tests {
 
         let phase = task.await.expect("wait task");
         assert_eq!(phase, ShutdownPhase::ShuttingDown);
+    }
+
+    #[tokio::test]
+    async fn wait_for_app_request_drain_observes_guard_drop() {
+        let controller = ShutdownController::new(std::time::Duration::from_secs(30));
+        let guard = controller
+            .try_enter_app_request()
+            .expect("running server accepts request");
+        let waiter = controller.clone();
+
+        let task = tokio::spawn(async move {
+            waiter.wait_for_app_request_drain().await;
+            waiter.active_app_requests()
+        });
+
+        tokio::task::yield_now().await;
+        drop(guard);
+
+        let active = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("drain wait should complete after guard drop")
+            .expect("wait task");
+        assert_eq!(active, 0);
+    }
+
+    #[tokio::test]
+    async fn wait_for_websocket_drain_observes_guard_drop() {
+        let controller = ShutdownController::new(std::time::Duration::from_secs(30));
+        let guard = controller
+            .try_enter_websocket()
+            .expect("running server accepts websocket");
+        let waiter = controller.clone();
+
+        let task = tokio::spawn(async move { waiter.wait_for_websocket_drain().await });
+
+        tokio::task::yield_now().await;
+        drop(guard);
+
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("websocket drain should complete after guard drop")
+            .expect("wait task");
+        assert!(drained);
     }
 }
