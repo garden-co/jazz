@@ -34,6 +34,495 @@ fn subscription_updates_after_insert_and_process() {
 }
 
 #[test]
+fn synced_subscription_does_not_copy_existing_pending_local_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(200)],
+    )
+    .unwrap();
+    assert_eq!(qm.pending_local_row_batches.len(), 2);
+
+    let query = qm.query("users").build();
+    let sub_id = qm.subscribe_with_sync(query, None, None).unwrap();
+    let subscription = qm.subscriptions.get(&sub_id).unwrap();
+    assert!(subscription.sync_backed);
+    assert!(subscription.pending_local_row_ids.is_empty());
+    assert!(!subscription.has_pending_local_updates);
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].delta.added.len(), 2);
+}
+
+#[test]
+fn composite_index_is_planned_only_after_local_backfill_is_ready() {
+    use crate::query_manager::types::CompositeIndexColumn;
+
+    let sync_manager = SyncManager::new();
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::builder("documents")
+            .column("owner_id", ColumnType::Text)
+            .column("updated_at", ColumnType::Timestamp)
+            .column("title", ColumnType::Text)
+            .composite_index(vec![
+                CompositeIndexColumn::asc("owner_id"),
+                CompositeIndexColumn::desc("updated_at"),
+            ])
+            .build(),
+    );
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = qm.current_branch();
+    let descriptor = qm.schema[&TableName::new("documents")].columns.clone();
+
+    for (owner, updated_at, title) in [
+        ("alice", 10_u64, "First"),
+        ("bob", 20_u64, "Other"),
+        ("alice", 30_u64, "Latest"),
+    ] {
+        let row_id = ObjectId::new();
+        let data = encode_row(
+            &descriptor,
+            &[
+                Value::Text(owner.into()),
+                Value::Timestamp(updated_at),
+                Value::Text(title.into()),
+            ],
+        )
+        .unwrap();
+        let index_mutations = QueryManager::index_mutations_for_insert_on_branch(
+            "documents",
+            &branch,
+            row_id,
+            &data,
+            &descriptor,
+            None,
+            &[],
+        );
+        let row = StoredRowBatch::new(
+            row_id,
+            branch.clone(),
+            [],
+            data,
+            RowProvenance::for_insert("test", updated_at),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            None,
+        );
+        storage
+            .apply_row_mutation(
+                "documents",
+                std::slice::from_ref(&row),
+                &[VisibleRowEntry::new(row.clone())],
+                &index_mutations,
+            )
+            .unwrap();
+    }
+
+    let query = qm
+        .query("documents")
+        .filter_eq("owner_id", Value::Text("alice".into()))
+        .order_by_desc("updated_at")
+        .limit(2)
+        .build();
+
+    let before = qm.subscribe(query.clone()).unwrap();
+    let before_graph = &qm.subscriptions.get(&before).unwrap().graph;
+    assert!(
+        before_graph
+            .index_scan_nodes
+            .iter()
+            .all(|(_, _, column)| !column.as_str().starts_with("__jazz_composite:")),
+        "unready composite index must not be planned"
+    );
+
+    qm.process_composite_index_backfills(&mut storage).unwrap();
+
+    let after = qm.subscribe(query).unwrap();
+    let after_graph = &qm.subscriptions.get(&after).unwrap().graph;
+    assert!(
+        after_graph
+            .index_scan_nodes
+            .iter()
+            .any(|(_, _, column)| column.as_str().starts_with("__jazz_composite:")),
+        "ready composite index should be planned"
+    );
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let latest_update = updates
+        .iter()
+        .find(|update| update.subscription_id == after)
+        .expect("new subscription update");
+    assert_eq!(latest_update.delta.added.len(), 2);
+}
+
+#[test]
+fn composite_index_definition_change_clears_same_name_raw_index_before_rebuild() {
+    use crate::query_manager::index::composite_index_value;
+    use crate::query_manager::types::{ColumnName, CompositeIndex, CompositeIndexColumn};
+
+    let index_name = ColumnName::new("documents_by_scope");
+    let old_index = CompositeIndex {
+        name: index_name,
+        columns: vec![CompositeIndexColumn::asc("owner_id")],
+    };
+    let new_index = CompositeIndex {
+        name: index_name,
+        columns: vec![
+            CompositeIndexColumn::asc("owner_id"),
+            CompositeIndexColumn::desc("updated_at"),
+        ],
+    };
+
+    let mut schema = Schema::new();
+    let mut documents = TableSchema::builder("documents")
+        .column("owner_id", ColumnType::Text)
+        .column("updated_at", ColumnType::Timestamp)
+        .column("title", ColumnType::Text)
+        .build();
+    documents.composite_indexes = vec![old_index.clone()];
+    schema.insert(TableName::new("documents"), documents.clone());
+
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), schema);
+    let branch = qm.current_branch();
+
+    for (owner, updated_at, title) in [
+        ("alice", 10_u64, "First"),
+        ("bob", 20_u64, "Other"),
+        ("alice", 30_u64, "Latest"),
+    ] {
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text(owner.into()),
+                Value::Timestamp(updated_at),
+                Value::Text(title.into()),
+            ],
+        )
+        .unwrap();
+    }
+    qm.process_composite_index_backfills(&mut storage).unwrap();
+
+    let old_alice_value = composite_index_value(
+        &old_index.columns,
+        &[(ColumnName::new("owner_id"), Value::Text("alice".into()))],
+    )
+    .unwrap();
+    assert_eq!(
+        storage
+            .index_lookup("documents", index_name.as_str(), &branch, &old_alice_value)
+            .len(),
+        2
+    );
+
+    documents.composite_indexes = vec![new_index.clone()];
+    let mut next_schema = Schema::new();
+    next_schema.insert(TableName::new("documents"), documents);
+    qm.schema = std::sync::Arc::new(next_schema);
+    qm.ready_composite_indexes.clear();
+
+    qm.process_composite_index_backfills(&mut storage).unwrap();
+
+    assert!(
+        storage
+            .index_lookup("documents", index_name.as_str(), &branch, &old_alice_value)
+            .is_empty(),
+        "old same-name index entries should be cleared before rebuilding the new definition"
+    );
+
+    let query = qm
+        .query("documents")
+        .filter_eq("owner_id", Value::Text("alice".into()))
+        .order_by_desc("updated_at")
+        .limit(2)
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    let graph = &qm.subscriptions.get(&sub_id).unwrap().graph;
+    assert!(
+        graph
+            .index_scan_nodes
+            .iter()
+            .any(|(_, _, column)| *column == index_name)
+    );
+}
+
+#[test]
+fn composite_index_backfill_budget_keeps_index_unplanned_until_ready() {
+    use crate::query_manager::indices::CompositeIndexBackfillBudget;
+    use crate::query_manager::types::CompositeIndexColumn;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::builder("documents")
+            .column("owner_id", ColumnType::Text)
+            .column("updated_at", ColumnType::Timestamp)
+            .column("title", ColumnType::Text)
+            .build(),
+    );
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), schema);
+
+    for updated_at in 0..5 {
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text("alice".into()),
+                Value::Timestamp(updated_at),
+                Value::Text(format!("Document {updated_at}")),
+            ],
+        )
+        .unwrap();
+    }
+
+    let mut next_schema = Schema::new();
+    next_schema.insert(
+        TableName::new("documents"),
+        TableSchema::builder("documents")
+            .column("owner_id", ColumnType::Text)
+            .column("updated_at", ColumnType::Timestamp)
+            .column("title", ColumnType::Text)
+            .composite_index(vec![
+                CompositeIndexColumn::asc("owner_id"),
+                CompositeIndexColumn::desc("updated_at"),
+            ])
+            .build(),
+    );
+    qm.schema = std::sync::Arc::new(next_schema);
+
+    let query = qm
+        .query("documents")
+        .filter_eq("owner_id", Value::Text("alice".into()))
+        .order_by_desc("updated_at")
+        .limit(2)
+        .build();
+    let budget = CompositeIndexBackfillBudget {
+        rows_per_index: 2,
+        indexes: 1,
+    };
+
+    qm.process_composite_index_backfills_with_budget(&mut storage, budget)
+        .unwrap();
+    let first_tick = qm.subscribe(query.clone()).unwrap();
+    assert!(
+        qm.subscriptions
+            .get(&first_tick)
+            .unwrap()
+            .graph
+            .index_scan_nodes
+            .iter()
+            .all(|(_, _, column)| !column.as_str().starts_with("__jazz_composite:")),
+        "partially backfilled composite index must stay hidden from planning"
+    );
+
+    qm.process_composite_index_backfills_with_budget(&mut storage, budget)
+        .unwrap();
+    let second_tick = qm.subscribe(query.clone()).unwrap();
+    assert!(
+        qm.subscriptions
+            .get(&second_tick)
+            .unwrap()
+            .graph
+            .index_scan_nodes
+            .iter()
+            .all(|(_, _, column)| !column.as_str().starts_with("__jazz_composite:")),
+        "index should still be hidden while cursor has more rows"
+    );
+
+    qm.process_composite_index_backfills_with_budget(&mut storage, budget)
+        .unwrap();
+    let ready_tick = qm.subscribe(query).unwrap();
+    assert!(
+        qm.subscriptions
+            .get(&ready_tick)
+            .unwrap()
+            .graph
+            .index_scan_nodes
+            .iter()
+            .any(|(_, _, column)| column.as_str().starts_with("__jazz_composite:")),
+        "fully backfilled composite index should become plannable"
+    );
+}
+
+#[test]
+fn adding_composite_index_backfills_existing_branch_rows() {
+    use crate::query_manager::types::{CompositeIndexColumn, SchemaBuilder};
+
+    let base_schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text),
+        )
+        .build();
+    let (mut writer, mut storage) = create_query_manager(SyncManager::new(), base_schema);
+    let original_branch = writer.current_branch();
+
+    for (owner, updated_at, title) in [
+        ("alice", 10_u64, "First"),
+        ("bob", 20_u64, "Other"),
+        ("alice", 30_u64, "Latest"),
+    ] {
+        writer
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text(owner.into()),
+                    Value::Timestamp(updated_at),
+                    Value::Text(title.into()),
+                ],
+            )
+            .unwrap();
+    }
+
+    let indexed_schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text)
+                .composite_index(vec![
+                    CompositeIndexColumn::asc("owner_id"),
+                    CompositeIndexColumn::desc("updated_at"),
+                ]),
+        )
+        .build();
+    let mut reader = QueryManager::new(SyncManager::new());
+    reader.set_current_schema(indexed_schema, "dev", "main");
+    assert_eq!(
+        reader.current_branch(),
+        original_branch,
+        "adding a composite index must keep the existing data branch"
+    );
+
+    reader
+        .process_composite_index_backfills(&mut storage)
+        .unwrap();
+
+    let query = reader
+        .query("documents")
+        .filter_eq("owner_id", Value::Text("alice".into()))
+        .order_by_desc("updated_at")
+        .limit(2)
+        .build();
+    let sub_id = reader.subscribe(query).unwrap();
+    assert!(
+        reader
+            .subscriptions
+            .get(&sub_id)
+            .unwrap()
+            .graph
+            .index_scan_nodes
+            .iter()
+            .any(|(_, _, column)| column.as_str().starts_with("__jazz_composite:")),
+        "existing branch rows should be backfilled into the new composite index"
+    );
+
+    reader.process(&mut storage);
+    let updates = reader.take_updates();
+    let update = updates
+        .iter()
+        .find(|update| update.subscription_id == sub_id)
+        .expect("subscription update");
+    assert_eq!(update.delta.added.len(), 2);
+}
+
+#[test]
+fn writes_after_adding_composite_index_do_not_use_stale_table_cache() {
+    use crate::query_manager::index::composite_index_value;
+    use crate::query_manager::types::{ColumnName, CompositeIndexColumn, SchemaBuilder};
+
+    let base_schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text),
+        )
+        .build();
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), base_schema);
+    let branch = qm.current_branch();
+
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[
+            Value::Text("alice".into()),
+            Value::Timestamp(10),
+            Value::Text("Before index".into()),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        qm.write_table_cache.len(),
+        1,
+        "first write should populate the no-composite table cache"
+    );
+
+    let indexed_schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text)
+                .composite_index(vec![
+                    CompositeIndexColumn::asc("owner_id"),
+                    CompositeIndexColumn::desc("updated_at"),
+                ]),
+        )
+        .build();
+    let documents = indexed_schema.get(&TableName::new("documents")).unwrap();
+    let index = documents.composite_indexes[0].clone();
+    qm.schema = std::sync::Arc::new(indexed_schema.clone());
+    qm.schema_context.current_schema = indexed_schema;
+
+    qm.process_composite_index_backfills(&mut storage).unwrap();
+
+    let after_index = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text("alice".into()),
+                Value::Timestamp(30),
+                Value::Text("After index".into()),
+            ],
+        )
+        .unwrap();
+
+    let value = composite_index_value(
+        &index.columns,
+        &[
+            (ColumnName::new("owner_id"), Value::Text("alice".into())),
+            (ColumnName::new("updated_at"), Value::Timestamp(30)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        storage.index_lookup("documents", index.name.as_str(), &branch, &value),
+        vec![after_index.row_id],
+        "writes after the index becomes part of the schema must maintain it"
+    );
+}
+
+#[test]
 fn unindexed_where_predicate_falls_back_to_id_scan() {
     let sync_manager = SyncManager::new();
     let mut schema = Schema::new();

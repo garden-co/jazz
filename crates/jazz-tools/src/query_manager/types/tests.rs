@@ -692,6 +692,97 @@ fn schema_hash_changes_when_indexed_columns_override_changes() {
 }
 
 #[test]
+fn schema_hash_ignores_composite_indexes() {
+    let without_composite_index = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text),
+        )
+        .build();
+
+    let with_composite_index = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text)
+                .composite_index(vec![
+                    CompositeIndexColumn::asc("owner_id"),
+                    CompositeIndexColumn::desc("updated_at"),
+                ]),
+        )
+        .build();
+
+    assert_eq!(
+        SchemaHash::compute(&without_composite_index),
+        SchemaHash::compute(&with_composite_index),
+        "adding a composite index should backfill the existing branch, not create a new schema branch",
+    );
+}
+
+#[test]
+fn validate_composite_indexes_rejects_duplicate_names() {
+    let index_name = ColumnName::new("documents_by_owner");
+    let mut documents = TableSchema::builder("documents")
+        .column("owner_id", ColumnType::Text)
+        .column("updated_at", ColumnType::Timestamp)
+        .build();
+    documents.composite_indexes = vec![
+        CompositeIndex {
+            name: index_name,
+            columns: vec![CompositeIndexColumn::asc("owner_id")],
+        },
+        CompositeIndex {
+            name: index_name,
+            columns: vec![
+                CompositeIndexColumn::asc("owner_id"),
+                CompositeIndexColumn::desc("updated_at"),
+            ],
+        },
+    ];
+
+    let mut schema = Schema::new();
+    schema.insert(TableName::new("documents"), documents);
+
+    let error = validate_composite_indexes(&schema).unwrap_err();
+    assert!(error.contains("duplicate composite index name"));
+}
+
+#[test]
+fn validate_composite_indexes_rejects_column_namespace_collision() {
+    let mut documents = TableSchema::builder("documents")
+        .column("owner_id", ColumnType::Text)
+        .column("updated_at", ColumnType::Timestamp)
+        .build();
+    documents.composite_indexes = vec![CompositeIndex {
+        name: ColumnName::new("owner_id"),
+        columns: vec![CompositeIndexColumn::asc("owner_id")],
+    }];
+
+    let mut schema = Schema::new();
+    schema.insert(TableName::new("documents"), documents);
+
+    let error = validate_composite_indexes(&schema).unwrap_err();
+    assert!(error.contains("collides with column index"));
+}
+
+#[test]
+fn validate_composite_indexes_rejects_missing_component_columns() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .composite_index(vec![CompositeIndexColumn::asc("missing_column")]),
+        )
+        .build();
+
+    let error = validate_composite_indexes(&schema).unwrap_err();
+    assert!(error.contains("unknown column"));
+}
+
+#[test]
 fn schema_hash_distinguishes_explicit_empty_index_override() {
     let schema_without_override = SchemaBuilder::new()
         .table(

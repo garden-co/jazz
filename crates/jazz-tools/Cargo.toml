@@ -159,6 +159,14 @@ harness = false
 name = "server_authorization_scope_benchmark"
 harness = false
 
+[[bench]]
+name = "scoped_pagination_benchmark"
+harness = false
+
+[[bench]]
+name = "write_amplification_benchmark"
+harness = false
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]

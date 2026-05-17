@@ -28,7 +28,9 @@ use super::super::graph_nodes::sort::{SortDirection, SortKey, SortNode, SortTarg
 use super::super::graph_nodes::subgraph::SubgraphTemplate;
 use super::super::graph_nodes::union::UnionNode;
 use super::super::graph_nodes::{NodeId, RowNode};
-use super::super::index::ScanCondition;
+use super::super::index::{
+    ScanCondition, composite_index_column_name, composite_index_prefix_range,
+};
 use super::super::magic_columns::{MagicColumnKind, magic_column_descriptor, magic_column_kind};
 use super::super::policy::PolicyExpr;
 use super::super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
@@ -584,7 +586,16 @@ impl QueryGraph {
         let scan_plans: Vec<_> = plan
             .disjuncts
             .iter()
-            .map(|disjunct| index_scan_plan(disjunct, table_schema))
+            .map(|disjunct| {
+                index_scan_plan(
+                    disjunct,
+                    table_schema,
+                    &plan.order_by,
+                    plan.limit,
+                    plan.offset,
+                    select_policy.is_none(),
+                )
+            })
             .collect();
 
         for branch in &branches {
@@ -627,7 +638,8 @@ impl QueryGraph {
                     branch,
                     scan_plan.condition.clone(),
                     descriptor.clone(),
-                );
+                )
+                .with_scan_limit(scan_plan.scan_limit);
                 let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
                 graph
                     .index_scan_nodes
@@ -2074,6 +2086,7 @@ struct IndexScanPlan {
     column: String,
     condition: ScanCondition,
     fully_covers: bool,
+    scan_limit: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -2105,12 +2118,28 @@ impl Default for ScanIntersection {
 fn index_scan_plan(
     disjunct: &Conjunction,
     table_schema: &crate::query_manager::types::TableSchema,
+    order_by: &[(String, SortDirection)],
+    limit: Option<usize>,
+    offset: usize,
+    allow_limit_pushdown: bool,
 ) -> IndexScanPlan {
+    if let Some(plan) = composite_ordered_index_scan_plan(
+        disjunct,
+        table_schema,
+        order_by,
+        limit,
+        offset,
+        allow_limit_pushdown,
+    ) {
+        return plan;
+    }
+
     if disjunct.conditions.is_empty() {
         return IndexScanPlan {
             column: "_id".to_string(),
             condition: ScanCondition::All,
             fully_covers: true,
+            scan_limit: None,
         };
     }
 
@@ -2136,6 +2165,7 @@ fn index_scan_plan(
             column: empty_plan.column.clone(),
             condition: ScanCondition::Empty,
             fully_covers: true,
+            scan_limit: None,
         };
     }
 
@@ -2148,6 +2178,7 @@ fn index_scan_plan(
             column: "_id".to_string(),
             condition: ScanCondition::All,
             fully_covers: false,
+            scan_limit: None,
         };
     };
 
@@ -2160,7 +2191,64 @@ fn index_scan_plan(
         column: selected.column.clone(),
         condition: selected.condition.clone(),
         fully_covers,
+        scan_limit: None,
     }
+}
+
+fn composite_ordered_index_scan_plan(
+    disjunct: &Conjunction,
+    table_schema: &crate::query_manager::types::TableSchema,
+    order_by: &[(String, SortDirection)],
+    limit: Option<usize>,
+    offset: usize,
+    allow_limit_pushdown: bool,
+) -> Option<IndexScanPlan> {
+    let limit = limit?;
+    if offset != 0 || order_by.len() != 1 {
+        return None;
+    }
+    let (order_column, order_direction) = &order_by[0];
+    let eq_condition = disjunct
+        .conditions
+        .iter()
+        .find_map(|condition| match condition {
+            Condition::Eq { column, value } => Some((column.as_str(), value.clone())),
+            _ => None,
+        })?;
+
+    let index = table_schema.composite_indexes.iter().find(|index| {
+        let [scope, ordered] = index.columns.as_slice() else {
+            return false;
+        };
+        scope.name.as_str() == eq_condition.0
+            && matches!(
+                scope.direction,
+                crate::query_manager::types::IndexDirection::Asc
+            )
+            && ordered.name.as_str() == order_column
+            && matches!(
+                (ordered.direction, *order_direction),
+                (
+                    crate::query_manager::types::IndexDirection::Asc,
+                    SortDirection::Ascending
+                ) | (
+                    crate::query_manager::types::IndexDirection::Desc,
+                    SortDirection::Descending
+                )
+            )
+    })?;
+
+    let (min, max) = composite_index_prefix_range(&index.columns, &[eq_condition.1])?;
+    let fully_covers = disjunct.conditions.len() == 1;
+    Some(IndexScanPlan {
+        column: composite_index_column_name(index),
+        condition: ScanCondition::Range {
+            min: Bound::Included(min),
+            max: max.map_or(Bound::Unbounded, Bound::Excluded),
+        },
+        fully_covers,
+        scan_limit: (allow_limit_pushdown && fully_covers).then_some(limit),
+    })
 }
 
 fn column_scan_plan(disjunct: &Conjunction, column: &str) -> ColumnScanPlan {

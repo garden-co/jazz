@@ -41,6 +41,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     ) -> Result<QuerySubscriptionId, RuntimeError> {
         self.schema_manager
             .query_manager_mut()
+            .process_composite_index_backfills(&mut self.storage)
+            .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
+        self.schema_manager
+            .query_manager_mut()
             .subscribe_with_sync_and_propagation_with_local_updates(
                 query,
                 session,

@@ -24,6 +24,7 @@ use super::{
     },
 };
 use crate::object::ObjectId;
+use crate::query_manager::types::Value;
 use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
 use crate::sync_manager::DurabilityTier;
 
@@ -239,6 +240,29 @@ impl RocksDBStorage {
         Ok(out)
     }
 
+    fn scan_range_keys_from_db_limited(
+        db: &TransactionDB,
+        start: &str,
+        end: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, StorageError> {
+        let start_bytes = start.as_bytes();
+        let mut read_opts = ReadOptions::default();
+        read_opts.set_iterate_upper_bound(end.as_bytes().to_vec());
+        let mut out = Vec::with_capacity(limit.min(128));
+        let iter = db.iterator_opt(
+            IteratorMode::From(start_bytes, rocksdb::Direction::Forward),
+            read_opts,
+        );
+        for item in iter.take(limit) {
+            let (key, _) = item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
+            let key_str = String::from_utf8(key.to_vec())
+                .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
+            out.push(key_str);
+        }
+        Ok(out)
+    }
+
     // ---- transaction helpers ----
 
     fn put_on_txn<'a>(
@@ -441,6 +465,53 @@ impl Storage for RocksDBStorage {
                 Self::scan_range_keys_from_db(&inner.db, start_key, end_key)
             })
         })
+    }
+
+    fn index_range_limited(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: std::ops::Bound<&Value>,
+        end: std::ops::Bound<&Value>,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        let Some((start_key, end_key)) =
+            key_codec::index_range_scan_bounds(table, column, branch, start, end)
+        else {
+            return Vec::new();
+        };
+        let Some(start_key) = start_key else {
+            return self
+                .index_range(table, column, branch, start, end)
+                .into_iter()
+                .take(limit)
+                .collect();
+        };
+        let Some(end_key) = end_key else {
+            return self
+                .index_range(table, column, branch, start, end)
+                .into_iter()
+                .take(limit)
+                .collect();
+        };
+
+        self.with_inner(|inner| {
+            let storage_start = key_codec::raw_table_entry_key(&raw_table, &start_key);
+            let storage_end = key_codec::raw_table_entry_key(&raw_table, &end_key);
+            let storage_prefix = key_codec::raw_table_prefix(&raw_table);
+            Self::scan_range_keys_from_db_limited(&inner.db, &storage_start, &storage_end, limit)
+                .map(|keys| {
+                    keys.into_iter()
+                        .filter_map(|key| {
+                            key.strip_prefix(&storage_prefix)
+                                .and_then(key_codec::parse_uuid_from_index_key)
+                        })
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
     }
 
     fn append_history_region_row_bytes(

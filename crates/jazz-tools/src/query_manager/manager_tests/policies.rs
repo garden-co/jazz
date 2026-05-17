@@ -420,6 +420,7 @@ fn e2e_permissions_prevent_sync() {
                 ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
             ]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new()
                 .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
         },
@@ -508,6 +509,7 @@ fn e2e_permissions_prevent_new_row_sync() {
                 ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
             ]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new()
                 .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
         },
@@ -609,6 +611,7 @@ fn sync_backed_session_subscription_keeps_local_rows_when_server_scope_is_empty(
                 ColumnDescriptor::new("owner_id", ColumnType::Text),
             ]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new()
                 .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
         },
@@ -683,6 +686,7 @@ fn sync_backed_exists_rel_session_subscription_keeps_local_rows_when_server_scop
         TableSchema {
             columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
                 rel: RelExpr::Filter {
                     input: Box::new(RelExpr::TableScan {
@@ -789,6 +793,7 @@ fn sync_backed_local_tier_exists_rel_keeps_confirmed_local_rows_when_server_scop
         TableSchema {
             columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
                 rel: RelExpr::Filter {
                     input: Box::new(RelExpr::TableScan {
@@ -883,6 +888,7 @@ fn sync_backed_exists_session_subscription_keeps_local_rows_when_server_scope_is
         TableSchema {
             columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new().with_select(PolicyExpr::Exists {
                 table: "user_team_edges".into(),
                 condition: Box::new(PolicyExpr::And(vec![
@@ -985,6 +991,7 @@ fn fail_closed_server_withholds_session_scope_before_permissions_head() {
         TableSchema {
             columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
                 rel: RelExpr::Filter {
                     input: Box::new(RelExpr::Join {
@@ -1114,6 +1121,7 @@ fn synced_session_query_for_exists_rel_sends_policy_context_tables_upstream() {
         TableSchema {
             columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
                 rel: RelExpr::Filter {
                     input: Box::new(RelExpr::Join {
@@ -1199,6 +1207,7 @@ fn backend_sync_subscription_without_handshake_session_stays_unscoped_without_pe
                 ColumnDescriptor::new("identity_key", ColumnType::Text).nullable(),
             ]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new().with_select(PolicyExpr::eq_session(
                 "identity_key",
                 vec!["user_id".into()],

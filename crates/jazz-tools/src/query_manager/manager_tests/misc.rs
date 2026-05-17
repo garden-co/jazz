@@ -30,3 +30,22 @@ fn column_count_mismatch_error() {
         other => panic!("Expected ColumnCountMismatch, got {other:?}"),
     }
 }
+
+#[test]
+#[should_panic(expected = "invalid composite index schema")]
+fn set_current_schema_rejects_invalid_composite_index_namespace() {
+    use crate::query_manager::types::{ColumnName, CompositeIndex, CompositeIndexColumn};
+
+    let mut schema = Schema::new();
+    let mut documents = TableSchema::builder("documents")
+        .column("owner_id", ColumnType::Text)
+        .column("updated_at", ColumnType::Timestamp)
+        .build();
+    documents.composite_indexes = vec![CompositeIndex {
+        name: ColumnName::new("owner_id"),
+        columns: vec![CompositeIndexColumn::asc("updated_at")],
+    }];
+    schema.insert(TableName::new("documents"), documents);
+
+    QueryManager::new(SyncManager::new()).set_current_schema(schema, "dev", "main");
+}

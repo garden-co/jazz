@@ -28,9 +28,9 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ColumnName, ComposedBranchName, LoadedRow, OrderedAdded, OrderedRowDelta, Row, RowDelta,
-    RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple,
-    Value, build_ordered_delta_with_post_ids,
+    ColumnName, ComposedBranchName, CompositeIndex, LoadedRow, OrderedAdded, OrderedRowDelta, Row,
+    RowDelta, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
+    TableSchema, Tuple, Value, build_ordered_delta_with_post_ids, validate_composite_indexes,
 };
 
 /// Error types for QueryManager operations.
@@ -356,6 +356,8 @@ pub(super) struct PolicyCheckState {
 pub(super) struct WriteTableCacheEntry {
     pub(super) descriptor: Arc<RowDescriptor>,
     pub(super) indexed_columns: Option<Arc<Vec<ColumnName>>>,
+    pub(super) composite_indexes: Arc<Vec<super::types::CompositeIndex>>,
+    pub(super) composite_index_projection: Arc<Vec<(ColumnName, usize)>>,
     pub(super) row_layout: Arc<crate::row_format::CompiledRowLayout>,
     pub(super) row_locator: RowLocator,
     pub(super) insert_policy: Option<Arc<PolicyExpr>>,
@@ -572,7 +574,13 @@ pub struct QueryManager {
 
     /// Per-schema, per-table write metadata cached to avoid cloning policy
     /// trees and descriptors on every hot write.
-    pub(super) write_table_cache: HashMap<(SchemaHash, TableName), Arc<WriteTableCacheEntry>>,
+    pub(super) write_table_cache:
+        HashMap<(SchemaHash, TableName, String), Arc<WriteTableCacheEntry>>,
+
+    /// Local derived composite indexes that are fully backfilled and safe for
+    /// query planning. Desired index definitions live in schema; readiness is
+    /// local storage state.
+    pub(super) ready_composite_indexes: HashSet<(TableName, String, ColumnName, String)>,
 }
 
 impl QueryManager {
@@ -663,6 +671,7 @@ impl QueryManager {
             catalogued_storage_namespaces: HashSet::new(),
             catalogue_app_id: None,
             write_table_cache: HashMap::new(),
+            ready_composite_indexes: HashSet::new(),
         }
     }
 
@@ -691,6 +700,8 @@ impl QueryManager {
         user_branch: &str,
         row_policy_mode: RowPolicyMode,
     ) {
+        validate_composite_indexes(&schema)
+            .unwrap_or_else(|error| panic!("invalid composite index schema: {error}"));
         self.schema_context
             .set_current(schema.clone(), env, user_branch);
         self.schema = Arc::new(schema.clone());
@@ -703,6 +714,7 @@ impl QueryManager {
         self.authorization_context_cache.clear();
         self.authorization_schema_required = false;
         self.write_table_cache.clear();
+        self.ready_composite_indexes.clear();
 
         // Update branch -> schema hash map
         let branch = self.schema_context.branch_name();
@@ -733,6 +745,8 @@ impl QueryManager {
     /// Creates indices for the schema's branch.
     /// Marks subscriptions for recompilation to include the new branch.
     pub fn add_live_schema(&mut self, schema: Schema) {
+        validate_composite_indexes(&schema)
+            .unwrap_or_else(|error| panic!("invalid composite index schema: {error}"));
         let hash = SchemaHash::compute(&schema);
 
         // Skip if already live or is current
@@ -820,7 +834,7 @@ impl QueryManager {
     }
 
     pub(super) fn local_subscription_compile_schema(&self, session: Option<&Session>) -> Schema {
-        if self.local_subscription_uses_explicit_authorization(session) {
+        let schema = if self.local_subscription_uses_explicit_authorization(session) {
             self.schema
                 .iter()
                 .map(|(table_name, table_schema)| {
@@ -831,7 +845,41 @@ impl QueryManager {
                 .collect()
         } else {
             self.schema.as_ref().clone()
+        };
+        self.schema_with_ready_composite_indexes(schema)
+    }
+
+    fn schema_with_ready_composite_indexes(&self, mut schema: Schema) -> Schema {
+        let branches: Vec<String> = self
+            .schema_context
+            .all_branch_names()
+            .into_iter()
+            .map(|branch| branch.as_str().to_string())
+            .collect();
+
+        for (table_name, table_schema) in &mut schema {
+            table_schema.composite_indexes.retain(|index| {
+                self.composite_index_ready_for_branches(*table_name, index, &branches)
+            });
         }
+        schema
+    }
+
+    fn composite_index_ready_for_branches(
+        &self,
+        table_name: TableName,
+        index: &CompositeIndex,
+        branches: &[String],
+    ) -> bool {
+        !branches.is_empty()
+            && branches.iter().all(|branch| {
+                self.ready_composite_indexes.contains(&(
+                    table_name,
+                    branch.clone(),
+                    index.name,
+                    index.signature(),
+                ))
+            })
     }
 
     pub(crate) fn schema_has_any_explicit_policies(schema: &Schema) -> bool {
@@ -843,7 +891,7 @@ impl QueryManager {
     /// Mark all subscriptions for recompilation.
     ///
     /// Called when live schemas change to ensure subscriptions pick up new branches.
-    fn mark_subscriptions_for_recompile(&mut self) {
+    pub(super) fn mark_subscriptions_for_recompile(&mut self) {
         for sub in self.subscriptions.values_mut() {
             sub.needs_recompile = true;
         }
@@ -928,6 +976,16 @@ impl QueryManager {
         let current_schema = self.schema.clone();
         let current_schema_context = self.schema_context.clone();
         let authorization_schema = self.authorization_schema.clone();
+        let ready_current_schema =
+            self.schema_with_ready_composite_indexes(current_schema.as_ref().clone());
+        let ready_current_structural_schema: Schema = ready_current_schema
+            .iter()
+            .map(|(table_name, table_schema)| {
+                let mut structural = table_schema.clone();
+                structural.policies = TablePolicies::default();
+                (*table_name, structural)
+            })
+            .collect();
 
         // Recompile local subscriptions
         for (sub_id, sub) in &mut self.subscriptions {
@@ -944,16 +1002,9 @@ impl QueryManager {
                         .map(|auth_schema| auth_schema.as_ref() != current_schema.as_ref())
                         .unwrap_or(false);
                 let compile_schema = if uses_explicit_authorization_filtering {
-                    current_schema
-                        .iter()
-                        .map(|(table_name, table_schema)| {
-                            let mut structural = table_schema.clone();
-                            structural.policies = TablePolicies::default();
-                            (*table_name, structural)
-                        })
-                        .collect()
+                    ready_current_structural_schema.clone()
                 } else {
-                    current_schema.as_ref().clone()
+                    ready_current_schema.clone()
                 };
 
                 // Recompile the graph
@@ -1322,6 +1373,9 @@ impl QueryManager {
 
         if let Err(error) = self.ensure_known_schemas_catalogued(storage) {
             tracing::warn!(%error, "failed to persist known schemas to catalogue storage");
+        }
+        if let Err(error) = self.process_composite_index_backfills(storage) {
+            tracing::warn!(%error, "failed to process composite index backfills");
         }
 
         // 1. Process SyncManager inbox (receives client writes)
@@ -1865,6 +1919,7 @@ impl QueryManager {
                     old_data,
                     &descriptor,
                     table_schema.indexed_columns.as_deref(),
+                    &table_schema.composite_indexes,
                 );
             }
             return Some(SubscriptionVisibilityEffect {
@@ -1887,6 +1942,7 @@ impl QueryManager {
                         &old_row.data,
                         &descriptor,
                         table_schema.indexed_columns.as_deref(),
+                        &table_schema.composite_indexes,
                     );
                 } else {
                     let _ = storage.index_remove(
@@ -1935,6 +1991,7 @@ impl QueryManager {
                     new_data,
                     &descriptor,
                     table_schema.indexed_columns.as_deref(),
+                    &table_schema.composite_indexes,
                 )
             {
                 tracing::error!(
@@ -1964,6 +2021,7 @@ impl QueryManager {
                     new_data,
                     &descriptor,
                     table_schema.indexed_columns.as_deref(),
+                    &table_schema.composite_indexes,
                 )
             {
                 tracing::error!(
@@ -1984,6 +2042,7 @@ impl QueryManager {
                     branch,
                     descriptor: &descriptor,
                     indexed_columns: table_schema.indexed_columns.as_deref(),
+                    composite_indexes: &table_schema.composite_indexes,
                 },
                 update.object_id,
                 &old_row.data,

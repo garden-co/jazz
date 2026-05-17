@@ -18,6 +18,7 @@ pub struct IndexScanNode {
     pub column: ColumnName,
     pub branch: String,
     pub condition: ScanCondition,
+    pub scan_limit: Option<usize>,
 
     /// Output tuple descriptor (single element, unmaterialized).
     output_descriptor: TupleDescriptor,
@@ -47,6 +48,7 @@ impl IndexScanNode {
             column: column.into(),
             branch: branch.into(),
             condition,
+            scan_limit: None,
             output_descriptor,
             row_descriptor,
             current_tuples: AHashSet::new(),
@@ -63,6 +65,11 @@ impl IndexScanNode {
         row_descriptor: RowDescriptor,
     ) -> Self {
         Self::new_with_branch(table, column, "main", condition, row_descriptor)
+    }
+
+    pub fn with_scan_limit(mut self, limit: Option<usize>) -> Self {
+        self.scan_limit = limit;
+        self
     }
 
     /// Get the output tuple descriptor.
@@ -199,16 +206,26 @@ impl SourceNode for IndexScanNode {
             ScanCondition::Range { min, max } => {
                 let start = min.as_ref();
                 let end = max.as_ref();
-                ctx.storage
-                    .index_range(
+                if let Some(limit) = self.scan_limit {
+                    ctx.storage.index_range_limited(
+                        self.table.as_str(),
+                        self.column.as_str(),
+                        &self.branch,
+                        start,
+                        end,
+                        limit,
+                    )
+                } else {
+                    ctx.storage.index_range(
                         self.table.as_str(),
                         self.column.as_str(),
                         &self.branch,
                         start,
                         end,
                     )
-                    .into_iter()
-                    .collect()
+                }
+                .into_iter()
+                .collect()
             }
         };
         self.apply_local_overlay_rows(ctx, &mut new_ids);

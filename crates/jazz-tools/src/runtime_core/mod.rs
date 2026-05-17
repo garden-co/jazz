@@ -429,6 +429,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
+        let _ = schema_manager
+            .query_manager_mut()
+            .process_composite_index_backfills(&mut storage);
         let acknowledged_rejected_batches: HashSet<BatchId> = storage
             .scan_acknowledged_rejected_batch_fates()
             .map(|batch_ids| batch_ids.into_iter().collect())

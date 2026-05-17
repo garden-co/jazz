@@ -10,14 +10,15 @@ use std::collections::HashMap;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, RowDescriptor, Schema,
-    SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, CompositeIndex,
+    CompositeIndexColumn, IndexDirection, RowDescriptor, Schema, SchemaHash, TableName,
+    TablePolicies, TableSchema, Value,
 };
 
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V6 as u8;
+const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V7 as u8;
 const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -38,6 +39,8 @@ enum SchemaEncodingVersion {
     V5 = 5,
     // v6 schemas include per-table indexed-column overrides.
     V6 = 6,
+    // v7 schemas include explicit composite indexes.
+    V7 = 7,
 }
 
 impl SchemaEncodingVersion {
@@ -49,6 +52,7 @@ impl SchemaEncodingVersion {
             4 => Some(Self::V4),
             5 => Some(Self::V5),
             6 => Some(Self::V6),
+            7 => Some(Self::V7),
             _ => None,
         }
     }
@@ -62,15 +66,19 @@ impl SchemaEncodingVersion {
     }
 
     fn has_column_defaults(self) -> bool {
-        matches!(self, Self::V4 | Self::V5 | Self::V6)
+        matches!(self, Self::V4 | Self::V5 | Self::V6 | Self::V7)
     }
 
     fn has_column_merge_strategies(self) -> bool {
-        matches!(self, Self::V5 | Self::V6)
+        matches!(self, Self::V5 | Self::V6 | Self::V7)
     }
 
     fn has_indexed_columns(self) -> bool {
-        matches!(self, Self::V6)
+        matches!(self, Self::V6 | Self::V7)
+    }
+
+    fn has_composite_indexes(self) -> bool {
+        matches!(self, Self::V7)
     }
 }
 
@@ -128,7 +136,7 @@ impl std::error::Error for CatalogueEncodingError {}
 /// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
-    let version = SchemaEncodingVersion::V6;
+    let version = SchemaEncodingVersion::V7;
     buf.push(version as u8);
 
     // Sort tables by name for deterministic ordering
@@ -198,6 +206,9 @@ pub fn decode_table_descriptor_from_schema(
         if version.has_indexed_columns() {
             skip_indexed_columns(data, &mut offset)?;
         }
+        if version.has_composite_indexes() {
+            skip_composite_indexes(data, &mut offset)?;
+        }
         if version.has_table_policies() {
             decode_table_policies(data, &mut offset)?;
         }
@@ -217,6 +228,9 @@ fn encode_table_entry_with_version(
     if version.has_indexed_columns() {
         encode_indexed_columns(buf, schema.indexed_columns.as_deref());
     }
+    if version.has_composite_indexes() {
+        encode_composite_indexes(buf, &schema.composite_indexes);
+    }
     if version.has_table_policies() {
         encode_table_policies(buf, &schema.policies);
     }
@@ -234,6 +248,11 @@ fn decode_table_entry_with_version(
     } else {
         None
     };
+    let composite_indexes = if version.has_composite_indexes() {
+        decode_composite_indexes(data, offset)?
+    } else {
+        Vec::new()
+    };
     if version.has_table_policies() {
         // Legacy schema versions encoded policies inline, but structural schema
         // decode intentionally drops them now that permissions are catalogued
@@ -246,6 +265,7 @@ fn decode_table_entry_with_version(
         TableSchema {
             columns: descriptor,
             indexed_columns,
+            composite_indexes,
             policies: TablePolicies::default(),
         },
     ))
@@ -294,6 +314,68 @@ fn skip_indexed_columns(data: &[u8], offset: &mut usize) -> Result<(), Catalogue
     for _ in 0..count {
         let len = read_u32(data, offset)? as usize;
         read_bytes(data, offset, len)?;
+    }
+    Ok(())
+}
+
+fn encode_composite_indexes(buf: &mut Vec<u8>, indexes: &[CompositeIndex]) {
+    write_u32(buf, indexes.len() as u32);
+    for index in indexes {
+        write_string(buf, index.name.as_str());
+        write_u32(buf, index.columns.len() as u32);
+        for part in &index.columns {
+            write_string(buf, part.name.as_str());
+            buf.push(match part.direction {
+                IndexDirection::Asc => 0,
+                IndexDirection::Desc => 1,
+            });
+        }
+    }
+}
+
+fn decode_composite_indexes(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<Vec<CompositeIndex>, CatalogueEncodingError> {
+    let count = read_u32(data, offset)?;
+    let mut indexes = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let name = ColumnName::new(read_string(data, offset, "composite_index_name")?);
+        let part_count = read_u32(data, offset)?;
+        let mut columns = Vec::with_capacity(part_count as usize);
+        for _ in 0..part_count {
+            let column = ColumnName::new(read_string(data, offset, "composite_index_column")?);
+            let direction = match read_u8(data, offset)? {
+                0 => IndexDirection::Asc,
+                1 => IndexDirection::Desc,
+                tag => {
+                    return Err(CatalogueEncodingError::InvalidTypeTag {
+                        tag,
+                        context: "composite_index_direction",
+                    });
+                }
+            };
+            columns.push(CompositeIndexColumn {
+                name: column,
+                direction,
+            });
+        }
+        indexes.push(CompositeIndex { name, columns });
+    }
+    Ok(indexes)
+}
+
+fn skip_composite_indexes(data: &[u8], offset: &mut usize) -> Result<(), CatalogueEncodingError> {
+    let count = read_u32(data, offset)?;
+    for _ in 0..count {
+        let name_len = read_u32(data, offset)? as usize;
+        read_bytes(data, offset, name_len)?;
+        let part_count = read_u32(data, offset)?;
+        for _ in 0..part_count {
+            let column_len = read_u32(data, offset)? as usize;
+            read_bytes(data, offset, column_len)?;
+            read_u8(data, offset)?;
+        }
     }
     Ok(())
 }
@@ -959,6 +1041,7 @@ fn decode_table_schema(
     Ok(TableSchema {
         columns: descriptor,
         indexed_columns: None,
+        composite_indexes: Vec::new(),
         policies: TablePolicies::default(),
     })
 }
@@ -972,6 +1055,7 @@ fn decode_table_schema_v1(
     Ok(TableSchema {
         columns: descriptor,
         indexed_columns: None,
+        composite_indexes: Vec::new(),
         policies: TablePolicies::default(),
     })
 }
@@ -2179,6 +2263,37 @@ mod tests {
             .get(&TableName::new("todos"))
             .expect("decoded todos table");
         assert_eq!(todos.indexed_columns, Some(vec![ColumnName::new("done")]));
+    }
+
+    #[test]
+    fn schema_roundtrip_preserves_composite_indexes() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("documents")
+                    .column("owner_id", ColumnType::Text)
+                    .column("updated_at", ColumnType::Timestamp)
+                    .composite_index(vec![
+                        CompositeIndexColumn::asc("owner_id"),
+                        CompositeIndexColumn::desc("updated_at"),
+                    ]),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        assert_eq!(encoded[0], SCHEMA_VERSION);
+
+        let decoded = decode_schema(&encoded).unwrap();
+        let documents = decoded
+            .get(&TableName::new("documents"))
+            .expect("decoded documents table");
+        assert_eq!(documents.composite_indexes.len(), 1);
+        assert_eq!(
+            documents.composite_indexes[0].columns,
+            vec![
+                CompositeIndexColumn::asc("owner_id"),
+                CompositeIndexColumn::desc("updated_at"),
+            ]
+        );
     }
 
     #[test]

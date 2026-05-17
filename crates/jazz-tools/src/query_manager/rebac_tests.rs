@@ -544,6 +544,7 @@ fn seed_folder_on_branch(
         &folder_content,
         folders_descriptor,
         None,
+        &[],
     )
     .unwrap();
     qm.persist_row_region_tip(storage, "folders", folder_id, branch);

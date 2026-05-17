@@ -538,6 +538,37 @@ impl Storage for MemoryStorage {
         })
     }
 
+    fn index_range_limited(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: std::ops::Bound<&Value>,
+        end: std::ops::Bound<&Value>,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        let Some((start_key, end_key)) =
+            key_codec::index_range_scan_bounds(table, column, branch, start, end)
+        else {
+            return Vec::new();
+        };
+        let Some(rows) = self.raw_tables.get(&raw_table) else {
+            return Vec::new();
+        };
+
+        let keys: Box<dyn Iterator<Item = &String> + '_> = match (start_key, end_key) {
+            (Some(start), Some(end)) => Box::new(rows.range(start..end).map(|(key, _)| key)),
+            (Some(start), None) => Box::new(rows.range(start..).map(|(key, _)| key)),
+            (None, Some(end)) => Box::new(rows.range(..end).map(|(key, _)| key)),
+            (None, None) => Box::new(rows.keys()),
+        };
+
+        keys.take(limit)
+            .filter_map(|key| key_codec::parse_uuid_from_index_key(key))
+            .collect()
+    }
+
     fn append_history_region_rows(
         &mut self,
         table: &str,

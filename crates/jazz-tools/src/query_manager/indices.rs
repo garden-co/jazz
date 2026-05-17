@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::ops::Bound;
+
 use crate::object::ObjectId;
 use crate::row_histories::{RowState, VisibleRowEntry};
 use crate::storage::{IndexMutation, Storage, StorageError, validate_index_value_size};
@@ -5,8 +8,12 @@ use crate::storage::{IndexMutation, Storage, StorageError, validate_index_value_
 use crate::row_format::CompiledRowLayout;
 
 use super::encoding::decode_column;
+use super::index::composite_index_value;
 use super::manager::{QueryError, QueryManager};
-use super::types::{ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, TableName, Value};
+use super::types::{
+    ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, CompositeIndex, RowDescriptor,
+    Schema, TableName, Value,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IndexUpdateError {
@@ -35,6 +42,115 @@ pub(super) struct BranchIndexTarget<'a> {
     pub branch: &'a str,
     pub descriptor: &'a RowDescriptor,
     pub indexed_columns: Option<&'a [ColumnName]>,
+    pub composite_indexes: &'a [CompositeIndex],
+}
+
+const COMPOSITE_INDEX_BUILD_STATE_TABLE: &str = "__jazz_composite_index_build_state";
+const COMPOSITE_INDEX_BACKFILL_CHUNK_SIZE: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompositeIndexBackfillBudget {
+    pub rows_per_index: usize,
+    pub indexes: usize,
+}
+
+impl Default for CompositeIndexBackfillBudget {
+    fn default() -> Self {
+        Self {
+            rows_per_index: COMPOSITE_INDEX_BACKFILL_CHUNK_SIZE,
+            indexes: usize::MAX,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompositeIndexBuildState {
+    Building { cursor: Option<ObjectId> },
+    Ready,
+}
+
+fn composite_index_build_key(
+    table: &str,
+    branch: &str,
+    index_name: &str,
+    index_signature: &str,
+) -> String {
+    format!(
+        "t{}:{}:b{}:{}:i{}:{}:s{}:{}",
+        table.len(),
+        table,
+        branch.len(),
+        branch,
+        index_name.len(),
+        index_name,
+        index_signature.len(),
+        index_signature
+    )
+}
+
+fn encode_composite_index_build_state(state: CompositeIndexBuildState) -> Vec<u8> {
+    match state {
+        CompositeIndexBuildState::Ready => vec![1],
+        CompositeIndexBuildState::Building { cursor } => {
+            let mut out = vec![0, u8::from(cursor.is_some())];
+            if let Some(cursor) = cursor {
+                out.extend_from_slice(cursor.uuid().as_bytes());
+            }
+            out
+        }
+    }
+}
+
+fn decode_composite_index_build_state(bytes: &[u8]) -> Option<CompositeIndexBuildState> {
+    match bytes {
+        [1] => Some(CompositeIndexBuildState::Ready),
+        [0, 0] => Some(CompositeIndexBuildState::Building { cursor: None }),
+        [0, 1, cursor @ ..] if cursor.len() == 16 => {
+            let uuid = uuid::Uuid::from_slice(cursor).ok()?;
+            Some(CompositeIndexBuildState::Building {
+                cursor: Some(ObjectId::from_uuid(uuid)),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn read_composite_index_build_key_part<'a>(
+    raw: &'a str,
+    offset: &mut usize,
+    tag: u8,
+) -> Option<&'a str> {
+    let bytes = raw.as_bytes();
+    if bytes.get(*offset).copied()? != tag {
+        return None;
+    }
+    *offset += 1;
+    let len_start = *offset;
+    while bytes.get(*offset).copied()? != b':' {
+        *offset += 1;
+    }
+    let len = raw.get(len_start..*offset)?.parse::<usize>().ok()?;
+    *offset += 1;
+    let value_start = *offset;
+    let value_end = value_start.checked_add(len)?;
+    let value = raw.get(value_start..value_end)?;
+    *offset = value_end;
+    if *offset < raw.len() {
+        if bytes.get(*offset).copied()? != b':' {
+            return None;
+        }
+        *offset += 1;
+    }
+    Some(value)
+}
+
+fn parse_composite_index_build_key(raw: &str) -> Option<(String, String, String, String)> {
+    let mut offset = 0;
+    let table = read_composite_index_build_key_part(raw, &mut offset, b't')?.to_string();
+    let branch = read_composite_index_build_key_part(raw, &mut offset, b'b')?.to_string();
+    let index = read_composite_index_build_key_part(raw, &mut offset, b'i')?.to_string();
+    let signature = read_composite_index_build_key_part(raw, &mut offset, b's')?.to_string();
+    (offset == raw.len()).then_some((table, branch, index, signature))
 }
 
 impl QueryManager {
@@ -152,6 +268,87 @@ impl QueryManager {
         }
     }
 
+    pub(super) fn composite_index_projection(
+        descriptor: &RowDescriptor,
+        composite_indexes: &[CompositeIndex],
+    ) -> Vec<(ColumnName, usize)> {
+        let needed: HashSet<ColumnName> = composite_indexes
+            .iter()
+            .flat_map(|index| index.columns.iter().map(|part| part.name))
+            .collect();
+
+        if needed.is_empty() {
+            return Vec::new();
+        }
+
+        descriptor
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, column)| needed.contains(&column.name).then_some((column.name, idx)))
+            .collect()
+    }
+
+    fn composite_index_values_by_projection(
+        descriptor: &RowDescriptor,
+        layout: &CompiledRowLayout,
+        data: &[u8],
+        projection: &[(ColumnName, usize)],
+    ) -> Vec<(ColumnName, Value)> {
+        projection
+            .iter()
+            .filter_map(|(name, idx)| {
+                crate::row_format::decode_column_with_layout(descriptor, layout, data, *idx)
+                    .ok()
+                    .map(|value| (*name, value))
+            })
+            .collect()
+    }
+
+    fn push_insert_composite_index_values<'a>(
+        mutations: &mut Vec<IndexMutation<'a>>,
+        table: &'a str,
+        branch: &'a str,
+        object_id: ObjectId,
+        values_by_column: &[(ColumnName, Value)],
+        composite_indexes: &'a [CompositeIndex],
+    ) {
+        for index in composite_indexes {
+            let Some(value) = composite_index_value(&index.columns, values_by_column) else {
+                continue;
+            };
+            mutations.push(IndexMutation::Insert {
+                table,
+                column: index.name.as_str(),
+                branch,
+                value,
+                row_id: object_id,
+            });
+        }
+    }
+
+    fn push_remove_composite_index_values<'a>(
+        mutations: &mut Vec<IndexMutation<'a>>,
+        table: &'a str,
+        branch: &'a str,
+        object_id: ObjectId,
+        values_by_column: &[(ColumnName, Value)],
+        composite_indexes: &'a [CompositeIndex],
+    ) {
+        for index in composite_indexes {
+            let Some(value) = composite_index_value(&index.columns, values_by_column) else {
+                continue;
+            };
+            mutations.push(IndexMutation::Remove {
+                table,
+                column: index.name.as_str(),
+                branch,
+                value,
+                row_id: object_id,
+            });
+        }
+    }
+
     pub(super) fn index_mutations_for_insert_on_branch<'a>(
         table: &'a str,
         branch: &'a str,
@@ -159,6 +356,7 @@ impl QueryManager {
         data: &[u8],
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
+        composite_indexes: &'a [CompositeIndex],
     ) -> Vec<IndexMutation<'a>> {
         let layout = crate::row_format::compiled_row_layout(descriptor);
         Self::index_mutations_for_insert_on_branch_with_layout(
@@ -168,6 +366,7 @@ impl QueryManager {
             data,
             descriptor,
             indexed_columns,
+            composite_indexes,
             &layout,
         )
     }
@@ -179,7 +378,33 @@ impl QueryManager {
         data: &[u8],
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
+        composite_indexes: &'a [CompositeIndex],
         layout: &CompiledRowLayout,
+    ) -> Vec<IndexMutation<'a>> {
+        let projection = Self::composite_index_projection(descriptor, composite_indexes);
+        Self::index_mutations_for_insert_on_branch_with_layout_and_projection(
+            table,
+            branch,
+            object_id,
+            data,
+            descriptor,
+            indexed_columns,
+            composite_indexes,
+            layout,
+            &projection,
+        )
+    }
+
+    pub(super) fn index_mutations_for_insert_on_branch_with_layout_and_projection<'a>(
+        table: &'a str,
+        branch: &'a str,
+        object_id: ObjectId,
+        data: &[u8],
+        descriptor: &'a RowDescriptor,
+        indexed_columns: Option<&'a [ColumnName]>,
+        composite_indexes: &'a [CompositeIndex],
+        layout: &CompiledRowLayout,
+        composite_index_projection: &[(ColumnName, usize)],
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Insert {
             table,
@@ -208,6 +433,23 @@ impl QueryManager {
             }
         }
 
+        if !composite_indexes.is_empty() {
+            let values_by_column = Self::composite_index_values_by_projection(
+                descriptor,
+                layout,
+                data,
+                composite_index_projection,
+            );
+            Self::push_insert_composite_index_values(
+                &mut mutations,
+                table,
+                branch,
+                object_id,
+                &values_by_column,
+                composite_indexes,
+            );
+        }
+
         mutations
     }
 
@@ -219,6 +461,35 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
+        composite_indexes: &'a [CompositeIndex],
+    ) -> Vec<IndexMutation<'a>> {
+        let layout = crate::row_format::compiled_row_layout(descriptor);
+        let projection = Self::composite_index_projection(descriptor, composite_indexes);
+        Self::index_mutations_for_update_on_branch_with_layout_and_projection(
+            table,
+            branch,
+            object_id,
+            old_data,
+            new_data,
+            descriptor,
+            indexed_columns,
+            composite_indexes,
+            layout.as_ref(),
+            &projection,
+        )
+    }
+
+    pub(super) fn index_mutations_for_update_on_branch_with_layout_and_projection<'a>(
+        table: &'a str,
+        branch: &'a str,
+        object_id: ObjectId,
+        old_data: &[u8],
+        new_data: &[u8],
+        descriptor: &'a RowDescriptor,
+        indexed_columns: Option<&'a [ColumnName]>,
+        composite_indexes: &'a [CompositeIndex],
+        layout: &CompiledRowLayout,
+        composite_index_projection: &[(ColumnName, usize)],
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = Vec::new();
 
@@ -259,6 +530,46 @@ impl QueryManager {
             }
         }
 
+        if !composite_indexes.is_empty() {
+            let old_values_by_column = Self::composite_index_values_by_projection(
+                descriptor,
+                layout,
+                old_data,
+                composite_index_projection,
+            );
+            let new_values_by_column = Self::composite_index_values_by_projection(
+                descriptor,
+                layout,
+                new_data,
+                composite_index_projection,
+            );
+            for index in composite_indexes {
+                let old_value = composite_index_value(&index.columns, &old_values_by_column);
+                let new_value = composite_index_value(&index.columns, &new_values_by_column);
+                if old_value == new_value {
+                    continue;
+                }
+                if let Some(value) = old_value {
+                    mutations.push(IndexMutation::Remove {
+                        table,
+                        column: index.name.as_str(),
+                        branch,
+                        value,
+                        row_id: object_id,
+                    });
+                }
+                if let Some(value) = new_value {
+                    mutations.push(IndexMutation::Insert {
+                        table,
+                        column: index.name.as_str(),
+                        branch,
+                        value,
+                        row_id: object_id,
+                    });
+                }
+            }
+        }
+
         mutations
     }
 
@@ -269,6 +580,7 @@ impl QueryManager {
         old_data: &[u8],
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
+        composite_indexes: &'a [CompositeIndex],
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Remove {
             table,
@@ -296,6 +608,25 @@ impl QueryManager {
             }
         }
 
+        if !composite_indexes.is_empty() {
+            let layout = crate::row_format::compiled_row_layout(descriptor);
+            let projection = Self::composite_index_projection(descriptor, composite_indexes);
+            let values_by_column = Self::composite_index_values_by_projection(
+                descriptor,
+                layout.as_ref(),
+                old_data,
+                &projection,
+            );
+            Self::push_remove_composite_index_values(
+                &mut mutations,
+                table,
+                branch,
+                object_id,
+                &values_by_column,
+                composite_indexes,
+            );
+        }
+
         mutations.push(IndexMutation::Insert {
             table,
             column: "_id_deleted",
@@ -314,6 +645,7 @@ impl QueryManager {
         old_data: Option<&[u8]>,
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
+        composite_indexes: &'a [CompositeIndex],
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Remove {
             table,
@@ -341,6 +673,25 @@ impl QueryManager {
                     );
                 }
             }
+
+            if !composite_indexes.is_empty() {
+                let layout = crate::row_format::compiled_row_layout(descriptor);
+                let projection = Self::composite_index_projection(descriptor, composite_indexes);
+                let values_by_column = Self::composite_index_values_by_projection(
+                    descriptor,
+                    layout.as_ref(),
+                    data,
+                    &projection,
+                );
+                Self::push_remove_composite_index_values(
+                    &mut mutations,
+                    table,
+                    branch,
+                    object_id,
+                    &values_by_column,
+                    composite_indexes,
+                );
+            }
         }
 
         mutations.push(IndexMutation::Remove {
@@ -361,6 +712,7 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
+        composite_indexes: &'a [CompositeIndex],
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![
             IndexMutation::Remove {
@@ -397,6 +749,25 @@ impl QueryManager {
             }
         }
 
+        if !composite_indexes.is_empty() {
+            let layout = crate::row_format::compiled_row_layout(descriptor);
+            let projection = Self::composite_index_projection(descriptor, composite_indexes);
+            let values_by_column = Self::composite_index_values_by_projection(
+                descriptor,
+                layout.as_ref(),
+                new_data,
+                &projection,
+            );
+            Self::push_insert_composite_index_values(
+                &mut mutations,
+                table,
+                branch,
+                object_id,
+                &values_by_column,
+                composite_indexes,
+            );
+        }
+
         mutations
     }
 
@@ -409,6 +780,7 @@ impl QueryManager {
         data: &[u8],
         descriptor: &RowDescriptor,
         indexed_columns: Option<&[ColumnName]>,
+        composite_indexes: &[CompositeIndex],
     ) -> Result<(), IndexUpdateError> {
         let mutations = Self::index_mutations_for_insert_on_branch(
             table,
@@ -417,6 +789,7 @@ impl QueryManager {
             data,
             descriptor,
             indexed_columns,
+            composite_indexes,
         );
         for mutation in &mutations {
             if let Err(error) = storage.apply_index_mutations(std::slice::from_ref(mutation)) {
@@ -450,6 +823,7 @@ impl QueryManager {
             new_data,
             target.descriptor,
             target.indexed_columns,
+            target.composite_indexes,
         );
         storage
             .apply_index_mutations(&mutations)
@@ -465,6 +839,7 @@ impl QueryManager {
         old_data: &[u8],
         descriptor: &RowDescriptor,
         indexed_columns: Option<&[ColumnName]>,
+        composite_indexes: &[CompositeIndex],
     ) -> Result<(), QueryError> {
         let mutations = Self::index_mutations_for_soft_delete_on_branch(
             table,
@@ -473,6 +848,7 @@ impl QueryManager {
             old_data,
             descriptor,
             indexed_columns,
+            composite_indexes,
         );
         storage
             .apply_index_mutations(&mutations)
@@ -488,6 +864,7 @@ impl QueryManager {
         old_data: Option<&[u8]>,
         descriptor: &RowDescriptor,
         indexed_columns: Option<&[ColumnName]>,
+        composite_indexes: &[CompositeIndex],
     ) -> Result<(), QueryError> {
         let mutations = Self::index_mutations_for_hard_delete_on_branch(
             table,
@@ -496,6 +873,7 @@ impl QueryManager {
             old_data,
             descriptor,
             indexed_columns,
+            composite_indexes,
         );
         storage
             .apply_index_mutations(&mutations)
@@ -511,6 +889,7 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &RowDescriptor,
         indexed_columns: Option<&[ColumnName]>,
+        composite_indexes: &[CompositeIndex],
     ) -> Result<(), QueryError> {
         let mutations = Self::index_mutations_for_undelete_on_branch(
             table,
@@ -519,6 +898,7 @@ impl QueryManager {
             new_data,
             descriptor,
             indexed_columns,
+            composite_indexes,
         );
         storage
             .apply_index_mutations(&mutations)
@@ -554,6 +934,7 @@ impl QueryManager {
             Some(row_data),
             &table_schema.columns,
             table_schema.indexed_columns.as_deref(),
+            &table_schema.composite_indexes,
         ) {
             tracing::warn!(
                 table,
@@ -616,6 +997,7 @@ impl QueryManager {
                 restored_data,
                 &table_schema.columns,
                 table_schema.indexed_columns.as_deref(),
+                &table_schema.composite_indexes,
             )
         {
             tracing::warn!(
@@ -630,5 +1012,263 @@ impl QueryManager {
         self.pending_local_row_batches.remove(&row_id);
         self.mark_subscriptions_dirty_local(table);
         self.mark_local_row_updated_in_subscriptions(table, row_id);
+    }
+
+    pub(crate) fn process_composite_index_backfills<H: Storage + ?Sized>(
+        &mut self,
+        storage: &mut H,
+    ) -> Result<(), StorageError> {
+        self.process_composite_index_backfills_with_budget(
+            storage,
+            CompositeIndexBackfillBudget::default(),
+        )
+    }
+
+    pub(crate) fn process_composite_index_backfills_with_budget<H: Storage + ?Sized>(
+        &mut self,
+        storage: &mut H,
+        budget: CompositeIndexBackfillBudget,
+    ) -> Result<(), StorageError> {
+        if !self.schema_context.is_initialized() {
+            return Ok(());
+        }
+
+        let targets = self.composite_index_backfill_targets();
+        let desired = Self::desired_composite_index_keys(&targets);
+        self.cleanup_stale_composite_index_builds(storage, &desired)?;
+        let mut became_ready = Vec::new();
+        let mut processed_indexes = 0;
+        let rows_per_index = budget.rows_per_index.max(1);
+
+        for (branch, schema) in targets {
+            for (table_name, table_schema) in schema {
+                for index in &table_schema.composite_indexes {
+                    let signature = index.signature();
+                    let key = composite_index_build_key(
+                        table_name.as_str(),
+                        &branch,
+                        index.name.as_str(),
+                        &signature,
+                    );
+                    let state = storage
+                        .raw_table_get(COMPOSITE_INDEX_BUILD_STATE_TABLE, &key)?
+                        .and_then(|bytes| decode_composite_index_build_state(&bytes));
+
+                    let state = match state {
+                        Some(CompositeIndexBuildState::Ready) => {
+                            self.ready_composite_indexes.insert((
+                                table_name,
+                                branch.clone(),
+                                index.name,
+                                signature.clone(),
+                            ));
+                            continue;
+                        }
+                        Some(state @ CompositeIndexBuildState::Building { .. }) => state,
+                        None => {
+                            let has_rows = !storage
+                                .index_range_limited(
+                                    table_name.as_str(),
+                                    "_id",
+                                    &branch,
+                                    Bound::Unbounded,
+                                    Bound::Unbounded,
+                                    1,
+                                )
+                                .is_empty();
+                            let initial = if has_rows {
+                                CompositeIndexBuildState::Building { cursor: None }
+                            } else {
+                                CompositeIndexBuildState::Ready
+                            };
+                            storage.raw_table_put(
+                                COMPOSITE_INDEX_BUILD_STATE_TABLE,
+                                &key,
+                                &encode_composite_index_build_state(initial),
+                            )?;
+                            if matches!(initial, CompositeIndexBuildState::Ready) {
+                                self.ready_composite_indexes.insert((
+                                    table_name,
+                                    branch.clone(),
+                                    index.name,
+                                    signature.clone(),
+                                ));
+                                became_ready.push(table_name);
+                                continue;
+                            }
+                            initial
+                        }
+                    };
+
+                    let CompositeIndexBuildState::Building { cursor } = state else {
+                        continue;
+                    };
+                    self.ready_composite_indexes.remove(&(
+                        table_name,
+                        branch.clone(),
+                        index.name,
+                        signature.clone(),
+                    ));
+                    if processed_indexes >= budget.indexes {
+                        continue;
+                    }
+                    processed_indexes += 1;
+
+                    let start_value = cursor.map(Value::Uuid);
+                    let start = start_value
+                        .as_ref()
+                        .map_or(Bound::Unbounded, Bound::Excluded);
+                    let row_ids = storage.index_range_limited(
+                        table_name.as_str(),
+                        "_id",
+                        &branch,
+                        start,
+                        Bound::Unbounded,
+                        rows_per_index,
+                    );
+
+                    let mut mutations = Vec::new();
+                    let layout = crate::row_format::compiled_row_layout(&table_schema.columns);
+                    let projection = Self::composite_index_projection(
+                        &table_schema.columns,
+                        std::slice::from_ref(index),
+                    );
+                    for row_id in &row_ids {
+                        let Some(row) = storage.load_visible_region_row(
+                            table_name.as_str(),
+                            &branch,
+                            *row_id,
+                        )?
+                        else {
+                            continue;
+                        };
+                        if row.is_soft_deleted() || row.is_hard_deleted() {
+                            continue;
+                        }
+                        let values_by_column = Self::composite_index_values_by_projection(
+                            &table_schema.columns,
+                            layout.as_ref(),
+                            &row.data,
+                            &projection,
+                        );
+                        Self::push_insert_composite_index_values(
+                            &mut mutations,
+                            table_name.as_str(),
+                            &branch,
+                            *row_id,
+                            &values_by_column,
+                            std::slice::from_ref(index),
+                        );
+                    }
+                    storage.apply_index_mutations(&mutations)?;
+
+                    let next_state = if row_ids.len() < rows_per_index {
+                        CompositeIndexBuildState::Ready
+                    } else {
+                        CompositeIndexBuildState::Building {
+                            cursor: row_ids.last().copied(),
+                        }
+                    };
+                    storage.raw_table_put(
+                        COMPOSITE_INDEX_BUILD_STATE_TABLE,
+                        &key,
+                        &encode_composite_index_build_state(next_state),
+                    )?;
+
+                    if matches!(next_state, CompositeIndexBuildState::Ready) {
+                        self.ready_composite_indexes.insert((
+                            table_name,
+                            branch.clone(),
+                            index.name,
+                            signature,
+                        ));
+                        became_ready.push(table_name);
+                    }
+                }
+            }
+        }
+
+        if !became_ready.is_empty() {
+            self.mark_subscriptions_for_recompile();
+        }
+        Ok(())
+    }
+
+    fn composite_index_backfill_targets(&self) -> Vec<(String, Schema)> {
+        let mut targets = Vec::new();
+        let current_branch = self.schema_context.branch_name().as_str().to_string();
+        targets.push((current_branch, self.schema.as_ref().clone()));
+
+        for (schema_hash, schema) in &self.schema_context.live_schemas {
+            let branch = ComposedBranchName::new(
+                &self.schema_context.env,
+                *schema_hash,
+                &self.schema_context.user_branch,
+            )
+            .to_branch_name()
+            .as_str()
+            .to_string();
+            targets.push((branch, schema.clone()));
+        }
+
+        targets
+    }
+
+    fn desired_composite_index_keys(
+        targets: &[(String, Schema)],
+    ) -> HashSet<(String, String, String, String)> {
+        let mut desired = HashSet::new();
+        for (branch, schema) in targets {
+            for (table_name, table_schema) in schema {
+                for index in &table_schema.composite_indexes {
+                    desired.insert((
+                        table_name.as_str().to_string(),
+                        branch.clone(),
+                        index.name.as_str().to_string(),
+                        index.signature(),
+                    ));
+                }
+            }
+        }
+        desired
+    }
+
+    fn cleanup_stale_composite_index_builds<H: Storage + ?Sized>(
+        &mut self,
+        storage: &mut H,
+        desired: &HashSet<(String, String, String, String)>,
+    ) -> Result<(), StorageError> {
+        let keys = storage.raw_table_scan_prefix_keys(COMPOSITE_INDEX_BUILD_STATE_TABLE, "")?;
+        let mut cleared_raw_indexes = HashSet::new();
+
+        for key in keys {
+            let Some((table, branch, index_name, signature)) =
+                parse_composite_index_build_key(&key)
+            else {
+                continue;
+            };
+            if desired.contains(&(
+                table.clone(),
+                branch.clone(),
+                index_name.clone(),
+                signature.clone(),
+            )) {
+                continue;
+            }
+
+            storage.raw_table_delete(COMPOSITE_INDEX_BUILD_STATE_TABLE, &key)?;
+            self.ready_composite_indexes.remove(&(
+                TableName::new(table.clone()),
+                branch.clone(),
+                ColumnName::new(index_name.clone()),
+                signature,
+            ));
+
+            if cleared_raw_indexes.insert((table.clone(), branch.clone(), index_name.clone())) {
+                storage.clear_index(&table, &index_name, &branch)?;
+            }
+        }
+
+        Ok(())
     }
 }
