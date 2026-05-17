@@ -1983,7 +1983,7 @@ impl WasmRuntime {
     pub fn flush(&self) -> Result<(), JsValue> {
         let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
         self.core
-            .borrow()
+            .borrow_mut()
             .flush_storage()
             .map_err(|e| JsValue::from_str(&format!("flush failed: {e}")))
     }
@@ -1993,7 +1993,7 @@ impl WasmRuntime {
     pub fn flush_wal(&self) -> Result<(), JsValue> {
         let _span = debug_span!("wasm::flushWal", tier = self.tier_label).entered();
         self.core
-            .borrow()
+            .borrow_mut()
             .flush_wal()
             .map_err(|e| JsValue::from_str(&format!("flush WAL failed: {e}")))
     }

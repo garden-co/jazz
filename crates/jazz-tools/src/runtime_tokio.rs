@@ -412,6 +412,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     /// and then runs additional ticks until all storage is flushed.
     pub async fn flush(&self) -> Result<(), RuntimeError> {
         let mut attempts = 0;
+        let mut last_storage_flush_error = None;
         loop {
             // Wait for any scheduled batched_tick to complete
             loop {
@@ -435,18 +436,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             // Synchronous tick and check if more work was generated
             let has_more_work = {
                 let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-                if let Some(error) = core.take_storage_flush_error() {
-                    return Err(RuntimeError::WriteError(format!(
-                        "storage WAL flush failed: {error}"
-                    )));
-                }
                 core.batched_tick();
                 if let Some(error) = core.take_storage_flush_error() {
-                    return Err(RuntimeError::WriteError(format!(
-                        "storage WAL flush failed: {error}"
-                    )));
+                    last_storage_flush_error = Some(error);
                 }
-                core.has_outbound() || core.scheduler().is_scheduled()
+                core.has_outbound()
+                    || core.scheduler().is_scheduled()
+                    || core.has_storage_write_pending_flush()
             };
 
             if !has_more_work {
@@ -464,6 +460,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             return Err(RuntimeError::WriteError(format!(
                 "storage WAL flush failed: {error}"
             )));
+        }
+        if core.has_storage_write_pending_flush()
+            && let Some(error) = last_storage_flush_error
+        {
+            return Err(RuntimeError::WriteError(format!(
+                "storage WAL flush failed: {error}"
+            )));
+        }
+        if core.has_storage_write_pending_flush() {
+            return Err(RuntimeError::WriteError(
+                "storage WAL flush did not complete".to_string(),
+            ));
         }
 
         Ok(())
@@ -987,6 +995,30 @@ mod tests {
             error.to_string().contains("injected WAL flush failure"),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn flush_recovers_after_transient_wal_flush_failure() {
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-transient-wal-flush-failure");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+
+        let storage = MemoryStorage::new().with_transient_flush_wal_failures(
+            StorageError::IoError("transient WAL flush failure".to_string()),
+            1,
+        );
+        let runtime = TokioRuntime::new(schema_manager, storage, |_| {});
+
+        runtime
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+        runtime
+            .flush()
+            .await
+            .expect("explicit runtime flush should retry transient WAL flush failure");
     }
 
     #[tokio::test]

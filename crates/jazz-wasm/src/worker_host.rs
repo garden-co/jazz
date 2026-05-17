@@ -755,12 +755,14 @@ fn update_auth(jwt: Option<String>, runtime: Option<&Rc<WasmRuntime>>) {
     }
 }
 
-fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
+fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
     HOST.with(|cell| {
         if let Some(h) = cell.borrow_mut().as_mut() {
             h.state = HostState::ShuttingDown;
         }
     });
+
+    let mut shutdown_failure = None;
 
     if let Some(rt) = runtime {
         // Drain any parked main/peer sync messages so their writes reach
@@ -777,9 +779,12 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
         // a future storage backend introduces a separate snapshot path.
         rt.batched_tick();
         if let Err(err) = rt.flush_wal() {
-            post_to_main(&WorkerToMainWire::Error {
-                message: format!("shutdown flush failed: {}", js_error_message(&err)),
-            });
+            let message = format!("shutdown flush failed: {}", js_error_message(&err));
+            if simulate_crash {
+                post_to_main(&WorkerToMainWire::Error { message });
+            } else {
+                shutdown_failure = Some(message);
+            }
         }
         rt.install_noop_sync_sender();
         // (No forwarder on worker side — `install_noop_sync_sender` below
@@ -802,7 +807,11 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
         g.main_client_id = None;
     });
 
-    post_to_main(&WorkerToMainWire::ShutdownOk);
+    if let Some(message) = shutdown_failure {
+        post_to_main(&WorkerToMainWire::ShutdownFailed { message });
+    } else {
+        post_to_main(&WorkerToMainWire::ShutdownOk);
+    }
     global.close();
     HOST.with(|cell| *cell.borrow_mut() = None);
 }

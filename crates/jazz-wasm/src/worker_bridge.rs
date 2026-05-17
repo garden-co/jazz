@@ -374,7 +374,7 @@ impl WasmWorkerBridge {
     pub fn simulate_crash(&self) -> js_sys::Promise {
         let inner = Rc::clone(&self.inner);
         wasm_bindgen_futures::future_to_promise(async move {
-            let (tx, rx) = oneshot::channel::<()>();
+            let (tx, rx) = oneshot::channel::<Result<(), String>>();
             *inner.shutdown_resolver.borrow_mut() = Some(tx);
             post_wire(&inner.worker, &MainToWorkerWire::SimulateCrash);
             let timeout = make_timeout(SHUTDOWN_ACK_TIMEOUT_MS);
@@ -442,20 +442,27 @@ impl WasmWorkerBridge {
         self.inner.sender.set_server_payload_forwarder(None);
         self.inner.runtime.remove_server();
 
-        let (tx, rx) = oneshot::channel::<()>();
+        let (tx, rx) = oneshot::channel::<Result<(), String>>();
         *self.inner.shutdown_resolver.borrow_mut() = Some(tx);
         post_wire(&self.inner.worker, &MainToWorkerWire::Shutdown);
 
         let inner = Rc::clone(&self.inner);
         wasm_bindgen_futures::future_to_promise(async move {
             let timeout = make_timeout(SHUTDOWN_ACK_TIMEOUT_MS);
-            let _ = select(rx, timeout).await;
             // Clear `worker.onmessage` so late inbound messages don't invoke
             // a freed Rust trampoline. `Closure::drop` alone does NOT clear
             // the JS slot.
+            let shutdown_result = match select(rx, timeout).await {
+                Either::Left((Ok(Ok(())), _)) => Ok(()),
+                Either::Left((Ok(Err(message)), _)) => Err(message),
+                Either::Left((Err(_), _)) => Err("shutdown resolver dropped".to_string()),
+                Either::Right(_) => Ok(()),
+            };
             inner.worker.set_onmessage(None);
             inner.transition_shutdown_finished();
-            Ok(JsValue::UNDEFINED)
+            shutdown_result
+                .map(|()| JsValue::UNDEFINED)
+                .map_err(|message| JsValue::from_str(&message))
         })
     }
 }
@@ -525,7 +532,7 @@ struct BridgeInner {
     on_message_closure: RefCell<Option<Closure<dyn FnMut(MessageEvent)>>>,
     init_resolver: RefCell<Option<oneshot::Sender<Result<String, String>>>>,
     init_promise: RefCell<Option<js_sys::Promise>>,
-    shutdown_resolver: RefCell<Option<oneshot::Sender<()>>>,
+    shutdown_resolver: RefCell<Option<oneshot::Sender<Result<(), String>>>>,
     expects_upstream: Cell<bool>,
     upstream_connected: Cell<bool>,
     has_forwarder: Cell<bool>,
@@ -846,7 +853,14 @@ impl BridgeInner {
             }
             WorkerToMainWire::ShutdownOk => {
                 if let Some(tx) = self.shutdown_resolver.borrow_mut().take() {
-                    let _ = tx.send(());
+                    let _ = tx.send(Ok(()));
+                }
+            }
+            WorkerToMainWire::ShutdownFailed { message } => {
+                if let Some(tx) = self.shutdown_resolver.borrow_mut().take() {
+                    let _ = tx.send(Err(message));
+                } else {
+                    tracing::warn!("worker shutdown failed without pending shutdown: {message}");
                 }
             }
             WorkerToMainWire::DebugSchemaStateOk { .. }

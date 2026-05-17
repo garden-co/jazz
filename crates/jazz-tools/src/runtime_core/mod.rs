@@ -564,17 +564,23 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     /// Flush the storage to persistent medium.
-    pub fn flush_storage(&self) -> Result<(), StorageError> {
-        self.storage.flush()
+    pub fn flush_storage(&mut self) -> Result<(), StorageError> {
+        self.storage.flush()?;
+        self.clear_storage_write_pending_flush();
+        Ok(())
     }
 
     /// Flush only the WAL buffer (not the full snapshot).
-    pub fn flush_wal(&self) -> Result<(), StorageError> {
-        self.storage.flush_wal()
+    pub fn flush_wal(&mut self) -> Result<(), StorageError> {
+        self.flush_wal_barrier()
     }
 
     pub(crate) fn mark_storage_write_pending_flush(&mut self) {
         self.storage_write_pending_flush = true;
+    }
+
+    pub(crate) fn has_storage_write_pending_flush(&self) -> bool {
+        self.storage_write_pending_flush
     }
 
     pub(crate) fn clear_storage_write_pending_flush(&mut self) {
@@ -588,6 +594,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     pub fn take_storage_flush_error(&mut self) -> Option<StorageError> {
         self.storage_flush_error.take()
+    }
+
+    pub(crate) fn flush_wal_barrier(&mut self) -> Result<(), StorageError> {
+        match self.storage.flush_wal() {
+            Ok(()) => {
+                self.clear_storage_write_pending_flush();
+                Ok(())
+            }
+            Err(error) => {
+                self.record_storage_flush_error(error.clone());
+                Err(error)
+            }
+        }
     }
 
     /// Consume RuntimeCore and return the Storage.

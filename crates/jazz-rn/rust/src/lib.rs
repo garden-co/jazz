@@ -1031,7 +1031,7 @@ impl RnRuntime {
 
     pub fn flush(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("flush", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
             core.flush_storage().map_err(runtime_err)?;
@@ -1096,7 +1096,7 @@ impl RnRuntime {
     /// Flush and close the underlying storage, releasing filesystem locks.
     pub fn close(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("close", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
             let flush_result = core.flush_storage();
