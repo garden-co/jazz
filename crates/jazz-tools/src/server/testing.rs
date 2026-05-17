@@ -540,10 +540,13 @@ mod tests {
             .expect("shutdown request");
         assert_eq!(response.status(), StatusCode::ACCEPTED);
 
+        let mut saw_unavailable = false;
         for _ in 0..80 {
             match client.get(format!("{base_url}/health")).send().await {
-                Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {}
-                Err(_) => return,
+                Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {
+                    saw_unavailable = true;
+                }
+                Err(_) if saw_unavailable => return,
                 _ => {}
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

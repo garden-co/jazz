@@ -65,6 +65,7 @@ pub async fn run(
     let (serve_shutdown_tx, serve_shutdown_rx) = tokio::sync::oneshot::channel();
     let shutdown_task = tokio::spawn(async move {
         state.shutdown.wait_requested().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         state.run_shutdown_finalization().await;
         let _ = serve_shutdown_tx.send(());
     });

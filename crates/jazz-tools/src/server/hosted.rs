@@ -42,6 +42,7 @@ impl HostedServer {
         let shutdown_state = built.state.clone();
         let shutdown_task = tokio::spawn(async move {
             shutdown_state.shutdown.wait_requested().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
             shutdown_state.run_shutdown_finalization().await;
             let _ = serve_shutdown_tx.send(());
         });
