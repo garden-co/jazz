@@ -145,6 +145,11 @@ pub(super) struct SchemaConnectivityResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub(super) struct ShutdownResponse {
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PublishMigrationResponse {
     object_id: String,
@@ -1130,8 +1135,46 @@ pub(super) async fn admin_subscription_introspection_handler(
     }
 }
 
-pub(super) async fn health_handler() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "status": "healthy"
-    }))
+pub(super) async fn internal_shutdown_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    let first_request = state.shutdown.request_shutdown();
+    let status = if first_request {
+        "shutting_down"
+    } else {
+        "already_shutting_down"
+    };
+
+    (StatusCode::ACCEPTED, Json(ShutdownResponse { status })).into_response()
+}
+
+pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    let phase = state.shutdown.phase();
+    if phase.is_running() {
+        return Json(serde_json::json!({
+            "status": "healthy"
+        }))
+        .into_response();
+    }
+
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "status": "shutting_down",
+            "phase": phase
+        })),
+    )
+        .into_response()
 }
