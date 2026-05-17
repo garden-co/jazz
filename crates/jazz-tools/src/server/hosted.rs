@@ -76,7 +76,7 @@ impl HostedServer {
     /// Gracefully shut down: request shutdown, finalize runtime/storage, and await task.
     pub async fn shutdown(&mut self) {
         self.state.shutdown.request_shutdown();
-        let shutdown_budget = self.state.shutdown.timeout() + Duration::from_secs(5);
+        let shutdown_budget = self.state.shutdown.timeout() * 2 + Duration::from_secs(5);
 
         if let Some(mut shutdown_task) = self.shutdown_task.take()
             && tokio::time::timeout(shutdown_budget, &mut shutdown_task)
