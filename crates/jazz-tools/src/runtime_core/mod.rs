@@ -47,7 +47,7 @@ use crate::query_manager::types::{
 use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
 use crate::schema_manager::{Lens, SchemaManager};
-use crate::storage::Storage;
+use crate::storage::{Storage, StorageError};
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,13 +561,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     /// Flush the storage to persistent medium.
-    pub fn flush_storage(&self) {
-        self.storage.flush();
+    pub fn flush_storage(&self) -> Result<(), StorageError> {
+        self.storage.flush()
     }
 
     /// Flush only the WAL buffer (not the full snapshot).
-    pub fn flush_wal(&self) {
-        self.storage.flush_wal();
+    pub fn flush_wal(&self) -> Result<(), StorageError> {
+        self.storage.flush_wal()
     }
 
     pub(crate) fn mark_storage_write_pending_flush(&mut self) {

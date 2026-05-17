@@ -502,12 +502,12 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.index_scan_all(table, column, branch)
     }
 
-    fn flush(&self) {
-        self.inner.flush();
+    fn flush(&self) -> Result<(), StorageError> {
+        self.inner.flush()
     }
 
-    fn flush_wal(&self) {
-        self.inner.flush_wal();
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        self.inner.flush_wal()
     }
 
     fn close(&self) -> Result<(), StorageError> {
@@ -895,12 +895,12 @@ impl Storage for LegacyPersistenceObservingStorage {
         self.inner.index_scan_all(table, column, branch)
     }
 
-    fn flush(&self) {
-        self.inner.flush();
+    fn flush(&self) -> Result<(), StorageError> {
+        self.inner.flush()
     }
 
-    fn flush_wal(&self) {
-        self.inner.flush_wal();
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        self.inner.flush_wal()
     }
 
     fn close(&self) -> Result<(), StorageError> {
@@ -1313,13 +1313,13 @@ impl Storage for RowMutationObservingStorage {
         self.inner.index_scan_all(table, column, branch)
     }
 
-    fn flush(&self) {
-        self.inner.flush();
+    fn flush(&self) -> Result<(), StorageError> {
+        self.inner.flush()
     }
 
-    fn flush_wal(&self) {
+    fn flush_wal(&self) -> Result<(), StorageError> {
         self.calls.lock().unwrap().flush_wal_calls += 1;
-        self.inner.flush_wal();
+        self.inner.flush_wal()
     }
 
     fn close(&self) -> Result<(), StorageError> {

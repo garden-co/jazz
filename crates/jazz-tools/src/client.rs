@@ -492,7 +492,8 @@ impl JazzClient {
         // Flush storage state to disk for persistence
         self.runtime
             .with_storage(|storage| {
-                storage.flush();
+                storage.flush()?;
+                storage.flush_wal()?;
                 storage.close()
             })
             .map_err(|e| JazzError::Storage(e.to_string()))?
@@ -941,7 +942,7 @@ mod tests {
         }
 
         let storage = runtime.into_storage();
-        storage.flush();
+        storage.flush().expect("flush seeded client storage");
         storage.close().expect("close seeded client storage");
 
         (bundled_hash, learned_hash)

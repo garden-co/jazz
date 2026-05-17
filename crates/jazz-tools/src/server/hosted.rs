@@ -9,7 +9,7 @@ use super::ServerState;
 use super::builder::BuiltServer;
 use crate::schema_manager::AppId;
 
-/// A running Jazz server that owns its task, shutdown channel, and metadata.
+/// A running Jazz server that owns its tasks and metadata.
 ///
 /// Shared abstraction used by both `TestingServer` and `DevServer`.
 pub struct HostedServer {

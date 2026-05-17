@@ -3024,7 +3024,7 @@ mod tests {
         let (schema_hash, row_id, row) = {
             let mut storage = SqliteStorage::open(&path).unwrap();
             let seeded = seed_common_case_visible_task_row(&mut storage);
-            storage.flush();
+            storage.flush().unwrap();
             storage.close().unwrap();
             seeded
         };
@@ -3060,7 +3060,7 @@ mod tests {
         let (schema_hash, row_id, row) = {
             let mut storage = RocksDBStorage::open(&path, 8 * 1024 * 1024).unwrap();
             let seeded = seed_common_case_visible_task_row(&mut storage);
-            storage.flush();
+            storage.flush().unwrap();
             storage.close().unwrap();
             seeded
         };

@@ -194,16 +194,22 @@ pub struct ConnectionState {
 
 impl ServerState {
     pub async fn run_shutdown_finalization(&self) {
+        if !self.shutdown.try_begin_finalization() {
+            return;
+        }
+
         self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
         #[cfg(feature = "transport-websocket")]
         self.runtime.disconnect();
 
+        let mut failed = false;
         let websockets_drained = self.shutdown.wait_for_websocket_drain().await;
         if !websockets_drained {
             tracing::warn!(
                 active_websockets = self.shutdown.active_websockets(),
                 "shutdown websocket drain timed out"
             );
+            failed = true;
         }
 
         let app_requests_drained = self.shutdown.wait_for_app_request_drain().await;
@@ -212,10 +218,10 @@ impl ServerState {
                 active_app_requests = self.shutdown.active_app_requests(),
                 "shutdown app request drain timed out"
             );
+            failed = true;
         }
 
         self.shutdown.set_phase(ShutdownPhase::FlushingRuntime);
-        let mut failed = false;
         if let Err(error) = self.runtime.flush().await {
             tracing::error!(%error, "shutdown runtime flush failed");
             failed = true;
@@ -223,22 +229,26 @@ impl ServerState {
 
         self.shutdown.set_phase(ShutdownPhase::ClosingStorage);
         let storage_result = self.runtime.with_storage(|storage| {
-            storage.flush();
-            storage.flush_wal();
-            storage.close()
+            let flush_result = storage.flush();
+            let flush_wal_result = storage.flush_wal();
+            let close_result = storage.close();
+            (flush_result, flush_wal_result, close_result)
         });
 
         match storage_result {
-            Ok(Ok(())) => {
-                if failed {
-                    self.shutdown.set_phase(ShutdownPhase::Failed);
-                } else {
-                    self.shutdown.set_phase(ShutdownPhase::StorageClosed);
+            Ok((flush_result, flush_wal_result, close_result)) => {
+                if let Err(error) = flush_result {
+                    tracing::error!(%error, "shutdown storage flush failed");
+                    failed = true;
                 }
-            }
-            Ok(Err(error)) => {
-                tracing::error!(%error, "shutdown storage close failed");
-                failed = true;
+                if let Err(error) = flush_wal_result {
+                    tracing::error!(%error, "shutdown storage WAL flush failed");
+                    failed = true;
+                }
+                if let Err(error) = close_result {
+                    tracing::error!(%error, "shutdown storage close failed");
+                    failed = true;
+                }
             }
             Err(error) => {
                 tracing::error!(%error, "shutdown storage lock failed");
@@ -248,6 +258,8 @@ impl ServerState {
 
         if failed {
             self.shutdown.set_phase(ShutdownPhase::Failed);
+        } else {
+            self.shutdown.set_phase(ShutdownPhase::StorageClosed);
         }
     }
 
@@ -413,9 +425,14 @@ mod tests {
     use crate::server::builder::{ServerBuilder, StorageBackend};
 
     async fn build_test_state() -> Arc<ServerState> {
+        build_test_state_with_shutdown_timeout(Duration::from_secs(30)).await
+    }
+
+    async fn build_test_state_with_shutdown_timeout(timeout: Duration) -> Arc<ServerState> {
         let app_id = AppId::from_name("lifecycle-test");
         let built = ServerBuilder::new(app_id)
             .with_storage(StorageBackend::InMemory)
+            .with_shutdown_timeout(timeout)
             .build()
             .await
             .expect("build test server");
@@ -460,6 +477,20 @@ mod tests {
             candidates.contains_key(&alice),
             "alice should be a disconnect candidate"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_finalization_marks_failed_after_app_request_drain_timeout() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_millis(10)).await;
+        let _request_guard = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+
+        state.shutdown.request_shutdown();
+        state.run_shutdown_finalization().await;
+
+        assert_eq!(state.shutdown.phase(), ShutdownPhase::Failed);
     }
 
     #[tokio::test]

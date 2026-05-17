@@ -1275,7 +1275,9 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.storage().flush();
+        core.storage()
+            .flush()
+            .map_err(|e| napi::Error::from_reason(format!("Failed to flush storage: {:?}", e)))?;
         Ok(())
     }
 
@@ -1286,7 +1288,9 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.storage().flush();
+        core.storage()
+            .flush()
+            .map_err(|e| napi::Error::from_reason(format!("Failed to flush storage: {:?}", e)))?;
         core.storage()
             .close()
             .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;

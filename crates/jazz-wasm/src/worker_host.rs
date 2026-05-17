@@ -654,7 +654,7 @@ fn process_main_message(msg: MainToWorkerMessage) {
         MainToWorkerWire::DebugSeedLiveSchema { schema_json } => match runtime.as_ref() {
             Some(rt) => match rt.debug_seed_live_schema(&schema_json) {
                 Ok(()) => {
-                    rt.flush_wal();
+                    let _ = rt.flush_wal();
                     post_to_main(&WorkerToMainWire::DebugSeedLiveSchemaOk);
                 }
                 Err(err) => post_to_main(&WorkerToMainWire::Error {
@@ -705,7 +705,7 @@ fn handle_lifecycle_hint(event: WorkerLifecycleEvent, runtime: Option<&Rc<WasmRu
         | WorkerLifecycleEvent::Pagehide
         | WorkerLifecycleEvent::Freeze => {
             if let Some(rt) = runtime {
-                rt.flush_wal();
+                let _ = rt.flush_wal();
             }
         }
         _ => {}
@@ -767,7 +767,7 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
         // the same effect on storage; the distinction is preserved in case
         // a future storage backend introduces a separate snapshot path.
         rt.batched_tick();
-        rt.flush_wal();
+        let _ = rt.flush_wal();
         rt.install_noop_sync_sender();
         // (No forwarder on worker side — `install_noop_sync_sender` below
         // replaces the active sender wholesale, so any future outbox emission

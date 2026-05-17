@@ -29,6 +29,7 @@ pub struct ShutdownController {
 
 struct ShutdownInner {
     requested: AtomicBool,
+    finalization_started: AtomicBool,
     timeout: Duration,
     phase_tx: watch::Sender<ShutdownPhase>,
     drain_notify: Notify,
@@ -50,6 +51,7 @@ impl ShutdownController {
         Self {
             inner: Arc::new(ShutdownInner {
                 requested: AtomicBool::new(false),
+                finalization_started: AtomicBool::new(false),
                 timeout,
                 phase_tx,
                 drain_notify: Notify::new(),
@@ -86,6 +88,10 @@ impl ShutdownController {
             self.inner.drain_notify.notify_waiters();
         }
         !was_requested
+    }
+
+    pub(crate) fn try_begin_finalization(&self) -> bool {
+        !self.inner.finalization_started.swap(true, Ordering::SeqCst)
     }
 
     pub async fn wait_requested(&self) {
