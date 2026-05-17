@@ -306,7 +306,7 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     scheduler: Sch,
     /// True when storage was mutated since the last WAL flush barrier.
     storage_write_pending_flush: bool,
-    /// Last WAL flush error recorded by a scheduled or explicit batched tick.
+    /// Last storage flush error recorded by a durability barrier.
     storage_flush_error: Option<StorageError>,
     /// Transport handle for WebSocket sync.
     pub(crate) transport: Option<crate::transport_manager::TransportHandle>,
