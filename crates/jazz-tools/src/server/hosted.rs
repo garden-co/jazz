@@ -76,9 +76,10 @@ impl HostedServer {
     /// Gracefully shut down: request shutdown, finalize runtime/storage, and await task.
     pub async fn shutdown(&mut self) {
         self.state.shutdown.request_shutdown();
+        let shutdown_budget = self.state.shutdown.timeout() + Duration::from_secs(5);
 
         if let Some(mut shutdown_task) = self.shutdown_task.take()
-            && tokio::time::timeout(Duration::from_secs(5), &mut shutdown_task)
+            && tokio::time::timeout(shutdown_budget, &mut shutdown_task)
                 .await
                 .is_err()
         {
@@ -87,7 +88,7 @@ impl HostedServer {
         }
 
         if let Some(mut task) = self.task.take()
-            && tokio::time::timeout(Duration::from_millis(500), &mut task)
+            && tokio::time::timeout(shutdown_budget, &mut task)
                 .await
                 .is_err()
         {
