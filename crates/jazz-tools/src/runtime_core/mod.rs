@@ -306,6 +306,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     scheduler: Sch,
     /// True when storage was mutated since the last WAL flush barrier.
     storage_write_pending_flush: bool,
+    /// Last WAL flush error recorded by a scheduled or explicit batched tick.
+    storage_flush_error: Option<StorageError>,
     /// Transport handle for WebSocket sync.
     pub(crate) transport: Option<crate::transport_manager::TransportHandle>,
     /// Fallback outbox sender used when no `TransportHandle` is set (e.g. on
@@ -445,6 +447,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             storage,
             scheduler,
             storage_write_pending_flush: false,
+            storage_flush_error: None,
             transport: None,
             sync_sender: None,
             parked_sync_messages: Vec::new(),
@@ -576,6 +579,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     pub(crate) fn clear_storage_write_pending_flush(&mut self) {
         self.storage_write_pending_flush = false;
+        self.storage_flush_error = None;
+    }
+
+    pub(crate) fn record_storage_flush_error(&mut self, error: StorageError) {
+        self.storage_flush_error = Some(error);
+    }
+
+    pub fn take_storage_flush_error(&mut self) -> Option<StorageError> {
+        self.storage_flush_error.take()
     }
 
     /// Consume RuntimeCore and return the Storage.

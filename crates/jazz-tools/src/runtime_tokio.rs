@@ -435,7 +435,17 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             // Synchronous tick and check if more work was generated
             let has_more_work = {
                 let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+                if let Some(error) = core.take_storage_flush_error() {
+                    return Err(RuntimeError::WriteError(format!(
+                        "storage WAL flush failed: {error}"
+                    )));
+                }
                 core.batched_tick();
+                if let Some(error) = core.take_storage_flush_error() {
+                    return Err(RuntimeError::WriteError(format!(
+                        "storage WAL flush failed: {error}"
+                    )));
+                }
                 core.has_outbound() || core.scheduler().is_scheduled()
             };
 
@@ -447,6 +457,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             if attempts > 200 {
                 break;
             }
+        }
+
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        if let Some(error) = core.take_storage_flush_error() {
+            return Err(RuntimeError::WriteError(format!(
+                "storage WAL flush failed: {error}"
+            )));
         }
 
         Ok(())
@@ -847,7 +864,7 @@ mod tests {
     use super::*;
     use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
     use crate::schema_manager::AppId;
-    use crate::storage::MemoryStorage;
+    use crate::storage::{MemoryStorage, StorageError};
     use crate::sync_manager::SyncManager;
     use std::sync::atomic::AtomicUsize;
 
@@ -943,6 +960,33 @@ mod tests {
             .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn flush_returns_error_when_wal_flush_fails() {
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-wal-flush-failure");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+
+        let storage = MemoryStorage::new().with_flush_wal_error(StorageError::IoError(
+            "injected WAL flush failure".to_string(),
+        ));
+        let runtime = TokioRuntime::new(schema_manager, storage, |_| {});
+
+        runtime
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+        let error = runtime
+            .flush()
+            .await
+            .expect_err("explicit runtime flush should surface WAL flush failure");
+        assert!(
+            error.to_string().contains("injected WAL flush failure"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]

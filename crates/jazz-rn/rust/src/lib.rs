@@ -489,6 +489,9 @@ impl RnRuntime {
                 })?;
                 core.scheduler_mut().clear_scheduled();
                 core.batched_tick();
+                if let Some(error) = core.take_storage_flush_error() {
+                    return Err(runtime_err(format!("storage WAL flush failed: {error}")));
+                }
             }
             Ok(())
         })

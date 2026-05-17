@@ -710,7 +710,11 @@ fn handle_lifecycle_hint(event: WorkerLifecycleEvent, runtime: Option<&Rc<WasmRu
         | WorkerLifecycleEvent::Pagehide
         | WorkerLifecycleEvent::Freeze => {
             if let Some(rt) = runtime {
-                let _ = rt.flush_wal();
+                if let Err(err) = rt.flush_wal() {
+                    post_to_main(&WorkerToMainWire::Error {
+                        message: format!("lifecycle WAL flush failed: {}", js_error_message(&err)),
+                    });
+                }
             }
         }
         _ => {}

@@ -42,6 +42,8 @@ impl TableRowHistories {
 /// - Main thread in browser (acts as cache of worker state)
 pub struct MemoryStorage {
     cache_namespace: usize,
+    #[cfg(test)]
+    flush_wal_error: Option<StorageError>,
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
     authoritative_batch_fates: std::cell::RefCell<HashMap<BatchId, BatchFate>>,
@@ -59,6 +61,12 @@ impl MemoryStorage {
     /// Create a new empty MemoryStorage.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_flush_wal_error(mut self, error: StorageError) -> Self {
+        self.flush_wal_error = Some(error);
+        self
     }
 
     fn ensure_cached_raw_table_header(
@@ -92,6 +100,8 @@ impl Default for MemoryStorage {
     fn default() -> Self {
         Self {
             cache_namespace: next_storage_cache_namespace(),
+            #[cfg(test)]
+            flush_wal_error: None,
             raw_tables: HashMap::new(),
             authoritative_batch_fates: std::cell::RefCell::new(HashMap::new()),
             ensured_raw_table_headers: HashSet::new(),
@@ -1127,6 +1137,14 @@ impl Storage for MemoryStorage {
             )
         });
         Ok(rows)
+    }
+
+    #[cfg(test)]
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        if let Some(error) = &self.flush_wal_error {
+            return Err(error.clone());
+        }
+        Ok(())
     }
 }
 

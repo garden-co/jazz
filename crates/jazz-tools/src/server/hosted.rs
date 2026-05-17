@@ -78,13 +78,17 @@ impl HostedServer {
         self.state.shutdown.request_shutdown();
         let shutdown_budget = self.state.shutdown.timeout() * 2 + Duration::from_secs(5);
 
+        let mut finalization_completed = false;
         if let Some(mut shutdown_task) = self.shutdown_task.take()
             && tokio::time::timeout(shutdown_budget, &mut shutdown_task)
                 .await
-                .is_err()
+                .is_ok()
         {
-            shutdown_task.abort();
-            let _ = tokio::time::timeout(Duration::from_millis(50), shutdown_task).await;
+            finalization_completed = true;
+        }
+
+        if !finalization_completed {
+            return;
         }
 
         if let Some(mut task) = self.task.take()

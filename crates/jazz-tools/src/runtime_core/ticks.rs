@@ -743,7 +743,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             let _span = tracing::debug_span!("flush_wal").entered();
             match self.storage.flush_wal() {
                 Ok(()) => self.clear_storage_write_pending_flush(),
-                Err(error) => tracing::error!(%error, "storage WAL flush failed"),
+                Err(error) => {
+                    tracing::error!(%error, "storage WAL flush failed");
+                    self.record_storage_flush_error(error);
+                }
             }
         }
     }
