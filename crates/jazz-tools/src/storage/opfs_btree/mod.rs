@@ -372,17 +372,17 @@ impl Storage for OpfsBTreeStorage {
         else {
             return Vec::new();
         };
-        let (Some(start_key), Some(end_key)) = (start_key, end_key) else {
-            return self
-                .index_range(table, column, branch, start, end)
-                .into_iter()
-                .take(limit)
-                .collect();
-        };
-
-        let storage_start = key_codec::raw_table_entry_key(&raw_table, &start_key);
-        let storage_end = key_codec::raw_table_entry_key(&raw_table, &end_key);
         let storage_prefix = key_codec::raw_table_prefix(&raw_table);
+        let storage_start = start_key
+            .map(|key| key_codec::raw_table_entry_key(&raw_table, &key))
+            .unwrap_or_else(|| storage_prefix.clone());
+        let storage_end = end_key
+            .map(|key| key_codec::raw_table_entry_key(&raw_table, &key))
+            .unwrap_or_else(|| {
+                let mut bytes = storage_prefix.clone().into_bytes();
+                increment_bytes(&mut bytes);
+                String::from_utf8(bytes).expect("raw table prefix remains utf8")
+            });
 
         self.tree_scan_range_keys_limited(&storage_start, &storage_end, limit)
             .map(|keys| {

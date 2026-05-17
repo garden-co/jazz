@@ -13,6 +13,7 @@ use crate::schema_manager::{
 use super::super::graph_nodes::array_subquery::{ArraySubqueryNode, Correlate};
 use super::super::graph_nodes::filter::{FilterNode, Predicate};
 use super::super::graph_nodes::index_scan::IndexScanNode;
+use super::super::graph_nodes::index_scan::ScanDirection;
 use super::super::graph_nodes::join::{JoinColumnRef, JoinNode};
 use super::super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::super::graph_nodes::magic_columns::{MagicColumnRequest, MagicColumnsNode};
@@ -639,7 +640,8 @@ impl QueryGraph {
                     scan_plan.condition.clone(),
                     descriptor.clone(),
                 )
-                .with_scan_limit(scan_plan.scan_limit);
+                .with_scan_limit(scan_plan.scan_limit)
+                .with_scan_direction(scan_plan.scan_direction);
                 let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
                 graph
                     .index_scan_nodes
@@ -2087,6 +2089,7 @@ struct IndexScanPlan {
     condition: ScanCondition,
     fully_covers: bool,
     scan_limit: Option<usize>,
+    scan_direction: ScanDirection,
 }
 
 #[derive(Debug)]
@@ -2140,6 +2143,7 @@ fn index_scan_plan(
             condition: ScanCondition::All,
             fully_covers: true,
             scan_limit: None,
+            scan_direction: ScanDirection::Forward,
         };
     }
 
@@ -2166,6 +2170,7 @@ fn index_scan_plan(
             condition: ScanCondition::Empty,
             fully_covers: true,
             scan_limit: None,
+            scan_direction: ScanDirection::Forward,
         };
     }
 
@@ -2179,6 +2184,7 @@ fn index_scan_plan(
             condition: ScanCondition::All,
             fully_covers: false,
             scan_limit: None,
+            scan_direction: ScanDirection::Forward,
         };
     };
 
@@ -2192,6 +2198,7 @@ fn index_scan_plan(
         condition: selected.condition.clone(),
         fully_covers,
         scan_limit: None,
+        scan_direction: ScanDirection::Forward,
     }
 }
 
@@ -2208,6 +2215,21 @@ fn composite_ordered_index_scan_plan(
         return None;
     }
     let (order_column, order_direction) = &order_by[0];
+    if disjunct.conditions.is_empty() {
+        let (index, scan_direction) =
+            ordered_limit_composite_index(table_schema, order_column, *order_direction)?;
+        return Some(IndexScanPlan {
+            column: composite_index_column_name(index),
+            condition: ScanCondition::Range {
+                min: Bound::Unbounded,
+                max: Bound::Unbounded,
+            },
+            fully_covers: true,
+            scan_limit: allow_limit_pushdown.then_some(limit),
+            scan_direction,
+        });
+    }
+
     let eq_condition = disjunct
         .conditions
         .iter()
@@ -2216,26 +2238,21 @@ fn composite_ordered_index_scan_plan(
             _ => None,
         })?;
 
-    let index = table_schema.composite_indexes.iter().find(|index| {
+    let (index, scan_direction) = table_schema.composite_indexes.iter().find_map(|index| {
         let [scope, ordered] = index.columns.as_slice() else {
-            return false;
+            return None;
         };
-        scope.name.as_str() == eq_condition.0
-            && matches!(
+        if scope.name.as_str() != eq_condition.0
+            || !matches!(
                 scope.direction,
                 crate::query_manager::types::IndexDirection::Asc
             )
-            && ordered.name.as_str() == order_column
-            && matches!(
-                (ordered.direction, *order_direction),
-                (
-                    crate::query_manager::types::IndexDirection::Asc,
-                    SortDirection::Ascending
-                ) | (
-                    crate::query_manager::types::IndexDirection::Desc,
-                    SortDirection::Descending
-                )
-            )
+            || ordered.name.as_str() != order_column
+        {
+            return None;
+        }
+        ordered_index_scan_direction(ordered.direction, *order_direction)
+            .map(|scan_direction| (index, scan_direction))
     })?;
 
     let (min, max) = composite_index_prefix_range(&index.columns, &[eq_condition.1])?;
@@ -2248,7 +2265,44 @@ fn composite_ordered_index_scan_plan(
         },
         fully_covers,
         scan_limit: (allow_limit_pushdown && fully_covers).then_some(limit),
+        scan_direction,
     })
+}
+
+fn ordered_limit_composite_index<'a>(
+    table_schema: &'a crate::query_manager::types::TableSchema,
+    order_column: &str,
+    order_direction: SortDirection,
+) -> Option<(
+    &'a crate::query_manager::types::CompositeIndex,
+    ScanDirection,
+)> {
+    table_schema.composite_indexes.iter().find_map(|index| {
+        let [ordered] = index.columns.as_slice() else {
+            return None;
+        };
+        if ordered.name.as_str() != order_column {
+            return None;
+        }
+        ordered_index_scan_direction(ordered.direction, order_direction)
+            .map(|scan_direction| (index, scan_direction))
+    })
+}
+
+fn ordered_index_scan_direction(
+    index_direction: crate::query_manager::types::IndexDirection,
+    order_direction: SortDirection,
+) -> Option<ScanDirection> {
+    match (index_direction, order_direction) {
+        (crate::query_manager::types::IndexDirection::Asc, SortDirection::Ascending)
+        | (crate::query_manager::types::IndexDirection::Desc, SortDirection::Descending) => {
+            Some(ScanDirection::Forward)
+        }
+        (crate::query_manager::types::IndexDirection::Asc, SortDirection::Descending)
+        | (crate::query_manager::types::IndexDirection::Desc, SortDirection::Ascending) => {
+            Some(ScanDirection::Reverse)
+        }
+    }
 }
 
 fn column_scan_plan(disjunct: &Conjunction, column: &str) -> ColumnScanPlan {

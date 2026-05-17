@@ -10,6 +10,12 @@ use crate::row_format::decode_row;
 
 use super::{SourceContext, SourceNode};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanDirection {
+    Forward,
+    Reverse,
+}
+
 /// Source node that scans an index via Storage.
 /// Emits TupleDelta with length-1 tuples based on the scan condition.
 #[derive(Debug)]
@@ -19,6 +25,7 @@ pub struct IndexScanNode {
     pub branch: String,
     pub condition: ScanCondition,
     pub scan_limit: Option<usize>,
+    pub scan_direction: ScanDirection,
 
     /// Output tuple descriptor (single element, unmaterialized).
     output_descriptor: TupleDescriptor,
@@ -49,6 +56,7 @@ impl IndexScanNode {
             branch: branch.into(),
             condition,
             scan_limit: None,
+            scan_direction: ScanDirection::Forward,
             output_descriptor,
             row_descriptor,
             current_tuples: AHashSet::new(),
@@ -69,6 +77,11 @@ impl IndexScanNode {
 
     pub fn with_scan_limit(mut self, limit: Option<usize>) -> Self {
         self.scan_limit = limit;
+        self
+    }
+
+    pub fn with_scan_direction(mut self, direction: ScanDirection) -> Self {
+        self.scan_direction = direction;
         self
     }
 
@@ -207,14 +220,24 @@ impl SourceNode for IndexScanNode {
                 let start = min.as_ref();
                 let end = max.as_ref();
                 if let Some(limit) = self.scan_limit {
-                    ctx.storage.index_range_limited(
-                        self.table.as_str(),
-                        self.column.as_str(),
-                        &self.branch,
-                        start,
-                        end,
-                        limit,
-                    )
+                    match self.scan_direction {
+                        ScanDirection::Forward => ctx.storage.index_range_limited(
+                            self.table.as_str(),
+                            self.column.as_str(),
+                            &self.branch,
+                            start,
+                            end,
+                            limit,
+                        ),
+                        ScanDirection::Reverse => ctx.storage.index_range_limited_reverse(
+                            self.table.as_str(),
+                            self.column.as_str(),
+                            &self.branch,
+                            start,
+                            end,
+                            limit,
+                        ),
+                    }
                 } else {
                     ctx.storage.index_range(
                         self.table.as_str(),
