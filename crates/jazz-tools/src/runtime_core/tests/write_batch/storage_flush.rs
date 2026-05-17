@@ -118,6 +118,29 @@ fn rc_batched_tick_flushes_wal_after_local_write() {
 }
 
 #[test]
+fn rc_flush_storage_records_error_and_clears_after_transient_success() {
+    let flush_error = StorageError::IoError("transient full flush failure".to_string());
+    let app_id = AppId::from_name("row-full-flush-transient-failure");
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), test_schema(), app_id, "dev", "main").unwrap();
+    let storage = MemoryStorage::new().with_transient_flush_failures(flush_error.clone(), 1);
+    let mut core = new_test_core(schema_manager, storage, NoopScheduler);
+
+    core.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    let error = core.flush_storage().expect_err("first flush should fail");
+    assert_eq!(error, flush_error);
+    assert!(core.has_storage_write_pending_flush());
+    assert_eq!(core.take_storage_flush_error(), Some(flush_error));
+
+    core.flush_storage()
+        .expect("second flush should clear transient failure");
+    assert!(!core.has_storage_write_pending_flush());
+    assert_eq!(core.take_storage_flush_error(), None);
+}
+
+#[test]
 fn rc_batched_tick_skips_flush_wal_for_query_settled_only_message() {
     let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
     let mut core = create_runtime_with_boxed_storage(

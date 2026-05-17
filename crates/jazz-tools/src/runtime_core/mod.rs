@@ -565,9 +565,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     /// Flush the storage to persistent medium.
     pub fn flush_storage(&mut self) -> Result<(), StorageError> {
-        self.storage.flush()?;
-        self.clear_storage_write_pending_flush();
-        Ok(())
+        match self.storage.flush() {
+            Ok(()) => {
+                self.clear_storage_write_pending_flush();
+                Ok(())
+            }
+            Err(error) => {
+                self.record_storage_flush_error(error.clone());
+                Err(error)
+            }
+        }
     }
 
     /// Flush only the WAL buffer (not the full snapshot).

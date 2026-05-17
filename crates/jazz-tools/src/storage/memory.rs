@@ -43,6 +43,8 @@ impl TableRowHistories {
 pub struct MemoryStorage {
     cache_namespace: usize,
     #[cfg(test)]
+    flush_failures: std::cell::RefCell<Option<(StorageError, Option<usize>)>>,
+    #[cfg(test)]
     flush_wal_failures: std::cell::RefCell<Option<(StorageError, Option<usize>)>>,
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
@@ -66,6 +68,16 @@ impl MemoryStorage {
     #[cfg(test)]
     pub(crate) fn with_flush_wal_error(mut self, error: StorageError) -> Self {
         self.flush_wal_failures = std::cell::RefCell::new(Some((error, None)));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_transient_flush_failures(
+        mut self,
+        error: StorageError,
+        failures: usize,
+    ) -> Self {
+        self.flush_failures = std::cell::RefCell::new(Some((error, Some(failures))));
         self
     }
 
@@ -110,6 +122,8 @@ impl Default for MemoryStorage {
     fn default() -> Self {
         Self {
             cache_namespace: next_storage_cache_namespace(),
+            #[cfg(test)]
+            flush_failures: std::cell::RefCell::new(None),
             #[cfg(test)]
             flush_wal_failures: std::cell::RefCell::new(None),
             raw_tables: HashMap::new(),
@@ -1147,6 +1161,21 @@ impl Storage for MemoryStorage {
             )
         });
         Ok(rows)
+    }
+
+    #[cfg(test)]
+    fn flush(&self) -> Result<(), StorageError> {
+        if let Some((error, remaining)) = self.flush_failures.borrow_mut().as_mut() {
+            match remaining {
+                Some(0) => {}
+                Some(count) => {
+                    *count -= 1;
+                    return Err(error.clone());
+                }
+                None => return Err(error.clone()),
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
