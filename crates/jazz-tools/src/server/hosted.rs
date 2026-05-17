@@ -15,7 +15,7 @@ use crate::schema_manager::AppId;
 pub struct HostedServer {
     pub state: Arc<ServerState>,
     task: Option<JoinHandle<()>>,
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    shutdown_task: Option<JoinHandle<()>>,
     pub port: u16,
     pub app_id: AppId,
     pub data_dir: PathBuf,
@@ -38,11 +38,17 @@ impl HostedServer {
             .expect("bind server listener");
         let port = listener.local_addr().expect("local addr").port();
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (serve_shutdown_tx, serve_shutdown_rx) = oneshot::channel();
+        let shutdown_state = built.state.clone();
+        let shutdown_task = tokio::spawn(async move {
+            shutdown_state.shutdown.wait_requested().await;
+            shutdown_state.run_shutdown_finalization().await;
+            let _ = serve_shutdown_tx.send(());
+        });
         let task = tokio::spawn(async move {
             axum::serve(listener, built.app)
                 .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
+                    let _ = serve_shutdown_rx.await;
                 })
                 .await
                 .expect("serve jazz server");
@@ -51,7 +57,7 @@ impl HostedServer {
         let server = Self {
             state: built.state,
             task: Some(task),
-            shutdown_tx: Some(shutdown_tx),
+            shutdown_task: Some(shutdown_task),
             port,
             app_id,
             data_dir,
@@ -66,17 +72,17 @@ impl HostedServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    /// Gracefully shut down: flush runtime, send shutdown signal, await task,
-    /// flush+close storage, close external identity store.
+    /// Gracefully shut down: request shutdown, finalize runtime/storage, and await task.
     pub async fn shutdown(&mut self) {
-        self.state
-            .runtime
-            .flush()
-            .await
-            .expect("flush server runtime");
+        self.state.shutdown.request_shutdown();
 
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
+        if let Some(mut shutdown_task) = self.shutdown_task.take()
+            && tokio::time::timeout(Duration::from_secs(5), &mut shutdown_task)
+                .await
+                .is_err()
+        {
+            shutdown_task.abort();
+            let _ = shutdown_task.await;
         }
 
         if let Some(mut task) = self.task.take()
@@ -87,15 +93,6 @@ impl HostedServer {
             task.abort();
             let _ = task.await;
         }
-
-        self.state
-            .runtime
-            .with_storage(|storage| {
-                storage.flush();
-                storage.flush_wal();
-                let _ = storage.close();
-            })
-            .expect("flush and close server storage");
     }
 
     async fn wait_ready(&self) {
@@ -115,8 +112,9 @@ impl HostedServer {
 
 impl Drop for HostedServer {
     fn drop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
+        self.state.shutdown.request_shutdown();
+        if let Some(task) = self.shutdown_task.take() {
+            task.abort();
         }
         if let Some(task) = self.task.take() {
             task.abort();

@@ -193,6 +193,50 @@ pub struct ConnectionState {
 }
 
 impl ServerState {
+    pub async fn run_shutdown_finalization(&self) {
+        self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
+        #[cfg(feature = "transport-websocket")]
+        self.runtime.disconnect();
+
+        let websockets_drained = self.shutdown.wait_for_websocket_drain().await;
+        if !websockets_drained {
+            tracing::warn!(
+                active_websockets = self.shutdown.active_websockets(),
+                "shutdown websocket drain timed out"
+            );
+        }
+
+        self.shutdown.wait_for_app_request_drain().await;
+
+        self.shutdown.set_phase(ShutdownPhase::FlushingRuntime);
+        if let Err(error) = self.runtime.flush().await {
+            tracing::error!(%error, "shutdown runtime flush failed");
+            self.shutdown.set_phase(ShutdownPhase::Failed);
+            return;
+        }
+
+        self.shutdown.set_phase(ShutdownPhase::ClosingStorage);
+        let storage_result = self.runtime.with_storage(|storage| {
+            storage.flush();
+            storage.flush_wal();
+            storage.close()
+        });
+
+        match storage_result {
+            Ok(Ok(())) => {
+                self.shutdown.set_phase(ShutdownPhase::StorageClosed);
+            }
+            Ok(Err(error)) => {
+                tracing::error!(%error, "shutdown storage close failed");
+                self.shutdown.set_phase(ShutdownPhase::Failed);
+            }
+            Err(error) => {
+                tracing::error!(%error, "shutdown storage lock failed");
+                self.shutdown.set_phase(ShutdownPhase::Failed);
+            }
+        }
+    }
+
     /// Record that a connection closed. If this was the last SSE connection
     /// for the given client_id, add it to disconnect_candidates.
     ///

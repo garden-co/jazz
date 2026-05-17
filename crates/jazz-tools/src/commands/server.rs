@@ -60,7 +60,24 @@ pub async fn run(
 
     info!("Listening on http://{}", bound_addr);
     info!("Open the inspector: {}", inspector_link);
-    axum::serve(listener, built.app).await?;
+
+    let state = built.state.clone();
+    let (serve_shutdown_tx, serve_shutdown_rx) = tokio::sync::oneshot::channel();
+    let shutdown_task = tokio::spawn(async move {
+        state.shutdown.wait_requested().await;
+        state.run_shutdown_finalization().await;
+        let _ = serve_shutdown_tx.send(());
+    });
+
+    let serve_result = axum::serve(listener, built.app)
+        .with_graceful_shutdown(async {
+            let _ = serve_shutdown_rx.await;
+        })
+        .await;
+
+    shutdown_task.abort();
+    let _ = shutdown_task.await;
+    serve_result?;
 
     Ok(())
 }
