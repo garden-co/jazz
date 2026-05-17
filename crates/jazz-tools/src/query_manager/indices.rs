@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ops::Bound;
 
+use crate::metadata::RowProvenance;
 use crate::object::ObjectId;
 use crate::row_histories::{RowState, VisibleRowEntry};
 use crate::storage::{IndexMutation, Storage, StorageError, validate_index_value_size};
@@ -9,6 +10,7 @@ use crate::row_format::CompiledRowLayout;
 
 use super::encoding::decode_column;
 use super::index::composite_index_value;
+use super::magic_columns::{CREATED_AT_COLUMN_NAME, UPDATED_AT_COLUMN_NAME};
 use super::manager::{QueryError, QueryManager};
 use super::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, CompositeIndex, RowDescriptor,
@@ -349,11 +351,100 @@ impl QueryManager {
         }
     }
 
+    fn push_insert_system_timestamp_index_values<'a>(
+        mutations: &mut Vec<IndexMutation<'a>>,
+        table: &'a str,
+        branch: &'a str,
+        object_id: ObjectId,
+        provenance: &RowProvenance,
+    ) {
+        mutations.push(IndexMutation::Insert {
+            table,
+            column: CREATED_AT_COLUMN_NAME,
+            branch,
+            value: Value::Timestamp(provenance.created_at),
+            row_id: object_id,
+        });
+        mutations.push(IndexMutation::Insert {
+            table,
+            column: UPDATED_AT_COLUMN_NAME,
+            branch,
+            value: Value::Timestamp(provenance.updated_at),
+            row_id: object_id,
+        });
+    }
+
+    fn push_remove_system_timestamp_index_values<'a>(
+        mutations: &mut Vec<IndexMutation<'a>>,
+        table: &'a str,
+        branch: &'a str,
+        object_id: ObjectId,
+        provenance: &RowProvenance,
+    ) {
+        mutations.push(IndexMutation::Remove {
+            table,
+            column: CREATED_AT_COLUMN_NAME,
+            branch,
+            value: Value::Timestamp(provenance.created_at),
+            row_id: object_id,
+        });
+        mutations.push(IndexMutation::Remove {
+            table,
+            column: UPDATED_AT_COLUMN_NAME,
+            branch,
+            value: Value::Timestamp(provenance.updated_at),
+            row_id: object_id,
+        });
+    }
+
+    fn push_update_system_timestamp_index_values<'a>(
+        mutations: &mut Vec<IndexMutation<'a>>,
+        table: &'a str,
+        branch: &'a str,
+        object_id: ObjectId,
+        old_provenance: &RowProvenance,
+        new_provenance: &RowProvenance,
+    ) {
+        if old_provenance.created_at != new_provenance.created_at {
+            mutations.push(IndexMutation::Remove {
+                table,
+                column: CREATED_AT_COLUMN_NAME,
+                branch,
+                value: Value::Timestamp(old_provenance.created_at),
+                row_id: object_id,
+            });
+            mutations.push(IndexMutation::Insert {
+                table,
+                column: CREATED_AT_COLUMN_NAME,
+                branch,
+                value: Value::Timestamp(new_provenance.created_at),
+                row_id: object_id,
+            });
+        }
+        if old_provenance.updated_at != new_provenance.updated_at {
+            mutations.push(IndexMutation::Remove {
+                table,
+                column: UPDATED_AT_COLUMN_NAME,
+                branch,
+                value: Value::Timestamp(old_provenance.updated_at),
+                row_id: object_id,
+            });
+            mutations.push(IndexMutation::Insert {
+                table,
+                column: UPDATED_AT_COLUMN_NAME,
+                branch,
+                value: Value::Timestamp(new_provenance.updated_at),
+                row_id: object_id,
+            });
+        }
+    }
+
     pub(super) fn index_mutations_for_insert_on_branch<'a>(
         table: &'a str,
         branch: &'a str,
         object_id: ObjectId,
         data: &[u8],
+        provenance: &RowProvenance,
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
         composite_indexes: &'a [CompositeIndex],
@@ -364,6 +455,7 @@ impl QueryManager {
             branch,
             object_id,
             data,
+            provenance,
             descriptor,
             indexed_columns,
             composite_indexes,
@@ -376,6 +468,7 @@ impl QueryManager {
         branch: &'a str,
         object_id: ObjectId,
         data: &[u8],
+        provenance: &RowProvenance,
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
         composite_indexes: &'a [CompositeIndex],
@@ -387,6 +480,7 @@ impl QueryManager {
             branch,
             object_id,
             data,
+            provenance,
             descriptor,
             indexed_columns,
             composite_indexes,
@@ -400,6 +494,7 @@ impl QueryManager {
         branch: &'a str,
         object_id: ObjectId,
         data: &[u8],
+        provenance: &RowProvenance,
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
         composite_indexes: &'a [CompositeIndex],
@@ -413,6 +508,13 @@ impl QueryManager {
             value: Value::Uuid(object_id),
             row_id: object_id,
         }];
+        Self::push_insert_system_timestamp_index_values(
+            &mut mutations,
+            table,
+            branch,
+            object_id,
+            provenance,
+        );
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if !Self::should_index_column(indexed_columns, col) {
@@ -459,6 +561,8 @@ impl QueryManager {
         object_id: ObjectId,
         old_data: &[u8],
         new_data: &[u8],
+        old_provenance: &RowProvenance,
+        new_provenance: &RowProvenance,
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
         composite_indexes: &'a [CompositeIndex],
@@ -471,6 +575,8 @@ impl QueryManager {
             object_id,
             old_data,
             new_data,
+            old_provenance,
+            new_provenance,
             descriptor,
             indexed_columns,
             composite_indexes,
@@ -485,6 +591,8 @@ impl QueryManager {
         object_id: ObjectId,
         old_data: &[u8],
         new_data: &[u8],
+        old_provenance: &RowProvenance,
+        new_provenance: &RowProvenance,
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
         composite_indexes: &'a [CompositeIndex],
@@ -492,6 +600,14 @@ impl QueryManager {
         composite_index_projection: &[(ColumnName, usize)],
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = Vec::new();
+        Self::push_update_system_timestamp_index_values(
+            &mut mutations,
+            table,
+            branch,
+            object_id,
+            old_provenance,
+            new_provenance,
+        );
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if !Self::should_index_column(indexed_columns, col) {
@@ -578,6 +694,7 @@ impl QueryManager {
         branch: &'a str,
         object_id: ObjectId,
         old_data: &[u8],
+        old_provenance: &RowProvenance,
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
         composite_indexes: &'a [CompositeIndex],
@@ -589,6 +706,13 @@ impl QueryManager {
             value: Value::Uuid(object_id),
             row_id: object_id,
         }];
+        Self::push_remove_system_timestamp_index_values(
+            &mut mutations,
+            table,
+            branch,
+            object_id,
+            old_provenance,
+        );
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if !Self::should_index_column(indexed_columns, col) {
@@ -643,6 +767,7 @@ impl QueryManager {
         branch: &'a str,
         object_id: ObjectId,
         old_data: Option<&[u8]>,
+        old_provenance: Option<&RowProvenance>,
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
         composite_indexes: &'a [CompositeIndex],
@@ -654,6 +779,16 @@ impl QueryManager {
             value: Value::Uuid(object_id),
             row_id: object_id,
         }];
+
+        if let Some(old_provenance) = old_provenance {
+            Self::push_remove_system_timestamp_index_values(
+                &mut mutations,
+                table,
+                branch,
+                object_id,
+                old_provenance,
+            );
+        }
 
         if let Some(data) = old_data {
             for (col_idx, col) in descriptor.columns.iter().enumerate() {
@@ -710,6 +845,7 @@ impl QueryManager {
         branch: &'a str,
         object_id: ObjectId,
         new_data: &[u8],
+        new_provenance: &RowProvenance,
         descriptor: &'a RowDescriptor,
         indexed_columns: Option<&'a [ColumnName]>,
         composite_indexes: &'a [CompositeIndex],
@@ -730,6 +866,13 @@ impl QueryManager {
                 row_id: object_id,
             },
         ];
+        Self::push_insert_system_timestamp_index_values(
+            &mut mutations,
+            table,
+            branch,
+            object_id,
+            new_provenance,
+        );
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if !Self::should_index_column(indexed_columns, col) {
@@ -778,6 +921,7 @@ impl QueryManager {
         branch: &str,
         object_id: ObjectId,
         data: &[u8],
+        provenance: &RowProvenance,
         descriptor: &RowDescriptor,
         indexed_columns: Option<&[ColumnName]>,
         composite_indexes: &[CompositeIndex],
@@ -787,6 +931,7 @@ impl QueryManager {
             branch,
             object_id,
             data,
+            provenance,
             descriptor,
             indexed_columns,
             composite_indexes,
@@ -814,6 +959,8 @@ impl QueryManager {
         object_id: ObjectId,
         old_data: &[u8],
         new_data: &[u8],
+        old_provenance: &RowProvenance,
+        new_provenance: &RowProvenance,
     ) -> Result<(), QueryError> {
         let mutations = Self::index_mutations_for_update_on_branch(
             target.table,
@@ -821,6 +968,8 @@ impl QueryManager {
             object_id,
             old_data,
             new_data,
+            old_provenance,
+            new_provenance,
             target.descriptor,
             target.indexed_columns,
             target.composite_indexes,
@@ -837,6 +986,7 @@ impl QueryManager {
         branch: &str,
         object_id: ObjectId,
         old_data: &[u8],
+        old_provenance: &RowProvenance,
         descriptor: &RowDescriptor,
         indexed_columns: Option<&[ColumnName]>,
         composite_indexes: &[CompositeIndex],
@@ -846,6 +996,7 @@ impl QueryManager {
             branch,
             object_id,
             old_data,
+            old_provenance,
             descriptor,
             indexed_columns,
             composite_indexes,
@@ -862,6 +1013,7 @@ impl QueryManager {
         branch: &str,
         object_id: ObjectId,
         old_data: Option<&[u8]>,
+        old_provenance: Option<&RowProvenance>,
         descriptor: &RowDescriptor,
         indexed_columns: Option<&[ColumnName]>,
         composite_indexes: &[CompositeIndex],
@@ -871,6 +1023,7 @@ impl QueryManager {
             branch,
             object_id,
             old_data,
+            old_provenance,
             descriptor,
             indexed_columns,
             composite_indexes,
@@ -887,6 +1040,7 @@ impl QueryManager {
         branch: &str,
         object_id: ObjectId,
         new_data: &[u8],
+        new_provenance: &RowProvenance,
         descriptor: &RowDescriptor,
         indexed_columns: Option<&[ColumnName]>,
         composite_indexes: &[CompositeIndex],
@@ -896,6 +1050,7 @@ impl QueryManager {
             branch,
             object_id,
             new_data,
+            new_provenance,
             descriptor,
             indexed_columns,
             composite_indexes,
@@ -932,6 +1087,7 @@ impl QueryManager {
             branch,
             row_id,
             Some(row_data),
+            None,
             &table_schema.columns,
             table_schema.indexed_columns.as_deref(),
             &table_schema.composite_indexes,
@@ -988,13 +1144,20 @@ impl QueryManager {
         }
 
         let table_name = TableName::new(table);
-        if let Some(table_schema) = self.schema.get(&table_name)
+        let restored_provenance = storage
+            .load_visible_region_row(table, branch, row_id)
+            .ok()
+            .flatten()
+            .map(|row| row.row_provenance());
+        if let (Some(table_schema), Some(restored_provenance)) =
+            (self.schema.get(&table_name), restored_provenance.as_ref())
             && let Err(error) = Self::update_indices_for_undelete_on_branch(
                 storage,
                 table,
                 branch,
                 row_id,
                 restored_data,
+                restored_provenance,
                 &table_schema.columns,
                 table_schema.indexed_columns.as_deref(),
                 &table_schema.composite_indexes,

@@ -32,7 +32,10 @@ use super::super::graph_nodes::{NodeId, RowNode};
 use super::super::index::{
     ScanCondition, composite_index_column_name, composite_index_prefix_range,
 };
-use super::super::magic_columns::{MagicColumnKind, magic_column_descriptor, magic_column_kind};
+use super::super::magic_columns::{
+    CREATED_AT_COLUMN_NAME, MagicColumnKind, UPDATED_AT_COLUMN_NAME, magic_column_descriptor,
+    magic_column_kind,
+};
 use super::super::policy::PolicyExpr;
 use super::super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
@@ -2216,6 +2219,22 @@ fn composite_ordered_index_scan_plan(
     }
     let (order_column, order_direction) = &order_by[0];
     if disjunct.conditions.is_empty() {
+        if let Some(system_timestamp_column) = system_timestamp_order_column(order_column) {
+            return Some(IndexScanPlan {
+                column: system_timestamp_column.to_string(),
+                condition: ScanCondition::Range {
+                    min: Bound::Unbounded,
+                    max: Bound::Unbounded,
+                },
+                fully_covers: true,
+                scan_limit: allow_limit_pushdown.then_some(limit),
+                scan_direction: match order_direction {
+                    SortDirection::Ascending => ScanDirection::Forward,
+                    SortDirection::Descending => ScanDirection::Reverse,
+                },
+            });
+        }
+
         let (index, scan_direction) =
             ordered_limit_composite_index(table_schema, order_column, *order_direction)?;
         return Some(IndexScanPlan {
@@ -2267,6 +2286,14 @@ fn composite_ordered_index_scan_plan(
         scan_limit: (allow_limit_pushdown && fully_covers).then_some(limit),
         scan_direction,
     })
+}
+
+fn system_timestamp_order_column(column: &str) -> Option<&str> {
+    let name = column
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(column);
+    matches!(name, CREATED_AT_COLUMN_NAME | UPDATED_AT_COLUMN_NAME).then_some(name)
 }
 
 fn ordered_limit_composite_index<'a>(

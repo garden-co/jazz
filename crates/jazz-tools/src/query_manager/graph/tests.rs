@@ -114,6 +114,44 @@ fn global_ordered_limit_query_can_reverse_scan_matching_composite_index() {
     assert_eq!(scan.scan_direction, ScanDirection::Reverse);
 }
 
+#[test]
+fn global_updated_at_magic_ordered_limit_uses_system_index() {
+    let schema = document_schema_with_updated_desc_index();
+    let query = QueryBuilder::new("documents")
+        .order_by_desc("$updatedAt")
+        .limit(50)
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+    let scan_id = graph.index_scan_nodes[0].0;
+    let GraphNode::IndexScan(scan) = &graph.nodes[scan_id.0 as usize].node else {
+        panic!("expected index scan");
+    };
+
+    assert_eq!(scan.column.as_str(), "$updatedAt");
+    assert_eq!(scan.scan_limit, Some(50));
+    assert_eq!(scan.scan_direction, ScanDirection::Reverse);
+}
+
+#[test]
+fn global_created_at_magic_ordered_limit_uses_system_index() {
+    let schema = document_schema_with_updated_desc_index();
+    let query = QueryBuilder::new("documents")
+        .order_by("$createdAt")
+        .limit(50)
+        .build();
+
+    let graph = QueryGraph::compile(&query, &schema).unwrap();
+    let scan_id = graph.index_scan_nodes[0].0;
+    let GraphNode::IndexScan(scan) = &graph.nodes[scan_id.0 as usize].node else {
+        panic!("expected index scan");
+    };
+
+    assert_eq!(scan.column.as_str(), "$createdAt");
+    assert_eq!(scan.scan_limit, Some(50));
+    assert_eq!(scan.scan_direction, ScanDirection::Forward);
+}
+
 fn bytea_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(

@@ -3,10 +3,12 @@ use std::ops::Bound;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::index::ScanCondition;
+use crate::query_manager::magic_columns::{MagicColumnKind, magic_column_kind};
 use crate::query_manager::types::{
     ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor, Value,
 };
 use crate::row_format::decode_row;
+use crate::row_histories::QueryRowBatch;
 
 use super::{SourceContext, SourceNode};
 
@@ -90,8 +92,8 @@ impl IndexScanNode {
         &self.output_descriptor
     }
 
-    fn overlay_value_matches_condition(&self, row_id: ObjectId, data: &[u8]) -> bool {
-        let Some(value) = self.overlay_index_value(row_id, data) else {
+    fn overlay_value_matches_condition(&self, row_id: ObjectId, row: &QueryRowBatch) -> bool {
+        let Some(value) = self.overlay_index_value(row_id, row) else {
             return false;
         };
         match &self.condition {
@@ -104,16 +106,21 @@ impl IndexScanNode {
         }
     }
 
-    fn overlay_index_value(&self, row_id: ObjectId, data: &[u8]) -> Option<Value> {
+    fn overlay_index_value(&self, row_id: ObjectId, row: &QueryRowBatch) -> Option<Value> {
         if self.column.as_str() == "_id" {
             return Some(Value::Uuid(row_id));
         }
         if self.column.as_str() == "_id_deleted" {
             return None;
         }
+        match magic_column_kind(self.column.as_str()) {
+            Some(MagicColumnKind::CreatedAt) => return Some(Value::Timestamp(row.created_at)),
+            Some(MagicColumnKind::UpdatedAt) => return Some(Value::Timestamp(row.updated_at)),
+            _ => {}
+        }
 
         let column_index = self.row_descriptor.column_index(self.column.as_str())?;
-        let values = decode_row(&self.row_descriptor, data).ok()?;
+        let values = decode_row(&self.row_descriptor, &row.data).ok()?;
         values.get(column_index).cloned()
     }
 
@@ -138,7 +145,7 @@ impl IndexScanNode {
                 new_ids.insert(row_id);
             } else if row.is_soft_deleted() || row.is_hard_deleted() {
                 new_ids.remove(&row_id);
-            } else if self.overlay_value_matches_condition(row_id, &row.data) {
+            } else if self.overlay_value_matches_condition(row_id, &row) {
                 new_ids.insert(row_id);
             } else {
                 new_ids.remove(&row_id);

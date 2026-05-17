@@ -1911,12 +1911,14 @@ impl QueryManager {
         if update.row.is_hard_deleted() {
             if apply_index_mutations {
                 let old_data = old_row.map(|row| row.data.as_ref());
+                let old_provenance = old_row.map(StoredRowBatch::row_provenance);
                 let _ = Self::update_indices_for_hard_delete_on_branch(
                     storage,
                     &branch_table,
                     branch,
                     update.object_id,
                     old_data,
+                    old_provenance.as_ref(),
                     &descriptor,
                     table_schema.indexed_columns.as_deref(),
                     &table_schema.composite_indexes,
@@ -1940,6 +1942,7 @@ impl QueryManager {
                         branch,
                         update.object_id,
                         &old_row.data,
+                        &old_row.row_provenance(),
                         &descriptor,
                         table_schema.indexed_columns.as_deref(),
                         &table_schema.composite_indexes,
@@ -1989,6 +1992,7 @@ impl QueryManager {
                     branch,
                     update.object_id,
                     new_data,
+                    &update.row.row_provenance(),
                     &descriptor,
                     table_schema.indexed_columns.as_deref(),
                     &table_schema.composite_indexes,
@@ -2019,6 +2023,7 @@ impl QueryManager {
                     branch,
                     update.object_id,
                     new_data,
+                    &update.row.row_provenance(),
                     &descriptor,
                     table_schema.indexed_columns.as_deref(),
                     &table_schema.composite_indexes,
@@ -2047,6 +2052,8 @@ impl QueryManager {
                 update.object_id,
                 &old_row.data,
                 new_data,
+                &old_row.row_provenance(),
+                &update.row.row_provenance(),
             )
         {
             tracing::error!(

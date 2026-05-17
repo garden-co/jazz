@@ -542,6 +542,7 @@ fn seed_folder_on_branch(
         branch,
         folder_id,
         &folder_content,
+        &RowProvenance::for_insert(ObjectId::new().to_string(), 1000),
         folders_descriptor,
         None,
         &[],

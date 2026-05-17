@@ -103,11 +103,13 @@ fn composite_index_is_planned_only_after_local_backfill_is_ready() {
             ],
         )
         .unwrap();
+        let provenance = RowProvenance::for_insert("test", updated_at);
         let index_mutations = QueryManager::index_mutations_for_insert_on_branch(
             "documents",
             &branch,
             row_id,
             &data,
+            &provenance,
             &descriptor,
             None,
             &[],
@@ -117,7 +119,7 @@ fn composite_index_is_planned_only_after_local_backfill_is_ready() {
             branch.clone(),
             [],
             data,
-            RowProvenance::for_insert("test", updated_at),
+            provenance,
             HashMap::new(),
             RowState::VisibleDirect,
             None,

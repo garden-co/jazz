@@ -1,6 +1,8 @@
 use crate::query_manager::types::{ColumnDescriptor, ColumnType};
 
 pub const RESERVED_MAGIC_COLUMN_PREFIX: char = '$';
+pub const CREATED_AT_COLUMN_NAME: &str = "$createdAt";
+pub const UPDATED_AT_COLUMN_NAME: &str = "$updatedAt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MagicColumnKind {
@@ -20,9 +22,9 @@ impl MagicColumnKind {
             MagicColumnKind::CanEdit => "$canEdit",
             MagicColumnKind::CanDelete => "$canDelete",
             MagicColumnKind::CreatedBy => "$createdBy",
-            MagicColumnKind::CreatedAt => "$createdAt",
+            MagicColumnKind::CreatedAt => CREATED_AT_COLUMN_NAME,
             MagicColumnKind::UpdatedBy => "$updatedBy",
-            MagicColumnKind::UpdatedAt => "$updatedAt",
+            MagicColumnKind::UpdatedAt => UPDATED_AT_COLUMN_NAME,
         }
     }
 }
@@ -33,9 +35,9 @@ pub fn magic_column_kind(name: &str) -> Option<MagicColumnKind> {
         "$canEdit" => Some(MagicColumnKind::CanEdit),
         "$canDelete" => Some(MagicColumnKind::CanDelete),
         "$createdBy" => Some(MagicColumnKind::CreatedBy),
-        "$createdAt" => Some(MagicColumnKind::CreatedAt),
+        CREATED_AT_COLUMN_NAME => Some(MagicColumnKind::CreatedAt),
         "$updatedBy" => Some(MagicColumnKind::UpdatedBy),
-        "$updatedAt" => Some(MagicColumnKind::UpdatedAt),
+        UPDATED_AT_COLUMN_NAME => Some(MagicColumnKind::UpdatedAt),
         _ => None,
     }
 }
