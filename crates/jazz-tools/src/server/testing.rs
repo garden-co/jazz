@@ -523,6 +523,8 @@ mod tests {
 
     use reqwest::StatusCode;
 
+    use crate::server::ShutdownPhase;
+
     use super::*;
 
     #[tokio::test]
@@ -546,7 +548,13 @@ mod tests {
                 Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {
                     saw_unavailable = true;
                 }
-                Err(_) if saw_unavailable => return,
+                Err(_) if saw_unavailable => {
+                    assert_eq!(
+                        server.server_state().shutdown.phase(),
+                        ShutdownPhase::StorageClosed
+                    );
+                    return;
+                }
                 _ => {}
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

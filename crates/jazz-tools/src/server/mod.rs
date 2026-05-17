@@ -206,13 +206,19 @@ impl ServerState {
             );
         }
 
-        self.shutdown.wait_for_app_request_drain().await;
+        let app_requests_drained = self.shutdown.wait_for_app_request_drain().await;
+        if !app_requests_drained {
+            tracing::warn!(
+                active_app_requests = self.shutdown.active_app_requests(),
+                "shutdown app request drain timed out"
+            );
+        }
 
         self.shutdown.set_phase(ShutdownPhase::FlushingRuntime);
+        let mut failed = false;
         if let Err(error) = self.runtime.flush().await {
             tracing::error!(%error, "shutdown runtime flush failed");
-            self.shutdown.set_phase(ShutdownPhase::Failed);
-            return;
+            failed = true;
         }
 
         self.shutdown.set_phase(ShutdownPhase::ClosingStorage);
@@ -224,16 +230,24 @@ impl ServerState {
 
         match storage_result {
             Ok(Ok(())) => {
-                self.shutdown.set_phase(ShutdownPhase::StorageClosed);
+                if failed {
+                    self.shutdown.set_phase(ShutdownPhase::Failed);
+                } else {
+                    self.shutdown.set_phase(ShutdownPhase::StorageClosed);
+                }
             }
             Ok(Err(error)) => {
                 tracing::error!(%error, "shutdown storage close failed");
-                self.shutdown.set_phase(ShutdownPhase::Failed);
+                failed = true;
             }
             Err(error) => {
                 tracing::error!(%error, "shutdown storage lock failed");
-                self.shutdown.set_phase(ShutdownPhase::Failed);
+                failed = true;
             }
+        }
+
+        if failed {
+            self.shutdown.set_phase(ShutdownPhase::Failed);
         }
     }
 

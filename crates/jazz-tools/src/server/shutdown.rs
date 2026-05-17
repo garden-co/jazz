@@ -173,18 +173,29 @@ impl ShutdownController {
         }
     }
 
-    pub async fn wait_for_app_request_drain(&self) {
+    pub async fn wait_for_app_request_drain(&self) -> bool {
+        let deadline = tokio::time::Instant::now() + self.timeout();
         let notified = self.inner.drain_notify.notified();
         tokio::pin!(notified);
 
         loop {
             notified.as_mut().enable();
             if self.active_app_requests() == 0 {
-                return;
+                return true;
             }
 
-            notified.as_mut().await;
-            notified.set(self.inner.drain_notify.notified());
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+
+            let sleep = tokio::time::sleep_until(deadline);
+            tokio::select! {
+                _ = notified.as_mut() => {
+                    notified.set(self.inner.drain_notify.notified());
+                }
+                _ = sleep => return self.active_app_requests() == 0,
+            }
         }
     }
 }
@@ -290,6 +301,16 @@ mod tests {
             .expect("drain wait should complete after guard drop")
             .expect("wait task");
         assert_eq!(active, 0);
+    }
+
+    #[tokio::test]
+    async fn wait_for_app_request_drain_returns_false_after_timeout() {
+        let controller = ShutdownController::new(std::time::Duration::from_millis(10));
+        let _guard = controller
+            .try_enter_app_request()
+            .expect("running server accepts request");
+
+        assert!(!controller.wait_for_app_request_drain().await);
     }
 
     #[tokio::test]
