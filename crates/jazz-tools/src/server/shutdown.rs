@@ -68,14 +68,14 @@ impl ShutdownController {
     }
 
     pub fn is_shutting_down(&self) -> bool {
-        !self.phase().is_running()
+        self.inner.requested.load(Ordering::SeqCst) || !self.phase().is_running()
     }
 
     pub fn subscribe(&self) -> watch::Receiver<ShutdownPhase> {
         self.inner.phase_tx.subscribe()
     }
 
-    pub fn set_phase(&self, phase: ShutdownPhase) {
+    pub(crate) fn set_phase(&self, phase: ShutdownPhase) {
         self.inner.phase_tx.send_replace(phase);
     }
 
@@ -240,6 +240,19 @@ mod tests {
         assert!(controller.try_enter_app_request().is_none());
     }
 
+    #[test]
+    fn guards_reject_after_shutdown_is_requested_before_phase_updates() {
+        let controller = ShutdownController::new(std::time::Duration::from_secs(30));
+        controller.inner.requested.store(true, Ordering::SeqCst);
+
+        assert_eq!(controller.phase(), ShutdownPhase::Running);
+        assert!(controller.is_shutting_down());
+        assert!(controller.try_enter_app_request().is_none());
+        assert!(controller.try_enter_websocket().is_none());
+        assert_eq!(controller.active_app_requests(), 0);
+        assert_eq!(controller.active_websockets(), 0);
+    }
+
     #[tokio::test]
     async fn wait_for_shutdown_request_observes_request() {
         let controller = ShutdownController::new(std::time::Duration::from_secs(30));
@@ -297,5 +310,15 @@ mod tests {
             .expect("websocket drain should complete after guard drop")
             .expect("wait task");
         assert!(drained);
+    }
+
+    #[tokio::test]
+    async fn wait_for_websocket_drain_returns_false_after_timeout() {
+        let controller = ShutdownController::new(std::time::Duration::from_millis(10));
+        let _guard = controller
+            .try_enter_websocket()
+            .expect("running server accepts websocket");
+
+        assert!(!controller.wait_for_websocket_drain().await);
     }
 }
