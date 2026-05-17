@@ -2431,7 +2431,9 @@ mod tests {
         // upgrade, handshake, and ConnectedResponse path the server uses.
         let collector = EventCollector::default();
         let subscriber = Registry::default().with(collector.clone());
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _ = tracing::dispatcher::set_global_default(dispatch.clone());
+        let _guard = tracing::dispatcher::set_default(&dispatch);
 
         let state = make_sync_test_state("test-backend-secret").await;
         let app = create_router(state);
@@ -2440,7 +2442,9 @@ mod tests {
             .await
             .expect("bind ws listener");
         let addr = listener.local_addr().expect("ws local addr");
+        let server_dispatch = dispatch.clone();
         let server_task = tokio::spawn(async move {
+            let _guard = tracing::dispatcher::set_default(&server_dispatch);
             axum::serve(listener, app).await.expect("serve ws app");
         });
 
@@ -2482,19 +2486,27 @@ mod tests {
             crate::transport_manager::SYNC_PROTOCOL_VERSION
         );
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let events = collector.snapshot();
-        assert!(
-            events.iter().any(|event| {
-                event.level == tracing::Level::INFO
-                    && event.message.as_deref() == Some("ws client connected")
-                    && event.fields.get("client_id").map(String::as_str) == Some(client_id.as_str())
-                    && event.fields.get("connection_id").map(String::as_str) == Some("1")
-                    && event.fields.get("role").map(String::as_str) == Some("backend")
-            }),
-            "expected ws client connected log, captured events: {events:#?}"
-        );
+        let mut events = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                events = collector.snapshot();
+                if events.iter().any(|event| {
+                    event.level == tracing::Level::INFO
+                        && event.message.as_deref() == Some("ws client connected")
+                        && event.fields.get("client_id").map(String::as_str)
+                            == Some(client_id.as_str())
+                        && event.fields.get("connection_id").map(String::as_str) == Some("1")
+                        && event.fields.get("role").map(String::as_str) == Some("backend")
+                }) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("expected ws client connected log, captured events: {events:#?}")
+        });
 
         let _ = ws.close(None).await;
         server_task.abort();
@@ -2541,6 +2553,57 @@ mod tests {
         assert!(matches!(connected, WsMessage::Binary(_)));
 
         assert_eq!(state.shutdown.active_websockets(), 1);
+        assert!(state.shutdown.request_shutdown());
+
+        let close_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for close")
+            .expect("ws frame")
+            .expect("ws result");
+        let WsMessage::Close(Some(close)) = close_frame else {
+            panic!("expected close frame, got {close_frame:?}");
+        };
+        assert_eq!(
+            close.code,
+            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart
+        );
+        assert_eq!(close.reason.as_ref(), "server shutting down");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.shutdown.active_websockets() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("websocket cleanup");
+
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_closes_upgraded_websocket_before_handshake() {
+        let state = make_sync_test_state("test-backend-secret").await;
+        let app = create_router(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws listener");
+        let addr = listener.local_addr().expect("ws local addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve ws app");
+        });
+
+        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
+        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.shutdown.active_websockets() != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("upgraded websocket should be tracked before handshake");
+
         assert!(state.shutdown.request_shutdown());
 
         let close_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())

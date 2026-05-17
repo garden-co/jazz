@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use jazz_tools::middleware::AuthConfig;
 use jazz_tools::schema_manager::AppId;
-use jazz_tools::server::{ServerBuilder, StorageBackend};
+use jazz_tools::server::{ServerBuilder, ShutdownPhase, StorageBackend};
 use tracing::info;
 
 const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
@@ -66,23 +66,80 @@ pub async fn run(
     info!("Open the inspector: {}", inspector_link);
 
     let state = built.state.clone();
+    let shutdown = state.shutdown.clone();
+    let shutdown_budget = shutdown_timeout
+        .saturating_mul(2)
+        .saturating_add(Duration::from_secs(5));
     let (serve_shutdown_tx, serve_shutdown_rx) = tokio::sync::oneshot::channel();
-    let shutdown_task = tokio::spawn(async move {
+    let mut shutdown_task = tokio::spawn(async move {
         state.shutdown.wait_requested().await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        state.run_shutdown_finalization().await;
+        let phase = state.run_shutdown_finalization().await;
         let _ = serve_shutdown_tx.send(());
+        phase
     });
 
-    let serve_result = axum::serve(listener, built.app)
-        .with_graceful_shutdown(async {
-            let _ = serve_shutdown_rx.await;
-        })
-        .await;
+    let mut serve_task = tokio::spawn(async move {
+        axum::serve(listener, built.app)
+            .with_graceful_shutdown(async {
+                let _ = serve_shutdown_rx.await;
+            })
+            .await
+    });
 
-    shutdown_task.abort();
-    let _ = shutdown_task.await;
-    serve_result?;
+    let mut forced_shutdown = false;
+    let serve_join_result = tokio::select! {
+        result = &mut serve_task => result,
+        _ = async {
+            shutdown.wait_requested().await;
+            tokio::time::sleep(shutdown_budget).await;
+        } => {
+            forced_shutdown = true;
+            serve_task.abort();
+            match tokio::time::timeout(Duration::from_millis(50), &mut serve_task).await {
+                Ok(result) => result,
+                Err(_) => Ok(Ok(())),
+            }
+        }
+    };
+
+    let serve_result = match serve_join_result {
+        Ok(result) => result,
+        Err(error) if forced_shutdown && error.is_cancelled() => Ok(()),
+        Err(error) => {
+            shutdown_task.abort();
+            let _ = tokio::time::timeout(Duration::from_millis(50), shutdown_task).await;
+            return Err(Box::new(error));
+        }
+    };
+
+    if let Err(error) = serve_result {
+        shutdown_task.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(50), shutdown_task).await;
+        return Err(Box::new(error));
+    }
+
+    if forced_shutdown {
+        return Err("server shutdown timed out while waiting for active requests to finish".into());
+    }
+
+    if shutdown.is_shutting_down() {
+        let final_phase =
+            match tokio::time::timeout(Duration::from_secs(5), &mut shutdown_task).await {
+                Ok(Ok(phase)) => phase,
+                Ok(Err(error)) => return Err(Box::new(error)),
+                Err(_) => {
+                    shutdown_task.abort();
+                    return Err("server shutdown finalization did not finish".into());
+                }
+            };
+        if final_phase == ShutdownPhase::Failed {
+            return Err("server shutdown finalization failed".into());
+        }
+    } else {
+        shutdown_task.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(50), shutdown_task).await;
+    }
 
     Ok(())
 }

@@ -17,7 +17,7 @@ use crate::query_manager::types::{
     ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::schema_manager::{Lens, LensOp, LensTransform};
-use crate::server::ServerState;
+use crate::server::{ServerState, ShutdownPhase};
 
 use super::utils::{
     parse_app_id_param, parse_object_id_param, parse_schema_hash_param, permissions_head_view,
@@ -1161,12 +1161,15 @@ pub(super) async fn internal_shutdown_handler(
 }
 
 pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    let phase = state.shutdown.phase();
-    if phase.is_running() {
+    let mut phase = state.shutdown.phase();
+    if !state.shutdown.is_shutting_down() && phase.is_running() {
         return Json(serde_json::json!({
             "status": "healthy"
         }))
         .into_response();
+    }
+    if phase.is_running() {
+        phase = ShutdownPhase::ShuttingDown;
     }
 
     (

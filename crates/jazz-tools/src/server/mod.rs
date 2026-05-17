@@ -193,9 +193,9 @@ pub struct ConnectionState {
 }
 
 impl ServerState {
-    pub async fn run_shutdown_finalization(&self) {
+    pub async fn run_shutdown_finalization(&self) -> ShutdownPhase {
         if !self.shutdown.try_begin_finalization() {
-            return;
+            return self.shutdown.phase();
         }
 
         self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
@@ -258,8 +258,10 @@ impl ServerState {
 
         if failed {
             self.shutdown.set_phase(ShutdownPhase::Failed);
+            ShutdownPhase::Failed
         } else {
             self.shutdown.set_phase(ShutdownPhase::StorageClosed);
+            ShutdownPhase::StorageClosed
         }
     }
 
@@ -488,8 +490,9 @@ mod tests {
             .expect("running server accepts request");
 
         state.shutdown.request_shutdown();
-        state.run_shutdown_finalization().await;
+        let phase = state.run_shutdown_finalization().await;
 
+        assert_eq!(phase, ShutdownPhase::Failed);
         assert_eq!(state.shutdown.phase(), ShutdownPhase::Failed);
     }
 
