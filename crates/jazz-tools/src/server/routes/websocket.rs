@@ -368,10 +368,15 @@ async fn handle_ws_connection(
         WsClientSetup::Session(_) => "session",
     };
 
+    let mut shutdown_rx = state.shutdown.subscribe();
     let Some(_websocket_guard) = state.shutdown.try_enter_websocket() else {
         close_ws_for_shutdown(&mut socket).await;
         return;
     };
+    if state.shutdown.is_shutting_down() {
+        close_ws_for_shutdown(&mut socket).await;
+        return;
+    }
 
     // 4. Register with ConnectionEventHub (mirrors events_handler).
     let connection_id = state
@@ -442,7 +447,6 @@ async fn handle_ws_connection(
 
     // 7. Bidirectional loop: inbound frames from client + outbound updates from hub.
     //    Also fires a periodic heartbeat so idle connections don't look half-open.
-    let mut shutdown_rx = state.shutdown.subscribe();
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     // Don't emit a heartbeat immediately after Connected — wait a full tick.
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
