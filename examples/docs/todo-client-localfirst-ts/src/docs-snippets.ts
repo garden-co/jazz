@@ -43,6 +43,10 @@ const urgent = openTodos.where({ title: { contains: "urgent" } });
 const incompleteTodos = app.todos.where({ done: false }).orderBy("title", "asc").limit(50);
 // #endregion reading-chained-query-ts
 
+// The query objects above are illustrative snippet fragments not referenced
+// elsewhere; re-export them so they count as used.
+export { byNewest, byTitle, urgent, incompleteTodos };
+
 // #region reading-filters-ts
 export async function readTodosWithFilters(db: Db) {
   return db.all(app.todos.where({ done: false, title: { contains: "docs" } }));
