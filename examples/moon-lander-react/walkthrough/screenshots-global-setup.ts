@@ -24,7 +24,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     serverUrl: server.url,
     appId: SCREENSHOT_APP_ID,
     adminSecret: ADMIN_SECRET,
-    schemaDir: join(import.meta.dirname ?? __dirname, ".."),
+    schemaDir: join(import.meta.dirname, ".."),
   });
 
   return () => server.stop();
