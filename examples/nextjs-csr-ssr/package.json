@@ -20,7 +20,7 @@
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^22.0.0",
+    "@types/node": "catalog:default",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "dotenv": "^17.3.1",
