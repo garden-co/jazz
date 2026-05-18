@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { BrowserAuthSecretStore } from "jazz-tools/svelte";
+  import { LocalFirstAuth } from "jazz-tools/svelte";
   import { goto } from "$app/navigation";
 
   // In production, pin this to your deployed hostname so passkeys remain
@@ -21,18 +21,15 @@
     mode?: "full" | "restore-only";
   } = $props();
 
+  const auth = new LocalFirstAuth();
+
   let phrase = $state<string | null>(null);
   let restoreInput = $state("");
   let status = $state<Status>({ kind: "idle" });
   let busy = $state(false);
 
   async function navigate() {
-    if (redirectAfterRestore) {
-      await goto(redirectAfterRestore);
-      location.reload();
-    } else {
-      location.reload();
-    }
+    if (redirectAfterRestore) await goto(redirectAfterRestore);
   }
 
   function describeError(err: unknown): string {
@@ -47,13 +44,12 @@
     status = { kind: "idle" };
     busy = true;
     try {
-      const secret = await BrowserAuthSecretStore.loadSecret();
-      if (!secret) {
+      if (!auth.secret) {
         status = { kind: "error", message: "No local secret to reveal yet." };
         return;
       }
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-      phrase = RecoveryPhrase.fromSecret(secret);
+      phrase = RecoveryPhrase.fromSecret(auth.secret);
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
     } finally {
@@ -81,10 +77,11 @@
     try {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
       const secret = RecoveryPhrase.toSecret(restoreInput.trim());
-      await BrowserAuthSecretStore.saveSecret(secret);
+      await auth.login(secret);
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
+    } finally {
       busy = false;
     }
   }
@@ -93,8 +90,7 @@
     status = { kind: "idle" };
     busy = true;
     try {
-      const secret = await BrowserAuthSecretStore.loadSecret();
-      if (!secret) {
+      if (!auth.secret) {
         status = { kind: "error", message: "No local secret to back up yet." };
         return;
       }
@@ -103,7 +99,7 @@
         appName: PASSKEY_APP_NAME,
         appHostname: PASSKEY_APP_HOSTNAME,
       });
-      await pb.backup(secret, "My account");
+      await pb.backup(auth.secret, "My account");
       status = { kind: "success", message: "Passkey backup created." };
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
@@ -122,10 +118,11 @@
         appHostname: PASSKEY_APP_HOSTNAME,
       });
       const secret = await pb.restore();
-      await BrowserAuthSecretStore.saveSecret(secret);
+      await auth.login(secret);
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
+    } finally {
       busy = false;
     }
   }
