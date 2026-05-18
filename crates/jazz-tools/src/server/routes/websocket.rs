@@ -473,6 +473,13 @@ async fn handle_ws_connection(
     heartbeat.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && state.shutdown.is_shutting_down() {
+                    close_ws_for_shutdown(&mut socket).await;
+                    break;
+                }
+            }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(data))) => {
                     let Some(payload) = crate::transport_manager::frame_decode(&data) else {
@@ -525,12 +532,6 @@ async fn handle_ws_connection(
                 let Ok(bytes) = event.encode_payload() else { continue };
                 let frame = crate::transport_manager::frame_encode(&bytes);
                 if socket.send(Message::Binary(frame)).await.is_err() {
-                    break;
-                }
-            }
-            changed = shutdown_rx.changed() => {
-                if changed.is_ok() && state.shutdown.is_shutting_down() {
-                    close_ws_for_shutdown(&mut socket).await;
                     break;
                 }
             }

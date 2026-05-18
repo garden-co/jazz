@@ -46,6 +46,8 @@ pub struct MemoryStorage {
     flush_failures: std::cell::RefCell<Option<(StorageError, Option<usize>)>>,
     #[cfg(test)]
     flush_wal_failures: std::cell::RefCell<Option<(StorageError, Option<usize>)>>,
+    #[cfg(test)]
+    flush_wal_call_count: std::cell::RefCell<usize>,
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
     authoritative_batch_fates: std::cell::RefCell<HashMap<BatchId, BatchFate>>,
@@ -91,6 +93,11 @@ impl MemoryStorage {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn flush_wal_call_count(&self) -> usize {
+        *self.flush_wal_call_count.borrow()
+    }
+
     fn ensure_cached_raw_table_header(
         &mut self,
         raw_table: &str,
@@ -126,6 +133,8 @@ impl Default for MemoryStorage {
             flush_failures: std::cell::RefCell::new(None),
             #[cfg(test)]
             flush_wal_failures: std::cell::RefCell::new(None),
+            #[cfg(test)]
+            flush_wal_call_count: std::cell::RefCell::new(0),
             raw_tables: HashMap::new(),
             authoritative_batch_fates: std::cell::RefCell::new(HashMap::new()),
             ensured_raw_table_headers: HashSet::new(),
@@ -1180,6 +1189,7 @@ impl Storage for MemoryStorage {
 
     #[cfg(test)]
     fn flush_wal(&self) -> Result<(), StorageError> {
+        *self.flush_wal_call_count.borrow_mut() += 1;
         if let Some((error, remaining)) = self.flush_wal_failures.borrow_mut().as_mut() {
             match remaining {
                 Some(0) => {}

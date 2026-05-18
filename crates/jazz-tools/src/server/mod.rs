@@ -221,6 +221,11 @@ impl ServerState {
             failed = true;
         }
 
+        if failed {
+            self.shutdown.set_phase(ShutdownPhase::Failed);
+            return ShutdownPhase::Failed;
+        }
+
         self.shutdown.set_phase(ShutdownPhase::FlushingRuntime);
         if let Err(error) = self.runtime.flush().await {
             tracing::error!(%error, "shutdown runtime flush failed");
@@ -387,6 +392,10 @@ impl ServerState {
         client_id: ClientId,
         payload: &[u8],
     ) -> Result<(), String> {
+        if self.shutdown.is_shutting_down() {
+            return Err("server is shutting down".to_string());
+        }
+
         if let Ok(payload) = crate::transport_protocol::decode_outbox_entry_payload(payload) {
             let inbox = InboxEntry {
                 source: Source::Client(client_id),
@@ -420,11 +429,38 @@ impl ServerState {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
+    use crate::middleware::AuthConfig;
+    use crate::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
     use crate::schema_manager::AppId;
+    use crate::schema_manager::SchemaManager;
     use crate::server::builder::{ServerBuilder, StorageBackend};
+    use crate::storage::StorageError;
+    use crate::sync_manager::SyncManager;
+
+    struct CloseObservingStorage {
+        close_calls: Arc<AtomicUsize>,
+    }
+
+    impl Storage for CloseObservingStorage {
+        fn close(&self) -> Result<(), StorageError> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn shutdown_test_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build()
+    }
 
     async fn build_test_state() -> Arc<ServerState> {
         build_test_state_with_shutdown_timeout(Duration::from_secs(30)).await
@@ -439,6 +475,36 @@ mod tests {
             .await
             .expect("build test server");
         built.state
+    }
+
+    fn build_test_state_with_storage(storage: DynStorage, timeout: Duration) -> Arc<ServerState> {
+        let app_id = AppId::from_name("shutdown-storage-test");
+        let schema_manager = SchemaManager::new(
+            SyncManager::new(),
+            shutdown_test_schema(),
+            app_id,
+            "dev",
+            "main",
+        )
+        .expect("build schema manager");
+        Arc::new(ServerState {
+            runtime: TokioRuntime::new(schema_manager, storage, |_| {}),
+            app_id,
+            connections: RwLock::new(HashMap::new()),
+            next_connection_id: std::sync::atomic::AtomicU64::new(1),
+            connection_event_hub: Arc::new(ConnectionEventHub::default()),
+            auth_config: AuthConfig::default(),
+            upstream_http_url: None,
+            topology: ServerTopology::Core,
+            http_client: reqwest::Client::builder()
+                .build()
+                .expect("build HTTP client"),
+            jwt_verifier: None,
+            disconnect_candidates: RwLock::new(HashMap::new()),
+            client_ttl: RwLock::new(Duration::from_secs(300)),
+            sync_tracer: None,
+            shutdown: ShutdownController::new(timeout),
+        })
     }
 
     /// Simulate adding a connection (like events_handler does).
@@ -494,6 +560,44 @@ mod tests {
 
         assert_eq!(phase, ShutdownPhase::Failed);
         assert_eq!(state.shutdown.phase(), ShutdownPhase::Failed);
+    }
+
+    #[tokio::test]
+    async fn shutdown_finalization_does_not_close_storage_when_app_requests_remain_active() {
+        let close_calls = Arc::new(AtomicUsize::new(0));
+        let state = build_test_state_with_storage(
+            Box::new(CloseObservingStorage {
+                close_calls: Arc::clone(&close_calls),
+            }),
+            Duration::from_millis(10),
+        );
+        let _request_guard = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+
+        state.shutdown.request_shutdown();
+        let phase = state.run_shutdown_finalization().await;
+
+        assert_eq!(phase, ShutdownPhase::Failed);
+        assert_eq!(
+            close_calls.load(Ordering::SeqCst),
+            0,
+            "storage must not be closed while app request guards are still active"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_frames_are_rejected_after_shutdown_is_requested() {
+        let state = build_test_state().await;
+        state.shutdown.request_shutdown();
+
+        let error = state
+            .process_ws_client_frame(ClientId::new(), b"not a sync frame")
+            .await
+            .expect_err("websocket frame should be rejected during shutdown");
+
+        assert_eq!(error, "server is shutting down");
     }
 
     #[tokio::test]

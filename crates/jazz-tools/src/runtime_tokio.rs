@@ -412,7 +412,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     /// and then runs additional ticks until all storage is flushed.
     pub async fn flush(&self) -> Result<(), RuntimeError> {
         let mut attempts = 0;
-        let mut last_storage_flush_error = None;
         loop {
             // Wait for any scheduled batched_tick to complete
             loop {
@@ -436,10 +435,14 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             // Synchronous tick and check if more work was generated
             let has_more_work = {
                 let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-                core.batched_tick();
-                if let Some(error) = core.take_storage_flush_error() {
-                    last_storage_flush_error = Some(error);
+                if core.has_storage_write_pending_flush() && core.has_storage_flush_error() {
+                    if let Some(error) = core.take_storage_flush_error() {
+                        return Err(RuntimeError::WriteError(format!(
+                            "storage WAL flush failed: {error}"
+                        )));
+                    }
                 }
+                core.batched_tick();
                 core.has_outbound()
                     || core.scheduler().is_scheduled()
                     || core.has_storage_write_pending_flush()
@@ -457,13 +460,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
 
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         if let Some(error) = core.take_storage_flush_error() {
-            return Err(RuntimeError::WriteError(format!(
-                "storage WAL flush failed: {error}"
-            )));
-        }
-        if core.has_storage_write_pending_flush()
-            && let Some(error) = last_storage_flush_error
-        {
             return Err(RuntimeError::WriteError(format!(
                 "storage WAL flush failed: {error}"
             )));
@@ -994,6 +990,13 @@ mod tests {
         assert!(
             error.to_string().contains("injected WAL flush failure"),
             "unexpected error: {error}"
+        );
+        let flush_wal_calls = runtime
+            .with_storage(|storage| storage.flush_wal_call_count())
+            .expect("inspect storage calls");
+        assert!(
+            flush_wal_calls <= 2,
+            "persistent WAL flush failures should not be retried in a tight loop, got {flush_wal_calls} attempts"
         );
     }
 

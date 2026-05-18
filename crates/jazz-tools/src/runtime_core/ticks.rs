@@ -743,6 +743,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             let _span = tracing::debug_span!("flush_wal").entered();
             if let Err(error) = self.flush_wal_barrier() {
                 tracing::error!(%error, "storage WAL flush failed");
+                if self.should_schedule_storage_flush_retry() {
+                    self.scheduler.schedule_batched_tick();
+                }
             }
         }
     }

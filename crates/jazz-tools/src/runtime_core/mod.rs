@@ -306,6 +306,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     scheduler: Sch,
     /// True when storage was mutated since the last WAL flush barrier.
     storage_write_pending_flush: bool,
+    /// True after scheduling one retry for the current failed WAL flush barrier.
+    storage_flush_retry_scheduled: bool,
     /// Last storage flush error recorded by a durability barrier.
     storage_flush_error: Option<StorageError>,
     /// Transport handle for WebSocket sync.
@@ -447,6 +449,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             storage,
             scheduler,
             storage_write_pending_flush: false,
+            storage_flush_retry_scheduled: false,
             storage_flush_error: None,
             transport: None,
             sync_sender: None,
@@ -584,15 +587,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     pub(crate) fn mark_storage_write_pending_flush(&mut self) {
         self.storage_write_pending_flush = true;
+        self.storage_flush_retry_scheduled = false;
     }
 
     pub(crate) fn has_storage_write_pending_flush(&self) -> bool {
         self.storage_write_pending_flush
     }
 
+    pub(crate) fn has_storage_flush_error(&self) -> bool {
+        self.storage_flush_error.is_some()
+    }
+
     pub(crate) fn clear_storage_write_pending_flush(&mut self) {
         self.storage_write_pending_flush = false;
+        self.storage_flush_retry_scheduled = false;
         self.storage_flush_error = None;
+    }
+
+    pub(crate) fn should_schedule_storage_flush_retry(&mut self) -> bool {
+        if self.storage_flush_retry_scheduled {
+            return false;
+        }
+        self.storage_flush_retry_scheduled = true;
+        true
     }
 
     pub(crate) fn record_storage_flush_error(&mut self, error: StorageError) {

@@ -141,6 +141,34 @@ fn rc_flush_storage_records_error_and_clears_after_transient_success() {
 }
 
 #[test]
+fn rc_batched_tick_reschedules_after_transient_wal_flush_failure() {
+    let flush_error = StorageError::IoError("transient WAL flush failure".to_string());
+    let scheduler = CountingScheduler::default();
+    let app_id = AppId::from_name("row-reschedule-wal-flush-failure");
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), test_schema(), app_id, "dev", "main").unwrap();
+    let storage = MemoryStorage::new().with_transient_flush_wal_failures(flush_error.clone(), 1);
+    let mut core = new_test_core(schema_manager, storage, scheduler.clone());
+
+    core.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    let scheduled_after_write = scheduler.schedule_count();
+
+    core.batched_tick();
+
+    assert!(core.has_storage_write_pending_flush());
+    assert_eq!(core.take_storage_flush_error(), Some(flush_error));
+    assert!(
+        scheduler.schedule_count() > scheduled_after_write,
+        "a transient WAL flush failure should schedule a retry tick"
+    );
+
+    core.batched_tick();
+    assert!(!core.has_storage_write_pending_flush());
+    assert_eq!(core.take_storage_flush_error(), None);
+}
+
+#[test]
 fn rc_batched_tick_skips_flush_wal_for_query_settled_only_message() {
     let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
     let mut core = create_runtime_with_boxed_storage(
