@@ -77,7 +77,7 @@ ahash = "0.8"
 sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
-rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["lz4", "zstd"], optional = true }
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["jemalloc", "lz4", "zstd"], optional = true }
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 axum = { version = "0.7", features = ["ws"], optional = true }
