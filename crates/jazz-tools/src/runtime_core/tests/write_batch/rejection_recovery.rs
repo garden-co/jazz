@@ -17,6 +17,24 @@ fn users_delete_denied_authorization_schema() -> Schema {
         .build()
 }
 
+fn storage_with_unacknowledged_rejected_local_batch(batch_id: BatchId) -> MemoryStorage {
+    let mut storage = MemoryStorage::new();
+    let fate = crate::batch_fate::BatchFate::Rejected {
+        batch_id,
+        code: "permission_denied".to_string(),
+        reason: "writer lacks publish rights".to_string(),
+    };
+    storage
+        .upsert_local_batch_record(&crate::batch_fate::LocalBatchRecord::new(
+            batch_id,
+            crate::batch_fate::BatchMode::Direct,
+            true,
+            Some(fate),
+        ))
+        .unwrap();
+    storage
+}
+
 #[test]
 fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() {
     let mut core = create_runtime_with_boxed_storage(
@@ -42,17 +60,8 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
         .expect("persisted direct insert should materialize a visible row")
         .batch_id;
 
-    core.push_sync_inbox(InboxEntry {
-        source: Source::Server(ServerId::new()),
-        payload: SyncPayload::BatchFate {
-            fate: crate::batch_fate::BatchFate::Rejected {
-                batch_id,
-                code: "permission_denied".to_string(),
-                reason: "writer lacks publish rights".to_string(),
-            },
-        },
-    });
-    core.immediate_tick();
+    core.replay_batch_rejection(batch_id, "permission_denied", "writer lacks publish rights")
+        .unwrap();
 
     assert_eq!(
         receiver.try_recv(),
@@ -1028,6 +1037,50 @@ fn rc_acknowledge_rejected_batch_prunes_pending_mutation_error_event() {
         s.a.drain_mutation_error_events().is_empty(),
         "acknowledgement should also remove a queued mutation error event"
     );
+}
+
+#[test]
+fn rc_restart_recovers_pending_mutation_error_events_only_for_client_tiers() {
+    let no_tier_batch_id = BatchId::new();
+    let mut no_tier_runtime = create_runtime_with_storage_and_sync_manager(
+        test_schema(),
+        "client-recover-rejected-batch-without-tier",
+        storage_with_unacknowledged_rejected_local_batch(no_tier_batch_id),
+        SyncManager::new(),
+    );
+    let no_tier_events = no_tier_runtime.drain_mutation_error_events();
+    assert_eq!(no_tier_events.len(), 1);
+    assert_eq!(no_tier_events[0].batch.batch_id, no_tier_batch_id);
+
+    let local_batch_id = BatchId::new();
+    let mut local_runtime = create_runtime_with_storage_and_sync_manager(
+        test_schema(),
+        "client-recover-rejected-batch-local-tier",
+        storage_with_unacknowledged_rejected_local_batch(local_batch_id),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
+    let local_events = local_runtime.drain_mutation_error_events();
+    assert_eq!(local_events.len(), 1);
+    assert_eq!(local_events[0].batch.batch_id, local_batch_id);
+
+    let edge_batch_id = BatchId::new();
+    let mut edge_runtime = create_runtime_with_storage_and_sync_manager(
+        test_schema(),
+        "server-does-not-recover-rejected-batch-notification",
+        storage_with_unacknowledged_rejected_local_batch(edge_batch_id),
+        SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+    );
+    assert!(
+        edge_runtime.drain_mutation_error_events().is_empty(),
+        "edge server runtimes should not recover client mutation-error notifications"
+    );
+    assert!(matches!(
+        edge_runtime
+            .storage()
+            .load_authoritative_batch_fate(edge_batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::Rejected { .. })
+    ));
 }
 
 #[test]

@@ -10,7 +10,7 @@
  * `init()`.
  */
 
-import type { LocalBatchRecord, MutationErrorEvent, Runtime } from "./client.js";
+import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 
@@ -56,12 +56,11 @@ interface WasmBridgeHandle {
       | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
       | null,
   ): void;
+  applyIncomingServerPayload(payload: Uint8Array): void;
   waitForUpstreamServerConnection(): Promise<void>;
-  waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
   replayServerConnection(): void;
   disconnectUpstream(): void;
   reconnectUpstream(): void;
-  acknowledgeRejectedBatch(batchId: string): void;
   simulateCrash(): Promise<void>;
   setListeners(listeners: ListenerSlots): void;
   shutdown(): Promise<void>;
@@ -74,15 +73,13 @@ interface RuntimeWithWorkerBridge extends Runtime {
 
 interface ListenerSlots {
   onAuthFailure?: (reason: AuthFailureReason) => void;
-  onLocalBatchRecordsSync?: (batches: LocalBatchRecord[]) => void;
-  onMutationErrorReplay?: (event: MutationErrorEvent) => void;
 }
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
 
 /**
- * Thrown by `waitForLocalSyncFlush` / `waitForUpstreamServerConnection` when
- * the bridge they were called on has been marked migrated — i.e. the leader
+ * Thrown by `waitForUpstreamServerConnection` when
+ * the bridge it was called on has been marked migrated — i.e. the leader
  * tab handed off to a different tab and the supervisor swapped the
  * underlying endpoint underneath this bridge.
  *
@@ -121,7 +118,7 @@ export class WorkerBridge {
    * promise underlying the wait still settles internally (usually via the
    * ack timeout) and is left to garbage-collect; the JS-visible promise
    * surfaces the typed rejection immediately so callers don't hang waiting
-   * for a `SyncAck` from a leader that's no longer attached.
+   * on a leader that's no longer attached.
    */
   private readonly pendingWaiters = new Set<(error: LeaderMigratedError) => void>();
 
@@ -196,15 +193,10 @@ export class WorkerBridge {
 
   /**
    * Mark this bridge as migrated (leader handoff). In-flight
-   * `waitForLocalSyncFlush` / `waitForUpstreamServerConnection` calls reject
-   * with {@link LeaderMigratedError}; subsequent calls reject immediately
-   * with the same error. Idempotent. Callers should retry against the fresh
-   * bridge attached after the supervisor's endpoint swap.
-   *
-   * The Rust bridge is left running for `shutdown()` to wind down (post
-   * `Shutdown`, wait for `ShutdownOk` or timeout); without this method,
-   * callers would have to wait the full Rust-side `LOCAL_SYNC_ACK_TIMEOUT_MS`
-   * before they learn the bridge is no longer authoritative.
+   * `waitForUpstreamServerConnection` calls reject with
+   * {@link LeaderMigratedError}; subsequent calls reject immediately with the
+   * same error. Idempotent. Callers should retry against the fresh bridge
+   * attached after the supervisor's endpoint swap.
    */
   notifyMigrated(): void {
     if (this.migrated) return;
@@ -272,10 +264,8 @@ export class WorkerBridge {
     await this.raceMigration(this.bridge.waitForUpstreamServerConnection());
   }
 
-  async waitForLocalSyncFlush(batchId?: string): Promise<void> {
-    if (this.disposed || !this.bridge) return;
-    if (this.migrated) throw new LeaderMigratedError();
-    await this.raceMigration(this.bridge.waitForLocalSyncFlush(batchId ?? null));
+  applyIncomingServerPayload(payload: Uint8Array): void {
+    this.bridge?.applyIncomingServerPayload(payload);
   }
 
   replayServerConnection(): void {
@@ -294,10 +284,6 @@ export class WorkerBridge {
     this.reconnectUpstream();
   }
 
-  acknowledgeRejectedBatch(batchId: string): void {
-    this.bridge?.acknowledgeRejectedBatch(batchId);
-  }
-
   /** Test-only: posts `simulate-crash` so the worker releases OPFS handles
    * without a clean snapshot, and resolves on `shutdown-ok` (or after the
    * shutdown-ack timeout). Used to validate WAL replay. */
@@ -308,16 +294,6 @@ export class WorkerBridge {
 
   onAuthFailure(listener: (reason: AuthFailureReason) => void): void {
     this.listeners.onAuthFailure = listener;
-    this.bridge?.setListeners(this.listeners);
-  }
-
-  onLocalBatchRecordsSync(listener: (batches: LocalBatchRecord[]) => void): void {
-    this.listeners.onLocalBatchRecordsSync = listener;
-    this.bridge?.setListeners(this.listeners);
-  }
-
-  onMutationErrorReplay(listener: (event: MutationErrorEvent) => void): void {
-    this.listeners.onMutationErrorReplay = listener;
     this.bridge?.setListeners(this.listeners);
   }
 }

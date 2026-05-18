@@ -5,6 +5,7 @@ packages:
   - examples/*
   - examples/docs/*
   - dev/stress-tests/*
+  - dev/local-telemetry/web
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi
@@ -13,6 +14,7 @@ packages:
 catalogs:
   default:
     "@sveltejs/vite-plugin-svelte": 7.0.0
+    "@types/node": "^22.0.0"
     "@vitest/browser": 4.1.0
     "@vitest/browser-playwright": 4.1.0
     "@vitejs/plugin-react": 6.0.1

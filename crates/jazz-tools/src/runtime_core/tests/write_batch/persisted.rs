@@ -332,6 +332,7 @@ fn rc_wait_for_batch_after_pending_rejection_consumes_mutation_error_event() {
     let ((_row_id, _row_values), batch_id) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
+    s.a.set_mutation_error_callback(Some(Arc::new(|_| {})));
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
@@ -359,6 +360,10 @@ fn rc_wait_for_batch_after_pending_rejection_consumes_mutation_error_event() {
     assert!(
         s.a.drain_mutation_error_events().is_empty(),
         "wait_for_batch should suppress a queued but undelivered mutation error"
+    );
+    assert!(
+        s.a.pending_mutation_error_delivery().is_none(),
+        "wait_for_batch should win even when mutation error delivery was already scheduled"
     );
 }
 

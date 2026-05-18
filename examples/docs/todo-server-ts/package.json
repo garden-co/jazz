@@ -18,7 +18,7 @@
   "devDependencies": {
     "@hono/node-server": "^1.19.11",
     "@types/express": "^4.17.21",
-    "@types/node": "^20.0.0",
+    "@types/node": "catalog:default",
     "hono": "^4.12.9",
     "tsx": "^4.0.0",
     "typescript": "catalog:default",

@@ -47,11 +47,9 @@ function fakeRuntime(overrides: Partial<Record<string, unknown>> = {}): Runtime 
         sendLifecycleHint() {},
         setServerPayloadForwarder() {},
         waitForUpstreamServerConnection: async () => {},
-        waitForLocalSyncFlush: async () => {},
         replayServerConnection() {},
         disconnectUpstream() {},
         reconnectUpstream() {},
-        acknowledgeRejectedBatch() {},
         simulateCrash: async () => {},
         setListeners() {},
         shutdown: async () => {},
@@ -76,11 +74,9 @@ describe("WorkerBridge endpoint", () => {
           sendLifecycleHint() {},
           setServerPayloadForwarder() {},
           waitForUpstreamServerConnection: async () => {},
-          waitForLocalSyncFlush: async () => {},
           replayServerConnection() {},
           disconnectUpstream() {},
           reconnectUpstream() {},
-          acknowledgeRejectedBatch() {},
           simulateCrash: async () => {},
           setListeners() {},
           shutdown: async () => {},
@@ -97,16 +93,16 @@ describe("WorkerBridge endpoint", () => {
 });
 
 describe("WorkerBridge leader migration", () => {
-  it("rejects in-flight waitForLocalSyncFlush with LeaderMigratedError on notifyMigrated()", async () => {
+  it("rejects in-flight upstream waits with LeaderMigratedError on notifyMigrated()", async () => {
     const endpoint = new FakeMessagePortEndpoint();
     // The Rust-side waiter never settles in this fake; only `notifyMigrated`
     // should resolve the JS-visible promise.
     const stuck = new Promise<void>(() => undefined);
-    const runtime = fakeRuntime({ waitForLocalSyncFlush: () => stuck });
+    const runtime = fakeRuntime({ waitForUpstreamServerConnection: () => stuck });
     const bridge = new WorkerBridge(endpoint, runtime);
     await bridge.init(workerBridgeOptions());
 
-    const inflight = bridge.waitForLocalSyncFlush("batch-1");
+    const inflight = bridge.waitForUpstreamServerConnection();
     let settled = false;
     inflight
       .catch(() => undefined)
@@ -129,9 +125,6 @@ describe("WorkerBridge leader migration", () => {
     await bridge.init(workerBridgeOptions());
     bridge.notifyMigrated();
 
-    await expect(bridge.waitForLocalSyncFlush("batch-2")).rejects.toBeInstanceOf(
-      LeaderMigratedError,
-    );
     await expect(bridge.waitForUpstreamServerConnection()).rejects.toBeInstanceOf(
       LeaderMigratedError,
     );
@@ -152,11 +145,11 @@ describe("WorkerBridge leader migration", () => {
   it("shutdown() also drains pending waiters with LeaderMigratedError", async () => {
     const endpoint = new FakeMessagePortEndpoint();
     const stuck = new Promise<void>(() => undefined);
-    const runtime = fakeRuntime({ waitForLocalSyncFlush: () => stuck });
+    const runtime = fakeRuntime({ waitForUpstreamServerConnection: () => stuck });
     const bridge = new WorkerBridge(endpoint, runtime);
     await bridge.init(workerBridgeOptions());
 
-    const inflight = bridge.waitForLocalSyncFlush("batch-3");
+    const inflight = bridge.waitForUpstreamServerConnection();
     void bridge.shutdown();
 
     await expect(inflight).rejects.toBeInstanceOf(LeaderMigratedError);

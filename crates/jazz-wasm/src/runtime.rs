@@ -87,10 +87,9 @@ pub fn subscribe_trace_entries(callback: Function) -> Function {
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::batch_fate::LocalBatchRecord;
-use jazz_tools::binding_support::{
-    parse_batch_id_input, serialize_batch_fate, serialize_local_batch_record,
-    serialize_local_batch_records, serialize_mutation_error_event,
-};
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::binding_support::serialize_mutation_error_event;
+use jazz_tools::binding_support::{parse_batch_id_input, serialize_batch_fate};
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::manager::LocalUpdates;
@@ -98,6 +97,8 @@ use jazz_tools::query_manager::manager::LocalUpdates;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{SchemaHash, Value};
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::runtime_core::{MutationErrorCallback, RejectedBatchAcknowledgedCallback};
 use jazz_tools::runtime_core::{
     QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
 };
@@ -446,7 +447,7 @@ fn assemble_wasm_runtime(
     _use_binary_encoding: bool,
 ) -> WasmRuntime {
     let scheduler = WasmScheduler::new();
-    let mutation_error_callback = scheduler.mutation_error_callback.clone();
+    let mutation_error_emit_scheduled = scheduler.mutation_error_emit_scheduled.clone();
     let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
     core.set_tier_label(tier_label);
     let core_rc = Rc::new(RefCell::new(core));
@@ -459,7 +460,7 @@ fn assemble_wasm_runtime(
     core_rc.borrow_mut().persist_schema();
     WasmRuntime {
         core: core_rc,
-        mutation_error_callback,
+        mutation_error_emit_scheduled,
         upstream_server_id: Rc::new(std::cell::Cell::new(None)),
         tier_label,
     }
@@ -484,18 +485,18 @@ type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler>;
 pub struct WasmScheduler {
     /// Debounce flag for scheduled ticks.
     scheduled: Rc<RefCell<bool>>,
+    /// Debounce flag for delayed mutation-error delivery.
+    mutation_error_emit_scheduled: Rc<RefCell<bool>>,
     /// Weak reference back to RuntimeCore for spawned tasks.
     core_ref: Weak<RefCell<WasmCoreType>>,
-    /// JS callback receiving pushed mutation error events.
-    mutation_error_callback: Rc<RefCell<Option<Function>>>,
 }
 
 impl WasmScheduler {
     fn new() -> Self {
         Self {
             scheduled: Rc::new(RefCell::new(false)),
+            mutation_error_emit_scheduled: Rc::new(RefCell::new(false)),
             core_ref: Weak::new(),
-            mutation_error_callback: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -504,33 +505,44 @@ impl WasmScheduler {
     }
 }
 
-fn emit_pending_mutation_errors(
-    core_rc: &Rc<RefCell<WasmCoreType>>,
-    mutation_error_callback: &Rc<RefCell<Option<Function>>>,
-) {
-    let Some(callback) = mutation_error_callback.borrow().clone() else {
+fn deliver_pending_mutation_errors(core_rc: &Rc<RefCell<WasmCoreType>>) {
+    let Some((callback, events)) = core_rc.borrow_mut().pending_mutation_error_delivery() else {
         return;
     };
 
-    let events = core_rc.borrow_mut().drain_mutation_error_events();
-    if events.is_empty() {
-        return;
-    }
-
-    let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
     for event in events {
-        let Ok(value) = serialize_mutation_error_event(&event).serialize(&serializer) else {
-            continue;
-        };
-        let _ = callback.call1(&JsValue::UNDEFINED, &value);
+        callback(&event);
     }
 }
 
-fn schedule_batched_tick_task(
-    core_ref: Weak<RefCell<WasmCoreType>>,
-    flag: Rc<RefCell<bool>>,
-    mutation_error_callback: Rc<RefCell<Option<Function>>>,
+fn schedule_pending_mutation_errors_emit(
+    core_rc: Rc<RefCell<WasmCoreType>>,
+    scheduled: Rc<RefCell<bool>>,
 ) {
+    let mut scheduled_guard = scheduled.borrow_mut();
+    if *scheduled_guard {
+        return;
+    }
+    *scheduled_guard = true;
+    drop(scheduled_guard);
+
+    let scheduled_in_task = Rc::clone(&scheduled);
+    let task = Closure::once_into_js(move || {
+        *scheduled_in_task.borrow_mut() = false;
+        deliver_pending_mutation_errors(&core_rc);
+    });
+
+    let global = js_sys::global();
+    let Ok(set_timeout) = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+        .and_then(|value| value.dyn_into::<Function>())
+    else {
+        *scheduled.borrow_mut() = false;
+        return;
+    };
+    let _ = set_timeout.call2(&global, &task, &JsValue::from_f64(0.0));
+}
+
+fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<RefCell<bool>>) {
     let flag_in_task = Rc::clone(&flag);
     let task = Closure::once_into_js(move || {
         *flag_in_task.borrow_mut() = false;
@@ -546,10 +558,6 @@ fn schedule_batched_tick_task(
             true
         };
 
-        if !needs_retry {
-            emit_pending_mutation_errors(&core_rc, &mutation_error_callback);
-        }
-
         if needs_retry {
             // Runtime is currently borrowed (e.g. during query/subscription setup).
             // Keep one retry queued rather than panicking on RefCell reborrow.
@@ -559,11 +567,7 @@ fn schedule_batched_tick_task(
             }
             *scheduled = true;
             drop(scheduled);
-            schedule_batched_tick_task(
-                core_ref.clone(),
-                flag_in_task.clone(),
-                mutation_error_callback.clone(),
-            );
+            schedule_batched_tick_task(core_ref.clone(), flag_in_task.clone());
         }
     });
 
@@ -586,12 +590,15 @@ impl Scheduler for WasmScheduler {
         if !*scheduled {
             *scheduled = true;
             drop(scheduled);
-            schedule_batched_tick_task(
-                self.core_ref.clone(),
-                self.scheduled.clone(),
-                self.mutation_error_callback.clone(),
-            );
+            schedule_batched_tick_task(self.core_ref.clone(), self.scheduled.clone());
         }
+    }
+
+    fn schedule_mutation_error_delivery(&self) {
+        let Some(core_rc) = self.core_ref.upgrade() else {
+            return;
+        };
+        schedule_pending_mutation_errors_emit(core_rc, self.mutation_error_emit_scheduled.clone());
     }
 }
 
@@ -900,11 +907,7 @@ fn flush_pending(inner: &Rc<RustOutboxSenderInner>) {
         if payloads.is_empty() {
             return;
         }
-        match postcard::to_allocvec(&crate::worker_protocol::MainToWorkerWire::Sync {
-            payloads,
-            ack_id: None,
-            ack_batch_id: None,
-        }) {
+        match postcard::to_allocvec(&crate::worker_protocol::MainToWorkerWire::Sync { payloads }) {
             Ok(b) => b,
             Err(_) => return,
         }
@@ -965,10 +968,7 @@ fn post_message_with_transfer(
 #[wasm_bindgen]
 pub struct WasmRuntime {
     pub(crate) core: Rc<RefCell<WasmCoreType>>,
-    /// JS callback holder for outbound mutation error events. Shared with the
-    /// `WasmScheduler` so any path that triggers an emission (batched tick,
-    /// explicit drain) calls the same JS function.
-    pub(crate) mutation_error_callback: Rc<RefCell<Option<Function>>>,
+    pub(crate) mutation_error_emit_scheduled: Rc<RefCell<bool>>,
     /// `Rc<Cell<…>>` so `WasmRuntime` clones share state. The bridge keeps a
     /// clone and mutates `upstream_server_id` via `add_server` / `remove_server`
     /// — those updates must be visible through the original handle too.
@@ -981,10 +981,38 @@ impl Clone for WasmRuntime {
     fn clone(&self) -> Self {
         Self {
             core: Rc::clone(&self.core),
-            mutation_error_callback: Rc::clone(&self.mutation_error_callback),
+            mutation_error_emit_scheduled: Rc::clone(&self.mutation_error_emit_scheduled),
             upstream_server_id: Rc::clone(&self.upstream_server_id),
             tier_label: self.tier_label,
         }
+    }
+}
+
+impl WasmRuntime {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_rejected_batch_acknowledged_callback(
+        &self,
+        callback: Option<RejectedBatchAcknowledgedCallback>,
+    ) {
+        self.core
+            .borrow_mut()
+            .set_rejected_batch_acknowledged_callback(callback);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn drain_pending_mutation_error_events(
+        &self,
+    ) -> Vec<jazz_tools::runtime_core::MutationErrorEvent> {
+        self.core.borrow_mut().drain_mutation_error_events()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn acknowledge_rejected_batch(&self, batch_id: &str) -> Result<bool, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        self.core
+            .borrow_mut()
+            .acknowledge_handled_rejected_batch(batch_id)
+            .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))
     }
 }
 
@@ -1003,6 +1031,8 @@ impl WasmRuntime {
     ///            Set for server nodes to enable ack emission.
     /// * `use_binary_encoding` - Optional outgoing sync payload encoding mode.
     ///   `Some(true)` emits postcard bytes (`Uint8Array`), otherwise JSON strings.
+    /// * `non_durable_client` - Internal browser main-thread mode. When true,
+    ///   direct writes stay optimistic until a durable peer syncs `BatchFate`.
     #[wasm_bindgen(constructor)]
     pub fn new(
         schema_json: &str,
@@ -1011,6 +1041,7 @@ impl WasmRuntime {
         user_branch: &str,
         tier: Option<String>,
         use_binary_encoding: Option<bool>,
+        non_durable_client: Option<bool>,
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
@@ -1060,7 +1091,7 @@ impl WasmRuntime {
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
-        let mutation_error_callback = scheduler.mutation_error_callback.clone();
+        let mutation_error_emit_scheduled = scheduler.mutation_error_emit_scheduled.clone();
         // The outbox `SyncSender` is installed by the worker bridge or host
         // when they know the postMessage target. Direct (non-worker) clients
         // open a transport via `connect()`; their server-bound traffic goes
@@ -1070,6 +1101,9 @@ impl WasmRuntime {
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
+        if non_durable_client.unwrap_or(false) {
+            core.set_non_durable_client_runtime();
+        }
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -1087,7 +1121,7 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
-            mutation_error_callback,
+            mutation_error_emit_scheduled,
             upstream_server_id: Rc::new(std::cell::Cell::new(None)),
             tier_label,
         })
@@ -1174,7 +1208,6 @@ impl WasmRuntime {
 
     fn batched_tick_and_emit_mutation_errors(&self) {
         self.core.borrow_mut().batched_tick();
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
     }
 
     fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
@@ -1238,10 +1271,19 @@ impl WasmRuntime {
     }
 
     /// Register a callback for unhandled mutation errors.
+    #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = onMutationError)]
     pub fn on_mutation_error(&self, callback: Function) {
-        *self.mutation_error_callback.borrow_mut() = Some(callback);
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
+        let callback: MutationErrorCallback = Rc::new(move |event| {
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            let Ok(value) = serialize_mutation_error_event(event).serialize(&serializer) else {
+                return;
+            };
+            let _ = callback.call1(&JsValue::UNDEFINED, &value);
+        });
+        self.core
+            .borrow_mut()
+            .set_mutation_error_callback(Some(callback));
     }
 
     // =========================================================================
@@ -1481,6 +1523,7 @@ impl WasmRuntime {
     pub fn wait_for_batch(&self, batch_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let tier = parse_tier(tier)?;
+        let core_rc = Rc::clone(&self.core);
         let receiver = {
             let mut core = self.core.borrow_mut();
             core.wait_for_batch(batch_id, tier)
@@ -1490,53 +1533,29 @@ impl WasmRuntime {
         Ok(wasm_bindgen_futures::future_to_promise(async move {
             match receiver.await {
                 Ok(Ok(())) => Ok(JsValue::undefined()),
-                Ok(Err(rejection)) => Err(serde_wasm_bindgen::to_value(&serde_json::json!({
-                    "kind": "rejected",
-                    "batchId": rejection.batch_id.to_string(),
-                    "code": rejection.code,
-                    "reason": rejection.reason,
-                }))
-                .unwrap_or_else(|_| JsValue::from_str("Persisted batch was rejected"))),
+                Ok(Err(rejection)) => {
+                    let batch_id = rejection.batch_id;
+                    let serializer =
+                        serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                    let value = serde_json::json!({
+                        "kind": "rejected",
+                        "batchId": batch_id.to_string(),
+                        "code": rejection.code,
+                        "reason": rejection.reason,
+                    })
+                    .serialize(&serializer)
+                    .unwrap_or_else(|_| JsValue::from_str("Persisted batch was rejected"));
+                    if let Err(err) = core_rc
+                        .borrow_mut()
+                        .acknowledge_handled_rejected_batch(batch_id)
+                    {
+                        tracing::warn!("acknowledge handled rejected batch: {err:?}");
+                    }
+                    Err(value)
+                }
                 Err(_) => Err(JsValue::from_str("Wait for batch cancelled")),
             }
         }))
-    }
-
-    #[wasm_bindgen(js_name = loadLocalBatchRecord)]
-    pub fn load_local_batch_record(&self, batch_id: &str) -> Result<JsValue, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let core = self.core.borrow();
-        let record = core
-            .local_batch_record_for_rejection_replay(batch_id)
-            .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
-        match record {
-            Some(record) => {
-                let serializer =
-                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-                serialize_local_batch_record(&record)
-                    .serialize(&serializer)
-                    .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
-            }
-            None => Ok(JsValue::null()),
-        }
-    }
-
-    #[wasm_bindgen(js_name = loadLocalBatchRecordStorageRow)]
-    pub fn load_local_batch_record_storage_row(&self, batch_id: &str) -> Result<JsValue, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let core = self.core.borrow();
-        let record = core
-            .local_batch_record(batch_id)
-            .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
-        match record {
-            Some(record) => {
-                let bytes = record
-                    .encode_storage_row()
-                    .map_err(|e| JsError::new(&format!("Encode local batch record failed: {e}")))?;
-                Ok(Uint8Array::from(bytes.as_slice()).into())
-            }
-            None => Ok(JsValue::null()),
-        }
     }
 
     #[wasm_bindgen(js_name = hydrateLocalBatchRecordStorageRow)]
@@ -1582,26 +1601,6 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Replay batch rejection failed: {e}")))
     }
 
-    #[wasm_bindgen(js_name = loadLocalBatchRecords)]
-    pub fn load_local_batch_records(&self) -> Result<JsValue, JsError> {
-        let core = self.core.borrow();
-        let records = core
-            .local_batch_records_for_worker_sync()
-            .map_err(|e| JsError::new(&format!("Load local batch records failed: {e}")))?;
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        serialize_local_batch_records(&records)
-            .serialize(&serializer)
-            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
-    }
-
-    #[wasm_bindgen(js_name = acknowledgeRejectedBatch)]
-    pub fn acknowledge_rejected_batch(&self, batch_id: &str) -> Result<bool, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let mut core = self.core.borrow_mut();
-        core.acknowledge_rejected_batch(batch_id)
-            .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))
-    }
-
     #[wasm_bindgen(js_name = discardLocalBatch)]
     pub fn discard_local_batch(&self, batch_id: &str) -> Result<bool, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
@@ -1616,40 +1615,6 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.seal_batch(batch_id)
             .map_err(|e| JsError::new(&format!("Seal batch failed: {e}")))
-    }
-
-    #[wasm_bindgen(js_name = retransmitLocalBatch)]
-    pub fn retransmit_local_batch(&self, batch_id: &str) -> Result<(), JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let mut core = self.core.borrow_mut();
-        core.retransmit_local_batch_to_servers(batch_id);
-        core.batched_tick();
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = replayLocalBatchPayloads)]
-    pub fn replay_local_batch_payloads(&self, batch_id: &str) -> Result<js_sys::Array, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let core = self.core.borrow();
-        let array = js_sys::Array::new();
-
-        for payload in core.local_batch_replay_payloads(batch_id) {
-            let bytes = payload
-                .to_bytes()
-                .map_err(|e| JsError::new(&format!("Encode local batch replay failed: {e}")))?;
-            array.push(&Uint8Array::from(bytes.as_slice()));
-        }
-
-        Ok(array)
-    }
-
-    #[wasm_bindgen(js_name = reconcileLocalBatchWithServer)]
-    pub fn reconcile_local_batch_with_server(&self, batch_id: &str) -> Result<(), JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let mut core = self.core.borrow_mut();
-        core.reconcile_local_batch_with_server(batch_id);
-        core.batched_tick();
-        Ok(())
     }
 
     // =========================================================================
@@ -1801,8 +1766,6 @@ impl WasmRuntime {
             core.set_next_expected_server_sequence(server_id, next_sync_seq);
         }
         core.batched_tick();
-        drop(core);
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
         Ok(())
     }
 
@@ -1949,8 +1912,6 @@ impl WasmRuntime {
         // Process pending updates and flush outbox so peer/main runtime can receive catalogue sync.
         core.immediate_tick();
         core.batched_tick();
-        drop(core);
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
 
         Ok(())
     }

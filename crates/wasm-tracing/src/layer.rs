@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     mem,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
 };
@@ -19,8 +19,8 @@ use tracing_log::NormalizeEvent as _;
 use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 
 use crate::{
-    debug1, debug4, error1, error4, log1, log4, mark, mark_name, measure, prelude::*,
-    recorder::StringRecorder, thread_display_suffix, warn1, warn4,
+    debug1, debug4, error1, error4, log1, log4, prelude::*, recorder::StringRecorder,
+    thread_display_suffix, warn1, warn4,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -28,8 +28,11 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
+/// OpenTelemetry-style wall-clock time: `(seconds, nanos)` since Unix epoch.
+type UnixNano = (u32, u32);
+
 struct SpanTiming {
-    start_unix_nano: String,
+    start_unix_nano: UnixNano,
 }
 
 const MAX_TRACE_ENTRIES: usize = 5_000;
@@ -58,15 +61,15 @@ enum TraceEntry {
         name: String,
         target: String,
         level: String,
-        start_unix_nano: String,
-        end_unix_nano: String,
+        start_unix_nano: UnixNano,
+        end_unix_nano: UnixNano,
         fields: HashMap<String, String>,
     },
     Log {
         sequence: u64,
         target: String,
         level: String,
-        timestamp_unix_nano: String,
+        timestamp_unix_nano: UnixNano,
         message: String,
         fields: HashMap<String, String>,
     },
@@ -104,7 +107,10 @@ pub fn subscribe_trace_entries(callback: js_sys::Function) -> js_sys::Function {
 /// Drain buffered tracing entries into a JavaScript value.
 #[cfg(target_arch = "wasm32")]
 pub fn drain_trace_entries() -> JsValue {
-    serde_wasm_bindgen::to_value(&drain_trace_entries_internal()).unwrap_or(JsValue::NULL)
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    drain_trace_entries_internal()
+        .serialize(&serializer)
+        .unwrap_or(JsValue::NULL)
 }
 
 fn trace_entry_collection_enabled() -> bool {
@@ -243,17 +249,13 @@ tracing::subscriber::set_global_default(subscriber);
 ```
 "#]
 pub struct WasmLayer {
-    last_event_id: AtomicUsize,
     config: WasmLayerConfig,
 }
 
 impl WasmLayer {
     /// Create a new [Layer] with the provided config
     pub fn new(config: WasmLayerConfig) -> Self {
-        WasmLayer {
-            last_event_id: AtomicUsize::new(0),
-            config,
-        }
+        WasmLayer { config }
     }
 }
 
@@ -275,6 +277,10 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
         id: &tracing::Id,
         ctx: Context<'_, S>,
     ) {
+        if !self.config.enabled && !trace_entry_collection_enabled() {
+            return;
+        }
+
         let mut new_debug_record = StringRecorder::new(self.config.show_fields);
         attrs.record(&mut new_debug_record);
 
@@ -316,24 +322,8 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
             return;
         }
 
-        if self.config.report_logs_in_timings {
-            let mark_name = format!(
-                "c{:x}",
-                self.last_event_id
-                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-            );
-            // mark and measure so you can see a little blip in the profile
-            mark(&mark_name);
-            let _ = measure(
-                format!(
-                    "{} {}{} {}",
-                    level,
-                    meta.module_path().unwrap_or("..."),
-                    thread_display_suffix(),
-                    recorder,
-                ),
-                mark_name,
-            );
+        if should_collect_entry && *level > Level::WARN {
+            return;
         }
 
         let origin = if self.config.show_origin {
@@ -398,14 +388,10 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
     }
 
     fn on_enter(&self, id: &tracing::Id, ctx: Context<'_, S>) {
-        if self.config.report_logs_in_timings {
-            mark(&mark_name(id));
-        }
-
-        if trace_entry_collection_enabled() {
-            if let Some(span_ref) = ctx.span(id) {
+        if let Some(span_ref) = ctx.span(id) {
+            if span_ref.extensions().get::<SpanTiming>().is_none() {
                 span_ref.extensions_mut().insert(SpanTiming {
-                    start_unix_nano: unix_nano_now_string(),
+                    start_unix_nano: unix_nano_now(),
                 });
             }
         }
@@ -414,6 +400,9 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
             if let Some(span_ref) = ctx.span(id) {
                 let meta = span_ref.metadata();
                 let level = meta.level();
+                if trace_entry_collection_enabled() && *level > Level::WARN {
+                    return;
+                }
                 let fields = span_ref
                     .extensions()
                     .get::<StringRecorder>()
@@ -440,42 +429,15 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
 
     fn on_exit(&self, id: &tracing::Id, ctx: Context<'_, S>) {
         let should_collect_entry = trace_entry_collection_enabled();
-        if !self.config.report_logs_in_timings && !should_collect_entry {
-            return;
-        }
 
         if let Some(span_ref) = ctx.span(id) {
             let meta = span_ref.metadata();
             let extensions = span_ref.extensions();
             let debug_record = extensions.get::<StringRecorder>();
             let timing = extensions.get::<SpanTiming>();
-            if let Some(debug_record) = debug_record {
-                if self.config.report_logs_in_timings {
-                    let _ = measure(
-                        format!(
-                            "\"{}\"{} {} {}",
-                            meta.name(),
-                            thread_display_suffix(),
-                            meta.module_path().unwrap_or("..."),
-                            debug_record,
-                        ),
-                        mark_name(id),
-                    );
-                }
-                record_span_trace_entry(meta, Some(debug_record), timing);
-            } else {
-                if self.config.report_logs_in_timings {
-                    let _ = measure(
-                        format!(
-                            "\"{}\"{} {}",
-                            meta.name(),
-                            thread_display_suffix(),
-                            meta.module_path().unwrap_or("..."),
-                        ),
-                        mark_name(id),
-                    );
-                }
-                record_span_trace_entry(meta, None, timing);
+
+            if should_collect_entry {
+                record_span_trace_entry(meta, debug_record, timing);
             }
         }
     }
@@ -490,15 +452,15 @@ fn record_span_trace_entry(
         return;
     }
 
-    let end_unix_nano = unix_nano_now_string();
+    let end_unix_nano = unix_nano_now();
     push_trace_entry(TraceEntry::Span {
         sequence: next_trace_entry_sequence(),
         name: meta.name().to_string(),
         target: meta.target().to_string(),
         level: meta.level().to_string(),
         start_unix_nano: timing
-            .map(|value| value.start_unix_nano.clone())
-            .unwrap_or_else(|| end_unix_nano.clone()),
+            .map(|value| value.start_unix_nano)
+            .unwrap_or(end_unix_nano),
         end_unix_nano,
         fields: recorder
             .map(|value| value.fields.clone())
@@ -515,7 +477,7 @@ fn record_log_trace_entry(meta: &tracing::Metadata<'_>, level: &Level, recorder:
         sequence: next_trace_entry_sequence(),
         target: meta.target().to_string(),
         level: level.to_string(),
-        timestamp_unix_nano: unix_nano_now_string(),
+        timestamp_unix_nano: unix_nano_now(),
         message: recorder
             .message
             .clone()
@@ -524,18 +486,26 @@ fn record_log_trace_entry(meta: &tracing::Metadata<'_>, level: &Level, recorder:
     });
 }
 
-fn unix_nano_now_string() -> String {
+fn unix_nano_now() -> UnixNano {
     #[cfg(target_arch = "wasm32")]
     {
-        format!("{:.0}", js_sys::Date::now() * 1_000_000.0)
+        let ms = js_sys::Date::now();
+        let seconds = (ms / 1000.0).floor();
+        let nanos_f = ((ms - seconds * 1000.0) * 1_000_000.0).round();
+        let mut seconds = seconds as u32;
+        let mut nanos = nanos_f as u32;
+        if nanos >= 1_000_000_000 {
+            nanos -= 1_000_000_000;
+            seconds = seconds.saturating_add(1);
+        }
+        (seconds, nanos)
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let nanos = SystemTime::now()
+        let duration = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
             .unwrap_or_default();
-        nanos.to_string()
+        (duration.as_secs() as u32, duration.subsec_nanos())
     }
 }
 
@@ -591,6 +561,7 @@ impl LevelExt for Level {
 mod trace_entry_tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use super::*;
     use tracing_subscriber::prelude::*;
@@ -603,8 +574,8 @@ mod trace_entry_tests {
             name: "opfs put".to_string(),
             target: "opfs_btree::db".to_string(),
             level: "TRACE".to_string(),
-            start_unix_nano: "1775000000000000000".to_string(),
-            end_unix_nano: "1775000000000001000".to_string(),
+            start_unix_nano: (1_775_000_000, 0),
+            end_unix_nano: (1_775_000_000, 1_000),
             fields: HashMap::from([("key_len".to_string(), "8".to_string())]),
         }
     }
@@ -614,7 +585,7 @@ mod trace_entry_tests {
             sequence,
             target: "opfs_btree::db".to_string(),
             level: "WARN".to_string(),
-            timestamp_unix_nano: "1775000000000002000".to_string(),
+            timestamp_unix_nano: (1_775_000_000, 2_000),
             message: "retrying write".to_string(),
             fields: HashMap::from([("attempt".to_string(), "2".to_string())]),
         }
@@ -633,7 +604,7 @@ mod trace_entry_tests {
     }
 
     fn silent_test_layer() -> WasmLayer {
-        WasmLayer::new(WasmLayerConfig::new().disable().remove_timings())
+        WasmLayer::new(WasmLayerConfig::new().disable())
     }
 
     #[test]
@@ -690,6 +661,87 @@ mod trace_entry_tests {
     }
 
     #[test]
+    fn entered_debug_span_with_typed_fields_captures_raw_strings() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        clear_trace_entries_for_test();
+        set_trace_entry_collection_enabled(true);
+
+        let runtime_layer = WasmLayer::new(WasmLayerConfig::new().with_max_level(Level::DEBUG));
+        let subscriber = tracing_subscriber::registry().with(runtime_layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let peer_kind = "server";
+            let peer_id = "00000000-0000-0000-0000-000000000000";
+            let payload = "RowBatchCreated";
+            let tier = "edge";
+            let _entered = tracing::debug_span!(
+                "sync.send",
+                peer_kind = peer_kind,
+                peer_id = peer_id,
+                payload = payload,
+                tier = tier,
+            )
+            .entered();
+        });
+
+        let drained = drain_trace_entries_for_test();
+        let span = drained
+            .iter()
+            .find(|entry| matches!(entry, TraceEntry::Span { name, .. } if name == "sync.send"))
+            .expect("sync.send span should be captured");
+        let TraceEntry::Span { fields, .. } = span else {
+            unreachable!()
+        };
+        assert_eq!(fields.get("peer_kind").map(String::as_str), Some("server"));
+        assert_eq!(
+            fields.get("peer_id").map(String::as_str),
+            Some("00000000-0000-0000-0000-000000000000"),
+        );
+        assert_eq!(
+            fields.get("payload").map(String::as_str),
+            Some("RowBatchCreated"),
+        );
+        assert_eq!(fields.get("tier").map(String::as_str), Some("edge"));
+    }
+
+    #[test]
+    fn enabling_collection_after_enter_preserves_original_start_time() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        clear_trace_entries_for_test();
+        set_trace_entry_collection_enabled(false);
+
+        let layer = WasmLayer::new(WasmLayerConfig::new().with_max_level(Level::DEBUG));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::debug_span!("toggled");
+            let entered = span.enter();
+            set_trace_entry_collection_enabled(true);
+            std::thread::sleep(Duration::from_millis(1));
+            drop(entered);
+        });
+
+        let drained = drain_trace_entries_for_test();
+        let span = drained
+            .iter()
+            .find_map(|entry| match entry {
+                TraceEntry::Span {
+                    name,
+                    start_unix_nano,
+                    end_unix_nano,
+                    ..
+                } if name == "toggled" => Some((*start_unix_nano, *end_unix_nano)),
+                _ => None,
+            })
+            .expect("toggled span should be recorded");
+
+        assert!(
+            span.0 < span.1,
+            "start {:?} must precede end {:?}",
+            span.0,
+            span.1
+        );
+    }
+
+    #[test]
     fn drain_returns_entries_and_clears_buffer() {
         let _guard = TEST_LOCK.lock().unwrap();
         clear_trace_entries_for_test();
@@ -729,13 +781,19 @@ mod trace_entry_tests {
     fn serializes_entries_with_js_field_names() {
         let span = serde_json::to_value(span_entry(3)).unwrap();
         assert_eq!(span["kind"], "span");
-        assert_eq!(span["startUnixNano"], "1775000000000000000");
-        assert_eq!(span["endUnixNano"], "1775000000000001000");
+        assert_eq!(span["startUnixNano"], serde_json::json!([1_775_000_000, 0]));
+        assert_eq!(
+            span["endUnixNano"],
+            serde_json::json!([1_775_000_000, 1_000])
+        );
         assert!(span.get("start_unix_nano").is_none());
 
         let log = serde_json::to_value(log_entry(4)).unwrap();
         assert_eq!(log["kind"], "log");
-        assert_eq!(log["timestampUnixNano"], "1775000000000002000");
+        assert_eq!(
+            log["timestampUnixNano"],
+            serde_json::json!([1_775_000_000, 2_000])
+        );
         assert!(log.get("timestamp_unix_nano").is_none());
 
         let dropped = serde_json::to_value(TraceEntry::Dropped { count: 5 }).unwrap();

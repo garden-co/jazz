@@ -63,6 +63,7 @@ describe("startLocalJazzServer via DevServer", () => {
       port,
       upstreamUrl: "ws://127.0.0.1:9",
       peerSecret: "cluster-peer-secret",
+      adminSecret: "admin-secret",
       inMemory: true,
     });
 

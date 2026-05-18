@@ -34,8 +34,6 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
     hasWorker,
     useBinaryEncoding,
     onAuthFailure,
-    onBeforeLocalBatchWait,
-    onRejectedBatchAcknowledged,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
     return JazzClient.connectSync(
       TestDb.runtime as never,
@@ -55,8 +53,7 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
       {
         useBinaryEncoding,
         onAuthFailure,
-        onBeforeLocalBatchWait,
-        onRejectedBatchAcknowledged,
+        nonDurableClientRuntime: hasWorker,
       },
     );
   }
@@ -82,6 +79,7 @@ function makeClientStub() {
     updateAuthToken: vi.fn(),
     connectTransport: vi.fn(),
     getRuntime: vi.fn(() => ({}) as never),
+    onMutationError: vi.fn(() => () => undefined),
   } as unknown as JazzClient & {
     connectTransport: ReturnType<typeof vi.fn>;
   };
@@ -232,6 +230,7 @@ describe("runtime/Db direct path upstream wiring", () => {
       updateAuthToken: vi.fn(),
       connectTransport: vi.fn(),
       getRuntime: vi.fn(() => ({}) as never),
+      onMutationError: vi.fn(() => () => undefined),
     } as unknown as JazzClient & {
       create: ReturnType<typeof vi.fn>;
       shutdown: ReturnType<typeof vi.fn>;
@@ -290,7 +289,6 @@ describe("runtime/Db direct path upstream wiring", () => {
           serverUrl: "https://example.test",
         }),
         onAuthFailure: expect.any(Function),
-        onRejectedBatchAcknowledged: expect.any(Function),
       }),
     );
     const createClientContext = runtimeModule.createClient.mock.calls[0]?.[0];
