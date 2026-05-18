@@ -1,17 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
-import { createJazzClient, JazzProvider } from "jazz-tools/vue";
-import { BrowserAuthSecretStore } from "jazz-tools";
+import { computed } from "vue";
+import { createJazzClient, JazzProvider, useLocalFirstAuth } from "jazz-tools/vue";
 
-const client = ref<ReturnType<typeof createJazzClient> | null>(null);
+const { secret, isLoading } = useLocalFirstAuth();
 
-onMounted(async () => {
-  const secret = await BrowserAuthSecretStore.getOrCreateSecret();
-  client.value = createJazzClient({
-    appId: "my-app",
-    secret,
-  });
-});
+const client = computed(() =>
+  !isLoading.value && secret.value
+    ? createJazzClient({ appId: "my-app", secret: secret.value })
+    : null,
+);
 </script>
 
 <template>
