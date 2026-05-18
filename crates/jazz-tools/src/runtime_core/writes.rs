@@ -392,25 +392,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
-        self.ensure_batch_is_writable(write_context)?;
-        let result = self
-            .schema_manager
-            .insert_with_write_context(&mut self.storage, table, values, write_context)
-            .map_err(crate::runtime_core::write_error_from_query)?;
-        let row_id = result.row_id;
-        let row_values = result.row_values;
-        let batch_id = result.batch_id;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(row_id, batch_id, batch_mode)?;
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
-        }
-        debug!(object_id = %row_id, "inserted");
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
-        Ok(((row_id, row_values), batch_id))
+        self.insert_with_id(table, values, None, write_context)
     }
 
     /// Compatibility shim for callers that pass an explicit row id.
@@ -424,13 +406,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.ensure_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
-            .insert_with_write_context_and_id(
-                &mut self.storage,
-                table,
-                values,
-                object_id,
-                write_context,
-            )
+            .insert(&mut self.storage, table, values, object_id, write_context)
             .map_err(crate::runtime_core::write_error_from_query)?;
         let row_id = result.row_id;
         let row_values = result.row_values;
@@ -459,7 +435,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
-            .update_with_write_context(&mut self.storage, object_id, &values, write_context)
+            .update(&mut self.storage, object_id, &values, write_context)
             .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
@@ -486,13 +462,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
-            .upsert_with_write_context_and_id(
-                &mut self.storage,
-                table,
-                object_id,
-                values,
-                write_context,
-            )
+            .upsert(&mut self.storage, table, object_id, values, write_context)
             .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)

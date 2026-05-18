@@ -51,7 +51,7 @@ fn schema_manager_update_uses_visible_row_after_legacy_commit_history_is_removed
     reader.add_live_schema(v1).unwrap();
 
     reader
-            .update_with_write_context(
+            .update(
                 &mut storage,
                 row_id,
                 &[
@@ -241,7 +241,7 @@ fn transactional_insert_uses_frozen_target_branch_schema() {
         .with_target_branch_name(v1_branch.clone());
 
     let inserted = manager
-        .insert_with_write_context(
+        .insert(
             &mut storage,
             "users",
             HashMap::from([
@@ -251,6 +251,7 @@ fn transactional_insert_uses_frozen_target_branch_schema() {
                     Value::Text("alice@example.com".to_string()),
                 ),
             ]),
+            None,
             Some(&write_context),
         )
         .expect("frozen-target insert should use the target branch schema");
@@ -302,7 +303,7 @@ fn transactional_insert_rejects_target_branch_outside_current_family() {
         .with_target_branch_name("prod-111111111111-feature");
 
     let err = manager
-        .insert_with_write_context(
+        .insert(
             &mut storage,
             "users",
             HashMap::from([
@@ -312,6 +313,7 @@ fn transactional_insert_rejects_target_branch_outside_current_family() {
                     Value::Text("alice@example.com".to_string()),
                 ),
             ]),
+            None,
             Some(&write_context),
         )
         .expect_err("cross-family target branch should be rejected");
@@ -393,7 +395,7 @@ fn transactional_update_uses_frozen_target_branch_schema() {
         .with_target_branch_name(v1_branch.clone());
 
     let batch_id = manager
-        .update_with_write_context(
+        .update(
             &mut storage,
             row_id,
             &[(
