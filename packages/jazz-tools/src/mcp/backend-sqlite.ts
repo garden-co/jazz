@@ -1,6 +1,6 @@
 // NOTE: no top-level `import … from "node:sqlite"` — this module must be safe
-// to parse/import on Node <22.  DatabaseSync is obtained via dynamic import
-// inside createSqliteBackend().
+// to parse/import on runtimes without node:sqlite. DatabaseSync is obtained
+// via dynamic import inside createSqliteBackend().
 
 export interface SearchResult {
   title: string;

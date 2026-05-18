@@ -40,7 +40,7 @@ zero-config local sync.
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22.12+
 - An empty target directory (the CLI refuses to scaffold into a non-empty one).
 
 ## A note on versioning

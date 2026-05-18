@@ -19,7 +19,7 @@ async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {
     serverUrl: server.url,
     appId: server.appId,
     adminSecret: server.adminSecret,
-    schemaDir: join(import.meta.dirname ?? __dirname, ".."),
+    schemaDir: join(import.meta.dirname, ".."),
   });
 
   return () => server.stop();
