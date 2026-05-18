@@ -435,12 +435,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             // Synchronous tick and check if more work was generated
             let has_more_work = {
                 let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-                if core.has_storage_write_pending_flush() && core.has_storage_flush_error() {
-                    if let Some(error) = core.take_storage_flush_error() {
-                        return Err(RuntimeError::WriteError(format!(
-                            "storage WAL flush failed: {error}"
-                        )));
-                    }
+                if core.has_storage_write_pending_flush()
+                    && core.has_storage_flush_error()
+                    && let Some(error) = core.take_storage_flush_error()
+                {
+                    return Err(RuntimeError::WriteError(format!(
+                        "storage WAL flush failed: {error}"
+                    )));
                 }
                 core.batched_tick();
                 core.has_outbound()
