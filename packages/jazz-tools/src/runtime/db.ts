@@ -2273,13 +2273,30 @@ export class Db {
     this.clearActiveQuerySubscriptionTraces();
     this.detachLifecycleHooks();
 
-    // Ensure bridge init has completed before sending shutdown —
-    // otherwise the worker may still be opening OPFS handles
-    await this.ensureBridgeReady();
+    // Wait for bridge init to settle before tearing the bridge down —
+    // otherwise the worker may still be opening OPFS handles. A *failed*
+    // init must not abort teardown: the supervisor (leader lock), the
+    // SharedWorker broker port and the reset channel still need releasing,
+    // or a worker-init failure strands the namespace's leader lease and
+    // dedicated worker for every other tab. Capture the error, finish the
+    // teardown best-effort, and rethrow it once the runtime is fully down.
+    let bridgeInitError: unknown;
+    let bridgeInitFailed = false;
+    try {
+      await this.ensureBridgeReady();
+    } catch (error) {
+      bridgeInitError = error;
+      bridgeInitFailed = true;
+    }
 
-    // Shutdown worker bridge — waits for OPFS handles to be released
+    // Shutdown worker bridge — waits for OPFS handles to be released.
     if (this.workerBridge && this.workerEndpoint) {
-      await this.workerBridge.shutdown();
+      try {
+        await this.workerBridge.shutdown();
+      } catch {
+        // Best-effort: a bridge teardown failure must not strand the
+        // supervisor's leader lock released below.
+      }
       this.workerBridge = null;
     }
 
@@ -2291,7 +2308,11 @@ export class Db {
     this.disposeWasmTelemetry?.();
     this.disposeWasmTelemetry = null;
     for (const client of this.clients.values()) {
-      await client.shutdown();
+      try {
+        await client.shutdown();
+      } catch {
+        // Best-effort, as above.
+      }
     }
     this.clients.clear();
 
@@ -2308,6 +2329,13 @@ export class Db {
     this.sharedWorker?.port.close();
     this.sharedWorker = null;
     this.workerEndpoint = null;
+
+    // Teardown ran to completion; surface a failed bridge init to the caller.
+    // The Db never became usable, and callers (`deleteClientStorage`) and
+    // tests rely on `shutdown()` rejecting in that case.
+    if (bridgeInitFailed) {
+      throw bridgeInitError;
+    }
   }
 
   private notifyActiveQuerySubscriptionTraceListeners(): void {

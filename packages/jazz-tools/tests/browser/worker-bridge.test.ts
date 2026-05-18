@@ -1113,20 +1113,10 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
     (fresh as unknown as { getClient(schema: WasmSchema): unknown }).getClient(app.wasmSchema);
-    await waitForCondition(
-      async () => {
-        const worker = getLeaderWorker(fresh);
-        return Boolean(worker?.onmessage);
-      },
-      5000,
-      `fresh worker bridge should install its onmessage handler; diagnostics=${JSON.stringify({
-        role: supervisorState(fresh)?.role ?? null,
-        hasEndpoint: Boolean(supervisorState(fresh)?.endpoint),
-        bridge: Boolean((fresh as unknown as { workerBridge?: unknown }).workerBridge),
-        clientsType: typeof (fresh as unknown as { clients?: unknown }).clients,
-        clientKeys: Object.keys((fresh as unknown as { clients?: object }).clients ?? {}),
-      })}`,
-    );
+    // Wait for the worker bridge to finish init. The bridge wires its
+    // worker→main listener via `addEventListener`, so the `Worker.onmessage`
+    // slot stays null — poll bridge readiness, not that slot.
+    await (fresh as unknown as { ensureBridgeReady(): Promise<void> }).ensureBridgeReady();
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
       fresh.subscribeAll(
