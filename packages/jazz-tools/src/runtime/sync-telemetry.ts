@@ -171,33 +171,39 @@ function recordWasmTelemetryEntry(
   entry: WasmTraceEntry,
 ): void {
   if (entry.kind === "span") {
+    const baseAttrs: Record<string, TelemetryAttributeValue> = {
+      "jazz.runtime_thread": runtimeThread,
+      "jazz.span.sequence": entry.sequence,
+      "jazz.span.level": entry.level,
+      "jazz.span.target": entry.target,
+      "jazz.span.fields": stringifyFieldsOrEmpty(entry.fields),
+    };
     const otelSpan = exporter.tracer.startSpan(entry.name || "wasm span", {
       kind: SPAN_KIND_INTERNAL,
-      startTime: unixNanoToTimeInput(entry.startUnixNano),
-      attributes: {
-        "jazz.runtime_thread": runtimeThread,
-        "jazz.span.sequence": entry.sequence,
-        "jazz.span.level": entry.level,
-        "jazz.span.target": entry.target,
-        "jazz.span.fields": JSON.stringify(entry.fields),
-      },
+      startTime: entry.startUnixNano,
+      attributes: hasOwnProperties(entry.fields)
+        ? { ...promotedFieldAttributes(entry.fields), ...baseAttrs }
+        : baseAttrs,
     });
-    otelSpan.end(unixNanoToTimeInput(entry.endUnixNano));
+    otelSpan.end(entry.endUnixNano);
     return;
   }
 
   if (entry.kind === "log") {
+    const baseAttrs: Record<string, TelemetryAttributeValue> = {
+      "jazz.runtime_thread": runtimeThread,
+      "jazz.log.sequence": entry.sequence,
+      "jazz.log.target": entry.target,
+      "jazz.log.fields": stringifyFieldsOrEmpty(entry.fields),
+    };
     exporter.logger.emit({
-      timestamp: unixNanoToTimeInput(entry.timestampUnixNano),
+      timestamp: entry.timestampUnixNano,
       severityNumber: severityNumber(entry.level),
       severityText: entry.level,
       body: entry.message,
-      attributes: {
-        "jazz.runtime_thread": runtimeThread,
-        "jazz.log.sequence": entry.sequence,
-        "jazz.log.target": entry.target,
-        "jazz.log.fields": JSON.stringify(entry.fields),
-      },
+      attributes: hasOwnProperties(entry.fields)
+        ? { ...promotedFieldAttributes(entry.fields), ...baseAttrs }
+        : baseAttrs,
     });
     return;
   }
@@ -258,6 +264,23 @@ async function createWasmTelemetryExporter(
   };
 }
 
+function promotedFieldAttributes(
+  fields: Record<string, unknown> | undefined,
+): Record<string, TelemetryAttributeValue> {
+  if (!fields || typeof fields !== "object") return {};
+  const attributes: Record<string, TelemetryAttributeValue> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (key.startsWith("jazz.")) continue;
+    if (value === null || value === undefined) continue;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      attributes[key] = value;
+    } else {
+      attributes[key] = JSON.stringify(value);
+    }
+  }
+  return attributes;
+}
+
 function severityNumber(level: string): number {
   switch (level.toUpperCase()) {
     case "TRACE":
@@ -276,12 +299,12 @@ function severityNumber(level: string): number {
   }
 }
 
-function unixNanoToTimeInput(value: unknown): TimeInput {
-  if (typeof value !== "string" || !/^\d+$/.test(value)) {
-    throw new TypeError(`expected nanosecond string, got ${typeof value}: ${String(value)}`);
-  }
-  const nanoseconds = BigInt(value);
-  const seconds = nanoseconds / 1_000_000_000n;
-  const nanos = nanoseconds % 1_000_000_000n;
-  return [Number(seconds), Number(nanos)];
+function hasOwnProperties(fields: Record<string, unknown> | undefined): boolean {
+  if (!fields) return false;
+  for (const _key in fields) return true;
+  return false;
+}
+
+function stringifyFieldsOrEmpty(fields: Record<string, unknown> | undefined): string {
+  return hasOwnProperties(fields) ? JSON.stringify(fields) : "{}";
 }

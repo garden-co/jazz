@@ -55,10 +55,6 @@ pub mod prelude {
 
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_namespace = performance)]
-    fn mark(a: &str);
-    #[wasm_bindgen(catch, js_namespace = performance)]
-    fn measure(name: String, startMark: String) -> Result<(), JsValue>;
     #[wasm_bindgen(js_namespace = console, js_name = log)]
     fn log1(message: String);
     #[wasm_bindgen(js_namespace = console, js_name = log)]
@@ -97,19 +93,6 @@ fn thread_display_suffix() -> String {
         None => message.push_str("main"),
     }
     message
-}
-
-#[cfg(not(feature = "mark-with-rayon-thread-index"))]
-fn mark_name(id: &tracing::Id) -> String {
-    format!("t{:x}", id.into_u64())
-}
-#[cfg(feature = "mark-with-rayon-thread-index")]
-fn mark_name(id: &tracing::Id) -> String {
-    format!(
-        "t{:x}-{}",
-        id.into_u64(),
-        rayon::current_thread_index().unwrap_or(999)
-    )
 }
 
 #[doc = r#"
@@ -192,7 +175,7 @@ use tracing::Level;
 pub fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
 
-    let config = WasmLayerConfig::new().remove_timings().with_max_level(Level::ERROR);
+    let config = WasmLayerConfig::new().with_max_level(Level::ERROR);
 
     let _ = wasm_tracing::set_as_global_default_with_config(config);
 
