@@ -1,16 +1,17 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
-  import { BrowserAuthSecretStore } from "jazz-tools/svelte";
+  import { LocalFirstAuth } from "jazz-tools/svelte";
   import TodoWidget from "$lib/TodoWidget.svelte";
   import AuthBackup from "$lib/AuthBackup.svelte";
 
   const session = authClient.useSession();
+  // Auto-syncs with the layout's LocalFirstAuth instance via the shared
+  // per-store notifier, so signOut here clears the secret everywhere.
+  const auth = new LocalFirstAuth();
 
   async function handleSignOut() {
-    // Clear the anonymous secret before signOut so that the reactive $effect
-    // in the layout gets a fresh anonymous identity when it rebuilds the client.
-    await BrowserAuthSecretStore.clearSecret();
+    await auth.signOut();
     await authClient.signOut();
     await goto("/");
   }

@@ -1,47 +1,26 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import {
     createJazzClient,
     JazzSvelteProvider,
-    BrowserAuthSecretStore,
+    LocalFirstAuth,
   } from "jazz-tools/svelte";
-  import type { DbConfig } from "jazz-tools";
+  import type { AuthState } from "jazz-tools";
   import type { Snippet } from "svelte";
   import { env } from "$env/dynamic/public";
-  import { authClient, getToken } from "$lib/auth-client";
+  import { getToken } from "$lib/auth-client";
 
   let {
     authenticated,
     children: pageChildren,
   }: { authenticated: boolean; children: Snippet } = $props();
 
-  let client = $state<ReturnType<typeof createJazzClient> | null>(null);
+  const appId = env.PUBLIC_JAZZ_APP_ID;
+  const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
 
-  onMount(() => {
-    let unsubRefresh: (() => void) | undefined;
+  const auth = new LocalFirstAuth();
+  let jwtToken = $state<string | null>(null);
 
-    (async () => {
-      const config = await buildConfig(authenticated);
-      if (!config) return;
-      const jazzClient = createJazzClient(config);
-      client = jazzClient;
-
-      if (authenticated) {
-        const resolved = await jazzClient;
-        unsubRefresh = resolved.db.onAuthChanged(async (state) => {
-          if (state.error !== "expired") return;
-          const fresh = await getToken();
-          if (fresh) resolved.db.updateAuthToken(fresh);
-        });
-      }
-    })();
-
-    return () => unsubRefresh?.();
-  });
-
-  async function buildConfig(auth: boolean): Promise<DbConfig | null> {
-    const appId = env.PUBLIC_JAZZ_APP_ID;
-    const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
+  $effect(() => {
     if (!appId || !serverUrl) {
       const missing = [
         !appId && "PUBLIC_JAZZ_APP_ID",
@@ -52,21 +31,52 @@
       console.error(
         `${missing} not set — the jazzSvelteKit() plugin should inject these.`,
       );
-      return Promise.resolve(null);
     }
-    const base: Omit<DbConfig, "jwtToken" | "secret"> = { appId, serverUrl };
+  });
 
-    if (auth) {
-      return getToken().then((token) =>
-        token ? { ...base, jwtToken: token } : null,
-      );
+  $effect(() => {
+    if (!authenticated) {
+      jwtToken = null;
+      return;
     }
+    let cancelled = false;
+    void getToken().then((token) => {
+      if (!cancelled) jwtToken = token;
+    });
+    return () => {
+      cancelled = true;
+    };
+  });
 
-    return BrowserAuthSecretStore.getOrCreateSecret().then((secret) => ({
-      ...base,
-      secret,
-    }));
-  }
+  let client = $derived.by(() => {
+    if (!appId || !serverUrl) return null;
+    if (authenticated) {
+      return jwtToken ? createJazzClient({ appId, serverUrl, jwtToken }) : null;
+    }
+    return !auth.isLoading && auth.secret
+      ? createJazzClient({ appId, serverUrl, secret: auth.secret })
+      : null;
+  });
+
+  $effect(() => {
+    if (!client || !authenticated) return;
+    const currentClient = client;
+    let cancelled = false;
+    let unsubRefresh: (() => void) | undefined;
+    void (async () => {
+      const resolved = await currentClient;
+      if (cancelled) return;
+      unsubRefresh = resolved.db.onAuthChanged(async (state: AuthState) => {
+        if (state.error !== "expired") return;
+        const fresh = await getToken();
+        if (fresh) resolved.db.updateAuthToken(fresh);
+      });
+    })();
+    return () => {
+      cancelled = true;
+      unsubRefresh?.();
+    };
+  });
 </script>
 
 {#if client}

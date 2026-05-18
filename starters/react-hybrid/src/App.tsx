@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BrowserAuthSecretStore } from "jazz-tools";
+import { useLocalFirstAuth } from "jazz-tools/react";
 import { authClient, useSession } from "./auth-client";
 import { AuthBackup } from "./auth-backup";
 import { SignInForm } from "./sign-in-form";
@@ -10,12 +10,13 @@ type View = "dashboard" | "signin" | "signup";
 
 export function App() {
   const { data: session, isPending } = useSession();
+  const auth = useLocalFirstAuth();
   const [view, setView] = useState<View>("dashboard");
 
   if (isPending) return <div>Loading…</div>;
 
   async function handleSignOut() {
-    await BrowserAuthSecretStore.clearSecret();
+    await auth.signOut();
     await authClient.signOut();
     setView("dashboard");
   }
