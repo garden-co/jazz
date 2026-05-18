@@ -15,7 +15,7 @@ The first version provides **write visibility isolation**:
 
 - Writes made on a branch id do not appear in normal `main` reads.
 - Reads from that branch id see current `main` plus the branch's own changed rows.
-- Branch access inherits from the normal permissions on the object id passed to `db.branch(...)`.
+- Branch access is controlled by explicit `forBranch(...)` rules in `permissions.ts`.
 - Branches are sparse. Jazz stores only rows changed on the branch, not a full copy of `main`.
 
 That means a branch initially behaves like a lightweight overlay:
@@ -28,15 +28,9 @@ main read   = current main only
 Merging publishes branch changes back to `main`. Diffing lets callers preview what a merge would do
 for a specific query before merging.
 
-Future improvements can strengthen this model:
+Future improvements can extend this model:
 
-- **Fully isolated branches:** a branch could read from its own fixed snapshot instead of current
-  `main`, and could have stronger branch-specific access control.
 - **Branch ancestry:** a branch could be based on another branch, not only on `main`.
-- **Query-based isolation:** a branch-like workflow could be scoped to one query or subset of data,
-  instead of a named branch that can touch any row.
-- **Branch-specific permissions:** apps could later override the inherited object permissions with
-  explicit branch permission hooks.
 - **Built-in branch metadata helpers:** Jazz could later provide optional helpers for branch
   listing, display names, closed branches, or explicit branch cleanup.
 
@@ -45,7 +39,7 @@ These are future improvements. The first version keeps branches sparse and simpl
 ## User-Facing APIs
 
 Branch ids are passed directly to the core APIs. A non-`main` branch id must be a Jazz object id.
-There is no required Jazz-managed branch registry in the first version.
+There is no required app-facing Jazz-managed branch registry in the first version.
 
 Most apps that want branch metadata can model it with their own `branches` table.
 
@@ -66,38 +60,67 @@ Here `branch.id` is both the branch metadata row id and the branch id.
 
 The id does not have to come from a `branches` table. Any Jazz-created row id can identify a branch:
 `db.branch(project.id)`, `db.branch(document.id)`, and `db.branch(branch.id)` all use the same core
-API. The table that owns the id defines the permission anchor, leaving branch management and naming
-as app-level choices.
+API. The table that owns the id chooses which `forBranch(...)` rule can apply, leaving branch
+management and naming as app-level choices.
 
-### Inherited Permissions
+### Branch Permissions
 
-Branch access inherits from the normal permissions on the backing object.
+Branch access is deny-by-default. A table must declare which backing tables may act as branch
+anchors for that table.
 
-For `db.branch(branch.id)`, the backing object is the `branches` row with id `branch.id`.
+For `db.branch(branch.id)`, the backing row is the `branches` row with id `branch.id`.
 
 ```ts
 export default definePermissions(app, ({ policy, session }) => {
-  policy.branches.allowRead.where({ ownerId: session.user_id });
-  policy.branches.allowInsert.where({ ownerId: session.user_id });
-  policy.branches.allowUpdate.where({ ownerId: session.user_id });
+  policy.todos.forBranch(policy.branches, ({ $branch }) => {
+    policy.todos.allowRead.where({ projectId: $branch.projectId });
+
+    policy.todos.allowInsert.where({
+      projectId: $branch.projectId,
+      createdBy: session.user_id,
+    });
+
+    policy.todos.allowUpdate.where({ projectId: $branch.projectId });
+    policy.todos.allowDelete.where({ projectId: $branch.projectId });
+  });
 });
 ```
 
 In this example:
 
 - creating a branch metadata row creates an object id that can be used as a branch id
-- the common pattern is that the created branch row is readable and updatable by its creator
-- reading from `db.branch(branch.id)` requires read permission on the branch row
-- writing through `db.branch(branch.id)` requires update permission on the branch row
-- diffing from `db.branch(branch.id)` requires read permission on the branch row
-- merging `db.branch(branch.id)` requires update permission on the branch row and normal write
-  permission for the rows written to `main`
+- Jazz resolves `branch.id` to the `branches` row
+- `$branch` is that resolved `branches` row
+- reading todos through `db.branch(branch.id)` requires the branch-scoped todo read rule to pass
+- writing todos through `db.branch(branch.id)` requires the matching branch-scoped todo write rule
+  to pass
+- diffing todos from `db.branch(branch.id)` requires the matching branch-scoped todo read rule
+- merging `db.branch(branch.id)` requires the matching branch-scoped rules for the source data and
+  normal write permission for the rows written to `main`
 
-Normal row permissions still apply to the data inside the branch. Being allowed to use
-`db.branch(branch.id)` does not bypass table permissions for todos, comments, or other rows.
+Jazz does not infer that `todos.projectId` points at `$branch.projectId`. The policy says that
+explicitly.
 
-Branch-specific permission hooks are future work. The first version only uses inherited object
-permissions.
+If `policy.todos.forBranch(policy.branches, ...)` is missing, todo reads and writes through that
+branch fail even if normal `policy.todos.allowRead` or `policy.todos.allowUpdate` rules exist.
+
+One table may support more than one branch backing type by declaring multiple blocks:
+
+```ts
+policy.todos.forBranch(policy.projects, ({ $branch }) => {
+  policy.todos.allowRead.where({ projectId: $branch.id });
+});
+
+policy.todos.forBranch(policy.workspaces, ({ $branch }) => {
+  policy.todos.allowRead.where({ workspaceId: $branch.id });
+});
+```
+
+When a branch id is selected, Jazz looks up the row's table and chooses the matching block. If the
+branch id points to some other table, access fails.
+
+Normal permissions on `branches`, `projects`, or other backing tables still matter when users query
+or edit those rows directly. They are separate from branch access.
 
 ### Branch-Scoped Database View
 
@@ -151,7 +174,7 @@ This means:
 
 ```text
 source = todos in the selected branch for this query
-target = todos in main
+target = todos in current main
 ```
 
 The diff result is close to a normal query result. Each returned row has the normal row fields plus
@@ -195,18 +218,20 @@ Merging writes branch changes back to `main`.
 await db.branch(branch.id).merge();
 ```
 
-Merge uses the same merge strategies as diff, but it does not stop just because diff would report
-conflicts. Conflicts are for review and UI. Merge still resolves through the configured strategies.
+Merge uses the same three inputs as diff:
+
+```text
+base, source, target
+```
+
+Merge uses the configured merge strategies, but it does not stop just because diff would report
+conflicts. Conflicts are for review and UI. Merge still resolves through those strategies.
 
 Merge publishes to `main`. The first version does not expose a merge target argument.
 
 Merge only includes the local version of the branch that is visible when merge starts. It does not
 wait for remote sync. If another device has written to the branch but that write has not arrived
 locally yet, this merge does not include it.
-
-Repeated merges are allowed. They may create extra history, and concurrent repeated merges may
-create a diamond in `main` history. Jazz should still show one correct visible result and must not
-double-apply the same branch change.
 
 ### Typical Product Flow
 
@@ -215,8 +240,9 @@ An app can use the APIs like this:
 1. Create the app object that scopes the draft, such as a project.
 2. Create a branch metadata row, such as `app.branches`, for that draft.
 3. Use that branch row's Jazz-created id as the branch id.
-4. Write draft changes through `db.branch(branch.id)`.
-5. Render draft views with query-builder `.branch(branch.id)`.
-6. Preview publish impact with query-builder `.diff()`.
-7. Show changed rows using the normal row fields plus `$diff`.
-8. Publish with `db.branch(branch.id).merge()`.
+4. Define `forBranch(...)` rules for the tables that can be read or written through that branch.
+5. Write draft changes through `db.branch(branch.id)`.
+6. Render draft views with query-builder `.branch(branch.id)`.
+7. Preview publish impact with query-builder `.diff()`.
+8. Show changed rows using the normal row fields plus `$diff`.
+9. Publish with `db.branch(branch.id).merge()`.
