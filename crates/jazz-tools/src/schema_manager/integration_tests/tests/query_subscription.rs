@@ -242,6 +242,8 @@ fn e2e_two_clients_query_subscriptions_through_server() {
                     Value::Text("Alice's Secret Doc".into()),
                 ),
             ]),
+            None,
+            None,
         )
         .unwrap()
         .row_id;
@@ -254,6 +256,8 @@ fn e2e_two_clients_query_subscriptions_through_server() {
                 ("owner_id".to_string(), Value::Text("bob".into())),
                 ("title".to_string(), Value::Text("Bob's Private Doc".into())),
             ]),
+            None,
+            None,
         )
         .unwrap()
         .row_id;
@@ -419,7 +423,9 @@ fn query_settled_no_tier_immediate() {
         ("id".to_string(), Value::Uuid(row_id)),
         ("name".to_string(), Value::Text("hello".into())),
     ]);
-    manager.insert(&mut storage, "items", values).unwrap();
+    manager
+        .insert(&mut storage, "items", values, None, None)
+        .unwrap();
     manager.process(&mut storage);
 
     // Subscribe with settled_tier=None
@@ -495,7 +501,9 @@ fn query_settled_direct() {
         ("id".to_string(), Value::Uuid(row_id)),
         ("name".to_string(), Value::Text("srv".into())),
     ]);
-    server_b.insert(&mut io_b, "items", values).unwrap();
+    server_b
+        .insert(&mut io_b, "items", values, None, None)
+        .unwrap();
     server_b.process(&mut io_b);
 
     // === Client A subscribes with settled_tier=Local ===
@@ -627,7 +635,9 @@ fn query_settled_holds_until_tier() {
         ("id".to_string(), Value::Uuid(row_id)),
         ("name".to_string(), Value::Text("local".into())),
     ]);
-    client_a.insert(&mut io_a, "items", values).unwrap();
+    client_a
+        .insert(&mut io_a, "items", values, None, None)
+        .unwrap();
     client_a.process(&mut io_a);
 
     // No delivery yet — tier not satisfied
@@ -784,7 +794,9 @@ fn query_settled_relays_edge_tier_through_worker() {
         ("id".to_string(), Value::Uuid(row_id)),
         ("name".to_string(), Value::Text("edge".into())),
     ]);
-    edge_c.insert(&mut io_c, "items", values).unwrap();
+    edge_c
+        .insert(&mut io_c, "items", values, None, None)
+        .unwrap();
     edge_c.process(&mut io_c);
 
     // Ignore bootstrap traffic from initial connect.
@@ -967,7 +979,9 @@ fn query_settled_data_accumulates() {
             ("id".to_string(), Value::Uuid(row_id)),
             ("name".to_string(), Value::Text(format!("item_{}", i))),
         ]);
-        client.insert(&mut storage, "items", values).unwrap();
+        client
+            .insert(&mut storage, "items", values, None, None)
+            .unwrap();
         client.process(&mut storage);
     }
 
@@ -1044,7 +1058,9 @@ fn query_one_shot_settled_tier() {
         ("id".to_string(), Value::Uuid(row_id)),
         ("name".to_string(), Value::Text("one-shot".into())),
     ]);
-    client.insert(&mut storage, "items", values).unwrap();
+    client
+        .insert(&mut storage, "items", values, None, None)
+        .unwrap();
     client.process(&mut storage);
 
     // Subscribe with settled_tier=Local (simulating one-shot behavior)
