@@ -29,7 +29,8 @@ a branch query to `main`, and merges from a branch to `main`.
 `main` is the reserved system branch. Every non-main branch id must be a Jazz object id. The row
 that owns that id is the branch's backing row.
 
-A branch exists because rows have been written with that branch id.
+A branch id is usable when it resolves to a backing row. The branch stores data only after rows are
+written with that branch id.
 
 Example:
 
@@ -51,8 +52,7 @@ branch -> main
 ```
 
 Because there is no branch registry or branch ancestry metadata, the system has no durable source
-for a longer fallback chain. Branch-of-branch can be added later, but it needs an explicit ancestry
-mechanism.
+for a longer fallback chain.
 
 ## Possible Future Branch Isolation
 
@@ -75,6 +75,11 @@ table being accessed, all branch permissions for that access fail.
 
 There is no separate branch creation API. Creating a branch means creating the backing row through
 normal `db.insert(...)`, then using that row's Jazz-created id as the branch id.
+
+A branch can be created when the user can create or use the backing row. For a normal app-level
+branch metadata table, that means normal insert permission on that table. For an existing object id,
+there is no separate branch-creation check; each branch read or write is checked through
+`forBranch(...)`.
 
 Most apps that want branch metadata can create an app-level `branches` table and use its row ids as
 branch ids.
@@ -100,31 +105,32 @@ Example:
 
 ```ts
 export default definePermissions(app, ({ policy, session }) => {
-  policy.todos.forBranch(policy.projects, ({ $branch }) => {
-    policy.todos.allowRead.where({ projectId: $branch.id });
-    policy.todos.allowInsert.where({
-      projectId: $branch.id,
+  policy.todos.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+    branchPolicy.allowRead.where({ projectId: $branch.projectId });
+    branchPolicy.allowInsert.where({
+      projectId: $branch.projectId,
       createdBy: session.user_id,
     });
-    policy.todos.allowUpdate.where({ projectId: $branch.id });
-    policy.todos.allowDelete.where({ projectId: $branch.id });
+    branchPolicy.allowUpdate.where({ projectId: $branch.projectId });
+    branchPolicy.allowDelete.where({ projectId: $branch.projectId });
   });
 });
 ```
 
-Here `$branch` is the resolved `projects` row. Jazz does not infer any relationship between
-`todos` and `projects` from the schema; the policy expresses that relationship through
-`projectId: $branch.id`.
+Here `$branch` is the resolved `branches` row, and `branchPolicy` is the branch-scoped policy for
+the table on the left, here `todos`. Jazz does not infer any relationship between `todos` and
+`branches` from the schema; the policy expresses that relationship through
+`projectId: $branch.projectId`.
 
 Multiple backing tables are allowed for one data table when explicitly declared:
 
 ```ts
-policy.todos.forBranch(policy.projects, ({ $branch }) => {
-  policy.todos.allowRead.where({ projectId: $branch.id });
+policy.todos.forBranch(policy.projects, ({ $branch, branchPolicy }) => {
+  branchPolicy.allowRead.where({ projectId: $branch.id });
 });
 
-policy.todos.forBranch(policy.workspaces, ({ $branch }) => {
-  policy.todos.allowRead.where({ workspaceId: $branch.id });
+policy.todos.forBranch(policy.workspaces, ({ $branch, branchPolicy }) => {
+  branchPolicy.allowRead.where({ workspaceId: $branch.id });
 });
 ```
 
