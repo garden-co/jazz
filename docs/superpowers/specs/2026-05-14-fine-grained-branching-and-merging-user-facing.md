@@ -28,14 +28,6 @@ main read   = current main only
 Merging publishes branch changes back to `main`. Diffing lets callers preview what a merge would do
 for a specific query before merging.
 
-Future improvements can extend this model:
-
-- **Branch ancestry:** a branch could be based on another branch, not only on `main`.
-- **Built-in branch metadata helpers:** Jazz could later provide optional helpers for branch
-  listing, display names, closed branches, or explicit branch cleanup.
-
-These are future improvements. The first version keeps branches sparse and simple.
-
 ## User-Facing APIs
 
 Branch ids are passed directly to the core APIs. A non-`main` branch id must be a Jazz object id.
@@ -45,6 +37,11 @@ Most apps that want branch metadata can model it with their own `branches` table
 
 This keeps branch creation simple: create the app object, then branch on that object's id. Jazz
 creates the row id; the app does not manually create a branch id.
+
+A branch can be created when the user can create or use the backing row. For a normal app-level
+branch metadata table, that means normal insert permission on that table. For an existing object id,
+there is no separate branch-creation check; each branch read or write is checked through
+`forBranch(...)`.
 
 ```ts
 const { value: branch } = db.insert(app.branches, {
@@ -72,19 +69,22 @@ For `db.branch(branch.id)`, the backing row is the `branches` row with id `branc
 
 ```ts
 export default definePermissions(app, ({ policy, session }) => {
-  policy.todos.forBranch(policy.branches, ({ $branch }) => {
-    policy.todos.allowRead.where({ projectId: $branch.projectId });
+  policy.todos.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+    branchPolicy.allowRead.where({ projectId: $branch.projectId });
 
-    policy.todos.allowInsert.where({
+    branchPolicy.allowInsert.where({
       projectId: $branch.projectId,
       createdBy: session.user_id,
     });
 
-    policy.todos.allowUpdate.where({ projectId: $branch.projectId });
-    policy.todos.allowDelete.where({ projectId: $branch.projectId });
+    branchPolicy.allowUpdate.where({ projectId: $branch.projectId });
+    branchPolicy.allowDelete.where({ projectId: $branch.projectId });
   });
 });
 ```
+
+Inside the callback, `$branch` is the resolved backing row and `branchPolicy` is the branch-scoped
+policy for the table on the left, here `todos`.
 
 In this example:
 
@@ -107,12 +107,12 @@ branch fail even if normal `policy.todos.allowRead` or `policy.todos.allowUpdate
 One table may support more than one branch backing type by declaring multiple blocks:
 
 ```ts
-policy.todos.forBranch(policy.projects, ({ $branch }) => {
-  policy.todos.allowRead.where({ projectId: $branch.id });
+policy.todos.forBranch(policy.projects, ({ $branch, branchPolicy }) => {
+  branchPolicy.allowRead.where({ projectId: $branch.id });
 });
 
-policy.todos.forBranch(policy.workspaces, ({ $branch }) => {
-  policy.todos.allowRead.where({ workspaceId: $branch.id });
+policy.todos.forBranch(policy.workspaces, ({ $branch, branchPolicy }) => {
+  branchPolicy.allowRead.where({ workspaceId: $branch.id });
 });
 ```
 
