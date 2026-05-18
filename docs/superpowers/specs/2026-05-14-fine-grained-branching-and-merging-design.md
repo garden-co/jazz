@@ -1,12 +1,16 @@
 # Fine-Grained Branching And Merging Design
 
+For now, only
+[2026-05-14-fine-grained-branching-and-merging-user-facing.md](2026-05-14-fine-grained-branching-and-merging-user-facing.md)
+should be treated as the proposal to review. Choices in this file are notes, not decisions.
+
 ## Goal
 
 Add sparse branches for draft and collaborative editing.
 
 Branches provide write isolation by visibility only. A normal read from `main` does not see branch
-writes. Non-main branch ids are Jazz object ids, and access to a branch inherits from the normal
-permissions on that backing object.
+writes. Non-main branch ids are Jazz object ids, and branch access is controlled by explicit
+branch-scoped permission rules in `permissions.ts`.
 
 The first implementation supports branch reads and writes as overlays on `main`, scoped diffs from
 a branch query to `main`, and merges from a branch to `main`.
@@ -16,15 +20,14 @@ a branch query to `main`, and merges from a branch to `main`.
 - No durable Jazz-managed branch registry in the MVP. Apps may create their own branch metadata
   tables.
 - No branch lifecycle state such as open, closed, or archived.
-- No formal idempotence guarantee for merge. Repeating the same merge may create extra history.
 - No supported branch-of-branch API in the MVP.
-- No branch-specific permission API in the MVP. Branch permissions inherit from backing object
-  permissions.
+- No schema-level branch declaration in the MVP. Branch backing types are declared in
+  `permissions.ts`, not `schema.ts`.
 
 ## Branch Model
 
-`main` is the reserved system branch. Every non-main branch id must be a Jazz object id. The object
-that owns that id is the branch's backing object for permissions.
+`main` is the reserved system branch. Every non-main branch id must be a Jazz object id. The row
+that owns that id is the branch's backing row.
 
 A branch exists because rows have been written with that branch id.
 
@@ -51,12 +54,27 @@ Because there is no branch registry or branch ancestry metadata, the system has 
 for a longer fallback chain. Branch-of-branch can be added later, but it needs an explicit ancestry
 mechanism.
 
+## Possible Future Branch Isolation
+
+We may provide stronger branch isolation later in one of two brief shapes:
+
+1. Track device versions and create a branch frontier from the device versions visible when the
+   branch starts.
+2. Use query-based scope: the branch can only read data from that scope, and Jazz stores the row
+   versions used by that query as the branch frontier.
+
+This is only a memory note. It is not part of the proposal to review now.
+
 ## Permission Model
 
-Branch permissions inherit from the branch backing object.
+Branch permissions are declared per data table in `permissions.ts` with `forBranch(...)`.
 
-There is no separate branch creation API. Creating a branch means creating the backing object
-through normal `db.insert(...)`, then using that object's Jazz-created id as the branch id.
+The backing row's table chooses which `forBranch(...)` block applies. If the selected branch id does
+not resolve to a row, or resolves to a table with no matching `forBranch(...)` block for the data
+table being accessed, all branch permissions for that access fail.
+
+There is no separate branch creation API. Creating a branch means creating the backing row through
+normal `db.insert(...)`, then using that row's Jazz-created id as the branch id.
 
 Most apps that want branch metadata can create an app-level `branches` table and use its row ids as
 branch ids.
@@ -71,33 +89,77 @@ const { value: branch } = db.insert(app.branches, {
 const draft = db.branch(branch.id);
 ```
 
-The common app pattern is that a user who can insert a branch metadata row also creates it with
-fields that make the row readable and updatable by that same user. After creation, branch access
-follows the normal read/update policy for the created branch row.
+The common app pattern is that a user creates a branch metadata row, then policies for draft data
+state how that draft data relates to the backing row.
 
-The backing object does not have to live in `app.branches`. Any Jazz-created row id can identify a
+The backing row does not have to live in `app.branches`. Any Jazz-created row id can identify a
 branch, such as a project id, document id, or app-specific workflow row id. The table that owns the
-id defines the permission anchor.
+id defines which `forBranch(...)` block is eligible.
+
+Example:
+
+```ts
+export default definePermissions(app, ({ policy, session }) => {
+  policy.todos.forBranch(policy.projects, ({ $branch }) => {
+    policy.todos.allowRead.where({ projectId: $branch.id });
+    policy.todos.allowInsert.where({
+      projectId: $branch.id,
+      createdBy: session.user_id,
+    });
+    policy.todos.allowUpdate.where({ projectId: $branch.id });
+    policy.todos.allowDelete.where({ projectId: $branch.id });
+  });
+});
+```
+
+Here `$branch` is the resolved `projects` row. Jazz does not infer any relationship between
+`todos` and `projects` from the schema; the policy expresses that relationship through
+`projectId: $branch.id`.
+
+Multiple backing tables are allowed for one data table when explicitly declared:
+
+```ts
+policy.todos.forBranch(policy.projects, ({ $branch }) => {
+  policy.todos.allowRead.where({ projectId: $branch.id });
+});
+
+policy.todos.forBranch(policy.workspaces, ({ $branch }) => {
+  policy.todos.allowRead.where({ workspaceId: $branch.id });
+});
+```
+
+At runtime, Jazz resolves the branch id through row locator storage:
+
+```text
+branch object id -> row locator -> backing table + origin schema hash -> current backing row
+```
+
+The backing table selects the matching `forBranch(...)` block. Schema lenses may be needed to
+resolve old backing rows to the current table shape before evaluating `$branch`.
+
+Resolving the backing row does not require the normal read policy for that backing table to pass.
+The backing row is policy context for `$branch`; the matching `forBranch(...)` block decides whether
+the branch operation is allowed. Apps should still define normal policies on branch metadata tables
+when users need to list or edit those metadata rows directly.
 
 In enforcing runtimes:
 
-- `db.branch(objectId)` must resolve `objectId` to a visible backing object.
-- Branch reads and query-builder branch reads require read permission on the backing object.
-- Branch writes require update permission on the backing object.
-- Branch diff requires read permission on the backing object.
-- Branch merge requires update permission on the backing object and must also pass normal target-row
-  write permissions on `main`.
+- `db.branch(objectId)` must resolve `objectId` to a backing row.
+- Branch reads and query-builder branch reads require a matching `forBranch(...)` block whose
+  branch-scoped `read` rule passes.
+- Branch writes require a matching `forBranch(...)` block whose branch-scoped `insert`, `update`, or
+  `delete` rule passes.
+- Branch diff requires the branch-scoped `read` rules needed to evaluate the selected query.
+- Branch merge requires the branch-scoped rules for the source branch data and must also pass normal
+  target-row write permissions on `main`.
 
-Normal row and table permissions still apply to the data read or written through the branch. The
-backing object permission is an additional gate for using the branch id; it does not grant access to
-unrelated rows.
+Normal non-branch row and table permissions still apply to `main`. Branch-scoped rules only apply
+when a branch id is selected. If a table has normal `allowRead` rules but no matching
+`forBranch(...)` block, those normal rules do not grant branch access.
 
 In permissive local runtimes without a loaded permission bundle, branch id object resolution may be
 best-effort, matching existing local permissive behavior. Enforcing runtimes must fail closed if the
-backing object cannot be resolved or is not allowed by policy.
-
-Branch-specific permission hooks, such as `allowBranchRead` or `allowBranchMerge`, are future work.
-The MVP keeps the rule simple by inheriting from normal object permissions.
+backing row cannot be resolved or no matching branch-scoped rule grants the operation.
 
 ## Parent Links
 
@@ -206,25 +268,26 @@ the corresponding main row.
 
 ## Diff Semantics
 
-Query-builder diff compares a source branch query with `main`.
+Query-builder diff compares a source branch query with current `main`.
 
 ```ts
 app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff();
 ```
 
 The source branch comes from the query builder's `.branch(...)` selection, or from the enclosing
-branch-scoped database view if the query does not select a branch directly. The target is `main`.
+branch-scoped database view if the query does not select a branch directly. The target is current
+`main`.
 
 The diff candidate set is concrete and non-circular:
 
 1. Evaluate the query against the source branch overlay.
-2. Evaluate the same query against `main`.
+2. Evaluate the same query against current `main`.
 3. Take the union of those row ids.
 4. Compute the merged preview only for that candidate set.
 
 This prevents a branch edit from hiding a row just because it no longer matches the query on one
 side. A row that would match only after merge, but matches neither source nor target before merge,
-is not included by query-scoped diff in the first version.
+is not included by query-builder diff in the first version.
 
 Within that scope, diff compares the source overlay rows with target rows, including branch
 tombstones and branch inserts.
@@ -305,9 +368,10 @@ diff. Merge always resolves through the merge strategies.
 If a merge strategy cannot compute a value, merge fails before writing anything for that merge
 batch.
 
-Repeated merges may write extra history. Concurrent repeated merges may also produce a diamond on
-`main`, for example when two callers merge the same source branch tip into the same target tip at
-the same time.
+Repeated merges of an already incorporated source branch tip should be no-ops when the runtime can
+prove the source tip is already reachable from `main`, or when the computed merged values equal the
+current target values. Concurrent repeated merges may still produce a diamond on `main`, for example
+when two callers merge the same source branch tip into the same target tip at the same time.
 
 Visible resolution must treat equivalent duplicate merge outputs as one logical contribution. In
 particular, if multiple `main` frontier tips incorporate the same source branch tip and produce the
@@ -353,12 +417,13 @@ Required coverage:
 - branch write is invisible from `main`
 - branch read falls back to current `main`
 - non-main branch ids must be Jazz object ids
-- enforcing runtimes deny branch access when the backing object is not readable
-- branch writes require update permission on the backing object
-- merge requires update permission on the backing object plus normal target-row write permission
+- enforcing runtimes deny branch access when `forBranch(...)` is missing
+- branch reads require a matching branch-scoped read rule
+- branch writes require matching branch-scoped write rules
+- merge requires matching branch-scoped source rules plus normal target-row write permission
 - query-builder branch selection uses branch overlay reads
 - query-level branch selection overrides a branch-scoped database default
-- query-builder diff compares the selected source branch with `main`
+- query-builder diff compares the selected source branch with current `main`
 - query-builder diff includes rows matching the query on the source or target side
 - branch edit overrides current `main`
 - branch delete hides current `main`
@@ -370,7 +435,7 @@ Required coverage:
 - merge excludes branch writes that are not locally visible when merge starts
 - diff detects strategy-defined overlap
 - merge resolves through merge strategies
-- repeated merge may create extra history while visible result remains stable
+- repeated merge of an already incorporated source tip is a no-op when reachable from `main`
 - concurrent repeated merges can produce a diamond without double-applying the same source change
 - cross-branch parent links resolve correctly
 - cross-branch parent refs include branch id plus batch id
