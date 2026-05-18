@@ -1605,26 +1605,64 @@ export class Db {
     return result;
   }
 
+  /**
+   * Remove the OPFS file backing `namespace`, retrying transient
+   * OPFS-locked failures.
+   *
+   * By the time this runs we hold the leader lock, so the leader tab's
+   * dedicated worker has finished `runShutdown()` — it was gracefully
+   * shut down *and* `terminate()`d. But Chrome releases a terminated
+   * worker's `FileSystemSyncAccessHandle` only when it finishes tearing
+   * the worker down, which happens asynchronously after `terminate()`
+   * returns (typically within a few hundred ms). Until then
+   * `removeEntry` rejects with `NoModificationAllowedError` /
+   * `InvalidStateError`.
+   *
+   * Holding the leader lock proves leadership was released; it does not
+   * prove the OS-level handle is gone. So we poll the real condition —
+   * retry the delete with capped backoff — the same handle conflict the
+   * OPFS *open* path already absorbs (`OpfsFile::open` in
+   * `crates/opfs-btree/src/file.rs`). If it is still locked after the
+   * budget, a live tab is genuinely holding it open: surface the
+   * actionable error.
+   */
   private async removeBrowserStorageNamespace(namespace: string): Promise<void> {
     const rootDirectory = await navigator.storage.getDirectory();
     const fileName = `${namespace}.opfsbtree`;
-    try {
-      await rootDirectory.removeEntry(fileName, { recursive: false });
-    } catch (error) {
-      const name = (error as { name?: string } | undefined)?.name;
-      if (name === "NotFoundError") {
+
+    // ~4.25s total budget across 12 attempts: well past the few-hundred-ms
+    // GC lag, bounded so a genuinely stuck handle still surfaces an error.
+    const maxAttempts = 12;
+    const baseDelayMs = 50;
+    const maxDelayMs = 500;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        await rootDirectory.removeEntry(fileName, { recursive: false });
         return;
-      }
-      if (name === "NoModificationAllowedError" || name === "InvalidStateError") {
+      } catch (error) {
+        const name = (error as { name?: string } | undefined)?.name;
+        if (name === "NotFoundError") {
+          return;
+        }
+        const opfsLocked = name === "NoModificationAllowedError" || name === "InvalidStateError";
+        if (opfsLocked && attempt < maxAttempts - 1) {
+          await sleep(Math.min(baseDelayMs * 2 ** attempt, maxDelayMs));
+          continue;
+        }
+        if (opfsLocked) {
+          throw new Error(
+            `Failed to delete browser storage for "${namespace}" because OPFS is still ` +
+              `locked after ${maxAttempts} attempts. Another tab is holding it open — ` +
+              `close it and retry.`,
+          );
+        }
         throw new Error(
-          `Failed to delete browser storage for "${namespace}" because OPFS is locked by another tab. Close other tabs and retry.`,
+          `Failed to delete browser storage for "${namespace}": ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         );
       }
-      throw new Error(
-        `Failed to delete browser storage for "${namespace}": ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
     }
   }
 
