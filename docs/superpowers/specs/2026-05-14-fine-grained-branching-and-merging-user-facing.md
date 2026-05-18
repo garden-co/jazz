@@ -232,17 +232,3 @@ Merge publishes to `main`. The first version does not expose a merge target argu
 Merge only includes the local version of the branch that is visible when merge starts. It does not
 wait for remote sync. If another device has written to the branch but that write has not arrived
 locally yet, this merge does not include it.
-
-### Typical Product Flow
-
-An app can use the APIs like this:
-
-1. Create the app object that scopes the draft, such as a project.
-2. Create a branch metadata row, such as `app.branches`, for that draft.
-3. Use that branch row's Jazz-created id as the branch id.
-4. Define `forBranch(...)` rules for the tables that can be read or written through that branch.
-5. Write draft changes through `db.branch(branch.id)`.
-6. Render draft views with query-builder `.branch(branch.id)`.
-7. Preview publish impact with query-builder `.diff()`.
-8. Show changed rows using the normal row fields plus `$diff`.
-9. Publish with `db.branch(branch.id).merge()`.
