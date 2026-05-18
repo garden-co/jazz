@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { BrowserAuthSecretStore } from "jazz-tools";
+import { useLocalFirstAuth } from "jazz-tools/react";
 
 type Status =
   | { kind: "idle" }
@@ -20,12 +20,10 @@ export function AuthBackup({
   redirectAfterRestore?: string;
   mode?: "full" | "restore-only";
 } = {}) {
+  const auth = useLocalFirstAuth();
+
   function navigate() {
-    if (redirectAfterRestore) {
-      location.assign(redirectAfterRestore);
-    } else {
-      location.reload();
-    }
+    if (redirectAfterRestore) location.assign(redirectAfterRestore);
   }
   const [phrase, setPhrase] = useState<string | null>(null);
   const [restoreInput, setRestoreInput] = useState("");
@@ -36,13 +34,12 @@ export function AuthBackup({
     setStatus({ kind: "idle" });
     setBusy(true);
     try {
-      const secret = await BrowserAuthSecretStore.loadSecret();
-      if (!secret) {
+      if (!auth.secret) {
         setStatus({ kind: "error", message: "No local secret to reveal yet." });
         return;
       }
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-      setPhrase(RecoveryPhrase.fromSecret(secret));
+      setPhrase(RecoveryPhrase.fromSecret(auth.secret));
     } catch (err) {
       setStatus({ kind: "error", message: describeError(err) });
     } finally {
@@ -70,10 +67,11 @@ export function AuthBackup({
     try {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
       const secret = RecoveryPhrase.toSecret(restoreInput.trim());
-      await BrowserAuthSecretStore.saveSecret(secret);
+      await auth.login(secret);
       navigate();
     } catch (err) {
       setStatus({ kind: "error", message: describeError(err) });
+    } finally {
       setBusy(false);
     }
   }
@@ -82,8 +80,7 @@ export function AuthBackup({
     setStatus({ kind: "idle" });
     setBusy(true);
     try {
-      const secret = await BrowserAuthSecretStore.loadSecret();
-      if (!secret) {
+      if (!auth.secret) {
         setStatus({ kind: "error", message: "No local secret to back up yet." });
         return;
       }
@@ -92,7 +89,7 @@ export function AuthBackup({
         appName: PASSKEY_APP_NAME,
         appHostname: PASSKEY_APP_HOSTNAME,
       });
-      await pb.backup(secret, "My account");
+      await pb.backup(auth.secret, "My account");
       setStatus({ kind: "success", message: "Passkey backup created." });
     } catch (err) {
       setStatus({ kind: "error", message: describeError(err) });
@@ -111,10 +108,11 @@ export function AuthBackup({
         appHostname: PASSKEY_APP_HOSTNAME,
       });
       const secret = await pb.restore();
-      await BrowserAuthSecretStore.saveSecret(secret);
+      await auth.login(secret);
       navigate();
     } catch (err) {
       setStatus({ kind: "error", message: describeError(err) });
+    } finally {
       setBusy(false);
     }
   }

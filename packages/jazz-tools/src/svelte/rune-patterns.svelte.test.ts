@@ -137,8 +137,8 @@ describe("applyDelta only touches changed rows", () => {
 
 describe("$state callback patterns", () => {
   it("onfulfilled delivers data and clears loading", () => {
-    let current: any[] | undefined = $state();
-    let loading: boolean = $state(true);
+    let current: any[] | undefined;
+    let loading = true;
 
     const onfulfilled = (data: any[]) => {
       current = data;
@@ -148,7 +148,7 @@ describe("$state callback patterns", () => {
     onfulfilled([{ id: "1", title: "Alice's todo" }]);
     flushSync();
 
-    expect($state.snapshot(current)).toEqual([{ id: "1", title: "Alice's todo" }]);
+    expect(current).toEqual([{ id: "1", title: "Alice's todo" }]);
     expect(loading).toBe(false);
   });
 
@@ -270,9 +270,9 @@ describe("$state callback patterns", () => {
   });
 
   it("onError surfaces error and clears current", () => {
-    let current: any[] | undefined = $state([{ id: "1" }]);
-    let loading: boolean = $state(false);
-    let error: Error | null = $state(null);
+    let current: any[] | undefined = [{ id: "1" }];
+    let loading = false;
+    let error: Error | null = null;
 
     const onError = (e: unknown) => {
       error = e instanceof Error ? e : new Error(String(e));
@@ -290,7 +290,7 @@ describe("$state callback patterns", () => {
   });
 
   it("onError wraps non-Error values in Error", () => {
-    let error: Error | null = $state(null);
+    let error: Error | null = null;
 
     const onError = (e: unknown) => {
       error = e instanceof Error ? e : new Error(String(e));
@@ -304,10 +304,9 @@ describe("$state callback patterns", () => {
   });
 
   it("synchronous throw during setup is caught and surfaced", () => {
-    let error: Error | null = $state(null);
-    let loading: boolean = $state(true);
+    let error: Error | null = null;
+    let loading = true;
 
-    // Mirrors the try/catch in the $effect body
     try {
       throw new Error("getCacheEntry exploded");
     } catch (e) {
@@ -349,15 +348,15 @@ describe("fulfilled cache entry provides initial data", () => {
       subscribe: vi.fn(() => vi.fn()),
     };
 
-    let current: any[] | undefined = $state();
-    let loading: boolean = $state(true);
+    let current: any[] | undefined;
+    let loading = true;
 
     if (entry.state.status === "fulfilled") {
       current = entry.state.data;
       loading = false;
     }
 
-    expect($state.snapshot(current)).toEqual([alice]);
+    expect(current).toEqual([alice]);
     expect(loading).toBe(false);
   });
 });
