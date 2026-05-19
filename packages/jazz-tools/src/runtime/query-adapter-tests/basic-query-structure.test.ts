@@ -24,6 +24,25 @@ describe("basic query structure", () => {
     expect(result.joins).toBeUndefined();
   });
 
+  it("translates branch scope metadata", () => {
+    const builderJson = JSON.stringify({
+      table: "todos",
+      branch: "branch-row-id",
+      branchScope: {
+        branchId: "branch-row-id",
+      },
+      conditions: [],
+      includes: {},
+      orderBy: [],
+    });
+
+    const result = parseTranslatedQuery(builderJson, basicSchema);
+
+    expect(result.branch_scope).toEqual({
+      branch_id: "branch-row-id",
+    });
+  });
+
   it("translates limit and offset", () => {
     const builderJson = JSON.stringify({
       table: "todos",

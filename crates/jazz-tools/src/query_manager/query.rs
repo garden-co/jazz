@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::object::ObjectId;
 use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey, SortTarget};
@@ -572,6 +573,8 @@ pub struct Query {
     /// For multi-branch queries, results are combined with LWW merge for same ObjectId.
     #[serde(default)]
     pub branches: Vec<String>,
+    #[serde(default)]
+    pub branch_scope: Option<BranchScopeSelector>,
     /// Joined tables.
     #[serde(default)]
     pub joins: Vec<JoinSpec>,
@@ -610,6 +613,11 @@ pub struct Query {
     /// Query compilation executes through this IR. The builder DSL fields are
     /// retained as construction syntax and normalized into relation IR.
     pub relation_ir: crate::query_manager::relation_ir::RelExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchScopeSelector {
+    pub branch_id: ObjectId,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -658,6 +666,7 @@ impl Query {
             table,
             alias: None,
             branches: Vec::new(),
+            branch_scope: None,
             joins: Vec::new(),
             disjuncts: vec![Conjunction::new()],
             order_by: Vec::new(),

@@ -44,6 +44,8 @@ export interface NormalizedIncludeSpec {
 
 export interface NormalizedBuiltQuery {
   table: string;
+  branch?: string;
+  branchScope?: { branchId: string };
   conditions: BuiltCondition[];
   includes: NormalizedIncludeSpec;
   requireIncludes: boolean;
@@ -57,6 +59,8 @@ export interface NormalizedBuiltQuery {
 
 type BuiltQueryShape = {
   table?: unknown;
+  branch?: unknown;
+  branchScope?: unknown;
   conditions?: unknown;
   includes?: unknown;
   __jazz_requireIncludes?: unknown;
@@ -252,6 +256,11 @@ export function normalizeBuiltQuery(raw: unknown, fallbackTable: string): Normal
 
   return {
     table: typeof value.table === "string" && value.table.length > 0 ? value.table : fallbackTable,
+    branch: typeof value.branch === "string" ? value.branch : undefined,
+    branchScope:
+      isPlainObject(value.branchScope) && typeof value.branchScope.branchId === "string"
+        ? { branchId: value.branchScope.branchId }
+        : undefined,
     conditions: normalizeConditions(value.conditions),
     includes: normalizeIncludeEntries(value.includes),
     requireIncludes: value[INTERNAL_REQUIRE_INCLUDES_KEY] === true,

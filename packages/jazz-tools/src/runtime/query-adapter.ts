@@ -810,6 +810,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const projectedColumns = visibleSelectColumns(selectColumns, includeProjectionColumns);
   const query = {
     table: builder.table,
+    ...(builder.branchScope ? { branch_scope: { branch_id: builder.branchScope.branchId } } : {}),
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
       hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: builder.requireIncludes,
