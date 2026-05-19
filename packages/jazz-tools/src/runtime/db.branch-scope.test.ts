@@ -162,4 +162,29 @@ describe("branch scoped Db", () => {
     expect(JSON.parse(updateContextJson).target_branch_name).toBe(branchId);
     expect(JSON.parse(deleteContextJson).target_branch_name).toBe(branchId);
   });
+
+  it("merges branch scopes through the runtime", async () => {
+    const runtime = {
+      createBranchScope: vi.fn(),
+      mergeBranchScope: vi.fn(() => "batch-merge"),
+      query: vi.fn(async () => []),
+      onMutationError: vi.fn(),
+      getSchema: vi.fn(() => schema),
+    } as unknown as Runtime & {
+      createBranchScope: ReturnType<typeof vi.fn>;
+      mergeBranchScope: ReturnType<typeof vi.fn>;
+    };
+    const client = JazzClient.connectWithRuntime(runtime, {
+      appId: "branch-scope-test",
+      schema,
+    });
+    const db = new TestDb(client);
+    const app = { todos: todosTable() };
+
+    const draft = await db.createBranch(branchId, app.todos.where({ projectId }));
+    const handle = draft.merge();
+
+    expect(runtime.mergeBranchScope).toHaveBeenCalledWith(branchId);
+    expect(handle.batchId).toBe("batch-merge");
+  });
 });

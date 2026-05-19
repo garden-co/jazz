@@ -298,6 +298,54 @@ fn branch_diff_compares_source_to_captured_base_and_current_main() {
 }
 
 #[test]
+fn branch_merge_writes_source_to_main_with_cross_branch_parent() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let branch_id = ObjectId::new();
+    qm.capture_branch_scope(&mut storage, branch_id, qm.query("users").build())
+        .unwrap();
+
+    let branch = branch_id.to_string();
+    let base_row = load_visible_row(&storage, alice.row_id, &get_branch(&qm));
+    let base_provenance = base_row.row_provenance();
+    let branch_batch_id = qm
+        .write_existing_row_on_branch_with_write_context(
+            &mut storage,
+            RowBranchWrite {
+                table: "users",
+                branch: &branch,
+                id: alice.row_id,
+                values: &[Value::Text("Alice".into()), Value::Integer(90)],
+                old_data_for_policy: &base_row.data,
+                old_provenance_for_policy: &base_provenance,
+            },
+            None,
+        )
+        .unwrap();
+
+    qm.merge_branch_scope(&mut storage, branch_id).unwrap();
+
+    let query = qm.query("users").build();
+    let rows = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(rows[0].1[1], Value::Integer(90));
+
+    let merged = load_visible_row(&storage, alice.row_id, &get_branch(&qm));
+    assert!(
+        merged.parents.contains(&branch_batch_id),
+        "merged main row should keep branch source batch as a parent"
+    );
+}
+
+#[test]
 fn branch_scope_delete_hides_captured_base_row() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();

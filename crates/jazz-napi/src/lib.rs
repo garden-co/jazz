@@ -1004,6 +1004,18 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Create branch scope failed: {e}")))
     }
 
+    #[napi(js_name = "mergeBranchScope")]
+    pub fn merge_branch_scope(&self, branch_id: String) -> napi::Result<Option<String>> {
+        let branch_id = parse_external_object_id(Some(&branch_id))
+            .map_err(napi::Error::from_reason)?
+            .ok_or_else(|| napi::Error::from_reason("Missing branch id"))?;
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .merge_branch_scope(branch_id)
+            .map_err(|e| napi::Error::from_reason(format!("Merge branch scope failed: {e}")))
+    }
+
     // =========================================================================
     // Subscriptions
     // =========================================================================

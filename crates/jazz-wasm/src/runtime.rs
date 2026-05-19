@@ -1438,6 +1438,17 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Create branch scope failed: {e}")))
     }
 
+    #[wasm_bindgen(js_name = mergeBranchScope)]
+    pub fn merge_branch_scope(&self, branch_id: &str) -> Result<Option<String>, JsError> {
+        let branch_id = parse_external_object_id(Some(branch_id))
+            .map_err(|message| JsError::new(&message))?
+            .ok_or_else(|| JsError::new("Missing branch id"))?;
+        self.core
+            .borrow_mut()
+            .merge_branch_scope(branch_id)
+            .map_err(|e| JsError::new(&format!("Merge branch scope failed: {e}")))
+    }
+
     /// Update a row by ObjectId.
     #[wasm_bindgen]
     pub fn update(&self, object_id: &str, values: JsValue) -> Result<JsValue, JsError> {

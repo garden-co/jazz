@@ -561,6 +561,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         Ok(())
     }
 
+    pub fn merge_branch_scope(
+        &mut self,
+        branch_id: ObjectId,
+    ) -> Result<Option<String>, RuntimeError> {
+        let batch_ids = self
+            .schema_manager
+            .query_manager_mut()
+            .merge_branch_scope(&mut self.storage, branch_id)?;
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(batch_ids.last().map(ToString::to_string))
+    }
+
     // =========================================================================
     // Schema/State Access
     // =========================================================================

@@ -6,13 +6,7 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type {
-  InsertValues,
-  Value,
-  RowDelta,
-  SubscriptionWireDelta,
-  WasmSchema,
-} from "../drivers/types.js";
+import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
@@ -79,6 +73,7 @@ export interface Runtime {
     options_json?: string | null,
   ): Promise<any>;
   createBranchScope?(branch_id: string, query_json: string): void;
+  mergeBranchScope?(branch_id: string): string | null | undefined;
   subscribe(
     query_json: string,
     on_update: Function,
@@ -1920,6 +1915,14 @@ export class JazzClient {
       throw new Error("createBranchScope is not supported by this runtime");
     }
     this.runtime.createBranchScope(branchId, resolveQueryJson(query));
+  }
+
+  mergeBranchScope(branchId: string): WriteHandle {
+    if (!this.runtime.mergeBranchScope) {
+      throw new Error("mergeBranchScope is not supported by this runtime");
+    }
+    const batchId = this.runtime.mergeBranchScope(branchId) ?? "";
+    return new WriteHandle(batchId, this);
   }
 
   /**

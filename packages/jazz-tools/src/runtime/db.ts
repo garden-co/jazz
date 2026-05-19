@@ -739,6 +739,7 @@ export class BranchDb {
   constructor(
     private readonly base: Db,
     private readonly branchId: string,
+    private readonly client?: JazzClient,
   ) {}
 
   private scopeQuery<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -798,6 +799,10 @@ export class BranchDb {
 
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: UpdateOptions): WriteHandle {
     return this.base.delete(table, id, { ...options, branch: this.branchId });
+  }
+
+  merge(): WriteHandle {
+    return (this.client ?? this.base.defaultClient()).mergeBranchScope(this.branchId);
   }
 }
 
@@ -1893,11 +1898,19 @@ export class Db {
       builtQuery.table,
     );
     client.createBranchScope(branchId, translateQuery(builderJson, planningSchema));
-    return new BranchDb(this, branchId);
+    return new BranchDb(this, branchId, client);
   }
 
   branch(branchId: string): BranchDb {
     return new BranchDb(this, branchId);
+  }
+
+  defaultClient(): JazzClient {
+    const first = this.clients.values().next();
+    if (first.done) {
+      throw new Error("mergeBranch requires an initialized database client");
+    }
+    return first.value;
   }
 
   /**

@@ -48,6 +48,14 @@ struct PreparedUpdateWrite {
     row_layout: Arc<crate::row_format::CompiledRowLayout>,
 }
 
+struct BranchMergeContext<'a> {
+    table: &'a str,
+    target_branch: &'a str,
+    source_branch: &'a str,
+    descriptor: &'a RowDescriptor,
+    indexed_columns: Option<&'a [ColumnName]>,
+}
+
 struct PreparedUpdateCommit<'a> {
     table: &'a str,
     branch: &'a str,
@@ -1176,6 +1184,254 @@ impl QueryManager {
     ) -> Result<InsertResult, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.insert_with_write_context(storage, table, values, owned.as_ref())
+    }
+
+    pub fn merge_branch_scope<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        branch_id: ObjectId,
+    ) -> Result<Vec<BatchId>, QueryError> {
+        let snapshot = storage
+            .load_branch_scope_snapshot(branch_id)
+            .map_err(|err| QueryError::EncodingError(format!("load branch scope: {err}")))?
+            .ok_or(QueryError::ObjectNotFound(branch_id))?;
+        let table = snapshot.scope_query.table.as_str().to_string();
+        let target_branch = self.current_branch();
+        let source_branch = branch_id.to_string();
+        let table_name = TableName::new(table.as_str());
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            target_branch.as_str(),
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        let descriptor = table_write.descriptor.clone();
+        let indexed_columns = table_write.indexed_columns.clone();
+
+        let mut merged = Vec::new();
+        for source in storage
+            .scan_visible_region(table.as_str(), source_branch.as_str())
+            .map_err(|err| QueryError::EncodingError(format!("scan branch rows: {err}")))?
+        {
+            if !Self::branch_merge_source_in_scope(
+                &snapshot,
+                table.as_str(),
+                descriptor.as_ref(),
+                &source,
+            )? {
+                continue;
+            }
+            let context = BranchMergeContext {
+                table: table.as_str(),
+                target_branch: target_branch.as_str(),
+                source_branch: source_branch.as_str(),
+                descriptor: descriptor.as_ref(),
+                indexed_columns: indexed_columns.as_deref().map(Vec::as_slice),
+            };
+            let Some(batch_id) = self.merge_branch_source_row(storage, context, &source)? else {
+                continue;
+            };
+            merged.push(batch_id);
+        }
+
+        Ok(merged)
+    }
+
+    fn branch_merge_source_in_scope(
+        snapshot: &BranchScopeSnapshot,
+        table: &str,
+        descriptor: &RowDescriptor,
+        source: &StoredRowBatch,
+    ) -> Result<bool, QueryError> {
+        if snapshot.entry_for(table, source.row_id).is_some() {
+            return Ok(true);
+        }
+        if source.is_soft_deleted() || source.is_hard_deleted() {
+            return Ok(false);
+        }
+        let values = decode_row(descriptor, &source.data)
+            .map_err(|err| QueryError::EncodingError(err.to_string()))?;
+        Ok(values_match_scope_query(
+            &snapshot.scope_query,
+            descriptor,
+            source.row_id,
+            &values,
+        ))
+    }
+
+    fn merge_branch_source_row<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        context: BranchMergeContext<'_>,
+        source: &StoredRowBatch,
+    ) -> Result<Option<BatchId>, QueryError> {
+        let BranchMergeContext {
+            table,
+            target_branch,
+            source_branch,
+            descriptor,
+            indexed_columns,
+        } = context;
+        let target = storage
+            .load_visible_query_row(table, target_branch, source.row_id)
+            .map_err(|err| QueryError::EncodingError(format!("load target row: {err}")))?;
+
+        if target.as_ref().is_some_and(|target| {
+            target.data == source.data && target.delete_kind == source.delete_kind
+        }) {
+            return Ok(None);
+        }
+
+        self.ensure_merge_parent_row_on_branch(
+            storage,
+            table,
+            target_branch,
+            source_branch,
+            source.row_id,
+            source.batch_id,
+        )?;
+
+        let mut parents = Vec::new();
+        if let Some(target) = target.as_ref() {
+            parents.push(target.batch_id);
+        }
+        parents.push(source.batch_id);
+        parents.sort();
+        parents.dedup();
+
+        let index_mutations = self.branch_merge_index_mutations(
+            table,
+            target_branch,
+            source,
+            target.as_ref(),
+            descriptor,
+            indexed_columns,
+        );
+        let provenance = source.row_provenance();
+        let row = self.authored_row_batch(
+            source.row_id,
+            target_branch,
+            parents,
+            source.data.to_vec(),
+            self.row_batch_authoring(&provenance, source.delete_kind, None),
+        );
+        let branch_name = BranchName::new(target_branch);
+        let (batch_id, visibility_change) = self.apply_local_row_history_write(
+            storage,
+            table,
+            &branch_name,
+            source.row_id,
+            row,
+            &index_mutations,
+        )?;
+        self.maybe_record_local_direct_settlement(
+            storage,
+            &branch_name,
+            source.row_id,
+            batch_id,
+            None,
+            &visibility_change,
+        )?;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
+        }
+        Ok(Some(batch_id))
+    }
+
+    fn ensure_merge_parent_row_on_branch<H: Storage>(
+        &self,
+        storage: &mut H,
+        table: &str,
+        target_branch: &str,
+        source_branch: &str,
+        row_id: ObjectId,
+        source_batch_id: BatchId,
+    ) -> Result<(), QueryError> {
+        if storage
+            .load_history_row_batch(table, target_branch, row_id, source_batch_id)
+            .map_err(|err| QueryError::EncodingError(format!("load merge parent: {err}")))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let mut source_parent = storage
+            .load_history_row_batch(table, source_branch, row_id, source_batch_id)
+            .map_err(|err| QueryError::EncodingError(format!("load source parent: {err}")))?
+            .ok_or_else(|| {
+                QueryError::EncodingError(format!(
+                    "source merge parent {:?} missing for {:?}",
+                    source_batch_id, row_id
+                ))
+            })?;
+        source_parent.branch = target_branch.to_string().into();
+        source_parent.parents.clear();
+        storage
+            .append_history_region_rows(table, &[source_parent])
+            .map_err(|err| QueryError::EncodingError(format!("append merge parent: {err}")))
+    }
+
+    fn branch_merge_index_mutations<'a>(
+        &self,
+        table: &'a str,
+        target_branch: &'a str,
+        source: &'a StoredRowBatch,
+        target: Option<&'a QueryRowBatch>,
+        descriptor: &'a RowDescriptor,
+        indexed_columns: Option<&'a [ColumnName]>,
+    ) -> Vec<crate::storage::IndexMutation<'a>> {
+        if source.is_hard_deleted() {
+            return Self::index_mutations_for_hard_delete_on_branch(
+                table,
+                target_branch,
+                source.row_id,
+                target.map(|row| row.data.as_ref()),
+                descriptor,
+                indexed_columns,
+            );
+        }
+        if source.is_soft_deleted() {
+            return target
+                .map(|row| {
+                    Self::index_mutations_for_soft_delete_on_branch(
+                        table,
+                        target_branch,
+                        source.row_id,
+                        &row.data,
+                        descriptor,
+                        indexed_columns,
+                    )
+                })
+                .unwrap_or_default();
+        }
+        if target.is_some_and(QueryRowBatch::is_soft_deleted) {
+            return Self::index_mutations_for_undelete_on_branch(
+                table,
+                target_branch,
+                source.row_id,
+                &source.data,
+                descriptor,
+                indexed_columns,
+            );
+        }
+        if let Some(target) = target {
+            return Self::index_mutations_for_update_on_branch(
+                table,
+                target_branch,
+                source.row_id,
+                &target.data,
+                &source.data,
+                descriptor,
+                indexed_columns,
+            );
+        }
+        Self::index_mutations_for_insert_on_branch(
+            table,
+            target_branch,
+            source.row_id,
+            &source.data,
+            descriptor,
+            indexed_columns,
+        )
     }
 
     /// Insert a new row into a table on a specific branch.
