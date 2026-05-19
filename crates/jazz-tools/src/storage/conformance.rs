@@ -13,6 +13,7 @@ use crate::digest::Digest32;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::branch_scope::{BranchScopeEntry, BranchScopeSnapshot};
+use crate::query_manager::query::Query;
 use crate::query_manager::types::{
     ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableSchema, Value,
 };
@@ -1030,7 +1031,7 @@ pub fn test_branch_scope_snapshot_round_trip(factory: &dyn Fn() -> Box<dyn Stora
     let batch_id = BatchId::new();
     let snapshot = BranchScopeSnapshot::new(
         branch_id,
-        "todos-scope-v1".to_string(),
+        Query::new("todos"),
         vec![BranchScopeEntry {
             table: "todos".to_string(),
             row_id,
@@ -1051,7 +1052,7 @@ pub fn test_branch_scope_snapshot_round_trip(factory: &dyn Fn() -> Box<dyn Stora
 pub fn test_branch_scope_snapshot_delete(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let branch_id = ObjectId::new();
-    let snapshot = BranchScopeSnapshot::new(branch_id, "empty".to_string(), vec![]);
+    let snapshot = BranchScopeSnapshot::new(branch_id, Query::new("todos"), vec![]);
 
     storage.upsert_branch_scope_snapshot(&snapshot).unwrap();
     storage.delete_branch_scope_snapshot(branch_id).unwrap();

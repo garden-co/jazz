@@ -224,6 +224,68 @@ fn branch_scope_delete_hides_captured_base_row() {
 }
 
 #[test]
+fn branch_scope_insert_visible_when_it_matches_scope_query() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let branch_id = ObjectId::new();
+    let scope_query = qm
+        .query("users")
+        .filter_ge("score", Value::Integer(50))
+        .build();
+    qm.capture_branch_scope(&mut storage, branch_id, scope_query)
+        .unwrap();
+
+    let branch = branch_id.to_string();
+    let inserted = qm
+        .insert_on_branch(
+            &mut storage,
+            "users",
+            &branch,
+            &[Value::Text("Dora".into()), Value::Integer(99)],
+        )
+        .unwrap();
+
+    let query = qm.query("users").with_branch_scope(branch_id).build();
+    let rows = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(
+        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+        vec![inserted.row_id]
+    );
+}
+
+#[test]
+fn branch_scope_insert_hidden_when_it_misses_scope_query() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let branch_id = ObjectId::new();
+    let scope_query = qm
+        .query("users")
+        .filter_ge("score", Value::Integer(50))
+        .build();
+    qm.capture_branch_scope(&mut storage, branch_id, scope_query)
+        .unwrap();
+
+    let branch = branch_id.to_string();
+    qm.insert_on_branch(
+        &mut storage,
+        "users",
+        &branch,
+        &[Value::Text("Eve".into()), Value::Integer(1)],
+    )
+    .unwrap();
+
+    let query = qm.query("users").with_branch_scope(branch_id).build();
+    let rows = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert!(rows.is_empty());
+}
+
+#[test]
 fn query_builder_explicit_main_branch() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();

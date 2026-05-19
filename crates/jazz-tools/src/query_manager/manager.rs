@@ -20,9 +20,7 @@ use crate::sync_manager::{
     RowBatchKey, SchemaWarning, SyncManager,
 };
 
-use super::branch_scope::{
-    BranchScopeSnapshot, scope_entries_from_rows_with_default_branch, stable_scope_query_hash,
-};
+use super::branch_scope::{BranchScopeSnapshot, scope_entries_from_rows_with_default_branch};
 use super::encoding::decode_row;
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
@@ -1185,8 +1183,7 @@ impl QueryManager {
             )
         };
 
-        let snapshot =
-            BranchScopeSnapshot::new(branch_id, stable_scope_query_hash(&query), entries);
+        let snapshot = BranchScopeSnapshot::new(branch_id, query, entries);
         storage
             .upsert_branch_scope_snapshot(&snapshot)
             .map_err(|err| {

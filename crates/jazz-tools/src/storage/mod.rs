@@ -832,6 +832,7 @@ fn decode_local_batch_record_key(key: &str) -> Result<BatchId, StorageError> {
 fn branch_scope_snapshot_storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("scope_query_hash", ColumnType::Text),
+        ColumnDescriptor::new("scope_query_json", ColumnType::Text),
         ColumnDescriptor::new("entries_json", ColumnType::Text),
     ])
 }
@@ -850,6 +851,8 @@ fn decode_branch_scope_snapshot_key(key: &str) -> Result<ObjectId, StorageError>
 }
 
 fn encode_branch_scope_snapshot(snapshot: &BranchScopeSnapshot) -> Result<Vec<u8>, StorageError> {
+    let scope_query_json = serde_json::to_string(&snapshot.scope_query)
+        .map_err(|err| StorageError::IoError(format!("encode branch scope query: {err}")))?;
     let entries_json = serde_json::to_string(&snapshot.entries)
         .map_err(|err| StorageError::IoError(format!("encode branch scope entries: {err}")))?;
 
@@ -857,6 +860,7 @@ fn encode_branch_scope_snapshot(snapshot: &BranchScopeSnapshot) -> Result<Vec<u8
         &branch_scope_snapshot_storage_descriptor(),
         &[
             Value::Text(snapshot.scope_query_hash.clone()),
+            Value::Text(scope_query_json),
             Value::Text(entries_json),
         ],
     )
@@ -870,20 +874,23 @@ fn decode_branch_scope_snapshot(
     let values = decode_row(&branch_scope_snapshot_storage_descriptor(), bytes)
         .map_err(|err| StorageError::IoError(format!("decode branch scope snapshot: {err}")))?;
 
-    let [Value::Text(scope_query_hash), Value::Text(entries_json)] = values.as_slice() else {
+    let [
+        Value::Text(_scope_query_hash),
+        Value::Text(scope_query_json),
+        Value::Text(entries_json),
+    ] = values.as_slice()
+    else {
         return Err(StorageError::IoError(
             "branch scope snapshot storage row has unexpected shape".to_string(),
         ));
     };
 
+    let scope_query = serde_json::from_str(scope_query_json)
+        .map_err(|err| StorageError::IoError(format!("decode branch scope query: {err}")))?;
     let entries = serde_json::from_str(entries_json)
         .map_err(|err| StorageError::IoError(format!("decode branch scope entries: {err}")))?;
 
-    Ok(BranchScopeSnapshot::new(
-        branch_id,
-        scope_query_hash.clone(),
-        entries,
-    ))
+    Ok(BranchScopeSnapshot::new(branch_id, scope_query, entries))
 }
 
 fn branch_ord_by_name_storage_descriptor() -> RowDescriptor {

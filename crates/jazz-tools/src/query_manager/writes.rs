@@ -16,6 +16,7 @@ use crate::storage::{
 };
 use crate::sync_manager::RowBatchKey;
 
+use super::branch_scope::{BranchScopeEntry, BranchScopeSnapshot, values_match_scope_query};
 use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
@@ -1317,12 +1318,62 @@ impl QueryManager {
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
+        self.maybe_admit_branch_scope_insert(
+            storage,
+            table,
+            branch,
+            object_id,
+            row_batch_id,
+            values,
+            descriptor,
+        )?;
 
         Ok(InsertResult {
             row_id: object_id,
             batch_id: row_batch_id,
             row_values: values.to_vec(),
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn maybe_admit_branch_scope_insert<H: Storage>(
+        &self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: BatchId,
+        values: &[Value],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        let Some(branch_id) = uuid::Uuid::parse_str(branch).ok().map(ObjectId::from_uuid) else {
+            return Ok(());
+        };
+        let Some(snapshot) = storage
+            .load_branch_scope_snapshot(branch_id)
+            .map_err(|err| QueryError::EncodingError(format!("load branch scope: {err}")))?
+        else {
+            return Ok(());
+        };
+
+        if snapshot.scope_query.table.as_str() != table {
+            return Ok(());
+        }
+        if !values_match_scope_query(&snapshot.scope_query, descriptor, row_id, values) {
+            return Ok(());
+        }
+
+        let mut entries = snapshot.entries.clone();
+        entries.push(BranchScopeEntry {
+            table: table.to_string(),
+            row_id,
+            base_branch: BranchName::new(branch),
+            base_batch_id: batch_id,
+        });
+        let updated = BranchScopeSnapshot::new(branch_id, snapshot.scope_query, entries);
+        storage
+            .upsert_branch_scope_snapshot(&updated)
+            .map_err(|err| QueryError::EncodingError(format!("upsert branch scope: {err}")))
     }
 
     pub fn insert_on_branch_with_session<H: Storage>(
