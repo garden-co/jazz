@@ -576,7 +576,7 @@ fn table_rename_update_and_delete_copy_on_write() {
     manager.process(&mut storage);
 
     manager
-        .update_with_session(
+        .update(
             &mut storage,
             row_id,
             &[(
@@ -694,7 +694,7 @@ fn transactional_insert_uses_frozen_target_branch_renamed_table_schema() {
         .with_target_branch_name(v1_branch.clone());
 
     let inserted = manager
-        .insert_with_write_context(
+        .insert(
             &mut storage,
             "users",
             HashMap::from([
@@ -704,6 +704,7 @@ fn transactional_insert_uses_frozen_target_branch_renamed_table_schema() {
                     Value::Text("alice@example.com".to_string()),
                 ),
             ]),
+            None,
             Some(&write_context),
         )
         .expect("frozen-target insert should use the renamed target table schema");

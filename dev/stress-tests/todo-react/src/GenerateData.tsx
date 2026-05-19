@@ -5,6 +5,7 @@ import { app } from "../schema";
 const TOTAL_PROJECTS = 10_000;
 const TOTAL_TODOS = 50_000;
 const BATCH_SIZE = 500;
+const YIELD_EVERY_BATCHES = 10;
 
 const ADJECTIVES = [
   "quick",
@@ -240,30 +241,43 @@ export function GenerateData() {
     try {
       // Generate projects in batches
       const projectIds: string[] = [];
+      let batchesSinceYield = 0;
       for (let i = 0; i < TOTAL_PROJECTS; i += BATCH_SIZE) {
         const batchEnd = Math.min(i + BATCH_SIZE, TOTAL_PROJECTS);
-        for (let j = i; j < batchEnd; j++) {
-          const row = db.insert(app.projects, { name: randomProjectName() });
-          projectIds.push(row.id);
-        }
+        db.batch((batch) => {
+          for (let j = i; j < batchEnd; j++) {
+            const row = batch.insert(app.projects, { name: randomProjectName() });
+            projectIds.push(row.id);
+          }
+        });
         setProjectsCreated(batchEnd);
-        // Yield to the event loop so the UI can update
-        await new Promise((r) => setTimeout(r, 0));
+        batchesSinceYield++;
+        if (batchesSinceYield >= YIELD_EVERY_BATCHES) {
+          batchesSinceYield = 0;
+          await new Promise((r) => setTimeout(r, 0));
+        }
       }
 
       // Generate todos in batches, round-robin across projects
+      batchesSinceYield = 0;
       for (let i = 0; i < TOTAL_TODOS; i += BATCH_SIZE) {
         const batchEnd = Math.min(i + BATCH_SIZE, TOTAL_TODOS);
-        for (let j = i; j < batchEnd; j++) {
-          db.insert(app.todos, {
-            title: randomTodoTitle(),
-            done: j % 5 === 0,
-            owner_id: sessionUserId,
-            projectId: projectIds[j % projectIds.length],
-          });
-        }
+        db.batch((batch) => {
+          for (let j = i; j < batchEnd; j++) {
+            batch.insert(app.todos, {
+              title: randomTodoTitle(),
+              done: j % 5 === 0,
+              owner_id: sessionUserId,
+              projectId: projectIds[j % projectIds.length],
+            });
+          }
+        });
         setTodosCreated(batchEnd);
-        await new Promise((r) => setTimeout(r, 0));
+        batchesSinceYield++;
+        if (batchesSinceYield >= YIELD_EVERY_BATCHES) {
+          batchesSinceYield = 0;
+          await new Promise((r) => setTimeout(r, 0));
+        }
       }
 
       setStatus("done");

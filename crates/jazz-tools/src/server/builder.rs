@@ -15,9 +15,7 @@ use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
-use crate::server::{
-    CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ServerState, ServerTopology,
-};
+use crate::server::{ConnectionEventHub, DynStorage, ServerState, ServerTopology};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
@@ -64,7 +62,6 @@ pub enum StorageBackend {
 pub struct ServerBuilder {
     app_id: AppId,
     auth_config: AuthConfig,
-    catalogue_authority: CatalogueAuthorityMode,
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
@@ -79,7 +76,6 @@ impl ServerBuilder {
                 allow_local_first_auth: true,
                 ..Default::default()
             },
-            catalogue_authority: CatalogueAuthorityMode::Local,
             schema_mode: ServerSchemaMode::Dynamic,
             storage_backend: StorageBackend::Persistent {
                 path: PathBuf::from("./data"),
@@ -101,11 +97,6 @@ impl ServerBuilder {
 
     pub fn with_local_first_auth(mut self, enabled: bool) -> Self {
         self.auth_config.allow_local_first_auth = enabled;
-        self
-    }
-
-    pub fn with_catalogue_authority(mut self, catalogue_authority: CatalogueAuthorityMode) -> Self {
-        self.catalogue_authority = catalogue_authority;
         self
     }
 
@@ -136,9 +127,13 @@ impl ServerBuilder {
             Some(upstream_url) => Some(upstream_ws_url(upstream_url, self.app_id)?),
             None => None,
         };
-        validate_server_config(&auth_config, &self.catalogue_authority, topology)?;
+        let upstream_http_url = match self.upstream_url.as_deref() {
+            Some(upstream_url) => Some(upstream_http_url(upstream_url, self.app_id)?),
+            None => None,
+        };
+        validate_server_config(&auth_config, topology)?;
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
-        log_auth_config(&auth_config, &self.catalogue_authority, topology);
+        log_auth_config(&auth_config, topology);
 
         let (runtime, connection_event_hub) = self.build_runtime()?;
         if let Some(upstream_ws_url) = upstream_ws_url.clone() {
@@ -155,7 +150,7 @@ impl ServerBuilder {
             next_connection_id: std::sync::atomic::AtomicU64::new(1),
             connection_event_hub,
             auth_config,
-            catalogue_authority: self.catalogue_authority.clone(),
+            upstream_http_url,
             topology,
             jwt_verifier,
             http_client,
@@ -372,40 +367,22 @@ async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVe
 
 fn validate_server_config(
     auth_config: &AuthConfig,
-    catalogue_authority: &CatalogueAuthorityMode,
     topology: ServerTopology,
 ) -> Result<(), String> {
     if topology.is_edge() && auth_config.peer_secret.is_none() {
         return Err("edge mode requires --peer-secret / JAZZ_PEER_SECRET".to_string());
     }
 
-    if matches!(catalogue_authority, CatalogueAuthorityMode::Local) {
-        return Ok(());
-    }
-
-    if auth_config.admin_secret.is_none() {
-        return Err(
-            "catalogue authority forwarding requires a local --admin-secret / JAZZ_ADMIN_SECRET"
-                .to_string(),
-        );
+    if topology.is_edge() && auth_config.admin_secret.is_none() {
+        return Err("edge mode requires --admin-secret / JAZZ_ADMIN_SECRET when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
     }
 
     Ok(())
 }
 
-fn log_auth_config(
-    auth_config: &AuthConfig,
-    catalogue_authority: &CatalogueAuthorityMode,
-    topology: ServerTopology,
-) {
-    let authority_mode = match catalogue_authority {
-        CatalogueAuthorityMode::Local => "local".to_string(),
-        CatalogueAuthorityMode::Forward { base_url, .. } => {
-            format!("forward({base_url})")
-        }
-    };
+fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, peer={}, catalogue_authority={}, topology={:?}",
+        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, peer={}, topology={:?}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
         auth_config.jwt_public_key.is_some(),
@@ -413,7 +390,6 @@ fn log_auth_config(
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
         auth_config.peer_secret.is_some(),
-        authority_mode,
         topology
     );
 }
@@ -454,6 +430,46 @@ pub fn upstream_ws_url(base_url: &str, app_id: AppId) -> Result<String, String> 
             base_path.trim_end_matches('/'),
             app_ws_path.trim_start_matches('/')
         ));
+    }
+
+    Ok(url.to_string())
+}
+
+pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(base_url)
+        .map_err(|err| format!("invalid upstream URL '{base_url}': {err}"))?;
+
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("upstream URL must not include query parameters or a fragment".to_string());
+    }
+
+    let scheme = match url.scheme() {
+        "http" => "http",
+        "https" => "https",
+        "ws" => "http",
+        "wss" => "https",
+        other => {
+            return Err(format!(
+                "unsupported upstream URL scheme '{other}'; expected http, https, ws, or wss"
+            ));
+        }
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| format!("failed to set upstream URL scheme to {scheme}"))?;
+
+    let app_ws_path = format!("/apps/{app_id}/ws");
+    let normalized_path = url.path().trim_end_matches('/').to_string();
+    if normalized_path == app_ws_path.trim_end_matches('/') {
+        url.set_path("/");
+    } else if let Some(prefix) = normalized_path.strip_suffix(&app_ws_path) {
+        let prefix_path = if prefix.is_empty() {
+            "/".to_string()
+        } else {
+            format!("{}/", prefix.trim_end_matches('/'))
+        };
+        url.set_path(&prefix_path);
+    } else if normalized_path.is_empty() {
+        url.set_path("/");
     }
 
     Ok(url.to_string())
@@ -553,6 +569,72 @@ mod tests {
         assert!(upstream_ws_url("https://core.example.com#cluster-a", app_id).is_err());
     }
 
+    #[test]
+    fn upstream_http_url_conversion_maps_base_urls_to_app_routes() {
+        let app_id =
+            AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
+
+        assert_eq!(
+            upstream_http_url("https://core.example.com", app_id).expect("https conversion"),
+            "https://core.example.com/"
+        );
+        assert_eq!(
+            upstream_http_url("http://core.example.com/base/", app_id).expect("http conversion"),
+            "http://core.example.com/base/"
+        );
+        assert_eq!(
+            upstream_http_url("ws://core.example.com", app_id).expect("ws conversion"),
+            "http://core.example.com/"
+        );
+        assert_eq!(
+            upstream_http_url(
+                "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws",
+                app_id,
+            )
+            .expect("wss conversion"),
+            "https://core.example.com/"
+        );
+        assert_eq!(
+            upstream_http_url(
+                "wss://core.example.com/base/apps/00000000-0000-0000-0000-000000000001/ws",
+                app_id,
+            )
+            .expect("prefixed wss conversion"),
+            "https://core.example.com/base/"
+        );
+    }
+
+    #[test]
+    fn upstream_http_url_conversion_rejects_query_and_fragment_urls() {
+        let app_id =
+            AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
+
+        assert!(upstream_http_url("https://core.example.com?token=abc", app_id).is_err());
+        assert!(upstream_http_url("https://core.example.com#cluster-a", app_id).is_err());
+    }
+
+    #[tokio::test]
+    async fn builder_requires_admin_secret_in_edge_mode() {
+        let auth_config = AuthConfig {
+            peer_secret: Some("cluster-peer-secret".to_string()),
+            allow_local_first_auth: true,
+            ..Default::default()
+        };
+
+        let result = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await;
+        let error = result
+            .err()
+            .expect("edge mode without admin secret should fail");
+
+        assert!(error.contains("--admin-secret"));
+        assert!(error.contains("--upstream-url"));
+    }
+
     #[tokio::test]
     async fn builder_uses_global_tier_without_upstream() {
         let built = ServerBuilder::new(AppId::from_name("global-builder-tier"))
@@ -579,6 +661,7 @@ mod tests {
             .with_storage(StorageBackend::InMemory)
             .with_auth_config(AuthConfig {
                 peer_secret: Some("cluster-secret".to_string()),
+                admin_secret: Some("admin-secret".to_string()),
                 ..Default::default()
             })
             .with_upstream_url("ws://127.0.0.1:9")

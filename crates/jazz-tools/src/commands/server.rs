@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use jazz_tools::middleware::AuthConfig;
 use jazz_tools::schema_manager::AppId;
-use jazz_tools::server::{CatalogueAuthorityMode, ServerBuilder, StorageBackend};
+use jazz_tools::server::{ServerBuilder, StorageBackend};
 use tracing::info;
 
 const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
@@ -17,7 +17,6 @@ pub async fn run(
     in_memory: bool,
     auth_config: AuthConfig,
     upstream_url: Option<String>,
-    catalogue_authority: CatalogueAuthorityMode,
     bound_port_file: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
@@ -31,9 +30,7 @@ pub async fn run(
         info!("Data directory: {}", data_dir);
     }
 
-    let builder = ServerBuilder::new(app_id)
-        .with_auth_config(auth_config)
-        .with_catalogue_authority(catalogue_authority);
+    let builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
     let builder = match upstream_url {
         Some(upstream_url) => builder.with_upstream_url(upstream_url),
         None => builder,

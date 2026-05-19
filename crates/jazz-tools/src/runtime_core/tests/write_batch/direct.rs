@@ -106,6 +106,45 @@ fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
 }
 
 #[test]
+fn rc_non_durable_client_seals_direct_batch_without_self_confirming_local_fate() {
+    let mut s = create_3tier_rc();
+    s.a.set_non_durable_client_runtime();
+
+    let ((row_id, _row_values), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    let query_results = execute_query(&mut s.a, Query::new("users"));
+    assert!(
+        query_results.iter().any(|(id, _)| *id == row_id),
+        "non-durable client should still expose optimistic rows to local queries"
+    );
+    assert_eq!(
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        None,
+        "non-durable client should not persist its own local fate"
+    );
+
+    let mut receiver = s.a.wait_for_batch(batch_id, DurabilityTier::Local).unwrap();
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "local wait should remain pending until worker-originated fate syncs back"
+    );
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(Ok(()))),
+        "worker BatchFate(local) should resolve the client local wait"
+    );
+}
+
+#[test]
 fn rc_update_sync() {
     let mut s = create_3tier_rc();
     let ((id, _row_values), _) =

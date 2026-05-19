@@ -91,7 +91,7 @@ export async function setup(): Promise<void> {
         serverUrl: coreServer.url,
         appId: coreServer.appId,
         adminSecret: coreServer.adminSecret!,
-        schemaDir: join(import.meta.dirname ?? __dirname, "../.."),
+        schemaDir: join(import.meta.dirname, "../.."),
       });
 
       await waitForCatalogueOnEdge(edgeServer, hash);

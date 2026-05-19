@@ -4,7 +4,6 @@ import {
   flushMicrotasks,
   makeClient,
   makeClientWithContext,
-  makeJwt,
   mockMutation,
   mockRow,
   runtimeBatchRecordStubs,
@@ -13,7 +12,7 @@ import {
   type Runtime,
 } from "./support.js";
 
-describe("JazzClient.forRequest", () => {
+describe("JazzClient runtime helpers", () => {
   it("enables backend mode when backend secret + server URL are configured", () => {
     const { client } = makeClient();
     expect(client.asBackend()).toBe(client);
@@ -35,123 +34,6 @@ describe("JazzClient.forRequest", () => {
       backendSecret: "test-backend-secret",
     });
     expect(() => client.asBackend()).toThrow("serverUrl required for backend mode");
-  });
-
-  it("extracts sub + claims from a bearer JWT", async () => {
-    const { client, queryCalls } = makeClient();
-    const token = makeJwt({
-      sub: "user-123",
-      claims: { role: "admin" },
-    });
-
-    const scopedClient = client.forRequest({
-      header(name: string) {
-        return name.toLowerCase() === "authorization" ? `Bearer ${token}` : undefined;
-      },
-    });
-
-    await scopedClient.query('{"table":"todos"}');
-
-    expect(queryCalls.length).toBe(1);
-    expect(queryCalls[0]![1]).toBe(
-      JSON.stringify({
-        user_id: "user-123",
-        claims: { role: "admin" },
-        authMode: "external",
-      }),
-    );
-  });
-
-  it("supports Node-style headers object", async () => {
-    const { client, queryCalls } = makeClient();
-    const token = makeJwt({ sub: "user-456" });
-
-    const scopedClient = client.forRequest({
-      headers: {
-        authorization: [`Bearer ${token}`],
-      },
-    });
-
-    await scopedClient.query('{"table":"todos"}');
-
-    expect(queryCalls[0]![1]).toBe(
-      JSON.stringify({
-        user_id: "user-456",
-        claims: {},
-        authMode: "external",
-      }),
-    );
-  });
-
-  it("throws when Authorization header is missing", () => {
-    const { client } = makeClient();
-
-    expect(() => client.forRequest({ headers: {} })).toThrow(
-      "Missing or invalid Authorization header",
-    );
-  });
-
-  it("throws when JWT sub is missing", () => {
-    const { client } = makeClient();
-    const token = makeJwt({ claims: { role: "admin" } });
-
-    expect(() =>
-      client.forRequest({
-        headers: {
-          authorization: `Bearer ${token}`,
-        },
-      }),
-    ).toThrow("JWT payload missing sub");
-  });
-
-  it("accepts query builders for session-scoped query calls", async () => {
-    const { client, queryCalls } = makeClient();
-    const token = makeJwt({ sub: "user-789" });
-
-    const scopedClient = client.forRequest({
-      headers: {
-        authorization: `Bearer ${token}`,
-      },
-    });
-
-    const builder = {
-      _build() {
-        return '{"table":"todos","conditions":[{"column":"done","op":"eq","value":true}]}';
-      },
-    };
-
-    await scopedClient.query(builder);
-
-    expect(queryCalls[0]![0]).toBe(builder._build());
-  });
-
-  it("translates schema-aware query builders for session-scoped query calls", async () => {
-    const { client, queryCalls } = makeClient();
-    const token = makeJwt({ sub: "user-901" });
-
-    const scopedClient = client.forRequest({
-      headers: {
-        authorization: `Bearer ${token}`,
-      },
-    });
-
-    const builder = {
-      _schema: schemaWithTodos,
-      _build() {
-        return JSON.stringify({
-          table: "todos",
-          conditions: [{ column: "done", op: "eq", value: true }],
-          includes: {},
-          orderBy: [],
-        });
-      },
-    };
-
-    await scopedClient.query(builder);
-
-    const parsed = JSON.parse(queryCalls[0]![0]) as Record<string, unknown>;
-    expect(parsed.table).toBe("todos");
-    expect(parsed).toHaveProperty("relation_ir");
   });
 
   it("accepts query builders for subscribe calls", async () => {

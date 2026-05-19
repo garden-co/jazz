@@ -2,10 +2,10 @@
 
 // CLI for jazz-tools schema tooling
 
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, realpathSync } from "fs";
 import { access, mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
-import { pathToFileURL } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { build } from "esbuild";
 import type {
   ColumnDescriptor,
@@ -1937,12 +1937,22 @@ export async function deploy(options: DeployOptions): Promise<void> {
   console.log(`Published permissions as ${describePermissionsHead(nextHead)}.`);
 }
 
+function realpathOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
 function isMainModule(): boolean {
   const entry = process.argv[1];
   if (!entry) {
     return false;
   }
-  return pathToFileURL(entry).href === import.meta.url;
+  // pnpm reaches the CLI through a symlinked package path, so argv[1] and
+  // import.meta.url differ only by symlink resolution. Compare realpaths.
+  return realpathOrSelf(entry) === realpathOrSelf(fileURLToPath(import.meta.url));
 }
 
 if (isMainModule()) {
