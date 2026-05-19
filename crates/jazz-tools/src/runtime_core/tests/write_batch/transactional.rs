@@ -1202,6 +1202,11 @@ fn rc_two_clients_accept_second_transactional_update_if_second_client_receives_f
             },
         ],
     );
+    // Right now transactions have a "read committed" isolation level, which means
+    // transactions can read data written after they began (including other transactions
+    // that were concurrently committed).
+    // We want to move into snapshot or serializable isolation, so that transactions can
+    // only read writes that happened BEFORE they began
     assert_single_user_named(
         &mut harness.bob,
         harness.row_id,
