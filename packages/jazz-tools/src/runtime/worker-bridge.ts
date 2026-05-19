@@ -58,6 +58,7 @@ interface WasmBridgeHandle {
   applyIncomingServerPayload(payload: Uint8Array): void;
   waitForUpstreamServerConnection(): Promise<void>;
   waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
+  createBranchScope(branchId: string, queryJson: string): Promise<void>;
   replayServerConnection(): void;
   disconnectUpstream(): void;
   reconnectUpstream(): void;
@@ -187,6 +188,11 @@ export class WorkerBridge {
   async waitForLocalSyncFlush(batchId?: string): Promise<void> {
     if (this.disposed || !this.bridge) return;
     await this.bridge.waitForLocalSyncFlush(batchId ?? null);
+  }
+
+  async createBranchScope(branchId: string, queryJson: string): Promise<void> {
+    if (this.disposed || !this.bridge) return;
+    await this.bridge.createBranchScope(branchId, queryJson);
   }
 
   applyIncomingServerPayload(payload: Uint8Array): void {

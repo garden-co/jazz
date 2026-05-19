@@ -196,6 +196,7 @@ fn describe_main_message(msg: &MainToWorkerMessage) -> &'static str {
         MainToWorkerMessage::Unknown(_) => "<unknown>",
         MainToWorkerMessage::Wire(wire) => match wire {
             MainToWorkerWire::Sync { .. } => "sync",
+            MainToWorkerWire::CreateBranchScope { .. } => "create-branch-scope",
             MainToWorkerWire::PeerOpen { .. } => "peer-open",
             MainToWorkerWire::PeerSync { .. } => "peer-sync",
             MainToWorkerWire::PeerClose { .. } => "peer-close",
@@ -636,7 +637,17 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 if let Err(err) =
                     rt.on_sync_message_received_from_client(&main_client_id, arr.into())
                 {
-                    tracing::warn!("onSyncMessageReceivedFromClient main: {err:?}");
+                    let preview = payload
+                        .iter()
+                        .take(12)
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    tracing::warn!(
+                        "onSyncMessageReceivedFromClient main len={} preview={} err={err:?}",
+                        payload.len(),
+                        preview
+                    );
                 }
             }
             rt.batched_tick();
@@ -644,11 +655,42 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 rt.flush_wal();
                 let (has_batch_record, batch_reconciled) =
                     reconcile_local_batch_for_ack(rt, &main_client_id, ack_batch_id.as_deref());
+                rt.flush_wal();
                 post_to_main(&WorkerToMainWire::SyncAck {
                     ack_id,
                     has_batch_record,
                     batch_reconciled,
                 });
+            }
+        }
+        MainToWorkerWire::CreateBranchScope {
+            branch_id,
+            query_json,
+            ack_id,
+        } => {
+            if let Some(rt) = runtime.as_ref() {
+                match rt.create_branch_scope(&branch_id, &query_json) {
+                    Ok(()) => {
+                        rt.flush_wal();
+                        if let Some(ack_id) = ack_id {
+                            post_to_main(&WorkerToMainWire::SyncAck {
+                                ack_id,
+                                has_batch_record: false,
+                                batch_reconciled: true,
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("createBranchScope: {err:?}");
+                        if let Some(ack_id) = ack_id {
+                            post_to_main(&WorkerToMainWire::SyncAck {
+                                ack_id,
+                                has_batch_record: false,
+                                batch_reconciled: false,
+                            });
+                        }
+                    }
+                }
             }
         }
         MainToWorkerWire::PeerOpen { peer_id } => {

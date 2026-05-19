@@ -99,6 +99,8 @@ export interface Runtime {
   /** Drive a synchronous batched tick. Used by callers that need to flush
    * pending state before a synchronous teardown. */
   batchedTick?(): void;
+  /** Flush the runtime WAL to local durable storage. WASM runtimes expose this. */
+  flushWal?(): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   reconcileLocalBatchWithServer?(batch_id: string): void;
@@ -1915,6 +1917,7 @@ export class JazzClient {
       throw new Error("createBranchScope is not supported by this runtime");
     }
     this.runtime.createBranchScope(branchId, resolveQueryJson(query));
+    this.runtime.flushWal?.();
   }
 
   mergeBranchScope(branchId: string): WriteHandle {

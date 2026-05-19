@@ -936,6 +936,54 @@ async fn wait_for_local_sync_flush_does_not_hang_when_ack_is_dropped() {
         .expect("wait_for_local_sync_flush resolves on dropped ack");
 }
 
+/// Local durability only needs the worker to receive the batch and flush its
+/// WAL. It must not wait for server reconciliation; otherwise local waits hit
+/// the full timeout whenever the worker can only confirm `local`.
+#[wasm_bindgen_test]
+async fn wait_for_local_sync_flush_resolves_after_worker_ack_even_when_batch_is_unreconciled() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    let init = bridge.init();
+    fw.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "c1".into(),
+    });
+    JsFuture::from(init).await.expect("init resolved");
+
+    let flush = bridge.wait_for_local_sync_flush(Some("batch-1".into()));
+    yield_once().await;
+
+    let sync = fw
+        .last_posted_decoded()
+        .expect("wait should post a sync ack request");
+    let ack_id = match sync {
+        MainToWorkerWire::Sync {
+            ack_id,
+            ack_batch_id,
+            ..
+        } => {
+            assert_eq!(ack_batch_id.as_deref(), Some("batch-1"));
+            ack_id.expect("sync should ask for an ack")
+        }
+        other => panic!("expected Sync, got {other:?}"),
+    };
+
+    fw.emit_wire(&WorkerToMainWire::SyncAck {
+        ack_id,
+        has_batch_record: true,
+        batch_reconciled: false,
+    });
+
+    let race = js_sys::Promise::race(&js_sys::Array::of2(&flush, &deadline_marker(500)));
+    let outcome = JsFuture::from(race).await.expect("race resolves");
+    assert!(
+        outcome.as_string().as_deref() != Some("deadline"),
+        "local sync flush waited for reconciliation instead of resolving after worker WAL flush"
+    );
+}
+
 /// Regression: after init has failed, `wait_for_local_sync_flush` must settle
 /// promptly rather than spending the full `LOCAL_SYNC_ACK_TIMEOUT_MS` posting
 /// to a worker that already errored. Pre-fix the bridge's `is_disposed_like`

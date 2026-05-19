@@ -292,6 +292,64 @@ fn branch_scope_sync_does_not_pull_rows_outside_captured_query() {
 }
 
 #[test]
+fn branch_scope_subscription_recovers_when_scope_is_created_after_subscribe() {
+    let mut s = create_3tier_rc();
+
+    let article_id = ObjectId::new();
+    let ((inserted_id, _), _) =
+        s.a.insert("users", user_insert_values(article_id, "Alice"), None)
+            .unwrap();
+    s.a.immediate_tick();
+
+    let branch_id = ObjectId::new();
+    let received = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
+    let received_clone = received.clone();
+
+    let _handle =
+        s.a.subscribe(
+            QueryBuilder::new("users")
+                .filter_eq("id", Value::Uuid(inserted_id))
+                .with_branch_scope(branch_id)
+                .build(),
+            move |delta| {
+                received_clone
+                    .lock()
+                    .unwrap()
+                    .push(decode_added_rows(&delta));
+            },
+            None,
+        )
+        .unwrap();
+
+    s.a.immediate_tick();
+    assert!(
+        !received
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|(row_id, _)| *row_id == inserted_id),
+        "missing branch scope should not permanently satisfy the subscription"
+    );
+
+    s.a.create_branch_scope(
+        branch_id,
+        QueryBuilder::new("users")
+            .filter_eq("id", Value::Uuid(inserted_id))
+            .build(),
+    )
+    .unwrap();
+
+    let calls = received.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .any(|delivery| delivery.iter().any(|(row_id, _)| *row_id == inserted_id)),
+        "creating the branch scope should refresh active branch-scoped subscriptions"
+    );
+}
+
+#[test]
 fn rc_query_synced_update_to_null_is_preserved() {
     let schema = SchemaBuilder::new()
         .table(

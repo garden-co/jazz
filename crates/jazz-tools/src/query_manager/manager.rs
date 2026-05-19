@@ -2108,14 +2108,22 @@ impl QueryManager {
                         return None;
                     }
                 } else {
-                    tracing::error!(
-                        object_id = %update.object_id,
-                        branch = %branch,
-                        local_update,
-                        "buffering row update for unknown branch; cannot parse schema hash"
-                    );
-                    self.pending_row_visibility_changes.push(update);
-                    return None;
+                    match origin_schema_hash {
+                        Some(hash) => {
+                            self.branch_schema_map.insert(branch.to_string(), hash);
+                            hash
+                        }
+                        None => {
+                            tracing::error!(
+                                object_id = %update.object_id,
+                                branch = %branch,
+                                local_update,
+                                "buffering row update for unknown branch; cannot parse schema hash"
+                            );
+                            self.pending_row_visibility_changes.push(update);
+                            return None;
+                        }
+                    }
                 }
             }
         };

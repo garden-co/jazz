@@ -97,6 +97,83 @@ fn server_builds_query_graph_on_subscription() {
 }
 
 #[test]
+fn server_branch_scope_subscription_recovers_when_scope_is_created_after_subscribe() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut server_qm, &storage, client_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let branch_id = ObjectId::new();
+    let query = QueryBuilder::new("users")
+        .filter_eq("id", Value::Uuid(alice.row_id))
+        .with_branch_scope(branch_id)
+        .build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            required_tier: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+    let initial = server_qm.sync_manager_mut().take_outbox();
+    assert!(
+        !initial.iter().any(|entry| matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::RowBatchNeeded { row, .. }
+            ) if *id == client_id && row.row_id == alice.row_id
+        )),
+        "missing branch scope must not expose rows"
+    );
+
+    let snapshot = server_qm
+        .capture_branch_scope(
+            &mut storage,
+            branch_id,
+            QueryBuilder::new("users")
+                .filter_eq("id", Value::Uuid(alice.row_id))
+                .build(),
+        )
+        .unwrap();
+    server_qm.mark_branch_scope_snapshot_updated(branch_id, &snapshot.entries);
+    server_qm.process(&mut storage);
+
+    let after_scope = server_qm.sync_manager_mut().take_outbox();
+    assert!(
+        after_scope.iter().any(|entry| matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::RowBatchNeeded { row, .. }
+            ) if *id == client_id && row.row_id == alice.row_id
+        )),
+        "creating branch scope should refresh active server subscriptions"
+    );
+}
+
+#[test]
 fn initial_query_settled_is_not_queued_behind_later_query_scope_rows() {
     use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
     use uuid::Uuid;

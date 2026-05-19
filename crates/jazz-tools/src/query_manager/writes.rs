@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::batch_fate::{BatchFate, BatchMode};
@@ -23,7 +23,8 @@ use super::manager::{
     WriteTableCacheEntry,
 };
 use super::policy::{
-    ComplexClause, Operation, PolicyExpr, bind_branch_row_refs, evaluate_simple_parts_with_row_id,
+    ComplexClause, Operation, PolicyExpr, bind_branch_row_refs_with_values,
+    evaluate_simple_parts_with_row_id,
 };
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
@@ -785,11 +786,79 @@ impl QueryManager {
             .branch_for_backing_table(backing_table)
     }
 
-    fn bind_branch_policy_for_snapshot(
+    fn branch_policy_values_for_snapshot<H: Storage>(
+        &self,
+        storage: &H,
+        schema: &Schema,
+        snapshot: &BranchScopeSnapshot,
+        backing_table: Option<TableName>,
+    ) -> HashMap<String, Value> {
+        let mut values = HashMap::new();
+        values.insert("id".to_string(), Value::Uuid(snapshot.branch_id));
+
+        let Some(backing_table) = backing_table else {
+            return values;
+        };
+        let Some(table_schema) = schema.get(&backing_table) else {
+            return values;
+        };
+
+        let current_branch = self.current_branch();
+        let branch_names = if current_branch == "main" {
+            vec![current_branch]
+        } else {
+            vec![current_branch, "main".to_string()]
+        };
+
+        let row = branch_names.into_iter().find_map(|branch| {
+            storage
+                .load_visible_query_row(backing_table.as_str(), branch.as_str(), snapshot.branch_id)
+                .ok()
+                .flatten()
+                .filter(|row| !row.is_hard_deleted())
+        });
+        let Some(row) = row else {
+            tracing::debug!(
+                branch_id = %snapshot.branch_id,
+                backing_table = %backing_table,
+                "branch policy backing row not found"
+            );
+            return values;
+        };
+
+        let Ok(decoded) = decode_row(&table_schema.columns, &row.data) else {
+            tracing::debug!(
+                branch_id = %snapshot.branch_id,
+                backing_table = %backing_table,
+                "failed to decode branch policy backing row"
+            );
+            return values;
+        };
+
+        for (column, value) in table_schema.columns.columns.iter().zip(decoded) {
+            values.insert(column.name_str().to_string(), value);
+        }
+        values
+    }
+
+    fn bind_branch_policy_for_snapshot<H: Storage>(
+        &self,
+        storage: &H,
+        schema: &Schema,
         policy: &PolicyExpr,
         snapshot: &BranchScopeSnapshot,
+        backing_table: Option<TableName>,
     ) -> PolicyExpr {
-        bind_branch_row_refs(policy, snapshot.branch_id).unwrap_or(PolicyExpr::False)
+        let branch_values =
+            self.branch_policy_values_for_snapshot(storage, schema, snapshot, backing_table);
+        bind_branch_row_refs_with_values(policy, |column| branch_values.get(column).cloned())
+            .unwrap_or_else(|| {
+                tracing::debug!(
+                    branch_id = %snapshot.branch_id,
+                    "branch policy references unavailable branch row value"
+                );
+                PolicyExpr::False
+            })
     }
 
     fn prepare_update_write_for_schema<H: Storage>(
@@ -822,11 +891,27 @@ impl QueryManager {
         let branch_using_policy = branch_policy
             .and_then(BranchTablePolicies::update_using_policy)
             .zip(branch_scope_snapshot.as_ref())
-            .map(|(policy, snapshot)| Self::bind_branch_policy_for_snapshot(policy, snapshot));
+            .map(|(policy, snapshot)| {
+                self.bind_branch_policy_for_snapshot(
+                    storage,
+                    write_schema,
+                    policy,
+                    snapshot,
+                    branch_backing_table,
+                )
+            });
         let branch_check_policy = branch_policy
             .and_then(BranchTablePolicies::update_check_policy)
             .zip(branch_scope_snapshot.as_ref())
-            .map(|(policy, snapshot)| Self::bind_branch_policy_for_snapshot(policy, snapshot));
+            .map(|(policy, snapshot)| {
+                self.bind_branch_policy_for_snapshot(
+                    storage,
+                    write_schema,
+                    policy,
+                    snapshot,
+                    branch_backing_table,
+                )
+            });
         let using_policy = branch_using_policy.as_ref().or_else(|| {
             if branch_policy.is_some() {
                 None
@@ -880,13 +965,25 @@ impl QueryManager {
                     .and_then(BranchTablePolicies::update_using_policy)
                     .zip(branch_scope_snapshot.as_ref())
                     .map(|(policy, snapshot)| {
-                        Self::bind_branch_policy_for_snapshot(policy, snapshot)
+                        self.bind_branch_policy_for_snapshot(
+                            storage,
+                            &auth_schema,
+                            policy,
+                            snapshot,
+                            branch_backing_table,
+                        )
                     });
                 let auth_branch_check_policy = auth_branch_policy
                     .and_then(BranchTablePolicies::update_check_policy)
                     .zip(branch_scope_snapshot.as_ref())
                     .map(|(policy, snapshot)| {
-                        Self::bind_branch_policy_for_snapshot(policy, snapshot)
+                        self.bind_branch_policy_for_snapshot(
+                            storage,
+                            &auth_schema,
+                            policy,
+                            snapshot,
+                            branch_backing_table,
+                        )
                     });
                 let auth_using_policy = auth_branch_using_policy.as_ref().or_else(|| {
                     if auth_branch_policy.is_some() {
@@ -1534,7 +1631,15 @@ impl QueryManager {
         let branch_insert_policy = branch_policy
             .and_then(BranchTablePolicies::insert_policy)
             .zip(branch_scope_snapshot.as_ref())
-            .map(|(policy, snapshot)| Self::bind_branch_policy_for_snapshot(policy, snapshot));
+            .map(|(policy, snapshot)| {
+                self.bind_branch_policy_for_snapshot(
+                    storage,
+                    write_schema,
+                    policy,
+                    snapshot,
+                    branch_backing_table,
+                )
+            });
         let insert_policy = branch_insert_policy.as_ref().or_else(|| {
             if branch_policy.is_some() {
                 None
@@ -1589,7 +1694,13 @@ impl QueryManager {
                     .and_then(BranchTablePolicies::insert_policy)
                     .zip(branch_scope_snapshot.as_ref())
                     .map(|(policy, snapshot)| {
-                        Self::bind_branch_policy_for_snapshot(policy, snapshot)
+                        self.bind_branch_policy_for_snapshot(
+                            storage,
+                            &auth_schema,
+                            policy,
+                            snapshot,
+                            branch_backing_table,
+                        )
                     });
                 let policy = auth_branch_insert_policy.as_ref().or_else(|| {
                     if auth_branch_policy.is_some() {
@@ -2640,7 +2751,15 @@ impl QueryManager {
         let branch_delete_policy = branch_policy
             .and_then(BranchTablePolicies::effective_delete_using)
             .zip(branch_scope_snapshot.as_ref())
-            .map(|(policy, snapshot)| Self::bind_branch_policy_for_snapshot(policy, snapshot));
+            .map(|(policy, snapshot)| {
+                self.bind_branch_policy_for_snapshot(
+                    storage,
+                    write_schema,
+                    policy,
+                    snapshot,
+                    branch_backing_table,
+                )
+            });
         let using_policy = branch_delete_policy.as_ref().or_else(|| {
             if branch_policy.is_some() {
                 None
@@ -2668,7 +2787,13 @@ impl QueryManager {
                     .and_then(BranchTablePolicies::effective_delete_using)
                     .zip(branch_scope_snapshot.as_ref())
                     .map(|(policy, snapshot)| {
-                        Self::bind_branch_policy_for_snapshot(policy, snapshot)
+                        self.bind_branch_policy_for_snapshot(
+                            storage,
+                            &auth_schema,
+                            policy,
+                            snapshot,
+                            branch_backing_table,
+                        )
                     });
                 let auth_using_policy = auth_branch_delete_policy.as_ref().or_else(|| {
                     if auth_branch_policy.is_some() {

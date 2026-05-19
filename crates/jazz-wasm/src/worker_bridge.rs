@@ -39,8 +39,6 @@ const INIT_RESPONSE_TIMEOUT_MS: i32 = 12_000;
 const SHUTDOWN_ACK_TIMEOUT_MS: i32 = 5_000;
 /// Deadline budget for `wait_for_local_sync_flush` (mirrors the JS path).
 const LOCAL_SYNC_ACK_TIMEOUT_MS: i32 = 2_000;
-/// Inter-attempt sleep when retrying because the batch is not yet reconciled.
-const LOCAL_SYNC_ACK_RETRY_MS: i32 = 10;
 
 fn parse_lifecycle_event(s: &str) -> Option<WorkerLifecycleEvent> {
     Some(match s {
@@ -310,9 +308,9 @@ impl WasmWorkerBridge {
     }
 
     /// Mirror of the TS-side `waitForLocalSyncFlush(batchId?)` from main: drive
-    /// the main runtime's outbox to the worker, await a `SyncAck`, optionally
-    /// retry while the batch is still reconciling. Returns once the worker
-    /// confirms reconciliation, the 2s budget expires, or any ack times out.
+    /// the main runtime's outbox to the worker and await a `SyncAck`. The worker
+    /// flushes its WAL before acking, so a single ack is enough for local
+    /// durability. Server reconciliation is intentionally not part of this wait.
     #[wasm_bindgen(js_name = waitForLocalSyncFlush)]
     pub fn wait_for_local_sync_flush(&self, batch_id: Option<String>) -> js_sys::Promise {
         let inner = Rc::clone(&self.inner);
@@ -324,17 +322,17 @@ impl WasmWorkerBridge {
             if let Some(promise) = init_promise {
                 let _ = JsFuture::from(promise).await;
             }
-            let start = now_ms();
+            if inner.is_inactive() {
+                return Ok(JsValue::UNDEFINED);
+            }
+            let deadline = now_ms() + LOCAL_SYNC_ACK_TIMEOUT_MS as f64;
             loop {
-                if inner.is_inactive() {
-                    return Ok(JsValue::UNDEFINED);
-                }
-                // Push any accumulated outbox traffic to the worker before
-                // posting the ack envelope so the ack covers the whole batch.
-                // `batched_tick` only drains the runtime's outbox into the
-                // sender's pending queue; `flush_now` is what synchronously
-                // postMessages it. Without the flush, the ack envelope posted
-                // below would race ahead of the writes it is meant to cover.
+                // Push any accumulated outbox traffic to the worker before posting
+                // the ack envelope so the ack covers the whole batch. `batched_tick`
+                // only drains the runtime's outbox into the sender's pending queue;
+                // `flush_now` is what synchronously postMessages it. Without the
+                // flush, the ack envelope posted below would race ahead of the
+                // writes it is meant to cover.
                 inner.runtime.batched_tick();
                 inner.sender.flush_now();
 
@@ -354,30 +352,60 @@ impl WasmWorkerBridge {
                     },
                 );
 
-                let remaining_ms = remaining_deadline(start, LOCAL_SYNC_ACK_TIMEOUT_MS);
-                let timeout = make_timeout(remaining_ms);
-                let outcome = match select(rx, timeout).await {
-                    Either::Left((Ok(ack), _)) => Some(ack),
+                let remaining = (deadline - now_ms()).max(1.0) as i32;
+                let outcome = match select(rx, make_timeout(remaining)).await {
+                    Either::Left((Ok(outcome), _)) => Some(outcome),
                     _ => None,
                 };
                 inner.pending_sync_acks.borrow_mut().remove(&ack_id);
 
-                if outcome.is_none() || inner.is_inactive() {
-                    return Ok(JsValue::UNDEFINED);
+                if batch_id.is_none() || outcome.as_ref().is_some_and(|ack| ack.has_batch_record) {
+                    break;
                 }
-                let outcome = outcome.expect("checked above");
-
-                // No batch in flight → first ack is enough.
-                if batch_id.is_none() {
-                    return Ok(JsValue::UNDEFINED);
+                if now_ms() >= deadline {
+                    break;
                 }
-                if outcome.batch_reconciled || elapsed_exceeded(start, LOCAL_SYNC_ACK_TIMEOUT_MS) {
-                    return Ok(JsValue::UNDEFINED);
-                }
-
-                // Still reconciling; back off briefly and try again.
-                let _ = JsFuture::from(make_timeout_promise(LOCAL_SYNC_ACK_RETRY_MS)).await;
+                let _ = make_timeout(10).await;
             }
+
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = createBranchScope)]
+    pub fn create_branch_scope(&self, branch_id: String, query_json: String) -> js_sys::Promise {
+        let inner = Rc::clone(&self.inner);
+        wasm_bindgen_futures::future_to_promise(async move {
+            if inner.is_inactive() {
+                return Ok(JsValue::UNDEFINED);
+            }
+            let init_promise = inner.init_promise.borrow().clone();
+            if let Some(promise) = init_promise {
+                let _ = JsFuture::from(promise).await;
+            }
+            if inner.is_inactive() {
+                return Ok(JsValue::UNDEFINED);
+            }
+
+            let ack_id = inner.next_sync_ack_id.get();
+            inner.next_sync_ack_id.set(ack_id.wrapping_add(1));
+            let (tx, rx) = oneshot::channel::<SyncAckOutcome>();
+            inner.pending_sync_acks.borrow_mut().insert(ack_id, tx);
+
+            post_wire(
+                &inner.worker,
+                &MainToWorkerWire::CreateBranchScope {
+                    branch_id,
+                    query_json,
+                    ack_id: Some(ack_id),
+                },
+            );
+
+            let timeout = make_timeout(LOCAL_SYNC_ACK_TIMEOUT_MS);
+            let _ = select(rx, timeout).await;
+            inner.pending_sync_acks.borrow_mut().remove(&ack_id);
+
+            Ok(JsValue::UNDEFINED)
         })
     }
 
@@ -616,6 +644,7 @@ struct BridgeInner {
 
 #[derive(Debug, Clone, Copy)]
 struct SyncAckOutcome {
+    has_batch_record: bool,
     batch_reconciled: bool,
 }
 
@@ -873,12 +902,15 @@ impl BridgeInner {
             }
             WorkerToMainWire::SyncAck {
                 ack_id,
-                has_batch_record: _,
+                has_batch_record,
                 batch_reconciled,
             } => {
                 let waiter = self.pending_sync_acks.borrow_mut().remove(&ack_id);
                 if let Some(tx) = waiter {
-                    let _ = tx.send(SyncAckOutcome { batch_reconciled });
+                    let _ = tx.send(SyncAckOutcome {
+                        has_batch_record,
+                        batch_reconciled,
+                    });
                 }
             }
             WorkerToMainWire::ShutdownOk => {
@@ -1017,20 +1049,6 @@ fn now_ms() -> f64 {
         .ok()
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0)
-}
-
-fn remaining_deadline(start_ms: f64, total_budget_ms: i32) -> i32 {
-    let elapsed = (now_ms() - start_ms).max(0.0);
-    let remaining = (total_budget_ms as f64) - elapsed;
-    if remaining <= 0.0 {
-        0
-    } else {
-        remaining as i32
-    }
-}
-
-fn elapsed_exceeded(start_ms: f64, total_budget_ms: i32) -> bool {
-    (now_ms() - start_ms) >= total_budget_ms as f64
 }
 
 /// Gather replay payloads for a batch from the main runtime as raw bytes

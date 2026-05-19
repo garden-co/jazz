@@ -915,25 +915,26 @@ impl QueryManager {
                 continue;
             };
 
-            let branch_scope_snapshot = if sub.query.branch_scope.is_some() {
-                match snapshot_from_branch_scope_query(&sub.query) {
-                    Some(snapshot) => {
-                        graph.set_branch_scope_entries(Some(&snapshot.entries));
-                        Some(snapshot)
-                    }
-                    None => {
-                        let reason = format!(
-                            "branch-scoped query_id {} did not include captured scope entries",
-                            sub.query_id.0
-                        );
-                        self.sync_manager.emit_query_subscription_rejected(
-                            sub.client_id,
-                            sub.query_id,
-                            "branch_scope_missing",
-                            reason,
-                        );
-                        continue;
-                    }
+            let branch_scope_snapshot = if let Some(selector) = sub.query.branch_scope.as_ref() {
+                let snapshot = snapshot_from_branch_scope_query(&sub.query).or_else(|| {
+                    storage
+                        .load_branch_scope_snapshot(selector.branch_id)
+                        .map_err(|error| {
+                            tracing::warn!(
+                                branch_id = %selector.branch_id,
+                                %error,
+                                "failed to load branch scope snapshot"
+                            );
+                        })
+                        .ok()
+                        .flatten()
+                });
+                if let Some(snapshot) = snapshot {
+                    graph.set_branch_scope_entries(Some(&snapshot.entries));
+                    Some(snapshot)
+                } else {
+                    graph.set_branch_scope_entries(Some(&[]));
+                    None
                 }
             } else {
                 None
@@ -1190,6 +1191,33 @@ impl QueryManager {
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let had_dirty_graph = sub.graph.has_dirty_nodes();
+            if let Some(selector) = sub.query.branch_scope.as_ref() {
+                if sub.branch_scope_snapshot.is_none() {
+                    match storage.load_branch_scope_snapshot(selector.branch_id) {
+                        Ok(snapshot) => {
+                            sub.branch_scope_snapshot =
+                                snapshot.or_else(|| snapshot_from_branch_scope_query(&sub.query));
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                branch_id = %selector.branch_id,
+                                %error,
+                                "failed to load branch scope snapshot"
+                            );
+                            sub.branch_scope_snapshot =
+                                snapshot_from_branch_scope_query(&sub.query);
+                        }
+                    }
+                }
+                let entries = sub
+                    .branch_scope_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.entries.as_slice())
+                    .unwrap_or(&[]);
+                sub.graph.set_branch_scope_entries(Some(entries));
+            } else {
+                sub.graph.set_branch_scope_entries(None);
+            }
             let branch_scope_snapshot = sub.branch_scope_snapshot.clone();
 
             // Row loader for this subscription
@@ -1382,8 +1410,10 @@ impl QueryManager {
         &mut self,
         table_name: TableName,
         branch_name: BranchName,
+        fallback_schema_hash: Option<SchemaHash>,
     ) -> WriteSchemaResolution {
         let parsed_branch = ComposedBranchName::parse(&branch_name);
+        let raw_uuid_branch = uuid::Uuid::parse_str(branch_name.as_str()).is_ok();
         let schema_hash = self
             .branch_schema_map
             .get(branch_name.as_str())
@@ -1392,6 +1422,13 @@ impl QueryManager {
                 parsed_branch
                     .as_ref()
                     .and_then(|composed| self.find_schema_by_short_hash(&composed.schema_hash))
+            })
+            .or({
+                if raw_uuid_branch {
+                    fallback_schema_hash
+                } else {
+                    None
+                }
             });
 
         if let Some(schema_hash) = schema_hash {
@@ -1467,7 +1504,13 @@ impl QueryManager {
             .unwrap_or_else(|| BranchName::new(self.current_branch()));
         let object_id = check.payload.object_id().unwrap_or_default();
 
-        let branch_table_schema = match self.resolve_write_table_schema(table_name, branch_name) {
+        let metadata_schema_hash = crate::storage::row_locator_from_metadata(&check.metadata)
+            .and_then(|locator| locator.origin_schema_hash);
+        let branch_table_schema = match self.resolve_write_table_schema(
+            table_name,
+            branch_name,
+            metadata_schema_hash,
+        ) {
             WriteSchemaResolution::Resolved(schema) => *schema,
             WriteSchemaResolution::PendingSchema => {
                 let wait_started_at = check

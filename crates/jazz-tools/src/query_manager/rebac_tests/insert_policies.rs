@@ -60,6 +60,77 @@ fn rebac_insert_allowed_by_simple_policy() {
 }
 
 #[test]
+fn rebac_insert_on_uuid_branch_uses_metadata_schema_hash() {
+    let schema = rebac_test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let sync_manager = SyncManager::new();
+    let mut qm = QueryManager::new(sync_manager);
+    let mut storage = seeded_memory_storage(&schema);
+
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, schema);
+    qm.set_known_schemas(Arc::new(known_schemas));
+
+    let client_id = ClientId::new();
+    connect_client(&mut qm, &storage, client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let branch = ObjectId::new().to_string();
+    let mut metadata = document_metadata();
+    metadata.insert(
+        MetadataKey::OriginSchemaHash.to_string(),
+        schema_hash.to_string(),
+    );
+    let obj_id = create_test_row(&mut storage, Some(metadata.clone()));
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, branch.clone().into()));
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
+    qm.sync_manager_mut().take_outbox();
+
+    let commit = stored_row_commit(
+        smallvec![],
+        encode_document("alice", "Branch doc", None),
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: row_batch_created_payload(
+            obj_id,
+            &branch,
+            Some(RowMetadata {
+                id: obj_id,
+                metadata,
+            }),
+            &commit,
+        ),
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let rejection_reason = client_write_rejection_reason(
+        &outbox,
+        client_id,
+        row_batch_id_for_commit(obj_id, &branch, &commit),
+    );
+    assert!(
+        rejection_reason.is_none(),
+        "UUID branch insert should not be rejected: {rejection_reason:?}"
+    );
+
+    let tips = test_row_tip_ids(&storage, obj_id, &branch).unwrap_or_default();
+    assert!(
+        tips.contains(&row_batch_id_for_commit(obj_id, &branch, &commit)),
+        "Insert should be approved using schema hash from row metadata"
+    );
+}
+
+#[test]
 fn rebac_insert_denied_by_simple_policy() {
     // Setup
     let sync_manager = SyncManager::new();

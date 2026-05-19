@@ -1114,6 +1114,7 @@ export class Db {
           this.markUnauthenticated(reason);
         },
         onBeforeLocalBatchWait: async (batchId) => {
+          await this.ensureBridgeReady();
           await this.workerBridge?.waitForLocalSyncFlush(batchId);
         },
         onRejectedBatchAcknowledged: (batchId) => {
@@ -1897,7 +1898,12 @@ export class Db {
       runtimeSchema.get,
       builtQuery.table,
     );
-    client.createBranchScope(branchId, translateQuery(builderJson, planningSchema));
+    const scopeQuery = translateQuery(builderJson, planningSchema);
+    client.createBranchScope(branchId, scopeQuery);
+    if (this.workerBridge) {
+      await this.workerBridge.waitForLocalSyncFlush();
+      await this.workerBridge.createBranchScope(branchId, scopeQuery);
+    }
     return new BranchDb(this, branchId, client);
   }
 

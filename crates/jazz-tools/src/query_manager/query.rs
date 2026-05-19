@@ -619,7 +619,7 @@ pub struct Query {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchScopeSelector {
     pub branch_id: ObjectId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub entries: Option<Vec<BranchScopeEntry>>,
 }
 

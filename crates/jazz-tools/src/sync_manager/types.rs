@@ -578,6 +578,7 @@ pub struct PendingPermissionCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::query::QueryBuilder;
     use crate::query_manager::session::AuthMode;
 
     #[test]
@@ -601,5 +602,28 @@ mod tests {
             } => assert_eq!(session.auth_mode, AuthMode::LocalFirst),
             other => panic!("expected QuerySubscription with session, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn query_subscription_with_uuid_filter_round_trips_postcard() {
+        let row_id = ObjectId::new();
+        let query = QueryBuilder::new("articles")
+            .filter_eq("id", crate::query_manager::types::Value::Uuid(row_id))
+            .limit(1)
+            .with_branch_scope(ObjectId::new())
+            .build();
+        let payload = SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: Some(Session::new("alice").with_auth_mode(AuthMode::LocalFirst)),
+            required_tier: Some(DurabilityTier::Local),
+            propagation: QueryPropagation::Full,
+            policy_context_tables: Vec::new(),
+        };
+
+        let bytes = payload.to_bytes().expect("encode payload");
+        let decoded = SyncPayload::from_bytes(&bytes).expect("decode payload");
+
+        assert!(matches!(decoded, SyncPayload::QuerySubscription { .. }));
     }
 }

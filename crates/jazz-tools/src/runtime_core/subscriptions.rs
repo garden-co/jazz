@@ -60,17 +60,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(query);
         }
 
-        let snapshot = self
+        if let Some(snapshot) = self
             .storage
             .load_branch_scope_snapshot(selector.branch_id)
             .map_err(|err| RuntimeError::QueryError(format!("load branch scope: {err}")))?
-            .ok_or_else(|| {
-                RuntimeError::QueryError(format!(
-                    "branch scope snapshot not found for {}",
-                    selector.branch_id
-                ))
-            })?;
-        selector.entries = Some(snapshot.entries);
+        {
+            selector.entries = Some(snapshot.entries);
+        }
         Ok(query)
     }
 

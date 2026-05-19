@@ -200,10 +200,10 @@ export class SubscriptionsOrchestrator {
       snapshot: snapshot ? [...snapshot] : undefined,
     });
 
-    const existing = this.entries.get(key) as InternalCacheEntry<T> | undefined;
-    if (existing && existing.state.status === "pending" && snapshot) {
-      existing.state = { status: "fulfilled", data: snapshot, error: null };
-      existing.resolvefulfilled(snapshot);
+    const current = this.entries.get(key) as InternalCacheEntry<T> | undefined;
+    if (current && current.state.status === "pending" && snapshot) {
+      current.state = { status: "fulfilled", data: snapshot, error: null };
+      current.resolvefulfilled(snapshot);
     }
 
     return key;

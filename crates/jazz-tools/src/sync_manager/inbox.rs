@@ -1228,11 +1228,10 @@ impl SyncManager {
                     reason,
                 } => {
                     tracing::warn!(
-                        ?server_id,
-                        query_id = query_id.0,
-                        code = %code,
-                        error = %reason,
-                        "server rejected query subscription"
+                        "server rejected query subscription server={server_id:?} query_id={} code={} reason={}",
+                        query_id.0,
+                        code,
+                        reason
                     );
                     self.pending_query_rejections.push(PendingQueryRejection {
                         query_id,
@@ -1241,7 +1240,7 @@ impl SyncManager {
                     });
                 }
                 _ => {
-                    tracing::warn!(?server_id, error = ?err, "error from server");
+                    tracing::warn!("error from server server={server_id:?} error={err:?}");
                 }
             },
             // Servers shouldn't send these to us

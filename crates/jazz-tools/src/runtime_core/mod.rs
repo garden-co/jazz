@@ -553,9 +553,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         branch_id: ObjectId,
         query: Query,
     ) -> Result<(), RuntimeError> {
-        self.schema_manager
+        let snapshot = self
+            .schema_manager
             .query_manager_mut()
             .capture_branch_scope(&mut self.storage, branch_id, query)?;
+        self.schema_manager
+            .query_manager_mut()
+            .mark_branch_scope_snapshot_updated(branch_id, &snapshot.entries);
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(())

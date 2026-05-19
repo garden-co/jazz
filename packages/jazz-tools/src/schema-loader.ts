@@ -228,6 +228,11 @@ function isTablePoliciesLike(input: unknown): input is TablePolicies {
   const tablePolicy = input as Record<string, unknown>;
   const validOperationKeys = ["select", "insert", "update", "delete"];
   return Object.entries(tablePolicy).every(([key, value]) => {
+    if (key === "branch") {
+      // forBranch(...) blocks compile to an array of per-backing-table
+      // policy bundles; their inner shape is validated by the runtime.
+      return Array.isArray(value);
+    }
     if (!validOperationKeys.includes(key)) {
       return false;
     }

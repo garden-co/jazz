@@ -97,6 +97,11 @@ pub enum MainToWorkerWire {
         ack_id: Option<u32>,
         ack_batch_id: Option<String>,
     },
+    CreateBranchScope {
+        branch_id: String,
+        query_json: String,
+        ack_id: Option<u32>,
+    },
     PeerOpen {
         peer_id: String,
     },

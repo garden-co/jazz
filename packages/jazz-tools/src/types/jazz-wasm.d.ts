@@ -79,6 +79,7 @@ declare module "jazz-wasm" {
     applyIncomingServerPayload(payload: Uint8Array): void;
     waitForUpstreamServerConnection(): Promise<void>;
     waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
+    createBranchScope(branchId: string, queryJson: string): Promise<void>;
     replayServerConnection(): void;
     disconnectUpstream(): void;
     reconnectUpstream(): void;
@@ -162,6 +163,7 @@ declare module "jazz-wasm" {
     removeServer(): void;
     reconcileLocalBatchWithServer?(batchId: string): void;
     batchedTick?(): void;
+    flushWal?(): void;
     addClient(): string;
     getSchema(): unknown;
     getSchemaHash(): string;

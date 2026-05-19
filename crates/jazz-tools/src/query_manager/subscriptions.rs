@@ -9,6 +9,7 @@ use crate::storage::Storage;
 use crate::sync_manager::{DurabilityTier, QueryId, ServerId};
 use crate::sync_manager::{OutgoingQuerySubscription, QueryPropagation};
 
+use super::branch_scope::BranchScopeEntry;
 #[cfg(test)]
 use super::encoding::decode_row;
 use super::graph_nodes::output::QuerySubscriptionId;
@@ -445,6 +446,78 @@ impl QueryManager {
             let query_id = QueryId(id.0);
             self.sync_manager
                 .send_query_unsubscription_to_servers(query_id);
+        }
+    }
+
+    pub fn mark_branch_scope_snapshot_updated(
+        &mut self,
+        branch_id: ObjectId,
+        entries: &[BranchScopeEntry],
+    ) {
+        let mut replay_subscriptions = Vec::new();
+        let has_durability_identity = self.sync_manager.has_durability_identity();
+        let current_branch = self
+            .schema_context
+            .is_initialized()
+            .then(|| self.schema_context.branch_name().as_str().to_string());
+
+        for (sub_id, subscription) in self.subscriptions.iter_mut() {
+            if subscription
+                .query
+                .branch_scope
+                .as_ref()
+                .is_some_and(|selector| selector.branch_id == branch_id)
+            {
+                if let Some(selector) = subscription.query.branch_scope.as_mut() {
+                    selector.entries = Some(entries.to_vec());
+                }
+                subscription.branch_scope_snapshot = None;
+                subscription.needs_visibility_recompute = true;
+                if subscription.propagation == QueryPropagation::Full || !has_durability_identity {
+                    let mut sync_query = subscription.query.clone();
+                    if sync_query.branches.is_empty()
+                        && let Some(current_branch) = current_branch.as_ref()
+                    {
+                        sync_query.branches = vec![current_branch.clone()];
+                    }
+                    replay_subscriptions.push((
+                        QueryId(sub_id.0),
+                        sync_query,
+                        subscription.session.clone(),
+                        subscription.durability_tier,
+                        subscription.propagation,
+                        subscription.policy_context_tables.clone(),
+                    ));
+                }
+            }
+        }
+
+        for subscription in self.server_subscriptions.values_mut() {
+            if subscription
+                .query
+                .branch_scope
+                .as_ref()
+                .is_some_and(|selector| selector.branch_id == branch_id)
+            {
+                if let Some(selector) = subscription.query.branch_scope.as_mut() {
+                    selector.entries = Some(entries.to_vec());
+                }
+                subscription.branch_scope_snapshot = None;
+                subscription.graph.mark_all_dirty();
+            }
+        }
+
+        for (query_id, query, session, durability_tier, propagation, policy_context_tables) in
+            replay_subscriptions
+        {
+            self.sync_manager.send_query_subscription_to_servers(
+                query_id,
+                query,
+                session,
+                durability_tier,
+                propagation,
+                policy_context_tables,
+            );
         }
     }
 

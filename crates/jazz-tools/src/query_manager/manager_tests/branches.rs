@@ -1,6 +1,7 @@
 use super::*;
 use crate::query_manager::branch_scope::BranchDiffKind;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyValue};
+use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{BranchTablePolicies, RowPolicyMode};
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 
@@ -31,6 +32,46 @@ fn branch_permission_schema() -> Schema {
                         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
                     ])),
                 ],
+                ..TablePolicies::default()
+            },
+        ),
+    );
+    schema
+}
+
+fn branch_reference_permission_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("drafts"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("target_todo_id", ColumnType::Uuid).references("todos"),
+            ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("todos"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("body", ColumnType::Text)]),
+            TablePolicies {
+                branch: vec![BranchTablePolicies::new("drafts").with_update(
+                    Some(PolicyExpr::Cmp {
+                        column: "id".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec![
+                            "__jazz_branch".into(),
+                            "target_todo_id".into(),
+                        ]),
+                    }),
+                    PolicyExpr::Cmp {
+                        column: "id".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec![
+                            "__jazz_branch".into(),
+                            "target_todo_id".into(),
+                        ]),
+                    },
+                )],
                 ..TablePolicies::default()
             },
         ),
@@ -522,6 +563,62 @@ fn branch_policy_denies_insert_when_session_misses() {
             operation: Operation::Insert,
         } if table == TableName::new("todos")
     ));
+}
+
+#[test]
+fn branch_policy_allows_update_when_row_matches_branch_row_reference() {
+    let sync_manager = SyncManager::new();
+    let schema = branch_reference_permission_schema();
+    let (mut qm, mut storage) = create_enforcing_query_manager(sync_manager, schema);
+
+    let todo = qm
+        .insert(&mut storage, "todos", &[Value::Text("Draft me".into())])
+        .unwrap();
+    let draft = qm
+        .insert(
+            &mut storage,
+            "drafts",
+            &[Value::Uuid(todo.row_id), Value::Text("alice".to_string())],
+        )
+        .unwrap();
+    qm.capture_branch_scope(
+        &mut storage,
+        draft.row_id,
+        qm.query("todos")
+            .filter_eq("id", Value::Uuid(todo.row_id))
+            .build(),
+    )
+    .unwrap();
+
+    let current_branch = get_branch(&qm);
+    let main_row = storage
+        .load_visible_query_row("todos", current_branch.as_str(), todo.row_id)
+        .unwrap()
+        .unwrap();
+    let session = WriteContext::from_session(PolicySession::new("alice"));
+    let branch = draft.row_id.to_string();
+
+    qm.write_existing_row_on_branch_with_write_context(
+        &mut storage,
+        RowBranchWrite {
+            table: "todos",
+            branch: branch.as_str(),
+            id: todo.row_id,
+            values: &[Value::Text("Drafted on branch".into())],
+            old_data_for_policy: &main_row.data,
+            old_provenance_for_policy: &main_row.row_provenance(),
+        },
+        Some(&session),
+    )
+    .expect("branch policy should allow matching update through branch row ref");
+
+    let query = qm
+        .query("todos")
+        .branch(branch.as_str())
+        .with_branch_scope(draft.row_id)
+        .build();
+    let rows = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(rows[0].1[0], Value::Text("Drafted on branch".into()));
 }
 
 #[test]
