@@ -10,7 +10,9 @@ use super::relation_ir::{PredicateExpr, RelExpr, RowIdRef, ValueRef};
 use super::session::Session;
 use super::types::{RowDescriptor, Value};
 use crate::metadata::RowProvenance;
+use crate::object::ObjectId;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Comparison operators for policy expressions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,8 +537,6 @@ impl PolicyExpr {
 // ============================================================================
 
 use std::collections::HashSet;
-
-use crate::object::ObjectId;
 
 use super::types::{Schema, TableName};
 
@@ -1682,6 +1682,9 @@ pub fn resolve_session_value(path: &[String], session: &Session) -> Option<Value
     }
 
     if is_user_id_path(path) {
+        if let Ok(user_id) = Uuid::parse_str(&session.user_id) {
+            return Some(Value::Uuid(ObjectId::from_uuid(user_id)));
+        }
         return Some(Value::Text(session.user_id.clone()));
     }
 

@@ -363,6 +363,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
         let cache_key = if depth == 0 && visited.is_empty() {
             Some(RefAccessSubexprKey {
+                branch: self.branch.to_string(),
                 table: *parent_table,
                 id: parent_id,
                 operation,
