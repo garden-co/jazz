@@ -113,12 +113,14 @@ interface TeamTeamEdge {
   id: string;
   child_team: string;
   parent_team: string;
+  administrator: boolean;
 }
 
 interface TeamTeamEdgeWhere {
   id?: string;
   child_team?: string;
   parent_team?: string;
+  administrator?: boolean;
 }
 
 interface ResourceAccessEdge {
@@ -1016,6 +1018,49 @@ describe("permissions DSL", () => {
     if (ir.seed.input.input.type !== "Join") {
       throw new Error("Expected hop seed join relation IR.");
     }
+  });
+
+  it("keeps explicit relation seeds and recursive-current filters scoped to the step table", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy, session }) => {
+      const directParents = policy.team_team_edges
+        .where({ child_team: session.user_id })
+        .hopTo("parent_team");
+      relation = policy.teams.gather({
+        start: directParents,
+        step: ({ current }) =>
+          policy.team_team_edges
+            .where({ child_team: current, administrator: false })
+            .hopTo("parent_team"),
+        maxDepth: 3,
+      });
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected recursive relation to be initialized.");
+    }
+
+    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    expect(ir.type).toBe("Gather");
+    if (ir.type !== "Gather") {
+      throw new Error("Expected gather relation IR.");
+    }
+    expect(ir.seed.type).toBe("Project");
+    expect(ir.step.type).toBe("Project");
+    if (ir.step.type !== "Project" || ir.step.input.type !== "Join") {
+      throw new Error("Expected projected recursive step join.");
+    }
+    const stepJoin = ir.step.input;
+    expect(stepJoin.on[0]?.left).toEqual({
+      scope: "team_team_edges",
+      column: "parent_team",
+    });
+    expect(stepJoin.left.type).toBe("Filter");
+    if (stepJoin.left.type !== "Filter") {
+      throw new Error("Expected filtered step relation.");
+    }
+    expect(JSON.stringify(stepJoin.left.predicate)).toContain('"scope":"team_team_edges"');
+    expect(JSON.stringify(stepJoin.left.predicate)).toContain('"column":"child_team"');
   });
 
   it("allows gather(...) to start from a union of same-table relations", () => {

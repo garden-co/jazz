@@ -9,6 +9,8 @@ use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{RowDescriptor, RowPolicyMode, Schema, Value};
 use crate::schema_manager::SchemaContext;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// Template for creating subgraph instances.
 ///
@@ -196,6 +198,21 @@ impl SubgraphTemplate {
     /// Get the output descriptor for result rows.
     pub fn output_descriptor(&self) -> &RowDescriptor {
         &self.output_descriptor
+    }
+
+    pub(crate) fn semantic_fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        serde_json::to_vec(&self.base_query)
+            .unwrap_or_else(|_| format!("{:?}", self.base_query).into_bytes())
+            .hash(&mut hasher);
+        self.inner_column.hash(&mut hasher);
+        self.select_columns.hash(&mut hasher);
+        self.output_descriptor.content_hash().hash(&mut hasher);
+        serde_json::to_vec(&self.session)
+            .unwrap_or_else(|_| format!("{:?}", self.session).into_bytes())
+            .hash(&mut hasher);
+        format!("{:?}", self.row_policy_mode).hash(&mut hasher);
+        hasher.finish()
     }
 }
 

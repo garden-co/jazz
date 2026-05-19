@@ -155,7 +155,7 @@ export interface PermissionRelation {
   select(columns: Record<string, string>): PermissionRelation;
   hopTo(relation: string): PermissionRelation;
   gather(options: {
-    start?: Record<string, unknown>;
+    start?: Record<string, unknown> | PermissionRelation;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation;
@@ -293,7 +293,7 @@ class PermissionRelationBuilder implements PermissionRelation {
   }
 
   gather(options: {
-    start?: Record<string, unknown>;
+    start?: Record<string, unknown> | PermissionRelation;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation {
@@ -303,7 +303,7 @@ class PermissionRelationBuilder implements PermissionRelation {
     if (this.state.selectMap && Object.keys(this.state.selectMap).length > 0) {
       throw new Error("gather(...) does not support select(...) seeds in MVP.");
     }
-    if (options.start && this.state.kind === "union") {
+    if (options.start && this.state.kind === "union" && !isPermissionRelation(options.start)) {
       throw new Error("gather(...) start does not support union(...) seeds in MVP.");
     }
 
@@ -353,7 +353,7 @@ class PermissionRelationBuilder implements PermissionRelation {
       {
         Cmp: {
           left: {
-            scope: stepState.outputTable,
+            scope: currentFilter.scope,
             column: stripQualifier(currentFilter.column),
           },
           op: "Eq",
@@ -379,7 +379,7 @@ class PermissionRelationBuilder implements PermissionRelation {
             on: [
               {
                 left: {
-                  scope: stepState.outputTable,
+                  scope: stepState.initialScope,
                   column: stripQualifier(stepJoin.left),
                 },
                 right: { scope: recursiveHopScope, column: "id" },
@@ -770,7 +770,7 @@ function buildTablePolicyBuilder(
       return createTableRelation(table, relationsByTable).hopTo(relation);
     },
     gather(options: {
-      start?: Record<string, unknown>;
+      start?: Record<string, unknown> | PermissionRelation;
       step: (ctx: { current: unknown }) => PermissionRelation;
       maxDepth?: number;
     }): PermissionRelation {
@@ -841,11 +841,20 @@ function createUnionRelation(
 
 function buildGatherSeedState(
   state: RelationExprState,
-  start: Record<string, unknown> | undefined,
+  start: Record<string, unknown> | PermissionRelation | undefined,
   relationsByTable: Map<string, Relation[]>,
 ): RelationExprState {
   if (start === undefined) {
     return state;
+  }
+  if (isPermissionRelation(start)) {
+    const seedState = getRelationState(start);
+    if (seedState.outputTable !== state.outputTable) {
+      throw new Error(
+        `gather(...) explicit relation seed must output "${state.outputTable}" rows, got "${seedState.outputTable}".`,
+      );
+    }
+    return seedState;
   }
 
   const startWhere = resolveRelationWhereInput(start);
@@ -1137,6 +1146,10 @@ function getRelationState(relation: PermissionRelation): RelationExprState {
     return relation.toState();
   }
   throw new Error("Expected a relation built from policy.<table> with where/join/hopTo/gather.");
+}
+
+function isPermissionRelation(value: unknown): value is PermissionRelation {
+  return value instanceof PermissionRelationBuilder;
 }
 
 function relationColumnRef(column: string, defaultScope: string): RelColumnRef {

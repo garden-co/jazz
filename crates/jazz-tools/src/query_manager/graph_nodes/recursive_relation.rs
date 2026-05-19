@@ -6,12 +6,14 @@
 //! - deterministic dedupe by normalized row content.
 
 use ahash::{AHashMap, AHashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use uuid::Uuid;
 
 use crate::metadata::{RowProvenance, SYSTEM_PRINCIPAL_ID};
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
-use crate::query_manager::settlement_eval_cache::SettlementEvalCache;
+use crate::query_manager::settlement_eval_cache::{RelationSubexprKey, SettlementEvalCache};
 use crate::query_manager::types::{
     LoadedRow, Row, RowDescriptor, Schema, TableName, Tuple, TupleBatchProvenance, TupleDelta,
     TupleDescriptor, TupleElement, TupleProvenance, Value,
@@ -447,10 +449,32 @@ impl RecursiveRelationNode {
     fn recompute_with_hop(
         &self,
         io: &dyn Storage,
-        _settlement_eval_cache: Option<&mut SettlementEvalCache>,
+        settlement_eval_cache: Option<&mut SettlementEvalCache>,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
-        self.recompute_with_hop_uncached(io, row_loader)
+        let Some(cache) = settlement_eval_cache else {
+            return self.recompute_with_hop_uncached(io, row_loader);
+        };
+        let key = RelationSubexprKey {
+            site_fingerprint: self.cache_site_fingerprint("recursive_hop"),
+            input_fingerprint: self.seed_fingerprint(),
+        };
+
+        if let Some(cached) = cache.relation_result_get(&key) {
+            crate::query_manager::policy_counters::increment(
+                "relation_subexpr_cache",
+                format!("hit kind=recursive_hop site={:016x}", key.site_fingerprint),
+            );
+            return cached;
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "relation_subexpr_cache",
+            format!("miss kind=recursive_hop site={:016x}", key.site_fingerprint),
+        );
+        let result = self.recompute_with_hop_uncached(io, row_loader);
+        cache.relation_result_insert(key, result.clone());
+        result
     }
 
     fn recompute_with_hop_uncached(
@@ -787,6 +811,57 @@ impl RecursiveRelationNode {
             step_row.provenance.clone(),
         ))
     }
+
+    fn cache_site_fingerprint(&self, kind: &'static str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        kind.hash(&mut hasher);
+        self.input_descriptor
+            .combined_descriptor()
+            .content_hash()
+            .hash(&mut hasher);
+        self.output_descriptor.content_hash().hash(&mut hasher);
+        self.step_template.semantic_fingerprint().hash(&mut hasher);
+        format!("{:?}", self.correlation_source).hash(&mut hasher);
+        self.hop
+            .as_ref()
+            .map(|hop| (hop.table, hop.step_column_index))
+            .hash(&mut hasher);
+        self.max_depth.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn seed_fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        let mut seeds = self.seed_tuples.values().collect::<Vec<_>>();
+        seeds.sort_by_key(|tuple| tuple.ids());
+
+        for tuple in seeds {
+            for element in tuple.iter() {
+                element.id().hash(&mut hasher);
+                element.content().hash(&mut hasher);
+                element.batch_id().hash(&mut hasher);
+                format!("{:?}", element.row_provenance()).hash(&mut hasher);
+            }
+
+            let mut provenance = tuple
+                .provenance()
+                .iter()
+                .map(|scoped_object| format!("{:?}", scoped_object))
+                .collect::<Vec<_>>();
+            provenance.sort_unstable();
+            provenance.hash(&mut hasher);
+
+            let mut batch_provenance = tuple
+                .batch_provenance()
+                .iter()
+                .map(|batch_id| format!("{:?}", batch_id))
+                .collect::<Vec<_>>();
+            batch_provenance.sort_unstable();
+            batch_provenance.hash(&mut hasher);
+        }
+
+        hasher.finish()
+    }
 }
 
 impl RowNode for RecursiveRelationNode {
@@ -963,5 +1038,52 @@ mod tests {
         let out = node.process(input);
         assert!(out.is_empty());
         assert!(node.is_dirty());
+    }
+
+    #[test]
+    fn recursive_cache_site_includes_step_semantics() {
+        let schema = test_schema();
+        let output_desc = schema
+            .get(&TableName::new("teams"))
+            .unwrap()
+            .columns
+            .clone();
+        let input_desc =
+            TupleDescriptor::single_with_materialization("", output_desc.clone(), true);
+        let base_step = SubgraphBuilder::new("team_edges")
+            .correlate("child_team")
+            .select(&["parent_team"])
+            .build(&schema)
+            .unwrap();
+        let filtered_step = SubgraphBuilder::new("team_edges")
+            .correlate("child_team")
+            .filter_eq("parent_team", Value::Integer(1))
+            .select(&["parent_team"])
+            .build(&schema)
+            .unwrap();
+
+        let base_node = RecursiveRelationNode::new(
+            input_desc.clone(),
+            output_desc.clone(),
+            base_step,
+            CorrelationSource::Column(0),
+            None,
+            10,
+            schema.clone(),
+        );
+        let filtered_node = RecursiveRelationNode::new(
+            input_desc,
+            output_desc,
+            filtered_step,
+            CorrelationSource::Column(0),
+            None,
+            10,
+            schema,
+        );
+
+        assert_ne!(
+            base_node.cache_site_fingerprint("recursive_hop"),
+            filtered_node.cache_site_fingerprint("recursive_hop")
+        );
     }
 }

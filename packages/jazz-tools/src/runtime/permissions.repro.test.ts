@@ -36,6 +36,26 @@ const reproApp = s.defineApp({
   }),
 });
 
+const doubleRefReproApp = s.defineApp({
+  teams: s.table({
+    name: s.string(),
+  }),
+  team_entry: s.table({
+    team_id: s.ref("teams"),
+    target_id: s.ref("teams"),
+    administrator: s.boolean(),
+  }),
+  dropdowns: s.table({
+    name: s.string(),
+  }),
+  dropdowns_access_edges: s.table({
+    resource_id: s.ref("dropdowns"),
+    team_id: s.ref("teams"),
+    grant_role: s.string(),
+    administrator: s.boolean(),
+  }),
+});
+
 type ReproPermissions = Parameters<typeof definePermissions<typeof reproApp>>[1];
 
 function seedScenario(context: JazzContext): void {
@@ -374,6 +394,89 @@ describe("runtime permission repros for recursive gather and qualified predicate
         "Relation Membership",
       ].sort(),
     );
+  });
+
+  it("evaluates explicit gather seeds through a same-table double-ref edge", async () => {
+    const appId = randomUUID();
+    const userTeamId = randomUUID();
+    const dataRoot = await mkdtemp(join(tmpdir(), "jazz-double-ref-permissions-repro-"));
+    const dataPath = join(dataRoot, "runtime.db");
+    const permissions = definePermissions(doubleRefReproApp, ({ policy, session }) => {
+      const directTeams = policy.team_entry.where({ team_id: session.user_id }).hopTo("target");
+      const reachableTeams = policy.teams.gather({
+        start: directTeams,
+        step: ({ current }) =>
+          policy.team_entry.where({ team_id: current, administrator: false }).hopTo("target"),
+        maxDepth: 8,
+      });
+
+      return [
+        policy.dropdowns.allowRead.where((dropdown) =>
+          policy.exists(
+            reachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
+              "dropdowns_access_edges.resource_id": dropdown.id,
+              grant_role: { in: ["viewer"] },
+              administrator: false,
+            }),
+          ),
+        ),
+      ];
+    });
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const context = createJazzContext({
+      appId,
+      app: doubleRefReproApp,
+      permissions,
+      driver: { type: "persistent", dataPath },
+      env: "test",
+      userBranch: "main",
+      tier: "edge",
+    });
+    onTestFinished(async () => {
+      context.flush();
+      await context.shutdown();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await rm(dataRoot, { recursive: true, force: true });
+    });
+
+    const db = context.db(doubleRefReproApp);
+    const { value: userTeam } = db.insert(
+      doubleRefReproApp.teams,
+      { name: "User" },
+      { id: userTeamId },
+    );
+    const { value: directTeam } = db.insert(doubleRefReproApp.teams, { name: "Direct" });
+    const { value: nestedTeam } = db.insert(doubleRefReproApp.teams, { name: "Nested" });
+    const { value: dropdown } = db.insert(doubleRefReproApp.dropdowns, { name: "Visible" });
+    db.insert(doubleRefReproApp.team_entry, {
+      team_id: userTeam.id,
+      target_id: directTeam.id,
+      administrator: false,
+    });
+    db.insert(doubleRefReproApp.team_entry, {
+      team_id: directTeam.id,
+      target_id: nestedTeam.id,
+      administrator: false,
+    });
+    db.insert(doubleRefReproApp.dropdowns_access_edges, {
+      resource_id: dropdown.id,
+      team_id: nestedTeam.id,
+      grant_role: "viewer",
+      administrator: false,
+    });
+
+    const userDb = context.forSession(
+      {
+        user_id: userTeam.id,
+        claims: {},
+        authMode: "external",
+      },
+      doubleRefReproApp,
+    );
+
+    await expect(userDb.all(doubleRefReproApp.dropdowns.where({}))).resolves.toEqual([
+      expect.objectContaining({ id: dropdown.id }),
+    ]);
   });
 
   it("keeps shared-context session reads stable across session order", async () => {
