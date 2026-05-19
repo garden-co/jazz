@@ -547,6 +547,20 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.immediate_tick();
         Ok(id)
     }
+
+    pub fn create_branch_scope(
+        &mut self,
+        branch_id: ObjectId,
+        query: Query,
+    ) -> Result<(), RuntimeError> {
+        self.schema_manager
+            .query_manager_mut()
+            .capture_branch_scope(&mut self.storage, branch_id, query)?;
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(())
+    }
+
     // =========================================================================
     // Schema/State Access
     // =========================================================================

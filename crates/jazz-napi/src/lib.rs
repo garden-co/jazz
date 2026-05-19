@@ -991,6 +991,19 @@ impl NapiRuntime {
         Ok(serde_json::Value::Array(json_rows))
     }
 
+    #[napi(js_name = "createBranchScope")]
+    pub fn create_branch_scope(&self, branch_id: String, query_json: String) -> napi::Result<()> {
+        let branch_id = parse_external_object_id(Some(&branch_id))
+            .map_err(napi::Error::from_reason)?
+            .ok_or_else(|| napi::Error::from_reason("Missing branch id"))?;
+        let query = parse_query(&query_json)?;
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .create_branch_scope(branch_id, query)
+            .map_err(|e| napi::Error::from_reason(format!("Create branch scope failed: {e}")))
+    }
+
     // =========================================================================
     // Subscriptions
     // =========================================================================

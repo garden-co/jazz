@@ -78,6 +78,7 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): Promise<any>;
+  createBranchScope?(branch_id: string, query_json: string): void;
   subscribe(
     query_json: string,
     on_update: Function,
@@ -1883,6 +1884,13 @@ export class JazzClient {
    */
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
     return this.queryInternal(query, this.resolvedSession ?? undefined, options);
+  }
+
+  createBranchScope(branchId: string, query: string | QueryInput): void {
+    if (!this.runtime.createBranchScope) {
+      throw new Error("createBranchScope is not supported by this runtime");
+    }
+    this.runtime.createBranchScope(branchId, resolveQueryJson(query));
   }
 
   /**

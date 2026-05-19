@@ -1426,6 +1426,18 @@ impl WasmRuntime {
         Ok(promise)
     }
 
+    #[wasm_bindgen(js_name = createBranchScope)]
+    pub fn create_branch_scope(&self, branch_id: &str, query_json: &str) -> Result<(), JsError> {
+        let branch_id = parse_external_object_id(Some(branch_id))
+            .map_err(|message| JsError::new(&message))?
+            .ok_or_else(|| JsError::new("Missing branch id"))?;
+        let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
+        self.core
+            .borrow_mut()
+            .create_branch_scope(branch_id, query)
+            .map_err(|e| JsError::new(&format!("Create branch scope failed: {e}")))
+    }
+
     /// Update a row by ObjectId.
     #[wasm_bindgen]
     pub fn update(&self, object_id: &str, values: JsValue) -> Result<JsValue, JsError> {

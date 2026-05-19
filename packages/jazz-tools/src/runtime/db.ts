@@ -735,6 +735,44 @@ export class DbDirectBatch extends DbBatchHandleBase<RuntimeDirectBatch> {
  */
 export type DbBatchScope = Scoped<DbDirectBatch>;
 
+export class BranchDb {
+  constructor(
+    private readonly base: Db,
+    private readonly branchId: string,
+  ) {}
+
+  private scopeQuery<T>(query: QueryBuilder<T>): QueryBuilder<T> {
+    const branchId = this.branchId;
+    return {
+      ...query,
+      _build() {
+        const raw = JSON.parse(query._build()) as Record<string, unknown>;
+        return JSON.stringify({
+          ...raw,
+          branch: branchId,
+          branchScope: { branchId },
+        });
+      },
+    } as QueryBuilder<T>;
+  }
+
+  all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    return this.base.all(this.scopeQuery(query), options);
+  }
+
+  one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
+    return this.base.one(this.scopeQuery(query), options);
+  }
+
+  subscribeAll<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+  ): () => void {
+    return this.base.subscribeAll(this.scopeQuery(query), callback, options);
+  }
+}
+
 /**
  * High-level database interface for typed queries and mutations.
  *
@@ -1804,6 +1842,26 @@ export class Db {
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     const client = this.getClient(table._schema);
     return client.delete(id);
+  }
+
+  async createBranch<T>(branchId: string, query: QueryBuilder<T>): Promise<BranchDb> {
+    const client = this.getClient(query._schema);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(client.getSchema()),
+    );
+    const builderJson = query._build();
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
+    const planningSchema = resolveSchemaWithTable(
+      query._schema,
+      runtimeSchema.get,
+      builtQuery.table,
+    );
+    client.createBranchScope(branchId, translateQuery(builderJson, planningSchema));
+    return new BranchDb(this, branchId);
+  }
+
+  branch(branchId: string): BranchDb {
+    return new BranchDb(this, branchId);
   }
 
   /**
