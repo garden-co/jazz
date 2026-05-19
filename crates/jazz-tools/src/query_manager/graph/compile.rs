@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::{cmp::Ordering, ops::Bound};
 
-use crate::object::BranchName;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode,
     Schema, SchemaHash, TableName, TupleDescriptor, Value,
@@ -35,6 +35,7 @@ use super::super::query::{ArraySubquerySpec, Condition, Conjunction, Query, Quer
 use super::super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::super::session::Session;
+use uuid::Uuid;
 
 use super::{CompactNode, GraphNode, QueryCompileError, QueryGraph, RelationCompileFeatures};
 
@@ -2124,7 +2125,7 @@ fn index_scan_plan(
             .iter()
             .any(|plan: &ColumnScanPlan| plan.column == condition.column())
         {
-            column_plans.push(column_scan_plan(disjunct, condition.column()));
+            column_plans.push(column_scan_plan(disjunct, table_schema, condition.column()));
         }
     }
 
@@ -2163,17 +2164,22 @@ fn index_scan_plan(
     }
 }
 
-fn column_scan_plan(disjunct: &Conjunction, column: &str) -> ColumnScanPlan {
+fn column_scan_plan(
+    disjunct: &Conjunction,
+    table_schema: &crate::query_manager::types::TableSchema,
+    column: &str,
+) -> ColumnScanPlan {
     let mut intersection = ScanIntersection::default();
     let mut first_scan = None;
+    let column_type = column_type_for_scan(table_schema, column);
 
     for condition in disjunct
         .conditions
         .iter()
         .filter(|c| c.column() == column && c.is_index_scannable())
     {
-        first_scan.get_or_insert_with(|| condition_to_scan(condition));
-        if !intersection.add(condition) {
+        first_scan.get_or_insert_with(|| condition_to_scan(condition, column_type));
+        if !intersection.add(condition, column_type) {
             return ColumnScanPlan {
                 column: column.to_string(),
                 condition: first_scan.unwrap_or(ScanCondition::All),
@@ -2197,27 +2203,36 @@ fn column_scan_plan(disjunct: &Conjunction, column: &str) -> ColumnScanPlan {
 }
 
 impl ScanIntersection {
-    fn add(&mut self, condition: &Condition) -> bool {
+    fn add(&mut self, condition: &Condition, column_type: Option<&ColumnType>) -> bool {
         match condition {
             Condition::Eq { value, .. } => {
-                if self.eq.as_ref().is_some_and(|existing| existing != value) {
+                let value = normalize_scan_value(value, column_type);
+                if self.eq.as_ref().is_some_and(|existing| existing != &value) {
                     self.empty = true;
                 } else {
-                    self.eq = Some(value.clone());
+                    self.eq = Some(value);
                 }
                 true
             }
-            Condition::Lt { value, .. } => self.tighten_upper(Bound::Excluded(value.clone())),
-            Condition::Le { value, .. } => self.tighten_upper(Bound::Included(value.clone())),
-            Condition::Gt { value, .. } => self.tighten_lower(Bound::Excluded(value.clone())),
-            Condition::Ge { value, .. } => self.tighten_lower(Bound::Included(value.clone())),
+            Condition::Lt { value, .. } => {
+                self.tighten_upper(Bound::Excluded(normalize_scan_value(value, column_type)))
+            }
+            Condition::Le { value, .. } => {
+                self.tighten_upper(Bound::Included(normalize_scan_value(value, column_type)))
+            }
+            Condition::Gt { value, .. } => {
+                self.tighten_lower(Bound::Excluded(normalize_scan_value(value, column_type)))
+            }
+            Condition::Ge { value, .. } => {
+                self.tighten_lower(Bound::Included(normalize_scan_value(value, column_type)))
+            }
             Condition::Between {
                 min: lower,
                 max: upper,
                 ..
             } => {
-                self.tighten_lower(Bound::Included(lower.clone()))
-                    && self.tighten_upper(Bound::Included(upper.clone()))
+                self.tighten_lower(Bound::Included(normalize_scan_value(lower, column_type)))
+                    && self.tighten_upper(Bound::Included(normalize_scan_value(upper, column_type)))
             }
             _ => true,
         }
@@ -2386,28 +2401,52 @@ fn apply_condition_to_builder(mut builder: QueryBuilder, condition: &Condition) 
 }
 
 /// Convert a condition to a scan condition.
-fn condition_to_scan(cond: &Condition) -> ScanCondition {
+fn column_type_for_scan<'a>(
+    table_schema: &'a crate::query_manager::types::TableSchema,
+    column: &str,
+) -> Option<&'a ColumnType> {
+    if column == "_id" || column == "id" {
+        return Some(&ColumnType::Uuid);
+    }
+    table_schema
+        .columns
+        .columns
+        .iter()
+        .find(|descriptor| descriptor.name == column)
+        .map(|descriptor| &descriptor.column_type)
+}
+
+fn normalize_scan_value(value: &Value, column_type: Option<&ColumnType>) -> Value {
+    match (value, column_type) {
+        (Value::Text(raw), Some(ColumnType::Uuid)) => Uuid::parse_str(raw)
+            .map(|uuid| Value::Uuid(ObjectId::from_uuid(uuid)))
+            .unwrap_or_else(|_| value.clone()),
+        _ => value.clone(),
+    }
+}
+
+fn condition_to_scan(cond: &Condition, column_type: Option<&ColumnType>) -> ScanCondition {
     match cond {
-        Condition::Eq { value, .. } => ScanCondition::Eq(value.clone()),
+        Condition::Eq { value, .. } => ScanCondition::Eq(normalize_scan_value(value, column_type)),
         Condition::Lt { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
-            max: Bound::Excluded(value.clone()),
+            max: Bound::Excluded(normalize_scan_value(value, column_type)),
         },
         Condition::Le { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
-            max: Bound::Included(value.clone()),
+            max: Bound::Included(normalize_scan_value(value, column_type)),
         },
         Condition::Gt { value, .. } => ScanCondition::Range {
-            min: Bound::Excluded(value.clone()),
+            min: Bound::Excluded(normalize_scan_value(value, column_type)),
             max: Bound::Unbounded,
         },
         Condition::Ge { value, .. } => ScanCondition::Range {
-            min: Bound::Included(value.clone()),
+            min: Bound::Included(normalize_scan_value(value, column_type)),
             max: Bound::Unbounded,
         },
         Condition::Between { min, max, .. } => ScanCondition::Range {
-            min: Bound::Included(min.clone()),
-            max: Bound::Included(max.clone()),
+            min: Bound::Included(normalize_scan_value(min, column_type)),
+            max: Bound::Included(normalize_scan_value(max, column_type)),
         },
         _ => ScanCondition::All,
     }
