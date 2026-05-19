@@ -1,4 +1,5 @@
 use super::*;
+use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 
 #[test]
 fn index_key_includes_branch() {
@@ -140,6 +141,86 @@ fn branch_scope_reads_captured_main_version_not_latest_main() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].1[1], Value::Integer(100));
+}
+
+#[test]
+fn branch_scope_update_overrides_captured_base_row() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let branch_id = ObjectId::new();
+    qm.capture_branch_scope(&mut storage, branch_id, qm.query("users").build())
+        .unwrap();
+
+    let branch = branch_id.to_string();
+    let base_row = load_visible_row(&storage, alice.row_id, &get_branch(&qm));
+    let base_provenance = base_row.row_provenance();
+    qm.write_existing_row_on_branch_with_write_context(
+        &mut storage,
+        RowBranchWrite {
+            table: "users",
+            branch: &branch,
+            id: alice.row_id,
+            values: &[Value::Text("Alice".into()), Value::Integer(55)],
+            old_data_for_policy: &base_row.data,
+            old_provenance_for_policy: &base_provenance,
+        },
+        None,
+    )
+    .unwrap();
+
+    let query = qm.query("users").with_branch_scope(branch_id).build();
+    let rows = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1[1], Value::Integer(55));
+}
+
+#[test]
+fn branch_scope_delete_hides_captured_base_row() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let branch_id = ObjectId::new();
+    qm.capture_branch_scope(&mut storage, branch_id, qm.query("users").build())
+        .unwrap();
+
+    let branch = branch_id.to_string();
+    let base_row = load_visible_row(&storage, alice.row_id, &get_branch(&qm));
+    let base_provenance = base_row.row_provenance();
+    qm.delete_existing_row_on_branch_with_write_context(
+        &mut storage,
+        RowBranchDelete {
+            table: "users",
+            branch: &branch,
+            id: alice.row_id,
+            old_data_for_policy: &base_row.data,
+            old_provenance_for_policy: &base_provenance,
+        },
+        None,
+    )
+    .unwrap();
+
+    let query = qm.query("users").with_branch_scope(branch_id).build();
+    let rows = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert!(rows.is_empty());
 }
 
 #[test]

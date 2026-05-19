@@ -413,11 +413,69 @@ impl QueryManager {
             self.persist_row_locator(storage, row_id, &row_locator);
         }
 
+        self.ensure_branch_scope_parent_rows(storage, table, branch_name, row_id, &row)?;
+
         let forwarded_row = row.clone();
         let applied = apply_row_batch(storage, row_id, branch_name, row, index_mutations)
             .map_err(|error| Self::query_error_for_local_row_history_write(row_id, error))?;
 
         self.finish_local_row_history_write(storage, table, row_id, forwarded_row, applied)
+    }
+
+    fn ensure_branch_scope_parent_rows<H: Storage>(
+        &self,
+        storage: &mut H,
+        table: &str,
+        branch_name: &BranchName,
+        row_id: ObjectId,
+        row: &StoredRowBatch,
+    ) -> Result<(), QueryError> {
+        let Some(branch_id) = uuid::Uuid::parse_str(branch_name.as_str())
+            .ok()
+            .map(ObjectId::from_uuid)
+        else {
+            return Ok(());
+        };
+        let Some(snapshot) = storage
+            .load_branch_scope_snapshot(branch_id)
+            .map_err(|err| QueryError::EncodingError(format!("load branch scope: {err}")))?
+        else {
+            return Ok(());
+        };
+        let Some(entry) = snapshot.entry_for(table, row_id) else {
+            return Ok(());
+        };
+        if !row.parents.contains(&entry.base_batch_id) {
+            return Ok(());
+        }
+        if storage
+            .load_history_row_batch(table, branch_name.as_str(), row_id, entry.base_batch_id)
+            .map_err(|err| QueryError::EncodingError(format!("load branch parent: {err}")))?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let mut anchor = storage
+            .load_history_row_batch(
+                entry.table.as_str(),
+                entry.base_branch.as_str(),
+                row_id,
+                entry.base_batch_id,
+            )
+            .map_err(|err| QueryError::EncodingError(format!("load branch-scope base: {err}")))?
+            .ok_or_else(|| {
+                QueryError::EncodingError(format!(
+                    "branch scope base batch {:?} missing for {:?}",
+                    entry.base_batch_id, row_id
+                ))
+            })?;
+        anchor.branch = branch_name.as_str().to_string().into();
+        anchor.parents.clear();
+
+        apply_row_batch(storage, row_id, branch_name, anchor, &[])
+            .map(|_| ())
+            .map_err(|error| Self::query_error_for_local_row_history_write(row_id, error))
     }
 
     fn finish_local_row_history_write<H: Storage>(
@@ -627,7 +685,27 @@ impl QueryManager {
         {
             return existing_batch_row.parents.iter().copied().collect();
         }
-        self.load_branch_tip_ids(storage, table, row_id, branch_name)
+        let branch_tip_ids = self.load_branch_tip_ids(storage, table, row_id, branch_name);
+        if !branch_tip_ids.is_empty() {
+            return branch_tip_ids;
+        }
+
+        let Some(branch_id) = uuid::Uuid::parse_str(branch_name)
+            .ok()
+            .map(ObjectId::from_uuid)
+        else {
+            return Vec::new();
+        };
+        storage
+            .load_branch_scope_snapshot(branch_id)
+            .ok()
+            .flatten()
+            .and_then(|snapshot| {
+                snapshot
+                    .entry_for(table, row_id)
+                    .map(|entry| vec![entry.base_batch_id])
+            })
+            .unwrap_or_default()
     }
 
     fn staged_row_for_write(

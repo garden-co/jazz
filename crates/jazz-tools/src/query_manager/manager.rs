@@ -1584,17 +1584,27 @@ impl QueryManager {
                                 .then(|| self.pending_local_row_batches.get(&id).copied())
                                 .flatten()
                         };
-                        if let Some(snapshot) = branch_scope_snapshot.as_ref()
-                            && let Some(row) = Self::load_branch_scope_base_row(
+                        if let Some(snapshot) = branch_scope_snapshot.as_ref() {
+                            if let Some(row) = Self::load_branch_scope_overlay_row(
                                 storage_ref,
                                 snapshot,
                                 id,
                                 table_hint.as_ref().map(TableName::as_str),
                                 &table,
                                 include_deleted,
-                            )
-                        {
-                            return Some(row);
+                            ) {
+                                return row;
+                            }
+                            if let Some(row) = Self::load_branch_scope_base_row(
+                                storage_ref,
+                                snapshot,
+                                id,
+                                table_hint.as_ref().map(TableName::as_str),
+                                &table,
+                                include_deleted,
+                            ) {
+                                return Some(row);
+                            }
                         }
                         Self::load_visible_row_for_query(
                             storage_ref,
@@ -2858,6 +2868,51 @@ impl QueryManager {
         ))
     }
 
+    fn branch_scope_entry_for_row<'a>(
+        snapshot: &'a BranchScopeSnapshot,
+        row_id: ObjectId,
+        table_hint: Option<&str>,
+        fallback_table: &str,
+    ) -> Option<&'a super::branch_scope::BranchScopeEntry> {
+        table_hint
+            .and_then(|table| snapshot.entry_for(table, row_id))
+            .or_else(|| snapshot.entry_for(fallback_table, row_id))
+            .or_else(|| snapshot.entries.iter().find(|entry| entry.row_id == row_id))
+    }
+
+    fn load_branch_scope_overlay_row(
+        storage: &dyn Storage,
+        snapshot: &BranchScopeSnapshot,
+        row_id: ObjectId,
+        table_hint: Option<&str>,
+        fallback_table: &str,
+        include_deleted: bool,
+    ) -> Option<Option<LoadedRow>> {
+        let entry = Self::branch_scope_entry_for_row(snapshot, row_id, table_hint, fallback_table)?;
+        let branch = snapshot.branch_id.to_string();
+        let row = storage
+            .load_visible_query_row(entry.table.as_str(), branch.as_str(), row_id)
+            .ok()
+            .flatten()?;
+
+        if row.is_hard_deleted() || !row.state.is_visible() {
+            return Some(None);
+        }
+        if row.is_soft_deleted() && !include_deleted {
+            return Some(None);
+        }
+
+        let row_provenance = row.row_provenance();
+        Some(Some(LoadedRow::new(
+            row.data,
+            row_provenance,
+            [(row_id, BranchName::new(branch.as_str()))]
+                .into_iter()
+                .collect(),
+            row.batch_id,
+        )))
+    }
+
     fn load_branch_scope_base_row(
         storage: &dyn Storage,
         snapshot: &BranchScopeSnapshot,
@@ -2866,10 +2921,7 @@ impl QueryManager {
         fallback_table: &str,
         include_deleted: bool,
     ) -> Option<LoadedRow> {
-        let entry = table_hint
-            .and_then(|table| snapshot.entry_for(table, row_id))
-            .or_else(|| snapshot.entry_for(fallback_table, row_id))
-            .or_else(|| snapshot.entries.iter().find(|entry| entry.row_id == row_id))?;
+        let entry = Self::branch_scope_entry_for_row(snapshot, row_id, table_hint, fallback_table)?;
         let row = storage
             .load_history_query_row_batch(
                 entry.table.as_str(),
