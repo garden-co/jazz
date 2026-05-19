@@ -771,6 +771,23 @@ export class BranchDb {
   ): () => void {
     return this.base.subscribeAll(this.scopeQuery(query), callback, options);
   }
+
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T> {
+    return this.base.insert(table, data, { ...options, branch: this.branchId });
+  }
+
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): WriteHandle {
+    return this.base.update(table, id, data, { ...options, branch: this.branchId });
+  }
+
+  delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: UpdateOptions): WriteHandle {
+    return this.base.delete(table, id, { ...options, branch: this.branchId });
+  }
 }
 
 /**
@@ -1839,9 +1856,9 @@ export class Db {
    *
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: UpdateOptions): WriteHandle {
     const client = this.getClient(table._schema);
-    return client.delete(id);
+    return client.delete(id, options);
   }
 
   async createBranch<T>(branchId: string, query: QueryBuilder<T>): Promise<BranchDb> {
@@ -2432,6 +2449,7 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
       options.updatedAt,
+      options.branch,
     );
   }
 
@@ -2450,11 +2468,23 @@ class ClientBackedDb extends Db {
       this.attribution,
       undefined,
       options?.updatedAt,
+      options?.branch,
     );
   }
 
-  override delete<T, Init>(_table: TableProxy<T, Init>, id: string): WriteHandle {
-    return this.runtimeClient.deleteHandleInternal(id, this.session, this.attribution);
+  override delete<T, Init>(
+    _table: TableProxy<T, Init>,
+    id: string,
+    options?: UpdateOptions,
+  ): WriteHandle {
+    return this.runtimeClient.deleteHandleInternal(
+      id,
+      this.session,
+      this.attribution,
+      undefined,
+      options?.updatedAt,
+      options?.branch,
+    );
   }
 
   override beginTransaction(): DbTransaction {

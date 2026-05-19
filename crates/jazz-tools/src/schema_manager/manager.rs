@@ -358,12 +358,15 @@ impl SchemaManager {
             return Ok((current_branch, current_hash));
         };
 
-        let parsed =
-            ComposedBranchName::parse(&BranchName::new(target_branch_name)).ok_or_else(|| {
-                QueryError::EncodingError(format!(
-                    "invalid target_branch_name `{target_branch_name}`"
-                ))
-            })?;
+        let branch_name = BranchName::new(target_branch_name);
+        let Some(parsed) = ComposedBranchName::parse(&branch_name) else {
+            if Uuid::parse_str(target_branch_name).is_ok() {
+                return Ok((target_branch_name.to_string(), current_hash));
+            }
+            return Err(QueryError::EncodingError(format!(
+                "invalid target_branch_name `{target_branch_name}`"
+            )));
+        };
 
         if !parsed.matches_env_and_branch(&self.context.env, &self.context.user_branch) {
             return Err(QueryError::EncodingError(format!(
