@@ -1,4 +1,5 @@
 pub mod bindings;
+pub mod branch_scope;
 pub mod encoding;
 pub mod graph;
 pub mod graph_nodes;
