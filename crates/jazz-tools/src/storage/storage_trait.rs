@@ -1599,6 +1599,35 @@ pub trait Storage {
             .unwrap_or_default()
     }
 
+    fn index_range_limited(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        let mut ids = self.index_range(table, column, branch, start, end);
+        ids.truncate(limit);
+        ids
+    }
+
+    fn index_range_limited_reverse(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        let mut ids = self.index_range(table, column, branch, start, end);
+        ids.reverse();
+        ids.truncate(limit);
+        ids
+    }
+
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         let raw_table = key_codec::index_raw_table(table, column, branch);
         self.raw_table_scan_prefix_keys(&raw_table, "")
@@ -1608,6 +1637,19 @@ pub trait Storage {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn clear_index(&mut self, table: &str, column: &str, branch: &str) -> Result<(), StorageError> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        let keys = self.raw_table_scan_prefix_keys(&raw_table, "")?;
+        let mutations = keys
+            .iter()
+            .map(|key| RawTableMutation::Delete {
+                table: raw_table.as_str(),
+                key: key.as_str(),
+            })
+            .collect::<Vec<_>>();
+        self.apply_raw_table_mutations(&mutations)
     }
 
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
@@ -2152,8 +2194,36 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).index_range(table, column, branch, start, end)
     }
 
+    fn index_range_limited(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        (**self).index_range_limited(table, column, branch, start, end, limit)
+    }
+
+    fn index_range_limited_reverse(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        (**self).index_range_limited_reverse(table, column, branch, start, end, limit)
+    }
+
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         (**self).index_scan_all(table, column, branch)
+    }
+
+    fn clear_index(&mut self, table: &str, column: &str, branch: &str) -> Result<(), StorageError> {
+        (**self).clear_index(table, column, branch)
     }
 
     fn flush(&self) {

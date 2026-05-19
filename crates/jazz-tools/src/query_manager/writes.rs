@@ -26,7 +26,7 @@ use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
     ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash,
-    TableName, Value,
+    TableName, TableSchema, Value,
 };
 
 pub struct RowBranchWrite<'a> {
@@ -42,6 +42,8 @@ struct PreparedUpdateWrite {
     new_data: Vec<u8>,
     descriptor: Arc<RowDescriptor>,
     indexed_columns: Option<Arc<Vec<ColumnName>>>,
+    composite_indexes: Arc<Vec<super::types::CompositeIndex>>,
+    composite_index_projection: Arc<Vec<(ColumnName, usize)>>,
     row_layout: Arc<crate::row_format::CompiledRowLayout>,
 }
 
@@ -94,18 +96,27 @@ impl QueryManager {
         let schema_hash = self
             .schema_hash_for_branch(branch)
             .unwrap_or_else(|| SchemaHash::compute(write_schema));
-        let cache_key = (schema_hash, table_name);
+        let table_schema = write_schema
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?;
+        let cache_key = (
+            schema_hash,
+            table_name,
+            Self::write_table_cache_signature(table_schema),
+        );
         if let Some(entry) = self.write_table_cache.get(&cache_key) {
             return Ok(entry.clone());
         }
 
         let table_name = cache_key.1;
-        let table_schema = write_schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
         let entry = Arc::new(WriteTableCacheEntry {
             descriptor: Arc::new(table_schema.columns.clone()),
             indexed_columns: table_schema.indexed_columns.clone().map(Arc::new),
+            composite_indexes: Arc::new(table_schema.composite_indexes.clone()),
+            composite_index_projection: Arc::new(Self::composite_index_projection(
+                &table_schema.columns,
+                &table_schema.composite_indexes,
+            )),
             row_layout: compiled_row_layout(&table_schema.columns),
             row_locator: RowLocator {
                 table: table_name.as_str().to_string().into(),
@@ -131,6 +142,29 @@ impl QueryManager {
         });
         self.write_table_cache.insert(cache_key, entry.clone());
         Ok(entry)
+    }
+
+    fn write_table_cache_signature(table_schema: &TableSchema) -> String {
+        if table_schema.composite_indexes.is_empty() {
+            return String::new();
+        }
+
+        let mut indexes: Vec<_> = table_schema.composite_indexes.iter().collect();
+        indexes.sort_by_key(|index| index.name.as_str());
+
+        let mut signature = String::from("composite-v1");
+        for index in indexes {
+            signature.push('|');
+            signature.push_str(&index.name.as_str().len().to_string());
+            signature.push(':');
+            signature.push_str(index.name.as_str());
+            signature.push('=');
+            let index_signature = index.signature();
+            signature.push_str(&index_signature.len().to_string());
+            signature.push(':');
+            signature.push_str(&index_signature);
+        }
+        signature
     }
 
     fn resolve_insert_object_id<H: Storage>(
@@ -826,6 +860,8 @@ impl QueryManager {
             new_data,
             descriptor: table_write.descriptor.clone(),
             indexed_columns: table_write.indexed_columns.clone(),
+            composite_indexes: table_write.composite_indexes.clone(),
+            composite_index_projection: table_write.composite_index_projection.clone(),
             row_layout: table_write.row_layout.clone(),
         })
     }
@@ -1135,14 +1171,17 @@ impl QueryManager {
         let index_mutations = if Self::write_context_is_open_batch(write_context) {
             Vec::new()
         } else {
-            Self::index_mutations_for_insert_on_branch_with_layout(
+            Self::index_mutations_for_insert_on_branch_with_layout_and_projection(
                 table,
                 branch,
                 object_id,
                 &data,
+                &provenance,
                 descriptor,
                 table_write.indexed_columns.as_deref().map(Vec::as_slice),
+                table_write.composite_indexes.as_ref(),
                 &table_write.row_layout,
+                &table_write.composite_index_projection,
             )
         };
         let row = self.authored_row_batch(
@@ -1849,28 +1888,38 @@ impl QueryManager {
                 branch,
                 id,
                 &prepared.new_data,
+                &new_provenance,
                 prepared.descriptor.as_ref(),
                 prepared.indexed_columns.as_deref().map(Vec::as_slice),
+                prepared.composite_indexes.as_ref(),
             )
         } else if let Some(old_branch_data) = existing_branch_data.as_deref() {
-            Self::index_mutations_for_update_on_branch(
+            Self::index_mutations_for_update_on_branch_with_layout_and_projection(
                 table,
                 branch,
                 id,
                 old_branch_data,
                 &prepared.new_data,
+                old_provenance_for_policy,
+                &new_provenance,
                 prepared.descriptor.as_ref(),
                 prepared.indexed_columns.as_deref().map(Vec::as_slice),
+                prepared.composite_indexes.as_ref(),
+                &prepared.row_layout,
+                &prepared.composite_index_projection,
             )
         } else {
-            Self::index_mutations_for_insert_on_branch_with_layout(
+            Self::index_mutations_for_insert_on_branch_with_layout_and_projection(
                 table,
                 branch,
                 id,
                 &prepared.new_data,
+                &new_provenance,
                 prepared.descriptor.as_ref(),
                 prepared.indexed_columns.as_deref().map(Vec::as_slice),
+                prepared.composite_indexes.as_ref(),
                 &prepared.row_layout,
+                &prepared.composite_index_projection,
             )
         };
         let batch_id = self.commit_prepared_update_write(
@@ -2100,8 +2149,10 @@ impl QueryManager {
                 branch,
                 id,
                 old_data_for_policy,
+                old_provenance_for_policy,
                 descriptor,
                 table_write.indexed_columns.as_deref().map(Vec::as_slice),
+                table_write.composite_indexes.as_ref(),
             )
         };
         let branch_name = BranchName::new(branch);
@@ -2219,8 +2270,10 @@ impl QueryManager {
             branch.as_str(),
             id,
             &new_data,
+            &row_provenance,
             descriptor,
             table_write.indexed_columns.as_deref().map(Vec::as_slice),
+            table_write.composite_indexes.as_ref(),
         );
         let branch_name = BranchName::new(branch.as_str());
         let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
@@ -2320,8 +2373,10 @@ impl QueryManager {
             branch.as_str(),
             id,
             old_data.as_deref(),
+            Some(&old_provenance),
             descriptor,
             table_write.indexed_columns.as_deref().map(Vec::as_slice),
+            table_write.composite_indexes.as_ref(),
         );
         let branch_name = BranchName::new(branch.as_str());
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(

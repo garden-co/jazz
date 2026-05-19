@@ -25,12 +25,13 @@ mod native;
 mod wasm;
 
 use crate::object::ObjectId;
+use crate::query_manager::types::Value;
 use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
     HistoryRowBytes, RawTableMutation, Storage, StorageError, VisibleRowBytes,
-    key_codec::increment_bytes,
+    key_codec::{self, increment_bytes},
     storage_core::{
         append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
@@ -220,6 +221,31 @@ impl OpfsBTreeStorage {
             .collect())
     }
 
+    fn tree_scan_range_keys_limited(
+        &self,
+        start: &str,
+        end: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, StorageError> {
+        if start.as_bytes() >= end.as_bytes() {
+            return Ok(Vec::new());
+        }
+
+        self.with_tree_mut(|tree| {
+            let entries = tree
+                .range(start.as_bytes(), end.as_bytes(), limit)
+                .map_err(map_storage_err)?;
+
+            entries
+                .into_iter()
+                .map(|(key, _)| {
+                    String::from_utf8(key)
+                        .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e)))
+                })
+                .collect()
+        })
+    }
+
     fn tree_scan_range_bytes(
         &self,
         start: &[u8],
@@ -329,6 +355,45 @@ impl Storage for OpfsBTreeStorage {
         raw_table_scan_range_keys_core(table, start, end, |start_key, end_key| {
             self.tree_scan_range_keys(start_key, end_key)
         })
+    }
+
+    fn index_range_limited(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: std::ops::Bound<&Value>,
+        end: std::ops::Bound<&Value>,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        let Some((start_key, end_key)) =
+            key_codec::index_range_scan_bounds(table, column, branch, start, end)
+        else {
+            return Vec::new();
+        };
+        let storage_prefix = key_codec::raw_table_prefix(&raw_table);
+        let storage_start = start_key
+            .map(|key| key_codec::raw_table_entry_key(&raw_table, &key))
+            .unwrap_or_else(|| storage_prefix.clone());
+        let storage_end = end_key
+            .map(|key| key_codec::raw_table_entry_key(&raw_table, &key))
+            .unwrap_or_else(|| {
+                let mut bytes = storage_prefix.clone().into_bytes();
+                increment_bytes(&mut bytes);
+                String::from_utf8(bytes).expect("raw table prefix remains utf8")
+            });
+
+        self.tree_scan_range_keys_limited(&storage_start, &storage_end, limit)
+            .map(|keys| {
+                keys.into_iter()
+                    .filter_map(|key| {
+                        key.strip_prefix(&storage_prefix)
+                            .and_then(key_codec::parse_uuid_from_index_key)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn append_history_region_row_bytes(

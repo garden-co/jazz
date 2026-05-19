@@ -155,6 +155,94 @@ pub enum ColumnMergeStrategy {
     Counter,
 }
 
+/// Sort direction for a column inside a maintained composite index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum IndexDirection {
+    Asc,
+    Desc,
+}
+
+/// One column component of a maintained composite index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CompositeIndexColumn {
+    pub name: ColumnName,
+    #[serde(default = "default_index_direction")]
+    pub direction: IndexDirection,
+}
+
+fn default_index_direction() -> IndexDirection {
+    IndexDirection::Asc
+}
+
+impl CompositeIndexColumn {
+    pub fn asc(name: impl Into<ColumnName>) -> Self {
+        Self {
+            name: name.into(),
+            direction: IndexDirection::Asc,
+        }
+    }
+
+    pub fn desc(name: impl Into<ColumnName>) -> Self {
+        Self {
+            name: name.into(),
+            direction: IndexDirection::Desc,
+        }
+    }
+}
+
+/// Explicit maintained composite index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CompositeIndex {
+    #[serde(default = "empty_composite_index_name")]
+    pub name: ColumnName,
+    pub columns: Vec<CompositeIndexColumn>,
+}
+
+impl CompositeIndex {
+    pub fn new(columns: Vec<CompositeIndexColumn>) -> Self {
+        Self {
+            name: ColumnName::new(composite_index_storage_name(&columns)),
+            columns,
+        }
+    }
+
+    pub fn signature(&self) -> String {
+        let mut signature = String::from("v1");
+        for part in &self.columns {
+            signature.push('|');
+            signature.push_str(&part.name.as_str().len().to_string());
+            signature.push(':');
+            signature.push_str(part.name.as_str());
+            signature.push(':');
+            signature.push_str(match part.direction {
+                IndexDirection::Asc => "asc",
+                IndexDirection::Desc => "desc",
+            });
+        }
+        signature
+    }
+}
+
+fn empty_composite_index_name() -> ColumnName {
+    ColumnName::new("")
+}
+
+fn composite_index_storage_name(columns: &[CompositeIndexColumn]) -> String {
+    let mut name = String::from("__jazz_composite:");
+    for (idx, part) in columns.iter().enumerate() {
+        if idx > 0 {
+            name.push('|');
+        }
+        name.push_str(part.name.as_str());
+        name.push(':');
+        name.push_str(match part.direction {
+            IndexDirection::Asc => "asc",
+            IndexDirection::Desc => "desc",
+        });
+    }
+    name
+}
+
 /// Interned column name type.
 /// Pointer-sized (8 bytes), Copy, fast equality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -387,6 +475,9 @@ pub struct TableSchema {
     /// Internal `_id` and `_id_deleted` indexes are always maintained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_columns: Option<Vec<ColumnName>>,
+    /// Explicit composite indexes for scoped ordered reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composite_indexes: Vec<CompositeIndex>,
     /// Access control policies.
     #[serde(default, skip_serializing_if = "table_policies_are_default")]
     pub policies: TablePolicies,
@@ -404,6 +495,7 @@ impl TableSchema {
         Self {
             columns,
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::default(),
         }
     }
@@ -413,6 +505,7 @@ impl TableSchema {
         Self {
             columns,
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies,
         }
     }
@@ -434,6 +527,65 @@ impl TableSchema {
             .as_ref()
             .is_none_or(|columns| columns.iter().any(|name| name.as_str() == column))
     }
+
+    pub fn validate_composite_indexes(&self, table_name: &TableName) -> Result<(), String> {
+        let mut index_names = HashSet::new();
+        let column_names: HashSet<ColumnName> = self
+            .columns
+            .columns
+            .iter()
+            .map(|column| column.name)
+            .collect();
+
+        for index in &self.composite_indexes {
+            if index.name.as_str().is_empty() {
+                return Err(format!(
+                    "table '{}' has composite index with empty name",
+                    table_name
+                ));
+            }
+            if !index_names.insert(index.name) {
+                return Err(format!(
+                    "table '{}' has duplicate composite index name '{}'",
+                    table_name, index.name
+                ));
+            }
+            if index.name.as_str() == "_id"
+                || index.name.as_str() == "_id_deleted"
+                || (column_names.contains(&index.name)
+                    && self.is_indexed_column(index.name.as_str()))
+            {
+                return Err(format!(
+                    "table '{}' composite index '{}' collides with column index storage",
+                    table_name, index.name
+                ));
+            }
+            if index.columns.is_empty() {
+                return Err(format!(
+                    "table '{}' composite index '{}' has no columns",
+                    table_name, index.name
+                ));
+            }
+
+            let mut component_names = HashSet::new();
+            for component in &index.columns {
+                if !column_names.contains(&component.name) {
+                    return Err(format!(
+                        "table '{}' composite index '{}' references unknown column '{}'",
+                        table_name, index.name, component.name
+                    ));
+                }
+                if !component_names.insert(component.name) {
+                    return Err(format!(
+                        "table '{}' composite index '{}' repeats column '{}'",
+                        table_name, index.name, component.name
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl From<RowDescriptor> for TableSchema {
@@ -448,6 +600,7 @@ pub struct TableSchemaBuilder {
     name: String,
     columns: Vec<ColumnDescriptor>,
     indexed_columns: Option<Vec<ColumnName>>,
+    composite_indexes: Vec<CompositeIndex>,
     policies: TablePolicies,
 }
 
@@ -458,6 +611,7 @@ impl TableSchemaBuilder {
             name: name.to_string(),
             columns: Vec::new(),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::default(),
         }
     }
@@ -522,6 +676,13 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Add a composite index. The first column is typically an equality scope
+    /// such as `owner_id` or `org_id`, followed by ordered columns.
+    pub fn composite_index(mut self, columns: Vec<CompositeIndexColumn>) -> Self {
+        self.composite_indexes.push(CompositeIndex::new(columns));
+        self
+    }
+
     /// Get the table name.
     pub fn name(&self) -> &str {
         &self.name
@@ -532,6 +693,7 @@ impl TableSchemaBuilder {
         TableSchema {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
+            composite_indexes: self.composite_indexes,
             policies: self.policies,
         }
     }
@@ -542,6 +704,7 @@ impl TableSchemaBuilder {
         let schema = TableSchema {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
+            composite_indexes: self.composite_indexes,
             policies: self.policies,
         };
         (name, schema)
@@ -580,6 +743,13 @@ impl SchemaBuilder {
 
 /// Schema mapping table names to their table schemas.
 pub type Schema = HashMap<TableName, TableSchema>;
+
+pub fn validate_composite_indexes(schema: &Schema) -> Result<(), String> {
+    for (table_name, table_schema) in schema {
+        table_schema.validate_composite_indexes(table_name)?;
+    }
+    Ok(())
+}
 
 /// Validate that no INHERITS cycles exist in the schema.
 ///

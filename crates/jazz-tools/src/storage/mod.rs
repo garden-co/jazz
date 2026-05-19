@@ -2870,30 +2870,36 @@ pub(crate) fn is_double_zero(value: &Value) -> bool {
 
 /// Encode a Value into bytes that sort correctly for range queries.
 pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    append_encoded_value(&mut bytes, value);
+    bytes
+}
+
+/// Append a Value encoded for index-key ordering to an existing buffer.
+pub(crate) fn append_encoded_value(bytes: &mut Vec<u8>, value: &Value) {
     match value {
-        Value::Null => vec![0x00], // Null sorts first
+        Value::Null => bytes.push(0x00), // Null sorts first
 
         Value::Boolean(b) => {
             // false (0x01) < true (0x02)
-            vec![0x01, if *b { 0x02 } else { 0x01 }]
+            bytes.push(0x01);
+            bytes.push(if *b { 0x02 } else { 0x01 });
         }
 
         Value::Integer(n) => {
             // Flip sign bit so negative < positive, big-endian for correct ordering
-            let mut bytes = vec![0x02];
+            bytes.push(0x02);
             bytes.extend_from_slice(&((*n as i64) ^ i64::MIN).to_be_bytes());
-            bytes
         }
 
         Value::BigInt(n) => {
             // Flip sign bit so negative < positive, big-endian for correct ordering
-            let mut bytes = vec![0x03];
+            bytes.push(0x03);
             bytes.extend_from_slice(&(*n ^ i64::MIN).to_be_bytes());
-            bytes
         }
 
         Value::Double(f) => {
-            let mut bytes = vec![0x09];
+            bytes.push(0x09);
             let bits = f.to_bits();
             // Flip for lexicographic ordering: if sign bit set, flip all bits;
             // otherwise flip only the sign bit.
@@ -2903,59 +2909,51 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
                 bits ^ (1u64 << 63)
             };
             bytes.extend_from_slice(&ordered.to_be_bytes());
-            bytes
         }
 
         Value::Timestamp(ts) => {
             // Unsigned, big-endian (already sorts correctly)
-            let mut bytes = vec![0x04];
+            bytes.push(0x04);
             bytes.extend_from_slice(&ts.to_be_bytes());
-            bytes
         }
 
         Value::Text(s) => {
             // UTF-8 bytes sort correctly for ASCII; good enough for now
-            let mut bytes = vec![0x05];
+            bytes.push(0x05);
             bytes.extend_from_slice(s.as_bytes());
-            bytes
         }
 
         Value::Uuid(id) => {
             // UUID bytes compare lexicographically by raw value.
-            let mut bytes = vec![0x06];
+            bytes.push(0x06);
             bytes.extend_from_slice(id.uuid().as_bytes());
-            bytes
         }
 
         Value::BatchId(batch_id) => {
-            let mut bytes = vec![0x0A];
+            bytes.push(0x0A);
             bytes.extend_from_slice(batch_id);
-            bytes
         }
 
         Value::Bytea(bytes_value) => {
             // Raw bytes for exact-match index semantics.
-            let mut bytes = vec![0x09];
+            bytes.push(0x09);
             bytes.extend_from_slice(bytes_value);
-            bytes
         }
 
         Value::Array(_) => {
             // Arrays use serialized bytes for equality semantics.
             // The durable key codec hashes oversized segments if needed.
-            let mut bytes = vec![0x07];
+            bytes.push(0x07);
             let json = serde_json::to_string(value).unwrap_or_default();
             bytes.extend_from_slice(json.as_bytes());
-            bytes
         }
 
         Value::Row { .. } => {
             // Rows use serialized bytes for equality semantics.
             // The durable key codec hashes oversized segments if needed.
-            let mut bytes = vec![0x08];
+            bytes.push(0x08);
             let json = serde_json::to_string(value).unwrap_or_default();
             bytes.extend_from_slice(json.as_bytes());
-            bytes
         }
     }
 }

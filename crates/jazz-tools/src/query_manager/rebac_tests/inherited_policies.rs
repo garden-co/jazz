@@ -208,8 +208,10 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
         &branch,
         folder_id,
         &encode_folder("alice", "Dev Folder"),
+        &RowProvenance::for_insert(ObjectId::new().to_string(), 1000),
         &folders_descriptor,
         None,
+        &[],
     )
     .unwrap();
     seed_qm.persist_row_region_tip(&mut storage, "folders", folder_id, &branch);

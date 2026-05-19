@@ -380,13 +380,6 @@ impl QueryManager {
             if !overlay_row_ids.is_empty() {
                 subscription.pending_local_row_ids.extend(overlay_row_ids);
                 subscription.has_pending_local_updates = true;
-            } else if subscription.local_updates == LocalUpdates::Immediate
-                && !self.pending_local_row_batches.is_empty()
-            {
-                subscription
-                    .pending_local_row_ids
-                    .extend(self.pending_local_row_batches.keys().copied());
-                subscription.has_pending_local_updates = true;
             }
         }
 

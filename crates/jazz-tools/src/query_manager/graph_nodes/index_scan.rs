@@ -3,12 +3,20 @@ use std::ops::Bound;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::index::ScanCondition;
+use crate::query_manager::magic_columns::{MagicColumnKind, magic_column_kind};
 use crate::query_manager::types::{
     ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor, Value,
 };
 use crate::row_format::decode_row;
+use crate::row_histories::QueryRowBatch;
 
 use super::{SourceContext, SourceNode};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanDirection {
+    Forward,
+    Reverse,
+}
 
 /// Source node that scans an index via Storage.
 /// Emits TupleDelta with length-1 tuples based on the scan condition.
@@ -18,6 +26,8 @@ pub struct IndexScanNode {
     pub column: ColumnName,
     pub branch: String,
     pub condition: ScanCondition,
+    pub scan_limit: Option<usize>,
+    pub scan_direction: ScanDirection,
 
     /// Output tuple descriptor (single element, unmaterialized).
     output_descriptor: TupleDescriptor,
@@ -47,6 +57,8 @@ impl IndexScanNode {
             column: column.into(),
             branch: branch.into(),
             condition,
+            scan_limit: None,
+            scan_direction: ScanDirection::Forward,
             output_descriptor,
             row_descriptor,
             current_tuples: AHashSet::new(),
@@ -65,13 +77,23 @@ impl IndexScanNode {
         Self::new_with_branch(table, column, "main", condition, row_descriptor)
     }
 
+    pub fn with_scan_limit(mut self, limit: Option<usize>) -> Self {
+        self.scan_limit = limit;
+        self
+    }
+
+    pub fn with_scan_direction(mut self, direction: ScanDirection) -> Self {
+        self.scan_direction = direction;
+        self
+    }
+
     /// Get the output tuple descriptor.
     pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
         &self.output_descriptor
     }
 
-    fn overlay_value_matches_condition(&self, row_id: ObjectId, data: &[u8]) -> bool {
-        let Some(value) = self.overlay_index_value(row_id, data) else {
+    fn overlay_value_matches_condition(&self, row_id: ObjectId, row: &QueryRowBatch) -> bool {
+        let Some(value) = self.overlay_index_value(row_id, row) else {
             return false;
         };
         match &self.condition {
@@ -84,16 +106,21 @@ impl IndexScanNode {
         }
     }
 
-    fn overlay_index_value(&self, row_id: ObjectId, data: &[u8]) -> Option<Value> {
+    fn overlay_index_value(&self, row_id: ObjectId, row: &QueryRowBatch) -> Option<Value> {
         if self.column.as_str() == "_id" {
             return Some(Value::Uuid(row_id));
         }
         if self.column.as_str() == "_id_deleted" {
             return None;
         }
+        match magic_column_kind(self.column.as_str()) {
+            Some(MagicColumnKind::CreatedAt) => return Some(Value::Timestamp(row.created_at)),
+            Some(MagicColumnKind::UpdatedAt) => return Some(Value::Timestamp(row.updated_at)),
+            _ => {}
+        }
 
         let column_index = self.row_descriptor.column_index(self.column.as_str())?;
-        let values = decode_row(&self.row_descriptor, data).ok()?;
+        let values = decode_row(&self.row_descriptor, &row.data).ok()?;
         values.get(column_index).cloned()
     }
 
@@ -118,7 +145,7 @@ impl IndexScanNode {
                 new_ids.insert(row_id);
             } else if row.is_soft_deleted() || row.is_hard_deleted() {
                 new_ids.remove(&row_id);
-            } else if self.overlay_value_matches_condition(row_id, &row.data) {
+            } else if self.overlay_value_matches_condition(row_id, &row) {
                 new_ids.insert(row_id);
             } else {
                 new_ids.remove(&row_id);
@@ -199,16 +226,36 @@ impl SourceNode for IndexScanNode {
             ScanCondition::Range { min, max } => {
                 let start = min.as_ref();
                 let end = max.as_ref();
-                ctx.storage
-                    .index_range(
+                if let Some(limit) = self.scan_limit {
+                    match self.scan_direction {
+                        ScanDirection::Forward => ctx.storage.index_range_limited(
+                            self.table.as_str(),
+                            self.column.as_str(),
+                            &self.branch,
+                            start,
+                            end,
+                            limit,
+                        ),
+                        ScanDirection::Reverse => ctx.storage.index_range_limited_reverse(
+                            self.table.as_str(),
+                            self.column.as_str(),
+                            &self.branch,
+                            start,
+                            end,
+                            limit,
+                        ),
+                    }
+                } else {
+                    ctx.storage.index_range(
                         self.table.as_str(),
                         self.column.as_str(),
                         &self.branch,
                         start,
                         end,
                     )
-                    .into_iter()
-                    .collect()
+                }
+                .into_iter()
+                .collect()
             }
         };
         self.apply_local_overlay_rows(ctx, &mut new_ids);

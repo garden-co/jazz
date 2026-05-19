@@ -101,6 +101,11 @@ impl SchemaHash {
                     hasher.update(&[0]);
                 }
             }
+
+            // Composite indexes are physical/query metadata. They must not
+            // affect branch identity, otherwise adding an index would move
+            // existing rows onto a different schema-qualified branch instead
+            // of backfilling the current branch.
         }
 
         Self(*hasher.finalize().as_bytes())

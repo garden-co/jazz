@@ -350,6 +350,61 @@ pub fn test_index_range(factory: &dyn Fn() -> Box<dyn Storage>) {
     );
 }
 
+pub fn test_index_range_limited_reverse(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let row1 = ObjectId::new();
+    let row2 = ObjectId::new();
+    let row3 = ObjectId::new();
+    let row4 = ObjectId::new();
+
+    storage
+        .index_insert("users", "age", "main", &Value::Integer(20), row1)
+        .unwrap();
+    storage
+        .index_insert("users", "age", "main", &Value::Integer(25), row2)
+        .unwrap();
+    storage
+        .index_insert("users", "age", "main", &Value::Integer(30), row3)
+        .unwrap();
+    storage
+        .index_insert("users", "age", "main", &Value::Integer(35), row4)
+        .unwrap();
+
+    assert_eq!(
+        storage.index_range_limited(
+            "users",
+            "age",
+            "main",
+            Bound::Unbounded,
+            Bound::Unbounded,
+            2,
+        ),
+        vec![row1, row2]
+    );
+    assert_eq!(
+        storage.index_range_limited_reverse(
+            "users",
+            "age",
+            "main",
+            Bound::Unbounded,
+            Bound::Unbounded,
+            2,
+        ),
+        vec![row4, row3]
+    );
+    assert_eq!(
+        storage.index_range_limited_reverse(
+            "users",
+            "age",
+            "main",
+            Bound::Included(&Value::Integer(25)),
+            Bound::Excluded(&Value::Integer(35)),
+            2,
+        ),
+        vec![row3, row2]
+    );
+}
+
 pub fn test_index_cross_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let main_row = ObjectId::new();
@@ -1499,6 +1554,11 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn index_range() {
                 conformance::test_index_range(&$factory);
+            }
+
+            #[test]
+            fn index_range_limited_reverse() {
+                conformance::test_index_range_limited_reverse(&$factory);
             }
 
             #[test]

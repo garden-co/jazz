@@ -1425,6 +1425,7 @@ fn sync_backed_joined_exists_rel_session_subscription_keeps_local_rows_when_serv
         TableSchema {
             columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
             indexed_columns: None,
+            composite_indexes: Vec::new(),
             policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
                 rel: RelExpr::Filter {
                     input: Box::new(RelExpr::Join {
