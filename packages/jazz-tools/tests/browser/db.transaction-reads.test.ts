@@ -278,6 +278,22 @@ describe("db transaction reads browser integration", () => {
       });
     });
   });
+
+  it("two concurrent transactions that modify the same data can both commit", async () => {
+    const { value: base } = db.insert(todos, { title: "Shared", done: false });
+
+    const aliceTx = db.beginTransaction();
+    const bobTx = db.beginTransaction();
+
+    aliceTx.update(todos, base.id, { title: "Alice's title" });
+    bobTx.update(todos, base.id, { title: "Bob's title" });
+
+    await aliceTx.commit().wait({ tier: "local" });
+    // Alice's change becomes visible to Bob before it commits, so Bob's commit succeeds as well
+    await bobTx.commit().wait({ tier: "local" });
+
+    expect((await db.one<Todo>(makeTodoQuery()))?.title).toEqual("Bob's title");
+  });
 });
 
 describe("db batch reads browser integration", () => {
