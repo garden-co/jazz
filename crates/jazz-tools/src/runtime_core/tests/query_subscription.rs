@@ -216,6 +216,82 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
 }
 
 #[test]
+fn branch_scope_sync_does_not_pull_rows_outside_captured_query() {
+    let mut s = create_3tier_rc();
+
+    let ((alice_id, _), _) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+    let ((bob_id, _), _) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Bob"), None)
+            .unwrap();
+    pump_3tier(&mut s);
+
+    let branch_id = ObjectId::new();
+    s.a.create_branch_scope(
+        branch_id,
+        QueryBuilder::new("users")
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build(),
+    )
+    .unwrap();
+
+    let mut future = s.a.query_with_propagation(
+        QueryBuilder::new("users")
+            .with_branch_scope(branch_id)
+            .build(),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Local),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "branch-scoped remote query should wait for the worker frontier"
+    );
+
+    s.a.batched_tick();
+    for entry in s.a.sync_sender().take() {
+        if entry.destination == Destination::Server(s.b_server_for_a) {
+            s.b.park_sync_message(InboxEntry {
+                source: Source::Client(s.a_client_of_b),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    s.b.batched_tick();
+    s.b.immediate_tick();
+    s.b.batched_tick();
+    let b_out = s.b.sync_sender().take();
+    let worker_scope = b_out
+        .iter()
+        .find_map(|entry| match &entry.payload {
+            SyncPayload::QuerySettled { scope, .. }
+                if entry.destination == Destination::Client(s.a_client_of_b) =>
+            {
+                Some(scope)
+            }
+            _ => None,
+        })
+        .expect("worker should settle branch-scoped query");
+
+    assert!(
+        worker_scope.iter().any(|(row_id, _)| *row_id == alice_id),
+        "captured row should stay in remote settled scope"
+    );
+    assert!(
+        !worker_scope.iter().any(|(row_id, _)| *row_id == bob_id),
+        "row outside captured branch query should not be sent by remote settled scope"
+    );
+}
+
+#[test]
 fn rc_query_synced_update_to_null_is_preserved() {
     let schema = SchemaBuilder::new()
         .table(

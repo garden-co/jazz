@@ -39,6 +39,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, RuntimeError> {
+        let query = self.hydrate_branch_scope_entries(query)?;
         self.schema_manager
             .query_manager_mut()
             .subscribe_with_sync_and_propagation_with_local_updates(
@@ -49,6 +50,28 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 propagation,
             )
             .map_err(|e| RuntimeError::QueryError(e.to_string()))
+    }
+
+    fn hydrate_branch_scope_entries(&self, mut query: Query) -> Result<Query, RuntimeError> {
+        let Some(selector) = query.branch_scope.as_mut() else {
+            return Ok(query);
+        };
+        if selector.entries.is_some() {
+            return Ok(query);
+        }
+
+        let snapshot = self
+            .storage
+            .load_branch_scope_snapshot(selector.branch_id)
+            .map_err(|err| RuntimeError::QueryError(format!("load branch scope: {err}")))?
+            .ok_or_else(|| {
+                RuntimeError::QueryError(format!(
+                    "branch scope snapshot not found for {}",
+                    selector.branch_id
+                ))
+            })?;
+        selector.entries = Some(snapshot.entries);
+        Ok(query)
     }
 
     fn activate_subscription(
@@ -354,6 +377,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         propagation: QueryPropagation,
         local_overlay_rows: HashMap<ObjectId, crate::sync_manager::RowBatchKey>,
     ) -> QueryFuture {
+        let query = match self.hydrate_branch_scope_entries(query) {
+            Ok(query) => query,
+            Err(err) => {
+                let (sender, receiver) = oneshot::channel();
+                let _ = sender.send(Err(err));
+                return QueryFuture::new(receiver);
+            }
+        };
         let _span = debug_span!(
             "query",
             table = query.table.as_str(),

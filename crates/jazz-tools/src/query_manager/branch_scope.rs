@@ -53,6 +53,20 @@ pub fn stable_scope_query_hash(query: &Query) -> String {
     hex::encode(Sha256::digest(json))
 }
 
+pub(crate) fn snapshot_from_branch_scope_query(query: &Query) -> Option<BranchScopeSnapshot> {
+    let selector = query.branch_scope.as_ref()?;
+    let entries = selector.entries.clone()?;
+    let mut scope_query = query.clone();
+    if let Some(selector) = scope_query.branch_scope.as_mut() {
+        selector.entries = None;
+    }
+    Some(BranchScopeSnapshot::new(
+        selector.branch_id,
+        scope_query,
+        entries,
+    ))
+}
+
 pub fn values_match_scope_query(
     query: &Query,
     descriptor: &RowDescriptor,

@@ -13,6 +13,7 @@ use crate::sync_manager::{
     ClientId, ClientRole, DurabilityTier, PendingPermissionCheck, SyncPayload,
 };
 
+use super::branch_scope::snapshot_from_branch_scope_query;
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, PolicyExpr};
 use super::policy_graph::{PolicyGraph, PolicyGraphBuildOptions};
@@ -914,6 +915,30 @@ impl QueryManager {
                 continue;
             };
 
+            let branch_scope_snapshot = if sub.query.branch_scope.is_some() {
+                match snapshot_from_branch_scope_query(&sub.query) {
+                    Some(snapshot) => {
+                        graph.set_branch_scope_entries(Some(&snapshot.entries));
+                        Some(snapshot)
+                    }
+                    None => {
+                        let reason = format!(
+                            "branch-scoped query_id {} did not include captured scope entries",
+                            sub.query_id.0
+                        );
+                        self.sync_manager.emit_query_subscription_rejected(
+                            sub.client_id,
+                            sub.query_id,
+                            "branch_scope_missing",
+                            reason,
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
             let branch_schema_map = Self::branch_schema_map_for_context(&subscription_context);
 
             // Initial settle to populate the graph
@@ -927,6 +952,28 @@ impl QueryManager {
             {
                 let row_loader =
                     |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                        if let Some(snapshot) = branch_scope_snapshot.as_ref() {
+                            if let Some(row) = Self::load_branch_scope_overlay_row(
+                                storage_ref,
+                                snapshot,
+                                id,
+                                table_hint.as_ref().map(TableName::as_str),
+                                &table,
+                                include_deleted,
+                            ) {
+                                return row;
+                            }
+                            if let Some(row) = Self::load_branch_scope_base_row(
+                                storage_ref,
+                                snapshot,
+                                id,
+                                table_hint.as_ref().map(TableName::as_str),
+                                &table,
+                                include_deleted,
+                            ) {
+                                return Some(row);
+                            }
+                        }
                         Self::load_visible_row_for_query(
                             storage_ref,
                             id,
@@ -1061,6 +1108,7 @@ impl QueryManager {
                 (sub.client_id, sub.query_id),
                 ServerQuerySubscription {
                     query: sub.query,
+                    branch_scope_snapshot,
                     graph,
                     schema_context: subscription_context,
                     session: session_for_policy,
@@ -1142,12 +1190,35 @@ impl QueryManager {
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let had_dirty_graph = sub.graph.has_dirty_nodes();
+            let branch_scope_snapshot = sub.branch_scope_snapshot.clone();
 
             // Row loader for this subscription
             let new_scope: Option<Cow<'_, HashSet<(ObjectId, BranchName)>>> = {
                 {
                     let row_loader =
                         |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                            if let Some(snapshot) = branch_scope_snapshot.as_ref() {
+                                if let Some(row) = Self::load_branch_scope_overlay_row(
+                                    storage,
+                                    snapshot,
+                                    id,
+                                    table_hint.as_ref().map(TableName::as_str),
+                                    &table,
+                                    include_deleted,
+                                ) {
+                                    return row;
+                                }
+                                if let Some(row) = Self::load_branch_scope_base_row(
+                                    storage,
+                                    snapshot,
+                                    id,
+                                    table_hint.as_ref().map(TableName::as_str),
+                                    &table,
+                                    include_deleted,
+                                ) {
+                                    return Some(row);
+                                }
+                            }
                             Self::load_visible_row_for_query(
                                 storage,
                                 id,

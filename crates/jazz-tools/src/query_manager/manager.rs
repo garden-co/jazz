@@ -20,7 +20,10 @@ use crate::sync_manager::{
     RowBatchKey, SchemaWarning, SyncManager,
 };
 
-use super::branch_scope::{BranchScopeSnapshot, scope_entries_from_rows_with_default_branch};
+use super::branch_scope::{
+    BranchScopeSnapshot, scope_entries_from_rows_with_default_branch,
+    snapshot_from_branch_scope_query,
+};
 use super::encoding::decode_row;
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
@@ -376,6 +379,8 @@ pub(super) struct WriteTableCacheEntry {
 pub(super) struct ServerQuerySubscription {
     /// The original query.
     pub(super) query: Query,
+    /// Captured query scope for branch-scope reads.
+    pub(super) branch_scope_snapshot: Option<BranchScopeSnapshot>,
     /// Compiled QueryGraph (with client's session for policy filtering).
     pub(super) graph: QueryGraph,
     /// Subscription-specific schema context derived from the downstream client schema.
@@ -1524,7 +1529,8 @@ impl QueryManager {
                 if subscription.branch_scope_snapshot.is_none() {
                     match storage.load_branch_scope_snapshot(selector.branch_id) {
                         Ok(snapshot) => {
-                            subscription.branch_scope_snapshot = snapshot;
+                            subscription.branch_scope_snapshot = snapshot
+                                .or_else(|| snapshot_from_branch_scope_query(&subscription.query));
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -1532,6 +1538,8 @@ impl QueryManager {
                                 %error,
                                 "failed to load branch scope snapshot"
                             );
+                            subscription.branch_scope_snapshot =
+                                snapshot_from_branch_scope_query(&subscription.query);
                         }
                     }
                 }
@@ -2877,7 +2885,7 @@ impl QueryManager {
             .or_else(|| snapshot.entries.iter().find(|entry| entry.row_id == row_id))
     }
 
-    fn load_branch_scope_overlay_row(
+    pub(super) fn load_branch_scope_overlay_row(
         storage: &dyn Storage,
         snapshot: &BranchScopeSnapshot,
         row_id: ObjectId,
@@ -2910,7 +2918,7 @@ impl QueryManager {
         )))
     }
 
-    fn load_branch_scope_base_row(
+    pub(super) fn load_branch_scope_base_row(
         storage: &dyn Storage,
         snapshot: &BranchScopeSnapshot,
         row_id: ObjectId,

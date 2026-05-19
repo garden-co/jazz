@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::object::ObjectId;
+use crate::query_manager::branch_scope::BranchScopeEntry;
 use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey, SortTarget};
@@ -618,6 +619,8 @@ pub struct Query {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchScopeSelector {
     pub branch_id: ObjectId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<BranchScopeEntry>>,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -819,7 +822,10 @@ impl QueryBuilder {
     }
 
     pub fn with_branch_scope(mut self, branch_id: ObjectId) -> Self {
-        self.query.branch_scope = Some(BranchScopeSelector { branch_id });
+        self.query.branch_scope = Some(BranchScopeSelector {
+            branch_id,
+            entries: None,
+        });
         self
     }
 
