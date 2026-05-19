@@ -4,6 +4,23 @@ import type { WasmSchema } from "../../src/drivers/types.js";
 import { uniqueDbName } from "./support.js";
 
 const schema: WasmSchema = {
+  projects: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+  },
+  tasks: {
+    columns: [
+      { name: "projectId", column_type: { type: "Uuid" }, nullable: false },
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ],
+  },
+  branches: {
+    columns: [
+      { name: "projectId", column_type: { type: "Uuid" }, nullable: false },
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+    ],
+  },
   todos: {
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
@@ -18,11 +35,51 @@ interface Todo {
   done: boolean;
 }
 
+interface Project {
+  id: string;
+  name: string;
+}
+
+interface Task {
+  id: string;
+  projectId: string;
+  title: string;
+  done: boolean;
+}
+
+interface Branch {
+  id: string;
+  projectId: string;
+  name: string;
+  ownerId: string;
+}
+
 const todos: TableProxy<Todo, Omit<Todo, "id">> = {
   _table: "todos",
   _schema: schema,
   _rowType: {} as Todo,
   _initType: {} as Omit<Todo, "id">,
+};
+
+const projects: TableProxy<Project, Omit<Project, "id">> = {
+  _table: "projects",
+  _schema: schema,
+  _rowType: {} as Project,
+  _initType: {} as Omit<Project, "id">,
+};
+
+const tasks: TableProxy<Task, Omit<Task, "id">> = {
+  _table: "tasks",
+  _schema: schema,
+  _rowType: {} as Task,
+  _initType: {} as Omit<Task, "id">,
+};
+
+const branches: TableProxy<Branch, Omit<Branch, "id">> = {
+  _table: "branches",
+  _schema: schema,
+  _rowType: {} as Branch,
+  _initType: {} as Omit<Branch, "id">,
 };
 
 function makeTodoQuery(
@@ -35,6 +92,24 @@ function makeTodoQuery(
     _build() {
       return JSON.stringify({
         table: "todos",
+        conditions,
+        includes: {},
+        orderBy: [],
+      });
+    },
+  };
+}
+
+function makeTaskQuery(
+  conditions: Array<{ column: string; op: string; value?: unknown }> = [],
+): QueryBuilder<Task> {
+  return {
+    _table: "tasks",
+    _schema: schema,
+    _rowType: {} as Task,
+    _build() {
+      return JSON.stringify({
+        table: "tasks",
         conditions,
         includes: {},
         orderBy: [],
@@ -57,6 +132,38 @@ afterEach(async () => {
 });
 
 describe("db transaction reads browser integration", () => {
+  it("keeps a draft branch pinned to the captured project query", async () => {
+    const { value: project } = db.insert(projects, { name: "Roadmap" });
+    const { value: task } = db.insert(tasks, {
+      projectId: project.id,
+      title: "Original",
+      done: false,
+    });
+    const { value: branch } = db.insert(branches, {
+      projectId: project.id,
+      name: "Alice draft",
+      ownerId: "alice",
+    });
+
+    const draft = await db.createBranch(
+      branch.id,
+      makeTaskQuery([{ column: "projectId", op: "eq", value: project.id }]),
+    );
+
+    db.update(tasks, task.id, { title: "Main changed" });
+    draft.update(tasks, task.id, { title: "Draft changed" });
+
+    const draftRows = await draft.all<Task>(
+      makeTaskQuery([{ column: "projectId", op: "eq", value: project.id }]),
+    );
+    const mainRows = await db.all<Task>(
+      makeTaskQuery([{ column: "projectId", op: "eq", value: project.id }]),
+    );
+
+    expect(draftRows[0]).toMatchObject({ id: task.id, title: "Draft changed" });
+    expect(mainRows[0]).toMatchObject({ id: task.id, title: "Main changed" });
+  });
+
   it("shows only the current transaction's staged inserts through tx.all", async () => {
     const aliceTx = db.beginTransaction();
     const bobTx = db.beginTransaction();

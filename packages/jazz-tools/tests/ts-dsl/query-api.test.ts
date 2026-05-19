@@ -30,6 +30,21 @@ describe("TS Query API", () => {
   });
 
   describe("filtering", () => {
+    it("type-checks branch scoped queries and writes", async () => {
+      const project = insertProject(db, "Branch API");
+      const draft = await db.createBranch(project.id, app.todos.where({ projectId: project.id }));
+
+      const rows = await draft.all(app.todos.where({ projectId: project.id }));
+      expectTypeOf(rows[0]!).branded.toEqualTypeOf<Todo>();
+
+      const inserted = draft.insert(app.todos, {
+        projectId: project.id,
+        title: "Draft",
+        done: false,
+      });
+      expectTypeOf(inserted.value).branded.toEqualTypeOf<Todo>();
+    });
+
     it("queries by id", async () => {
       const { id } = insertProject(db, "Project A");
 
