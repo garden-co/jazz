@@ -818,6 +818,11 @@ impl QueryBuilder {
         self
     }
 
+    pub fn with_branch_scope(mut self, branch_id: ObjectId) -> Self {
+        self.query.branch_scope = Some(BranchScopeSelector { branch_id });
+        self
+    }
+
     /// Add an equals filter condition.
     pub fn filter_eq(mut self, column: impl Into<String>, value: Value) -> Self {
         let current = self.query.disjuncts.last_mut().unwrap();

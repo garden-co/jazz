@@ -173,6 +173,7 @@ impl QueryManager {
             id,
             QuerySubscription {
                 query,
+                branch_scope_snapshot: None,
                 graph,
                 branches,
                 session,
@@ -255,6 +256,7 @@ impl QueryManager {
             id,
             QuerySubscription {
                 query,
+                branch_scope_snapshot: None,
                 graph,
                 branches,
                 session,

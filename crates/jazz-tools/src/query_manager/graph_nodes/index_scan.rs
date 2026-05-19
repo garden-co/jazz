@@ -2,6 +2,7 @@ use ahash::AHashSet;
 use std::ops::Bound;
 
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::branch_scope::BranchScopeEntry;
 use crate::query_manager::index::ScanCondition;
 use crate::query_manager::types::{
     ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor, Value,
@@ -27,6 +28,9 @@ pub struct IndexScanNode {
     current_tuples: AHashSet<Tuple>,
     /// Last scanned IDs (for computing deltas).
     last_scanned_ids: AHashSet<ObjectId>,
+    /// Captured branch-scope entries. When present, scans are seeded from
+    /// this frozen set instead of live branch indexes.
+    scope_entries: Option<Vec<BranchScopeEntry>>,
     /// Whether this node needs reprocessing.
     dirty: bool,
 }
@@ -51,6 +55,7 @@ impl IndexScanNode {
             row_descriptor,
             current_tuples: AHashSet::new(),
             last_scanned_ids: AHashSet::new(),
+            scope_entries: None,
             dirty: true,
         }
     }
@@ -125,6 +130,49 @@ impl IndexScanNode {
             }
         }
     }
+
+    pub fn set_scope_entries(&mut self, entries: Option<Vec<BranchScopeEntry>>) {
+        if self.scope_entries != entries {
+            self.scope_entries = entries;
+            self.dirty = true;
+        }
+    }
+
+    fn scan_scope_entries(
+        &self,
+        ctx: &SourceContext,
+        entries: &[BranchScopeEntry],
+    ) -> AHashSet<ObjectId> {
+        if matches!(self.condition, ScanCondition::Empty) {
+            return AHashSet::new();
+        }
+
+        entries
+            .iter()
+            .filter(|entry| entry.table == self.table.as_str())
+            .filter_map(|entry| {
+                let row = ctx
+                    .storage
+                    .load_history_query_row_batch(
+                        entry.table.as_str(),
+                        entry.base_branch.as_str(),
+                        entry.row_id,
+                        entry.base_batch_id,
+                    )
+                    .ok()
+                    .flatten()?;
+
+                if self.column.as_str() == "_id_deleted" {
+                    return row.is_soft_deleted().then_some(entry.row_id);
+                }
+                if !row.state.is_visible() || row.is_soft_deleted() || row.is_hard_deleted() {
+                    return None;
+                }
+                self.overlay_value_matches_condition(entry.row_id, &row.data)
+                    .then_some(entry.row_id)
+            })
+            .collect()
+    }
 }
 
 fn array_contains(value: &Value, expected: &Value) -> bool {
@@ -179,36 +227,40 @@ fn bound_matches(bound: &Bound<Value>, value: &Value, is_lower: bool) -> bool {
 
 impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
-        let mut new_ids: AHashSet<ObjectId> = match &self.condition {
-            ScanCondition::Empty => AHashSet::new(),
-            ScanCondition::All => ctx
-                .storage
-                .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
-                .into_iter()
-                .collect(),
-            ScanCondition::Eq(value) => ctx
-                .storage
-                .index_lookup(
-                    self.table.as_str(),
-                    self.column.as_str(),
-                    &self.branch,
-                    value,
-                )
-                .into_iter()
-                .collect(),
-            ScanCondition::Range { min, max } => {
-                let start = min.as_ref();
-                let end = max.as_ref();
-                ctx.storage
-                    .index_range(
+        let mut new_ids: AHashSet<ObjectId> = if let Some(scope_entries) = &self.scope_entries {
+            self.scan_scope_entries(ctx, scope_entries)
+        } else {
+            match &self.condition {
+                ScanCondition::Empty => AHashSet::new(),
+                ScanCondition::All => ctx
+                    .storage
+                    .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
+                    .into_iter()
+                    .collect(),
+                ScanCondition::Eq(value) => ctx
+                    .storage
+                    .index_lookup(
                         self.table.as_str(),
                         self.column.as_str(),
                         &self.branch,
-                        start,
-                        end,
+                        value,
                     )
                     .into_iter()
-                    .collect()
+                    .collect(),
+                ScanCondition::Range { min, max } => {
+                    let start = min.as_ref();
+                    let end = max.as_ref();
+                    ctx.storage
+                        .index_range(
+                            self.table.as_str(),
+                            self.column.as_str(),
+                            &self.branch,
+                            start,
+                            end,
+                        )
+                        .into_iter()
+                        .collect()
+                }
             }
         };
         self.apply_local_overlay_rows(ctx, &mut new_ids);

@@ -178,6 +178,8 @@ impl InsertResult {
 pub(crate) struct QuerySubscription {
     /// Original query for recompilation when schemas change.
     pub(crate) query: Query,
+    /// Captured query scope for branch-scope reads.
+    pub(crate) branch_scope_snapshot: Option<BranchScopeSnapshot>,
     /// Compiled query graph.
     pub(crate) graph: QueryGraph,
     /// Branches to read from (updated on recompile).
@@ -1521,8 +1523,33 @@ impl QueryManager {
             };
 
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
+            if let Some(selector) = subscription.query.branch_scope.as_ref() {
+                if subscription.branch_scope_snapshot.is_none() {
+                    match storage.load_branch_scope_snapshot(selector.branch_id) {
+                        Ok(snapshot) => {
+                            subscription.branch_scope_snapshot = snapshot;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                branch_id = %selector.branch_id,
+                                %error,
+                                "failed to load branch scope snapshot"
+                            );
+                        }
+                    }
+                }
+                let entries = subscription
+                    .branch_scope_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.entries.as_slice())
+                    .unwrap_or(&[]);
+                subscription.graph.set_branch_scope_entries(Some(entries));
+            } else {
+                subscription.graph.set_branch_scope_entries(None);
+            }
             let branches = subscription.branches.clone();
             let table = subscription.graph.table.as_str().to_string();
+            let branch_scope_snapshot = subscription.branch_scope_snapshot.clone();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = subscription.query.include_deleted;
             let local_durability_satisfies_subscription = subscription
@@ -1557,6 +1584,18 @@ impl QueryManager {
                                 .then(|| self.pending_local_row_batches.get(&id).copied())
                                 .flatten()
                         };
+                        if let Some(snapshot) = branch_scope_snapshot.as_ref()
+                            && let Some(row) = Self::load_branch_scope_base_row(
+                                storage_ref,
+                                snapshot,
+                                id,
+                                table_hint.as_ref().map(TableName::as_str),
+                                &table,
+                                include_deleted,
+                            )
+                        {
+                            return Some(row);
+                        }
                         Self::load_visible_row_for_query(
                             storage_ref,
                             id,
@@ -2815,6 +2854,44 @@ impl QueryManager {
             [(row_id, BranchName::new(source_branch))]
                 .into_iter()
                 .collect(),
+            row.batch_id,
+        ))
+    }
+
+    fn load_branch_scope_base_row(
+        storage: &dyn Storage,
+        snapshot: &BranchScopeSnapshot,
+        row_id: ObjectId,
+        table_hint: Option<&str>,
+        fallback_table: &str,
+        include_deleted: bool,
+    ) -> Option<LoadedRow> {
+        let entry = table_hint
+            .and_then(|table| snapshot.entry_for(table, row_id))
+            .or_else(|| snapshot.entry_for(fallback_table, row_id))
+            .or_else(|| snapshot.entries.iter().find(|entry| entry.row_id == row_id))?;
+        let row = storage
+            .load_history_query_row_batch(
+                entry.table.as_str(),
+                entry.base_branch.as_str(),
+                row_id,
+                entry.base_batch_id,
+            )
+            .ok()
+            .flatten()?;
+
+        if row.is_hard_deleted() || !row.state.is_visible() {
+            return None;
+        }
+        if row.is_soft_deleted() && !include_deleted {
+            return None;
+        }
+
+        let row_provenance = row.row_provenance();
+        Some(LoadedRow::new(
+            row.data,
+            row_provenance,
+            [(row_id, entry.base_branch)].into_iter().collect(),
             row.batch_id,
         ))
     }

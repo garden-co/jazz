@@ -3,6 +3,7 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 
 use crate::object::ObjectId;
+use crate::query_manager::branch_scope::BranchScopeEntry;
 use crate::query_manager::types::{LoadedRow, RowDelta, TableName, Tuple, TupleDelta};
 use crate::storage::Storage;
 use crate::sync_manager::RowBatchKey;
@@ -11,6 +12,24 @@ use super::super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, Tran
 use super::{GraphNode, QueryGraph};
 
 impl QueryGraph {
+    pub fn set_branch_scope_entries(&mut self, entries: Option<&[BranchScopeEntry]>) {
+        let index_scan_nodes = self.index_scan_nodes.clone();
+        for (node_id, table, _) in index_scan_nodes {
+            let node_entries = entries.map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| entry.table == table.as_str())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+            if let Some(GraphNode::IndexScan(node)) = self.get_node_mut(node_id) {
+                node.set_scope_entries(node_entries);
+            }
+            self.mark_dirty(node_id);
+            self.mark_downstream_dirty(node_id);
+        }
+    }
+
     /// Mark a node as dirty using the bitmap.
     pub fn mark_dirty(&mut self, id: NodeId) {
         let idx = id.0 as usize;

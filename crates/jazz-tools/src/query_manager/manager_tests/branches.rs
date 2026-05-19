@@ -110,6 +110,39 @@ fn captures_branch_scope_with_visible_main_frontier() {
 }
 
 #[test]
+fn branch_scope_reads_captured_main_version_not_latest_main() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch_id = ObjectId::new();
+    let scope_query = qm.query("users").build();
+    qm.capture_branch_scope(&mut storage, branch_id, scope_query)
+        .unwrap();
+
+    qm.update(
+        &mut storage,
+        alice.row_id,
+        &[Value::Text("Alice".into()), Value::Integer(1)],
+    )
+    .unwrap();
+
+    let branch_query = qm.query("users").with_branch_scope(branch_id).build();
+    let rows = execute_query(&mut qm, &mut storage, branch_query).unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1[1], Value::Integer(100));
+}
+
+#[test]
 fn query_builder_explicit_main_branch() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
