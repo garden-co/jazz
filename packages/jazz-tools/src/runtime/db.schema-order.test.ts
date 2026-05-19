@@ -484,6 +484,7 @@ describe("Db runtime schema order", () => {
       undefined,
       undefined,
       updatedAt,
+      undefined,
     );
     expect(upsertHandleInternal).toHaveBeenCalledWith(
       "todos",
@@ -494,6 +495,7 @@ describe("Db runtime schema order", () => {
       undefined,
       undefined,
       updatedAt,
+      undefined,
     );
   });
 

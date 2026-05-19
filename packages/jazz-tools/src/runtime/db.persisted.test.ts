@@ -149,7 +149,7 @@ describe("Db write handles", () => {
       },
       undefined,
     );
-    expect(remove).toHaveBeenCalledWith("todo-1");
+    expect(remove).toHaveBeenCalledWith("todo-1", undefined);
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
     expect(updateClient.waitForBatch).toHaveBeenCalledWith("batch-update", "edge");
@@ -215,8 +215,16 @@ describe("Db write handles", () => {
       "alice@writer",
       undefined,
       undefined,
+      undefined,
     );
-    expect(deleteHandleInternal).toHaveBeenCalledWith("todo-2", session, "alice@writer");
+    expect(deleteHandleInternal).toHaveBeenCalledWith(
+      "todo-2",
+      session,
+      "alice@writer",
+      undefined,
+      undefined,
+      undefined,
+    );
     expect(inserted.value).toEqual({
       id: "todo-2",
       title: "With session",
