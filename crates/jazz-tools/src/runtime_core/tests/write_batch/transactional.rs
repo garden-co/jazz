@@ -942,3 +942,302 @@ fn rc_missing_batch_fate_retransmits_local_transactional_rows_without_row_locato
             }]
     )));
 }
+
+struct TwoClientTransactionHarness {
+    alice: TestCore,
+    bob: TestCore,
+    server: TestCore,
+    alice_client_id: ClientId,
+    alice_server_id: ServerId,
+    bob_client_id: ClientId,
+    bob_server_id: ServerId,
+    row_id: ObjectId,
+    base_batch_id: BatchId,
+}
+
+fn create_two_client_transaction_harness(app_name: &str) -> TwoClientTransactionHarness {
+    let schema = test_schema();
+    let mut alice = create_runtime_with_schema(schema.clone(), app_name);
+    let mut bob = create_runtime_with_schema(schema.clone(), app_name);
+    let mut server = create_runtime_with_schema_and_sync_manager(
+        schema,
+        app_name,
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
+
+    let alice_client_id = ClientId::new();
+    let alice_server_id = ServerId::new();
+    let bob_client_id = ClientId::new();
+    let bob_server_id = ServerId::new();
+
+    server.add_client(alice_client_id, None);
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(alice_client_id, ClientRole::Peer);
+    server.add_client(bob_client_id, None);
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(bob_client_id, ClientRole::Peer);
+    alice.add_server(alice_server_id);
+    bob.add_server(bob_server_id);
+
+    alice.immediate_tick();
+    bob.immediate_tick();
+    server.immediate_tick();
+    alice.batched_tick();
+    bob.batched_tick();
+    server.batched_tick();
+    alice.sync_sender().take();
+    bob.sync_sender().take();
+    server.sync_sender().take();
+
+    let _bob_subscription = bob
+        .subscribe(QueryBuilder::new("users").build(), |_| {}, None)
+        .expect("bob should be able to subscribe to users");
+
+    let mut harness = TwoClientTransactionHarness {
+        alice,
+        bob,
+        server,
+        alice_client_id,
+        alice_server_id,
+        bob_client_id,
+        bob_server_id,
+        row_id: ObjectId::new(),
+        base_batch_id: BatchId::default(),
+    };
+
+    sync_server_with_clients(
+        &mut harness.server,
+        &mut [
+            ClientForServer {
+                core: &mut harness.alice,
+                server_id: harness.alice_server_id,
+                client_id: harness.alice_client_id,
+            },
+            ClientForServer {
+                core: &mut harness.bob,
+                server_id: harness.bob_server_id,
+                client_id: harness.bob_client_id,
+            },
+        ],
+    );
+
+    let ((row_id, _row_values), base_batch_id) = harness
+        .alice
+        .insert("users", user_insert_values(ObjectId::new(), "Shared"), None)
+        .expect("Alice should insert the shared base row through RuntimeCore");
+    harness.row_id = row_id;
+    harness.base_batch_id = base_batch_id;
+
+    sync_server_with_clients(
+        &mut harness.server,
+        &mut [
+            ClientForServer {
+                core: &mut harness.alice,
+                server_id: harness.alice_server_id,
+                client_id: harness.alice_client_id,
+            },
+            ClientForServer {
+                core: &mut harness.bob,
+                server_id: harness.bob_server_id,
+                client_id: harness.bob_client_id,
+            },
+        ],
+    );
+    assert_single_user_named(
+        &mut harness.bob,
+        row_id,
+        "Shared",
+        "Bob should learn the shared base row through sync before either transaction starts",
+    );
+
+    harness
+}
+
+fn transactional_write_context() -> WriteContext {
+    WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    }
+}
+
+fn users_named(core: &mut TestCore, name: &str) -> Vec<(ObjectId, Vec<Value>)> {
+    execute_local_runtime_query(
+        core,
+        QueryBuilder::new("users")
+            .filter_eq("name", Value::Text(name.to_string()))
+            .build(),
+        None,
+    )
+}
+
+fn assert_single_user_named(core: &mut TestCore, row_id: ObjectId, name: &str, message: &str) {
+    let rows = users_named(core, name);
+    assert_eq!(
+        rows.len(),
+        1,
+        "{message}: expected exactly one row, got {rows:?}"
+    );
+    assert_eq!(rows[0].0, row_id, "{message}: row id mismatch");
+    assert_eq!(
+        rows[0].1[1],
+        Value::Text(name.to_string()),
+        "{message}: name column mismatch"
+    );
+}
+
+#[test]
+fn rc_two_clients_reject_stale_transactional_update_after_first_client_commits() {
+    let mut harness = create_two_client_transaction_harness("two-client-transaction-conflict");
+
+    let alice_context = transactional_write_context();
+    let bob_context = transactional_write_context();
+
+    let alice_batch_id = harness
+        .alice
+        .update(
+            harness.row_id,
+            vec![("name".to_string(), Value::Text("Alice".to_string()))],
+            Some(&alice_context),
+        )
+        .unwrap();
+    let bob_batch_id = harness
+        .bob
+        .update(
+            harness.row_id,
+            vec![("name".to_string(), Value::Text("Bob".to_string()))],
+            Some(&bob_context),
+        )
+        .unwrap();
+
+    harness.alice.seal_batch(alice_batch_id).unwrap();
+    pump_client_messages_to_server(
+        &mut harness.alice,
+        &mut harness.server,
+        harness.alice_server_id,
+        harness.alice_client_id,
+    );
+    assert!(matches!(
+        harness.server.batch_fate(alice_batch_id).unwrap(),
+        Some(crate::batch_fate::BatchFate::AcceptedTransaction { .. })
+    ));
+    harness.server.sync_sender().take();
+
+    harness.bob.seal_batch(bob_batch_id).unwrap();
+    pump_client_messages_to_server(
+        &mut harness.bob,
+        &mut harness.server,
+        harness.bob_server_id,
+        harness.bob_client_id,
+    );
+    assert!(matches!(
+        harness
+            .server
+            .batch_fate(bob_batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::Rejected { code, .. })
+            if code == "transaction_conflict"
+    ));
+}
+
+#[test]
+fn rc_two_clients_accept_second_transactional_update_if_second_client_receives_first_before_commit()
+{
+    let mut harness =
+        create_two_client_transaction_harness("two-client-transaction-conflict-after-sync");
+
+    let alice_context = transactional_write_context();
+    let bob_context = transactional_write_context();
+
+    let alice_batch_id = harness
+        .alice
+        .update(
+            harness.row_id,
+            vec![("name".to_string(), Value::Text("Alice".to_string()))],
+            Some(&alice_context),
+        )
+        .unwrap();
+    let bob_batch_id = harness
+        .bob
+        .update(
+            harness.row_id,
+            vec![("name".to_string(), Value::Text("Bob".to_string()))],
+            Some(&bob_context),
+        )
+        .unwrap();
+
+    harness.alice.seal_batch(alice_batch_id).unwrap();
+    pump_client_messages_to_server(
+        &mut harness.alice,
+        &mut harness.server,
+        harness.alice_server_id,
+        harness.alice_client_id,
+    );
+    assert!(matches!(
+        harness.server.batch_fate(alice_batch_id).unwrap(),
+        Some(crate::batch_fate::BatchFate::AcceptedTransaction { .. })
+    ));
+
+    sync_server_with_clients(
+        &mut harness.server,
+        &mut [
+            ClientForServer {
+                core: &mut harness.alice,
+                server_id: harness.alice_server_id,
+                client_id: harness.alice_client_id,
+            },
+            ClientForServer {
+                core: &mut harness.bob,
+                server_id: harness.bob_server_id,
+                client_id: harness.bob_client_id,
+            },
+        ],
+    );
+    // Right now transactions have a "read committed" isolation level, which means
+    // transactions can read data written after they began (including other transactions
+    // that were concurrently committed).
+    // We want to move into snapshot or serializable isolation, so that transactions can
+    // only read writes that happened BEFORE they began
+    assert_single_user_named(
+        &mut harness.bob,
+        harness.row_id,
+        "Alice",
+        "Bob should learn Alice's accepted transaction before sealing his own",
+    );
+
+    harness.bob.seal_batch(bob_batch_id).unwrap();
+    sync_server_with_clients(
+        &mut harness.server,
+        &mut [
+            ClientForServer {
+                core: &mut harness.alice,
+                server_id: harness.alice_server_id,
+                client_id: harness.alice_client_id,
+            },
+            ClientForServer {
+                core: &mut harness.bob,
+                server_id: harness.bob_server_id,
+                client_id: harness.bob_client_id,
+            },
+        ],
+    );
+    assert!(matches!(
+        harness.server.batch_fate(bob_batch_id).unwrap(),
+        Some(crate::batch_fate::BatchFate::AcceptedTransaction { .. })
+    ));
+    assert_single_user_named(
+        &mut harness.server,
+        harness.row_id,
+        "Bob",
+        "Bob's transaction should publish after sealing against the updated visible frontier",
+    );
+}
