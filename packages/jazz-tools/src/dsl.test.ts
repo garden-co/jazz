@@ -9,7 +9,7 @@ import {
   table,
 } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
-import type { AddOp } from "./schema.js";
+import type { AddOp, Schema } from "./schema.js";
 
 describe("enum DSL invariants", () => {
   it("rejects empty variant list", () => {
@@ -241,6 +241,36 @@ describe("column merge strategy DSL", () => {
         ],
       },
     });
+  });
+
+  it("preserves branch policies in wasm schema output", () => {
+    const schema: Schema = {
+      tables: [
+        {
+          name: "tasks",
+          columns: [{ name: "title", sqlType: "TEXT", nullable: false }],
+          policies: {
+            branch: [
+              {
+                backing_table: "branches",
+                select: { using: { type: "True" } },
+                insert: { with_check: { type: "True" } },
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    expect(schemaToWasm(schema).tasks?.policies?.branch).toEqual([
+      {
+        backing_table: "branches",
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {},
+        delete: {},
+      },
+    ]);
   });
 
   it("rejects counter merge strategy on non-integer columns", () => {

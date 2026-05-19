@@ -7,6 +7,8 @@ import type {
   ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,
+  OperationPolicy as DslOperationPolicy,
+  BranchTablePolicies as DslBranchTablePolicies,
   PolicyExpr as DslPolicyExpr,
   PolicyLiteralValue as DslPolicyLiteralValue,
   PolicyValue as DslPolicyValue,
@@ -17,6 +19,7 @@ import type {
   ColumnDescriptor,
   TableSchema,
   TablePolicies,
+  BranchTablePolicies,
   PolicyExpr,
   PolicyLiteralValue,
   PolicyValue,
@@ -199,9 +202,7 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
   }
 }
 
-function cloneOperationPolicy(
-  policy: DslTablePolicies[keyof DslTablePolicies],
-): TablePolicies["select"] {
+function cloneOperationPolicy(policy: DslOperationPolicy | undefined): TablePolicies["select"] {
   const out: TablePolicies["select"] = {};
   if (!policy) {
     return out;
@@ -215,12 +216,23 @@ function cloneOperationPolicy(
   return out;
 }
 
+function cloneBranchPolicies(branchPolicies: DslBranchTablePolicies): BranchTablePolicies {
+  return {
+    backing_table: branchPolicies.backing_table,
+    select: cloneOperationPolicy(branchPolicies.select),
+    insert: cloneOperationPolicy(branchPolicies.insert),
+    update: cloneOperationPolicy(branchPolicies.update),
+    delete: cloneOperationPolicy(branchPolicies.delete),
+  };
+}
+
 function clonePolicies(policies: DslTablePolicies): TablePolicies {
   return {
     select: cloneOperationPolicy(policies.select),
     insert: cloneOperationPolicy(policies.insert),
     update: cloneOperationPolicy(policies.update),
     delete: cloneOperationPolicy(policies.delete),
+    ...(policies.branch ? { branch: policies.branch.map(cloneBranchPolicies) } : {}),
   };
 }
 

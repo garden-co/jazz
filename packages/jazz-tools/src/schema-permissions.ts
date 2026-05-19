@@ -1,4 +1,5 @@
 import type {
+  BranchTablePolicies as WasmBranchTablePolicies,
   OperationPolicy as WasmOperationPolicy,
   PolicyExpr as WasmPolicyExpr,
   PolicyValue as WasmPolicyValue,
@@ -410,6 +411,18 @@ function normalizeOperationPolicyForWasm(
   return normalized;
 }
 
+function normalizeBranchPolicyForWasm(
+  policy: NonNullable<TablePolicies["branch"]>[number],
+): WasmBranchTablePolicies {
+  return {
+    backing_table: policy.backing_table,
+    select: normalizeOperationPolicyForWasm(policy.select),
+    insert: normalizeOperationPolicyForWasm(policy.insert),
+    update: normalizeOperationPolicyForWasm(policy.update),
+    delete: normalizeOperationPolicyForWasm(policy.delete),
+  };
+}
+
 function validatePermissionTables(
   schemaTableNames: readonly string[],
   compiledPermissions: CompiledPermissionsMap,
@@ -497,6 +510,9 @@ export function normalizePermissionsForWasm(
       insert: normalizeOperationPolicyForWasm(tablePolicies.insert),
       update: normalizeOperationPolicyForWasm(tablePolicies.update),
       delete: normalizeOperationPolicyForWasm(tablePolicies.delete),
+      ...(tablePolicies.branch
+        ? { branch: tablePolicies.branch.map(normalizeBranchPolicyForWasm) }
+        : {}),
     };
   }
   return normalized;
