@@ -151,6 +151,11 @@ struct WorkerHost {
     current_auth_jwt: Option<String>,
     current_admin_secret: Option<String>,
     current_ws_url: Option<String>,
+    /// Last-known upstream socket state. Maintained by `set_upstream_connected`
+    /// on every connect/disconnect/auth-failure. Followers attaching later
+    /// read this to gate their server-tier queries on the leader's *real*
+    /// upstream rather than an optimistic one-shot signal.
+    upstream_connected: bool,
 }
 
 impl WorkerHost {
@@ -163,6 +168,7 @@ impl WorkerHost {
             current_auth_jwt: None,
             current_admin_secret: None,
             current_ws_url: None,
+            upstream_connected: false,
         }
     }
 }
@@ -351,7 +357,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     // Auth-failure callback.
     let auth_cb = Closure::<dyn FnMut(JsValue)>::new(|reason: JsValue| {
         let raw = reason.as_string().unwrap_or_default();
-        post_to_main(&WorkerToMainWire::UpstreamDisconnected);
+        set_upstream_connected(false);
         post_to_main(&WorkerToMainWire::AuthFailed {
             reason: map_auth_reason(&raw).to_string(),
         });
@@ -537,12 +543,57 @@ fn drain_pending_messages() {
 
 fn perform_upstream_connect(runtime: &Rc<WasmRuntime>, ws_url: &str, auth_json: &str) {
     match runtime.connect(ws_url.to_string(), auth_json.to_string()) {
-        Ok(()) => post_to_main(&WorkerToMainWire::UpstreamConnected),
+        Ok(()) => set_upstream_connected(true),
         Err(err) => {
             tracing::error!("runtime.connect failed: {:?}", err);
-            post_to_main(&WorkerToMainWire::UpstreamDisconnected);
+            set_upstream_connected(false);
         }
     }
+}
+
+/// Record an upstream connect/disconnect transition and fan it out to every
+/// consumer of the leader's socket state: the leader's own main thread *and*
+/// every adopted follower-tab port. Followers gate
+/// `waitForUpstreamServerConnection` on this signal, so a transition posted
+/// only to the main thread would strand them on a stale view of the socket.
+fn set_upstream_connected(connected: bool) {
+    HOST.with(|cell| {
+        if let Some(h) = cell.borrow_mut().as_mut() {
+            h.upstream_connected = connected;
+        }
+    });
+    let wire = if connected {
+        WorkerToMainWire::UpstreamConnected
+    } else {
+        WorkerToMainWire::UpstreamDisconnected
+    };
+    post_to_main(&wire);
+    broadcast_to_port_peers(&wire);
+}
+
+/// The wire message reflecting the leader's current upstream socket state.
+/// Sent to a follower on `Init` so its bridge starts from the real state.
+fn current_upstream_wire() -> WorkerToMainWire {
+    let connected = HOST.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|h| h.upstream_connected)
+            .unwrap_or(false)
+    });
+    if connected {
+        WorkerToMainWire::UpstreamConnected
+    } else {
+        WorkerToMainWire::UpstreamDisconnected
+    }
+}
+
+/// Post a message to every adopted follower-tab port.
+fn broadcast_to_port_peers(msg: &WorkerToMainWire) {
+    PORT_PEERS.with(|cell| {
+        for peer in cell.borrow().values() {
+            post_via_port(&peer.port, msg);
+        }
+    });
 }
 
 // =============================================================================
@@ -664,7 +715,7 @@ fn process_main_message(msg: MainToWorkerMessage) {
         MainToWorkerWire::DisconnectUpstream => {
             if let Some(rt) = runtime.as_ref() {
                 rt.disconnect();
-                post_to_main(&WorkerToMainWire::UpstreamDisconnected);
+                set_upstream_connected(false);
             }
         }
         MainToWorkerWire::ReconnectUpstream => {
@@ -954,10 +1005,12 @@ fn handle_attach_tab_port(port: MessagePort) {
 /// the leader's main-thread bridge, but its `Init`, auth, and upstream
 /// control messages have follower-only semantics:
 ///
-/// - `Init`: respond with `InitOk { client_id }` plus `UpstreamConnected` and
-///   an empty `LocalBatchRecordsSync` so the follower's bridge unblocks.
-///   The follower's serverUrl / jwtToken / runtimeSources fields are
-///   ignored — upstream and auth are owned by the leader.
+/// - `Init`: respond with `InitOk { client_id }`, the leader's *current*
+///   upstream-connection state, and an empty `LocalBatchRecordsSync`. The
+///   follower gates server-tier reads on that upstream signal, so it must
+///   reflect the leader's real socket — not an optimistic constant. The
+///   follower's serverUrl / jwtToken / runtimeSources fields are ignored —
+///   upstream and auth are owned by the leader.
 /// - `Sync`: route into the runtime addressed as this port's `client_id`.
 /// - `LifecycleHint`: forward to the leader's runtime so it can aggregate.
 /// - `UpdateAuth`: forward to the leader-owned auth/transport state so a
@@ -977,7 +1030,11 @@ fn handle_port_message(client_id: &str, port: &MessagePort, msg: MainToWorkerMes
                     client_id: client_id.to_string(),
                 },
             );
-            post_via_port(port, &WorkerToMainWire::UpstreamConnected);
+            // The leader's *real* upstream state — not an unconditional
+            // `UpstreamConnected`. The follower's bridge gates server-tier
+            // reads on this; an optimistic constant would let it read
+            // against a leader whose socket isn't actually up.
+            post_via_port(port, &current_upstream_wire());
             post_via_port(
                 port,
                 &WorkerToMainWire::LocalBatchRecordsSync {
@@ -1129,13 +1186,26 @@ fn http_url_to_ws(server_url: &str, app_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! In-source unit tests for the worker-host's pure helpers. These
-    //! cover the deleted `jazz-worker.test.ts` cases that have a Rust
-    //! analogue (`composeConnectUrl` → `http_url_to_ws`,
-    //! `mergeAuth`-related pieces are now folded into `update_auth` so
-    //! the closest equivalent is `map_auth_reason`).
-    use super::{http_url_to_ws, map_auth_reason};
+    //! In-source tests for the worker host: the pure URL/auth helpers
+    //! (`http_url_to_ws`, `map_auth_reason`) and the follower-tab `Init`
+    //! handshake's upstream-state reporting (`handle_port_message`).
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use js_sys::{Function, Reflect};
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
     use wasm_bindgen_test::*;
+    use web_sys::{MessageChannel, MessageEvent};
+
+    use super::{
+        handle_port_message, http_url_to_ws, map_auth_reason, HostState, WorkerHost, HOST,
+    };
+    use crate::worker_protocol::{
+        parse_worker_to_main, InitPayload, InitPayloadFields, MainToWorkerMessage,
+        ParsedWorkerToMain, WorkerToMainWire,
+    };
 
     wasm_bindgen_test_configure!(run_in_browser);
 
@@ -1211,5 +1281,109 @@ mod tests {
         assert_eq!(map_auth_reason(""), "invalid");
         assert_eq!(map_auth_reason("totally unrecognised"), "invalid");
         assert_eq!(map_auth_reason("Unauthorized "), "invalid"); // exact match only
+    }
+
+    fn fake_follower_init() -> MainToWorkerMessage {
+        // `handle_port_message` matches `Init(_)` — the payload is unused, so
+        // a blank one is sufficient.
+        MainToWorkerMessage::Init(Box::new(InitPayload {
+            fields: InitPayloadFields {
+                schema_json: String::new(),
+                app_id: String::new(),
+                env: String::new(),
+                user_branch: String::new(),
+                db_name: String::new(),
+                client_id: String::new(),
+                server_url: None,
+                jwt_token: None,
+                admin_secret: None,
+                fallback_wasm_url: None,
+                log_level: None,
+                telemetry_collector_url: None,
+            },
+            runtime_sources: JsValue::UNDEFINED,
+        }))
+    }
+
+    /// Resolve after one `setTimeout(0)` so queued `MessagePort` deliveries
+    /// (each its own task) get a turn before the next assertion.
+    async fn macrotask_yield() {
+        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            let set_timeout: Function = Reflect::get(&js_sys::global(), &"setTimeout".into())
+                .unwrap()
+                .unchecked_into();
+            let _ = set_timeout.call2(&JsValue::NULL, &resolve, &JsValue::from_f64(0.0));
+        });
+        let _ = JsFuture::from(promise).await;
+    }
+
+    /// Drive `handle_port_message` with a follower `Init` against a worker
+    /// host whose upstream socket is in the given state, and collect the
+    /// `WorkerToMainWire` messages posted back over the follower's port.
+    async fn follower_init_response(upstream_connected: bool) -> Vec<WorkerToMainWire> {
+        let mut host = WorkerHost::new();
+        host.state = HostState::Ready;
+        host.upstream_connected = upstream_connected;
+        HOST.with(|cell| *cell.borrow_mut() = Some(host));
+
+        let channel = MessageChannel::new().expect("MessageChannel::new");
+        let worker_side = channel.port1();
+        let follower_side = channel.port2();
+
+        let received: Rc<RefCell<Vec<WorkerToMainWire>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&received);
+        let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+            if let ParsedWorkerToMain::Wire(wire) = parse_worker_to_main(&event.data()) {
+                sink.borrow_mut().push(wire);
+            }
+        });
+        follower_side.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        follower_side.start();
+
+        // `Init` posts three messages back: InitOk, the upstream-state
+        // signal, and an (empty) LocalBatchRecordsSync.
+        handle_port_message("follower-1", &worker_side, fake_follower_init());
+
+        for _ in 0..50 {
+            if received.borrow().len() >= 3 {
+                break;
+            }
+            macrotask_yield().await;
+        }
+
+        follower_side.set_onmessage(None);
+        HOST.with(|cell| *cell.borrow_mut() = None);
+        drop(on_message);
+        let collected = received.borrow().clone();
+        collected
+    }
+
+    #[wasm_bindgen_test]
+    async fn follower_init_reports_upstream_disconnected_when_leader_offline() {
+        // The leader's upstream socket is not connected. A follower attaching
+        // now must be told `UpstreamDisconnected` so its bridge keeps
+        // `waitForUpstreamServerConnection` blocked — otherwise the follower
+        // serves server-tier reads against a leader with no upstream.
+        let wires = follower_init_response(false).await;
+        assert!(
+            matches!(wires.first(), Some(WorkerToMainWire::InitOk { .. })),
+            "expected InitOk first, got {wires:?}",
+        );
+        assert!(
+            matches!(wires.get(1), Some(WorkerToMainWire::UpstreamDisconnected)),
+            "follower Init while the leader's upstream is offline must report \
+             UpstreamDisconnected, got {wires:?}",
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn follower_init_reports_upstream_connected_when_leader_online() {
+        // The leader's upstream socket is live — the follower may proceed.
+        let wires = follower_init_response(true).await;
+        assert!(
+            matches!(wires.get(1), Some(WorkerToMainWire::UpstreamConnected)),
+            "follower Init while the leader's upstream is online must report \
+             UpstreamConnected, got {wires:?}",
+        );
     }
 }
