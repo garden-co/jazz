@@ -22,7 +22,7 @@ export async function setup(): Promise<void> {
     serverUrl: handle.url,
     appId: handle.appId,
     adminSecret: handle.adminSecret,
-    schemaDir: join(import.meta.dirname ?? __dirname, "../.."),
+    schemaDir: join(import.meta.dirname, "../.."),
   });
 }
 

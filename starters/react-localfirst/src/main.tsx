@@ -1,14 +1,13 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { type DbConfig, BrowserAuthSecretStore } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
 import { App } from "./App";
 import "./App.css";
 
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID as string | undefined;
 const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL as string | undefined;
 
-function buildConfig(secret: string): DbConfig {
+function LocalFirstProvider({ children }: React.PropsWithChildren) {
   if (!APP_ID || !SERVER_URL) {
     const missing = [!APP_ID && "VITE_JAZZ_APP_ID", !SERVER_URL && "VITE_JAZZ_SERVER_URL"]
       .filter((v) => !!v)
@@ -17,26 +16,15 @@ function buildConfig(secret: string): DbConfig {
       `${missing} not set. The jazzPlugin Vite plugin injects these at dev time; in production, set them explicitly in your environment.`,
     );
   }
-  return {
-    appId: APP_ID,
-    serverUrl: SERVER_URL,
-    secret,
-  };
-}
 
-function LocalFirstProvider({ children }: React.PropsWithChildren) {
-  const [config, setConfig] = useState<DbConfig | null>(null);
-
-  useEffect(() => {
-    BrowserAuthSecretStore.getOrCreateSecret().then((secret) => {
-      setConfig(buildConfig(secret));
-    });
-  }, []);
-
-  if (!config) return null;
+  const { secret, isLoading } = useLocalFirstAuth();
+  if (isLoading || !secret) return null;
 
   return (
-    <JazzProvider config={config} fallback={<p>Loading...</p>}>
+    <JazzProvider
+      config={{ appId: APP_ID, serverUrl: SERVER_URL, secret }}
+      fallback={<p>Loading...</p>}
+    >
       {children}
     </JazzProvider>
   );

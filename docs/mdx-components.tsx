@@ -7,6 +7,7 @@ import { GenerateAppId } from "./components/mdx/generate-app-id";
 import { CloudConfig } from "./components/mdx/cloud-config";
 import { DeployCommand } from "./components/mdx/deploy-command";
 import { LensDiagram } from "./components/mdx/lens-diagram";
+import { TierSyncDiagram } from "./components/mdx/tier-sync-diagram";
 import { JazzLogo } from "./components/brand/jazz-logo";
 
 function SlideCodeCell({ children, title }: { children: ReactNode; title: string }) {
@@ -29,6 +30,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     CloudConfig,
     DeployCommand,
     LensDiagram,
+    TierSyncDiagram,
     JazzLogo,
     SlideCodeCell,
     ...components,

@@ -5,10 +5,6 @@ pub struct WasmLayerConfig {
     ///
     /// `true` by default.
     pub enabled: bool,
-    /// In dev-tools, report timings of traces.
-    ///
-    /// `true` by default.
-    pub report_logs_in_timings: bool,
 
     /// emits the traces in either colorful or colorless fashion.
     ///
@@ -45,7 +41,6 @@ impl Default for WasmLayerConfig {
     fn default() -> Self {
         WasmLayerConfig {
             enabled: true,
-            report_logs_in_timings: true,
             use_console_methods: false,
             color: true,
             max_level: tracing::Level::TRACE,
@@ -65,12 +60,6 @@ impl WasmLayerConfig {
 
     pub fn disable(mut self) -> Self {
         self.enabled = false;
-        self
-    }
-
-    /// Disables events from appearing in performance timings
-    pub fn remove_timings(mut self) -> Self {
-        self.report_logs_in_timings = false;
         self
     }
 
@@ -119,7 +108,6 @@ fn test_default_built_config() {
         config,
         WasmLayerConfig {
             enabled: true,
-            report_logs_in_timings: true,
             color: true,
             use_console_methods: false,
             max_level: tracing::Level::TRACE,
@@ -129,13 +117,6 @@ fn test_default_built_config() {
             console_group_spans: false,
         }
     )
-}
-
-#[test]
-fn test_set_report_logs_in_timings() {
-    let config = WasmLayerConfig::new().remove_timings();
-
-    assert!(!config.report_logs_in_timings);
 }
 
 #[test]

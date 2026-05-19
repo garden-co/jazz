@@ -6,20 +6,10 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type {
-  InsertValues,
-  Value,
-  RowDelta,
-  SubscriptionWireDelta,
-  WasmSchema,
-} from "../drivers/types.js";
+import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import { applyUserAuthHeaders, type AuthFailureReason } from "./sync-transport.js";
-import {
-  resolveClientSessionStateSync,
-  LOCAL_FIRST_JWT_ISSUER,
-  ANONYMOUS_JWT_ISSUER,
-} from "./client-session.js";
+import type { AuthFailureReason } from "./sync-transport.js";
+import { resolveClientSessionStateSync } from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
@@ -27,10 +17,10 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
-import { appScopedUrl, httpUrlToWs } from "./url.js";
+import { httpUrlToWs } from "./url.js";
 
 /**
- * Minimal request shape supported by `JazzClient.forRequest()`.
+ * Minimal request shape supported by backend request helpers.
  *
  * Works with common server frameworks (Express, Fastify, Hono, Web Request wrappers)
  * as long as Authorization headers are exposed through `header(name)` or `headers`.
@@ -62,20 +52,11 @@ export interface Runtime {
   ): DirectMutationResult;
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
-  loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
-  loadLocalBatchRecordStorageRow?(batch_id: string): Uint8Array | null;
-  hydrateLocalBatchRecordStorageRow?(bytes: Uint8Array): void;
-  loadLocalBatchRecords?(): LocalBatchRecord[];
-  acknowledgeRejectedBatch?(batch_id: string): boolean;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   sealBatch(batch_id: string): void;
   waitForBatch(batch_id: string, tier: string): Promise<void>;
-  loadBatchFate?(batch_id: string): BatchFate | null;
-  replayBatchRejection?(batch_id: string, code: string, reason: string): void;
+  loadBatchFate(batch_id: string): BatchFate | null;
   discardLocalBatch?(batch_id: string): boolean;
-  retransmitLocalBatch?(batch_id: string): void;
-  replayLocalBatchPayloads?(batch_id: string): Uint8Array[];
-  reconcileLocalBatchWithServer?(batch_id: string): void;
   query(
     query_json: string,
     session_json?: string | null,
@@ -109,7 +90,6 @@ export interface Runtime {
   batchedTick?(): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
-  reconcileLocalBatchWithServer?(batch_id: string): void;
   addClient(): string;
   /**
    * When true, runtime row outputs are already aligned to the declared schema order.
@@ -299,8 +279,7 @@ export type SubscriptionCallback = (delta: SubscriptionWireDelta) => void;
 export interface ConnectSyncRuntimeOptions {
   useBinaryEncoding?: boolean;
   onAuthFailure?: (reason: AuthFailureReason) => void;
-  onBeforeLocalBatchWait?: (batchId: string) => Promise<void>;
-  onRejectedBatchAcknowledged?: (batchId: string) => void;
+  nonDurableClientRuntime?: boolean;
 }
 
 /**
@@ -542,31 +521,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   return JSON.stringify(payload);
 }
 
-function readHeader(request: RequestLike, name: string): string | undefined {
-  const lower = name.toLowerCase();
-
-  const fromMethod = request.header?.(name) ?? request.header?.(lower);
-  if (typeof fromMethod === "string") {
-    return fromMethod;
-  }
-
-  const headers = request.headers;
-  if (!headers) {
-    return undefined;
-  }
-
-  if (typeof Headers !== "undefined" && headers instanceof Headers) {
-    return headers.get(name) ?? headers.get(lower) ?? undefined;
-  }
-
-  const record = headers as Record<string, string | string[] | undefined>;
-  const raw = record[name] ?? record[lower];
-  if (Array.isArray(raw)) {
-    return raw[0];
-  }
-  return raw;
-}
-
 function normalizeSubscriptionCallbackArgs(
   args: unknown[],
 ): SubscriptionWireDelta | string | undefined {
@@ -580,73 +534,6 @@ function normalizeSubscriptionCallbackArgs(
 
   console.error("Invalid subscription callback arguments", args);
   return undefined;
-}
-
-function decodeBase64Url(value: string): string {
-  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-
-  if (typeof atob === "function") {
-    return atob(padded);
-  }
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(padded, "base64").toString("utf8");
-  }
-
-  throw new Error("No base64 decoder available in this runtime");
-}
-
-export function sessionFromRequest(request: RequestLike): Session {
-  const authHeader = readHeader(request, "authorization");
-  if (!authHeader?.startsWith("Bearer ")) {
-    throw new Error("Missing or invalid Authorization header");
-  }
-
-  const token = authHeader.slice("Bearer ".length).trim();
-  const parts = token.split(".");
-  if (parts.length < 2) {
-    throw new Error("Invalid JWT format");
-  }
-  const payloadPart = parts[1];
-  if (payloadPart === undefined) {
-    throw new Error("Invalid JWT format");
-  }
-
-  let payload: unknown;
-  try {
-    payload = JSON.parse(decodeBase64Url(payloadPart));
-  } catch {
-    throw new Error("Invalid JWT payload");
-  }
-
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error("Invalid JWT payload");
-  }
-
-  const typedPayload = payload as { sub?: unknown; iss?: unknown; claims?: unknown };
-  if (typeof typedPayload.sub !== "string" || typedPayload.sub.length === 0) {
-    throw new Error("JWT payload missing sub");
-  }
-
-  const claims =
-    typedPayload.claims &&
-    typeof typedPayload.claims === "object" &&
-    !Array.isArray(typedPayload.claims)
-      ? (typedPayload.claims as Record<string, unknown>)
-      : {};
-
-  // Derive authMode from the issuer claim
-  const issuer = typeof typedPayload.iss === "string" ? typedPayload.iss.trim() : undefined;
-  let authMode: Session["authMode"];
-  if (issuer === LOCAL_FIRST_JWT_ISSUER) {
-    authMode = "local-first";
-  } else if (issuer === ANONYMOUS_JWT_ISSUER) {
-    authMode = "anonymous";
-  } else {
-    authMode = "external";
-  }
-
-  return { user_id: typedPayload.sub, claims, authMode };
 }
 
 function shouldFallbackToUpsertUpdate(error: unknown): boolean {
@@ -703,45 +590,7 @@ function normalizeUpdatedAt(updatedAt?: number): number | undefined {
   return updatedAt;
 }
 
-function durabilityTierRank(tier: DurabilityTier): number {
-  switch (tier) {
-    case "local":
-      return 0;
-    case "edge":
-      return 1;
-    case "global":
-      return 2;
-  }
-}
-
-function settlementSatisfiesTier(
-  settlement: BatchFate | null | undefined,
-  tier: DurabilityTier,
-): boolean {
-  if (!settlement) {
-    return false;
-  }
-
-  if (settlement.kind !== "durableDirect" && settlement.kind !== "acceptedTransaction") {
-    return false;
-  }
-
-  return durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier);
-}
-
-function rejectionFromSettlement(
-  settlement: BatchFate | null | undefined,
-): PersistedWriteRejectedError | null {
-  if (!settlement || settlement.kind !== "rejected") {
-    return null;
-  }
-  return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
-}
-
-function rejectionFromRuntimeWaitError(
-  fallbackBatchId: string,
-  error: unknown,
-): PersistedWriteRejectedError | null {
+function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedError | null {
   if (!error || typeof error !== "object") {
     return null;
   }
@@ -754,11 +603,14 @@ function rejectionFromRuntimeWaitError(
   if (candidate.kind !== "rejected") {
     return null;
   }
-  if (typeof candidate.code !== "string" || typeof candidate.reason !== "string") {
+  if (
+    typeof candidate.code !== "string" ||
+    typeof candidate.reason !== "string" ||
+    typeof candidate.batchId !== "string"
+  ) {
     return null;
   }
-  const batchId = typeof candidate.batchId === "string" ? candidate.batchId : fallbackBatchId;
-  return new PersistedWriteRejectedError(batchId, candidate.code, candidate.reason);
+  return new PersistedWriteRejectedError(candidate.batchId, candidate.code, candidate.reason);
 }
 
 /**
@@ -1029,18 +881,6 @@ abstract class BatchHandleBase {
     this.ensureActive();
     return this.client.queryInternal(query, this.session, this.queryOptions(options));
   }
-
-  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
-  }
 }
 
 /**
@@ -1085,187 +925,6 @@ export class DirectBatch extends BatchHandleBase {
 export type BatchScope = Scoped<DirectBatch>;
 
 /**
- * Session-scoped client for backend operations.
- *
- * Created by `JazzClient.forSession()`. Allows backend applications
- * to perform operations as a specific user via header-based authentication.
- */
-export class SessionClient {
-  private client: JazzClient;
-  private session: Session;
-
-  constructor(client: JazzClient, session: Session) {
-    this.client = client;
-    this.session = session;
-  }
-
-  /**
-   * Create a new row as this session's user.
-   */
-  async create(table: string, values: InsertValues, options?: CreateOptions): Promise<string> {
-    if (!this.client.getServerUrl()) {
-      throw new Error("No server connection");
-    }
-
-    const response = await this.client.sendRequest(
-      this.client.getRequestUrl("/sync/object"),
-      "POST",
-      {
-        table,
-        values,
-        schema_context: this.client.getSchemaContext(),
-        ...(options?.id ? { object_id: options.id } : {}),
-        ...(options?.updatedAt !== undefined
-          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
-          : {}),
-      },
-      this.session,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Create failed: ${response.statusText}`);
-    }
-
-    const result = await response.json();
-    return result.object_id;
-  }
-
-  /**
-   * Create or update a row as this session's user using a caller-supplied id.
-   */
-  async upsert(table: string, values: InsertValues, options: UpsertOptions): Promise<void> {
-    try {
-      await this.create(table, values, options);
-      return;
-    } catch (error) {
-      if (!shouldFallbackToUpsertUpdate(error)) {
-        throw error;
-      }
-    }
-
-    await this.update(options.id, values as Record<string, Value>, {
-      updatedAt: options.updatedAt,
-    });
-  }
-
-  /**
-   * Update a row as this session's user.
-   */
-  async update(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: UpdateOptions,
-  ): Promise<void> {
-    if (!this.client.getServerUrl()) {
-      throw new Error("No server connection");
-    }
-
-    const updateArray = Object.entries(updates);
-
-    const response = await this.client.sendRequest(
-      this.client.getRequestUrl("/sync/object"),
-      "PUT",
-      {
-        object_id: objectId,
-        updates: updateArray,
-        schema_context: this.client.getSchemaContext(),
-        ...(options?.updatedAt !== undefined
-          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
-          : {}),
-      },
-      this.session,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Update failed: ${response.statusText}`);
-    }
-  }
-
-  /**
-   * Delete a row as this session's user.
-   */
-  async delete(objectId: string): Promise<void> {
-    if (!this.client.getServerUrl()) {
-      throw new Error("No server connection");
-    }
-
-    const response = await this.client.sendRequest(
-      this.client.getRequestUrl("/sync/object/delete"),
-      "POST",
-      {
-        object_id: objectId,
-        schema_context: this.client.getSchemaContext(),
-      },
-      this.session,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Delete failed: ${response.statusText}`);
-    }
-  }
-
-  /**
-   * Query as this session's user.
-   */
-  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
-    return this.client.queryInternal(query, this.session, options);
-  }
-
-  /**
-   * Subscribe to a query as this session's user.
-   */
-  subscribe(
-    query: string | QueryInput,
-    callback: SubscriptionCallback,
-    options?: QueryExecutionOptions,
-  ): number {
-    return this.client.subscribeInternal(query, callback, this.session, options);
-  }
-
-  beginTransaction(): Transaction {
-    return this.client.beginTransactionInternal(this.session);
-  }
-
-  transaction<TResult>(
-    callback: (tx: TransactionScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
-  transaction<TResult>(
-    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const transaction = this.beginTransaction();
-    return runInBatch(transaction, callback, this.client);
-  }
-
-  beginBatch(): DirectBatch {
-    return this.client.beginBatchInternal(this.session);
-  }
-
-  batch<TResult>(
-    callback: (batch: BatchScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
-  batch<TResult>(
-    callback: (batch: BatchScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginBatch();
-    return runInBatch(batch, callback, this.client);
-  }
-
-  localBatchRecord(batchId: string): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId: string): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
-  }
-}
-
-/**
  * High-level Jazz client.
  */
 export class JazzClient {
@@ -1275,17 +934,10 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   /**
-   * Listeners attached with {@link JazzClient.onMutationError} that are notified when a batch is rejected.
+   * Keeps track of batches/transactions that were completed without issuing any writes to the runtime.
+   * Necessary to resolve {@link waitForBatch} promises on these batches.
    */
-  private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
-  private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
-  private readonly waitHandledBatchIds = new Set<string>();
-  private readonly replayedRejectedBatchRecords = new Map<string, LocalBatchRecord>();
-  private readonly rejectedBatchRollbackRecords = new Map<string, LocalBatchRecord>();
-  private readonly hydratedWorkerBatchIds = new Set<string>();
   private readonly completedEmptyBatchIds = new Set<string>();
-  private readonly onRejectedBatchAcknowledged?: (batchId: string) => void;
-  private readonly onBeforeLocalBatchWait?: (batchId: string) => Promise<void>;
   private shutdownPromise: Promise<void> | null = null;
   private cachedRuntimeSchemaHash: string | null = null;
   private cachedRuntimeSchema: WasmSchema | null = null;
@@ -1332,8 +984,6 @@ export class JazzClient {
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = this.resolveSessionFromContext();
-    this.onRejectedBatchAcknowledged = runtimeOptions?.onRejectedBatchAcknowledged;
-    this.onBeforeLocalBatchWait = runtimeOptions?.onBeforeLocalBatchWait;
 
     if (runtimeOptions?.onAuthFailure) {
       const handler = runtimeOptions.onAuthFailure;
@@ -1343,7 +993,7 @@ export class JazzClient {
     }
 
     this.runtime.onMutationError((event) => {
-      this.queueMutationError(event);
+      console.error("Unhandled Jazz mutation error", event);
     });
   }
 
@@ -1404,6 +1054,7 @@ export class JazzClient {
       context.userBranch ?? "main",
       resolveNodeTier(context.tier),
       runtimeOptions?.useBinaryEncoding ?? false,
+      runtimeOptions?.nonDurableClientRuntime ?? false,
     );
 
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
@@ -1425,50 +1076,6 @@ export class JazzClient {
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ): JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
-  }
-
-  /**
-   * Create a session-scoped client for backend operations.
-   *
-   * This allows backend applications to perform operations as a specific user.
-   * Requires `backendSecret` to be configured in the `AppContext`.
-   *
-   * @param session Session to impersonate
-   * @returns SessionClient for performing operations as the given user
-   * @throws Error if backendSecret is not configured
-   *
-   * @example
-   * ```typescript
-   * const userSession = { user_id: "user-123", claims: {} };
-   * const userClient = client.forSession(userSession);
-   * const id = await userClient.create("todos", {
-   *   title: { type: "Text", value: "Buy milk" },
-   *   done: { type: "Boolean", value: false },
-   * });
-   * ```
-   */
-  forSession(session: Session): SessionClient {
-    if (!this.context.backendSecret) {
-      throw new Error("backendSecret required for session impersonation");
-    }
-    if (!this.context.serverUrl) {
-      throw new Error("serverUrl required for session impersonation");
-    }
-    return new SessionClient(this, session);
-  }
-
-  /**
-   * Create a session-scoped client from an authenticated HTTP request.
-   *
-   * Extracts `Authorization: Bearer <jwt>` and maps payload fields:
-   * - `sub` -> `session.user_id`
-   * - `claims` -> `session.claims` (defaults to `{}`)
-   *
-   * This helper only extracts payload fields and does not validate JWT signatures.
-   * JWT verification should happen in your auth middleware before request handling.
-   */
-  forRequest(request: RequestLike): SessionClient {
-    return this.forSession(sessionFromRequest(request));
   }
 
   beginTransaction(): Transaction {
@@ -1527,195 +1134,12 @@ export class JazzClient {
     );
   }
 
-  localBatchRecord(batchId: string): LocalBatchRecord | null {
-    const runtimeRecord = this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
-    const replayedRecord = this.replayedRejectedBatchRecords.get(batchId) ?? null;
-    if (
-      replayedRecord?.latestSettlement?.kind === "rejected" &&
-      runtimeRecord?.latestSettlement?.kind !== "rejected"
-    ) {
-      return replayedRecord;
-    }
-    return runtimeRecord ?? replayedRecord ?? null;
-  }
-
-  runtimeLocalBatchRecord(batchId: string): LocalBatchRecord | null {
-    return this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    const records = new Map(
-      this.requireBatchRecordMethod("loadLocalBatchRecords")().map((record) => [
-        record.batchId,
-        record,
-      ]),
-    );
-    for (const [batchId, record] of this.replayedRejectedBatchRecords) {
-      const runtimeRecord = records.get(batchId);
-      if (
-        !runtimeRecord ||
-        (record.latestSettlement?.kind === "rejected" &&
-          runtimeRecord.latestSettlement?.kind !== "rejected")
-      ) {
-        records.set(batchId, record);
-      }
-    }
-    return [...records.values()].sort((left, right) => left.batchId.localeCompare(right.batchId));
-  }
-
   batchFate(batchId: string): BatchFate | null {
-    const runtimeFate = this.runtime.loadBatchFate
-      ? this.runtime.loadBatchFate(batchId)
-      : (this.localBatchRecord(batchId)?.latestSettlement ?? null);
-    const replayedFate = this.replayedRejectedBatchRecords.get(batchId)?.latestSettlement ?? null;
-    if (replayedFate?.kind === "rejected" && runtimeFate?.kind !== "rejected") {
-      return replayedFate;
-    }
-    return runtimeFate ?? replayedFate;
+    return this.runtime.loadBatchFate(batchId);
   }
 
-  private batchRecordForFate(fate: BatchFate): LocalBatchRecord {
-    return {
-      batchId: fate.batchId,
-      mode: fate.kind === "acceptedTransaction" ? "transactional" : "direct",
-      sealed: true,
-      latestSettlement: fate,
-    };
-  }
-
-  hasPendingHydratedBatchReconciliation(tier: DurabilityTier): boolean {
-    for (const batchId of this.hydratedWorkerBatchIds) {
-      const settlement = this.batchFate(batchId);
-      if (rejectionFromSettlement(settlement)) {
-        continue;
-      }
-      if (!settlementSatisfiesTier(settlement, tier)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  pendingHydratedBatchReconciliationIds(tier: DurabilityTier): string[] {
-    const pending: string[] = [];
-    for (const batchId of this.hydratedWorkerBatchIds) {
-      const settlement = this.batchFate(batchId);
-      if (rejectionFromSettlement(settlement)) {
-        continue;
-      }
-      if (!settlementSatisfiesTier(settlement, tier)) {
-        pending.push(batchId);
-      }
-    }
-    return pending;
-  }
-
-  hasHydratedWorkerBatch(batchId: string): boolean {
-    return this.hydratedWorkerBatchIds.has(batchId);
-  }
-
-  hasAcknowledgedRejectedBatch(batchId: string): boolean {
-    return this.acknowledgedRejectedBatchErrors.has(batchId);
-  }
-
-  hasWaitHandlerForBatch(batchId: string): boolean {
-    return this.waitHandledBatchIds.has(batchId);
-  }
-
-  onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
-    this.mutationErrorListeners.add(listener);
-    return () => {
-      this.mutationErrorListeners.delete(listener);
-    };
-  }
-
-  private acknowledgeRejectedBatchInternal(batchId: string): boolean {
-    const rejection = rejectionFromSettlement(this.batchFate(batchId));
-    const acknowledgedInRuntime = this.requireBatchRecordMethod("acknowledgeRejectedBatch")(
-      batchId,
-    );
-    const acknowledgedReplayed = this.replayedRejectedBatchRecords.delete(batchId);
-    const acknowledged = acknowledgedInRuntime || acknowledgedReplayed;
-    if (acknowledged && rejection) {
-      this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
-    }
-    if (acknowledged) {
-      this.onRejectedBatchAcknowledged?.(batchId);
-    }
-    return acknowledged;
-  }
-
-  hydrateLocalBatchRecords(records: LocalBatchRecord[]): void {
-    const loadLocalBatchRecord = this.requireBatchRecordMethod("loadLocalBatchRecord");
-    for (const record of records) {
-      const publicRecord = this.hydrateEncodedLocalBatchRecord(record);
-      this.hydratedWorkerBatchIds.add(record.batchId);
-      this.replayRejectedBatchRows(publicRecord);
-      const runtimeRecord = loadLocalBatchRecord(record.batchId);
-      if (
-        runtimeRecord &&
-        !(
-          publicRecord.latestSettlement?.kind === "rejected" &&
-          runtimeRecord.latestSettlement?.kind !== "rejected"
-        )
-      ) {
-        continue;
-      }
-      this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
-      if (publicRecord.latestSettlement?.kind === "rejected") {
-        this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
-      }
-    }
-  }
-
-  replayRejectedBatchRecord(record: LocalBatchRecord): void {
-    const publicRecord = this.hydrateEncodedLocalBatchRecord(record);
-    this.hydratedWorkerBatchIds.add(record.batchId);
-    if (publicRecord.latestSettlement?.kind !== "rejected") {
-      return;
-    }
-    this.replayRejectedBatchRows(publicRecord);
-    this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
-    this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
-  }
-
-  private hydrateEncodedLocalBatchRecord(record: LocalBatchRecord): LocalBatchRecord {
-    if (record.encodedRecord) {
-      this.runtime.hydrateLocalBatchRecordStorageRow?.(record.encodedRecord);
-    }
-    const { encodedRecord: _encodedRecord, ...publicRecord } = record;
-    return publicRecord;
-  }
-
-  private replayRejectedBatchRows(record: LocalBatchRecord): void {
-    const settlement = record.latestSettlement;
-    if (settlement?.kind !== "rejected") {
-      return;
-    }
-    this.runtime.replayBatchRejection?.(record.batchId, settlement.code, settlement.reason);
-  }
-
-  private replayRejectedBatchRowsById(batchId: string): boolean {
-    const fate = this.batchFate(batchId);
-    if (fate?.kind !== "rejected") {
-      return false;
-    }
-    const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(fate);
-    this.replayRejectedBatchRows(batch);
-    return true;
-  }
-
-  private replayRejectedBatchRollbacks(): void {
-    for (const record of this.rejectedBatchRollbackRecords.values()) {
-      this.replayRejectedBatchRows(record);
-    }
-    for (const batchId of this.hydratedWorkerBatchIds) {
-      this.replayRejectedBatchRowsById(batchId);
-    }
-  }
-
-  acknowledgeRejectedBatch(batchId: string): boolean {
-    return this.acknowledgeRejectedBatchInternal(batchId);
+  onMutationError(listener: (event: MutationErrorEvent) => void): void {
+    this.runtime.onMutationError(listener);
   }
 
   sealBatch(batchId: string): WriteHandle {
@@ -1825,22 +1249,6 @@ export class JazzClient {
 
   private requireSessionWriteMethod<
     T extends keyof Pick<Runtime, "insertWithSession" | "updateWithSession" | "deleteWithSession">,
-  >(method: T): NonNullable<Runtime[T]> {
-    const runtimeMethod = this.runtime[method];
-    if (!runtimeMethod) {
-      throw new Error(`${String(method)} is not supported by this runtime`);
-    }
-    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
-  }
-
-  private requireBatchRecordMethod<
-    T extends keyof Pick<
-      Runtime,
-      | "loadLocalBatchRecord"
-      | "loadLocalBatchRecords"
-      | "loadBatchFate"
-      | "acknowledgeRejectedBatch"
-    >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
     if (!runtimeMethod) {
@@ -2222,7 +1630,6 @@ export class JazzClient {
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const effectiveRuntimeSchema =
       runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
-    this.replayRejectedBatchRollbacks();
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
@@ -2466,25 +1873,6 @@ export class JazzClient {
   }
 
   /**
-   * Get the server URL (for SessionClient).
-   * @internal
-   */
-  getServerUrl(): string | undefined {
-    return this.context.serverUrl;
-  }
-
-  /**
-   * Build a fully-qualified endpoint URL against the configured server.
-   * @internal
-   */
-  getRequestUrl(path: string): string {
-    if (!this.context.serverUrl) {
-      throw new Error("No server connection");
-    }
-    return appScopedUrl(this.context.serverUrl, this.context.appId, path);
-  }
-
-  /**
    * Get schema context for server requests.
    * @internal
    */
@@ -2500,127 +1888,22 @@ export class JazzClient {
     };
   }
 
-  /**
-   * Send an HTTP request with appropriate auth headers.
-   * @internal
-   */
-  async sendRequest(
-    url: string,
-    method: string,
-    body: unknown,
-    session?: Session,
-  ): Promise<Response> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-
-    // Priority 1: Backend impersonation (via SessionClient)
-    if (session && this.context.backendSecret) {
-      headers["X-Jazz-Backend-Secret"] = this.context.backendSecret;
-      headers["X-Jazz-Session"] = btoa(JSON.stringify(session));
-    }
-    // Priority 2: frontend auth (JWT bearer token)
-    else {
-      applyUserAuthHeaders(headers, {
-        jwtToken: this.context.jwtToken,
-      });
-    }
-
-    return fetch(url, {
-      method,
-      headers,
-      body: JSON.stringify(body),
-    });
-  }
-
-  private batchWaitOutcome(
-    batchId: string,
-    tier: DurabilityTier,
-  ): { settled: true; error: Error | null } | { settled: false } {
-    const acknowledgedRejection = this.acknowledgedRejectedBatchErrors.get(batchId);
-    if (acknowledgedRejection) {
-      return { settled: true, error: acknowledgedRejection };
-    }
-
-    if (this.completedEmptyBatchIds.has(batchId)) {
-      return { settled: true, error: null };
-    }
-
-    const settlement = this.batchFate(batchId);
-    const rejection = rejectionFromSettlement(settlement);
-    if (rejection) {
-      return { settled: true, error: rejection };
-    }
-    if (settlementSatisfiesTier(settlement, tier)) {
-      return { settled: true, error: null };
-    }
-
-    return { settled: false };
-  }
-
-  private normalizeBatchWaitError(batchId: string, error: unknown): Error {
-    return (
-      this.acknowledgedRejectedBatchErrors.get(batchId) ??
-      rejectionFromSettlement(this.batchFate(batchId)) ??
-      rejectionFromRuntimeWaitError(batchId, error) ??
-      (error instanceof Error ? error : new Error(String(error)))
-    );
-  }
-
-  private queueMutationError(event: MutationErrorEvent): void {
-    setTimeout(() => {
-      this.deliverMutationError(event);
-    }, 0);
-  }
-
-  private deliverMutationError(event: MutationErrorEvent): void {
-    const batchId = event.batch.batchId;
-    if (this.acknowledgedRejectedBatchErrors.has(batchId)) {
-      return;
-    }
-    if (this.waitHandledBatchIds.has(batchId)) {
-      return;
-    }
-
-    if (this.mutationErrorListeners.size === 0) {
-      console.error("Unhandled Jazz mutation error", event);
-    } else {
-      for (const listener of this.mutationErrorListeners) {
-        listener(event);
-      }
-    }
-
-    this.acknowledgeRejectedBatchInternal(batchId);
-  }
-
   async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
-    if (tier === "local" && this.onBeforeLocalBatchWait) {
-      await this.onBeforeLocalBatchWait(batchId);
-    }
-
-    const outcome = this.batchWaitOutcome(batchId, tier);
-    if (outcome.settled) {
-      if (outcome.error) {
-        this.replayRejectedBatchRowsById(batchId);
-        throw outcome.error;
-      }
+    if (this.completedEmptyBatchIds.has(batchId)) {
       return;
     }
-
-    this.waitHandledBatchIds.add(batchId);
-
     try {
       await this.runtime.waitForBatch(batchId, tier);
-      this.waitHandledBatchIds.delete(batchId);
     } catch (error) {
-      const normalizedError = this.normalizeBatchWaitError(batchId, error);
-      if (normalizedError instanceof PersistedWriteRejectedError) {
-        this.acknowledgeRejectedBatchInternal(batchId);
-      } else {
-        this.waitHandledBatchIds.delete(batchId);
-      }
-      throw normalizedError;
+      throw this.normalizeBatchWaitError(error);
     }
+  }
+
+  private normalizeBatchWaitError(error: unknown): Error {
+    return (
+      rejectionFromRuntimeWaitError(error) ??
+      (error instanceof Error ? error : new Error(String(error)))
+    );
   }
 
   /**

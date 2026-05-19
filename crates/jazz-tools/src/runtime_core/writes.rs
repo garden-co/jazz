@@ -9,12 +9,18 @@ use crate::row_histories::{BatchId, RowState, patch_row_batch_state};
 use crate::storage::StorageError;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
-    fn local_write_confirmed_tier(&self) -> DurabilityTier {
-        self.schema_manager
-            .query_manager()
-            .sync_manager()
-            .max_local_durability_tier()
-            .unwrap_or(DurabilityTier::Local)
+    fn local_write_confirmed_tier(&self) -> Option<DurabilityTier> {
+        if !self.synthesize_direct_write_fate {
+            return None;
+        }
+
+        Some(
+            self.schema_manager
+                .query_manager()
+                .sync_manager()
+                .max_local_durability_tier()
+                .unwrap_or(DurabilityTier::Local),
+        )
     }
 
     fn completed_batch_wait_receiver(
@@ -386,25 +392,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
-        self.ensure_batch_is_writable(write_context)?;
-        let result = self
-            .schema_manager
-            .insert_with_write_context(&mut self.storage, table, values, write_context)
-            .map_err(crate::runtime_core::write_error_from_query)?;
-        let row_id = result.row_id;
-        let row_values = result.row_values;
-        let batch_id = result.batch_id;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(row_id, batch_id, batch_mode)?;
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
-        }
-        debug!(object_id = %row_id, "inserted");
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
-        Ok(((row_id, row_values), batch_id))
+        self.insert_with_id(table, values, None, write_context)
     }
 
     /// Compatibility shim for callers that pass an explicit row id.
@@ -418,13 +406,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.ensure_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
-            .insert_with_write_context_and_id(
-                &mut self.storage,
-                table,
-                values,
-                object_id,
-                write_context,
-            )
+            .insert(&mut self.storage, table, values, object_id, write_context)
             .map_err(crate::runtime_core::write_error_from_query)?;
         let row_id = result.row_id;
         let row_values = result.row_values;
@@ -453,7 +435,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
-            .update_with_write_context(&mut self.storage, object_id, &values, write_context)
+            .update(&mut self.storage, object_id, &values, write_context)
             .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
@@ -480,13 +462,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
-            .upsert_with_write_context_and_id(
-                &mut self.storage,
-                table,
-                object_id,
-                values,
-                write_context,
-            )
+            .upsert(&mut self.storage, table, object_id, values, write_context)
             .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
@@ -788,12 +764,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 let batch = self.local_batch_record(batch_id)?.unwrap_or_else(|| {
                     LocalBatchRecord::new(batch_id, BatchMode::Direct, true, Some(fate.clone()))
                 });
-                self.durability
-                    .queue_mutation_error_event(MutationErrorEvent {
-                        code: code.to_string(),
-                        reason: reason.to_string(),
-                        batch,
-                    });
+                self.queue_mutation_error_event(MutationErrorEvent {
+                    code: code.to_string(),
+                    reason: reason.to_string(),
+                    batch,
+                });
             }
         }
         self.mark_storage_write_pending_flush();
@@ -886,15 +861,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         record.mark_sealed(submission.clone());
         if record.mode == BatchMode::Direct {
-            let confirmed_tier = self.local_write_confirmed_tier();
-            let settlement = BatchFate::DurableDirect {
-                batch_id,
-                confirmed_tier,
-            };
-            record.apply_fate(settlement.clone());
-            self.storage
-                .upsert_authoritative_batch_fate(&settlement)
-                .map_err(|err| RuntimeError::WriteError(format!("persist batch fate: {err}")))?;
+            if let Some(confirmed_tier) = self.local_write_confirmed_tier() {
+                let settlement = BatchFate::DurableDirect {
+                    batch_id,
+                    confirmed_tier,
+                };
+                record.apply_fate(settlement.clone());
+                self.storage
+                    .upsert_authoritative_batch_fate(&settlement)
+                    .map_err(|err| {
+                        RuntimeError::WriteError(format!("persist batch fate: {err}"))
+                    })?;
+            }
             self.publish_direct_batch_rows(&record)?;
         }
         self.storage

@@ -28,9 +28,6 @@ export interface JazzServerOptions {
   dataDir?: string;
   inMemory?: boolean;
   jwksUrl?: string;
-  catalogueAuthority?: "local" | "forward";
-  catalogueAuthorityUrl?: string;
-  catalogueAuthorityAdminSecret?: string;
 }
 
 export interface JazzPluginOptions {

@@ -98,11 +98,11 @@ describe("createNaiveBackend", () => {
     expect(calls.some((msg) => msg.includes("node:sqlite not available"))).toBe(true);
   });
 
-  it("warning message mentions upgrade path", async () => {
+  it("warning message names the missing capability", async () => {
     const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     await createNaiveBackend(txtPath);
     const calls = spy.mock.calls.map((c) => String(c[0]));
-    expect(calls.some((msg) => msg.includes("Node >=22.13"))).toBe(true);
+    expect(calls.some((msg) => msg.includes("node:sqlite + FTS5"))).toBe(true);
   });
 });
 

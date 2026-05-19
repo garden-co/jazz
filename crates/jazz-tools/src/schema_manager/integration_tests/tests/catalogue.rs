@@ -22,6 +22,8 @@ fn schema_manager_persists_current_schema_only_once_per_storage() {
                 ("id".to_string(), Value::Uuid(ObjectId::new())),
                 ("name".to_string(), Value::Text("Alice".into())),
             ]),
+            None,
+            None,
         )
         .expect("first insert should succeed");
     let first_upserts = storage.catalogue_upserts();
@@ -38,6 +40,8 @@ fn schema_manager_persists_current_schema_only_once_per_storage() {
                 ("id".to_string(), Value::Uuid(ObjectId::new())),
                 ("name".to_string(), Value::Text("Bob".into())),
             ]),
+            None,
+            None,
         )
         .expect("second insert should succeed");
 
@@ -859,6 +863,8 @@ fn e2e_catalogue_sync_with_data_query() {
                 ("name".to_string(), name.clone()),
                 ("email".to_string(), email.clone()),
             ]),
+            None,
+            None,
         )
         .unwrap();
     client_a.process(&mut io_a);
@@ -1166,6 +1172,8 @@ fn e2e_server_learns_schema_via_catalogue_sync() {
                 ("id".to_string(), Value::Uuid(ObjectId::new())),
                 ("content".to_string(), Value::Text("Hello World".into())),
             ]),
+            None,
+            None,
         )
         .unwrap()
         .row_id;

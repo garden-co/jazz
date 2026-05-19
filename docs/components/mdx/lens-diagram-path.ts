@@ -1,5 +1,14 @@
-// Pure geometry / path helpers for the lens diagram. No React, no DOM mutation
-// — just functions over DOMRects that produce SVG path strings.
+// Lens-diagram geometry — builds a single CCW path that snakes through the
+// data card, every schema/lens card on the projection chain, and out to the
+// client. Shared geometry primitives live in ./diagram/geometry.
+
+import {
+  PATH_INSET,
+  DEFAULT_CORNER_RADIUS,
+  type Anchors,
+  insetRect,
+  loopRoundedBox,
+} from "./diagram/geometry";
 
 export type Version = 1 | 2 | 3;
 export type Direction = "forward" | "backward" | "na";
@@ -13,51 +22,20 @@ function unreachable(x: never): never {
   throw new Error(`unreachable: ${String(x)}`);
 }
 
-const PATH_INSET = 1; // 2px CSS border, 2px SVG stroke → inset stroke centreline by 1px
-const SCHEMA_RADIUS = 8 - PATH_INSET; // rounded-lg = 8px outer; centreline radius
-
-type InsetRect = {
-  left: number;
-  right: number;
-  top: number;
-  bottom: number;
-  midX: number;
-  midY: number;
-};
-
-function insetRect(rect: DOMRect, container: DOMRect): InsetRect {
-  return {
-    left: rect.left - container.left + PATH_INSET,
-    right: rect.right - container.left - PATH_INSET,
-    top: rect.top - container.top + PATH_INSET,
-    bottom: rect.bottom - container.top - PATH_INSET,
-    midX: (rect.left + rect.right) / 2 - container.left,
-    midY: (rect.top + rect.bottom) / 2 - container.top,
-  };
-}
-
 type LoopStart = "left" | "top" | "bottom";
 
-// CCW perimeter loop around a schema, starting and ending at the same midpoint.
+// Schema cards are rounded-lg → DEFAULT_CORNER_RADIUS works directly.
 function loopSchema(rect: DOMRect, container: DOMRect, start: LoopStart): string {
-  const { left, right, top, bottom, midX, midY } = insetRect(rect, container);
-  const r = SCHEMA_RADIUS;
-  switch (start) {
-    case "left":
-      return `L ${left} ${bottom - r} A ${r} ${r} 0 0 0 ${left + r} ${bottom} L ${right - r} ${bottom} A ${r} ${r} 0 0 0 ${right} ${bottom - r} L ${right} ${top + r} A ${r} ${r} 0 0 0 ${right - r} ${top} L ${left + r} ${top} A ${r} ${r} 0 0 0 ${left} ${top + r} L ${left} ${midY}`;
-    case "top":
-      return `L ${left + r} ${top} A ${r} ${r} 0 0 0 ${left} ${top + r} L ${left} ${bottom - r} A ${r} ${r} 0 0 0 ${left + r} ${bottom} L ${right - r} ${bottom} A ${r} ${r} 0 0 0 ${right} ${bottom - r} L ${right} ${top + r} A ${r} ${r} 0 0 0 ${right - r} ${top} L ${midX} ${top}`;
-    case "bottom":
-      return `L ${right - r} ${bottom} A ${r} ${r} 0 0 0 ${right} ${bottom - r} L ${right} ${top + r} A ${r} ${r} 0 0 0 ${right - r} ${top} L ${left + r} ${top} A ${r} ${r} 0 0 0 ${left} ${top + r} L ${left} ${bottom - r} A ${r} ${r} 0 0 0 ${left + r} ${bottom} L ${midX} ${bottom}`;
-    default:
-      return unreachable(start);
-  }
+  const a = insetRect(rect, container);
+  const entry = start === "left" ? a.midY : a.midX;
+  return loopRoundedBox(a, entry, start);
 }
 
-// CCW perimeter loop around a lens.
-// borderRadius "50% / 35%" → outer rx = w/2, ry = h*0.35; centreline shifts in by 1px.
+// Lens cards use a pill/ellipse shape (borderRadius "50% / 35%"). The path
+// hugs that silhouette — straight sides, elliptical top and bottom caps.
 function loopLens(rect: DOMRect, container: DOMRect, start: LoopStart): string {
-  const { left, right, top, bottom, midX, midY } = insetRect(rect, container);
+  const a = insetRect(rect, container);
+  const { left, right, top, bottom, midX, midY } = a;
   const rx = rect.width / 2 - PATH_INSET;
   const ry = rect.height * 0.35 - PATH_INSET;
   switch (start) {
@@ -129,7 +107,8 @@ export function buildPath(args: {
     const isLens = cards[i].type === "lens";
     const isFirst = i === 0;
     const isLast = i === cards.length - 1;
-    const { right, top, bottom, midX, midY } = insetRect(rect, c);
+    const a: Anchors = insetRect(rect, c);
+    const { right, midX, midY, top, bottom } = a;
 
     // First card enters at left-mid (from the data card); subsequent cards
     // enter at top-mid (forward/idle) or bottom-mid (backward).
@@ -158,3 +137,7 @@ export function buildPath(args: {
 
   return path;
 }
+
+// Re-export the unused symbol so it lives in the bundle if anything elsewhere
+// references it. (Kept to mirror the previous public surface.)
+export { DEFAULT_CORNER_RADIUS };

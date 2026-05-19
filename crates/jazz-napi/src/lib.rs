@@ -44,8 +44,8 @@ use jazz_tools::binding_support::{
     generate_id as generate_binding_id, parse_batch_id_input,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_batch_fate, serialize_local_batch_record,
-    serialize_local_batch_records, serialize_mutation_error_event, subscription_delta_to_json,
+    query_rows_can_be_schema_aligned, serialize_batch_fate, serialize_mutation_error_event,
+    subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -54,12 +54,12 @@ use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
-    QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta,
-    SubscriptionHandle,
+    MutationErrorCallback, QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler,
+    SubscriptionDelta, SubscriptionHandle,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
-    CatalogueAuthorityMode, HostedServer as JazzHostedServer, ServerBuilder, StorageBackend,
+    HostedServer as JazzHostedServer, ServerBuilder, StorageBackend,
     TestingServer as JazzTestingServer,
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
@@ -371,9 +371,6 @@ struct DevServerStartOptions {
     upstream_url: Option<String>,
     peer_secret: Option<String>,
     allow_local_first_auth: Option<bool>,
-    catalogue_authority: Option<String>,
-    catalogue_authority_url: Option<String>,
-    catalogue_authority_admin_secret: Option<String>,
     telemetry_collector_url: Option<String>,
 }
 
@@ -424,18 +421,18 @@ type MutationErrorTsfn = ThreadsafeFunction<serde_json::Value>;
 
 pub struct NapiScheduler {
     scheduled: Arc<AtomicBool>,
+    mutation_error_delivery_scheduled: Arc<AtomicBool>,
     core_ref: Weak<Mutex<NapiCoreType>>,
     tsfn: Option<SchedulerTsfn>,
-    mutation_error_callback: Arc<Mutex<Option<MutationErrorTsfn>>>,
 }
 
 impl NapiScheduler {
     fn new() -> Self {
         Self {
             scheduled: Arc::new(AtomicBool::new(false)),
+            mutation_error_delivery_scheduled: Arc::new(AtomicBool::new(false)),
             core_ref: Weak::new(),
             tsfn: None,
-            mutation_error_callback: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -453,46 +450,54 @@ impl Scheduler for NapiScheduler {
         if !self.scheduled.swap(true, Ordering::SeqCst) {
             let scheduled = Arc::clone(&self.scheduled);
             let core_ref = self.core_ref.clone();
-            let mutation_error_callback = Arc::clone(&self.mutation_error_callback);
             std::thread::spawn(move || {
                 // Give bursts of inbound websocket frames a chance to coalesce
                 // before the runtime drains the queue.
                 std::thread::sleep(Duration::from_millis(1));
                 scheduled.store(false, Ordering::SeqCst);
-                if let Some(core_arc) = core_ref.upgrade() {
-                    if let Ok(mut core) = core_arc.lock() {
-                        core.batched_tick();
-                    }
-                    emit_pending_mutation_errors(&core_arc, &mutation_error_callback);
+                if let Some(core_arc) = core_ref.upgrade()
+                    && let Ok(mut core) = core_arc.lock()
+                {
+                    core.batched_tick();
                 }
             });
         }
     }
+
+    fn schedule_mutation_error_delivery(&self) {
+        if self
+            .mutation_error_delivery_scheduled
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let scheduled = Arc::clone(&self.mutation_error_delivery_scheduled);
+        let core_ref = self.core_ref.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1));
+            scheduled.store(false, Ordering::SeqCst);
+            if let Some(core_arc) = core_ref.upgrade() {
+                deliver_pending_mutation_errors(&core_arc);
+            }
+        });
+    }
 }
 
-fn emit_pending_mutation_errors(
-    core_arc: &Arc<Mutex<NapiCoreType>>,
-    mutation_error_callback: &Arc<Mutex<Option<MutationErrorTsfn>>>,
-) {
-    let Ok(callback_guard) = mutation_error_callback.lock() else {
-        return;
-    };
-    let Some(callback) = callback_guard.as_ref() else {
-        return;
-    };
-
-    let events = {
+fn deliver_pending_mutation_errors(core_arc: &Arc<Mutex<NapiCoreType>>) {
+    let delivery = {
         let Ok(mut core) = core_arc.lock() else {
             return;
         };
-        core.drain_mutation_error_events()
+        core.pending_mutation_error_delivery()
+    };
+
+    let Some((callback, events)) = delivery else {
+        return;
     };
 
     for event in events {
-        callback.call(
-            Ok(serialize_mutation_error_event(&event)),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
+        callback(&event);
     }
 }
 
@@ -537,7 +542,6 @@ fn build_napi_runtime(
 
     // Create components
     let scheduler = NapiScheduler::new();
-    let mutation_error_callback = Arc::clone(&scheduler.mutation_error_callback);
 
     // Create RuntimeCore and wrap
     let core = RuntimeCore::new(schema_manager, storage, scheduler);
@@ -555,16 +559,14 @@ fn build_napi_runtime(
 
         let core_ref_for_tsfn = core_weak.clone();
         let flag_for_tsfn = scheduled_flag;
-        let mutation_error_callback_for_tsfn = Arc::clone(&mutation_error_callback);
 
         let tick_fn = env.create_function_from_closure("__groove_tick", move |_ctx| {
             // Reset flag first so new ticks can be scheduled
             flag_for_tsfn.store(false, Ordering::SeqCst);
-            if let Some(core_arc) = core_ref_for_tsfn.upgrade() {
-                if let Ok(mut core) = core_arc.lock() {
-                    core.batched_tick();
-                }
-                emit_pending_mutation_errors(&core_arc, &mutation_error_callback_for_tsfn);
+            if let Some(core_arc) = core_ref_for_tsfn.upgrade()
+                && let Ok(mut core) = core_arc.lock()
+            {
+                core.batched_tick();
             }
             Ok(())
         })?;
@@ -587,7 +589,6 @@ fn build_napi_runtime(
         upstream_server_id: Mutex::new(None),
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
-        mutation_error_callback,
     })
 }
 
@@ -601,7 +602,6 @@ pub struct NapiRuntime {
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
-    mutation_error_callback: Arc<Mutex<Option<MutationErrorTsfn>>>,
 }
 
 #[napi]
@@ -813,36 +813,6 @@ impl NapiRuntime {
         }))
     }
 
-    #[napi(js_name = "loadLocalBatchRecord", ts_return_type = "any | null")]
-    pub fn load_local_batch_record(&self, batch_id: String) -> napi::Result<serde_json::Value> {
-        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let record = core.local_batch_record(batch_id).map_err(|e| {
-            napi::Error::from_reason(format!("Load local batch record failed: {e}"))
-        })?;
-
-        Ok(match record {
-            Some(record) => serialize_local_batch_record(&record),
-            None => serde_json::Value::Null,
-        })
-    }
-
-    #[napi(js_name = "loadLocalBatchRecords", ts_return_type = "any[]")]
-    pub fn load_local_batch_records(&self) -> napi::Result<serde_json::Value> {
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let records = core.local_batch_records().map_err(|e| {
-            napi::Error::from_reason(format!("Load local batch records failed: {e}"))
-        })?;
-
-        Ok(serialize_local_batch_records(&records))
-    }
-
     #[napi(js_name = "loadBatchFate", ts_return_type = "any | null")]
     pub fn load_batch_fate(&self, batch_id: String) -> napi::Result<serde_json::Value> {
         let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
@@ -860,31 +830,21 @@ impl NapiRuntime {
         })
     }
 
-    #[napi(js_name = "acknowledgeRejectedBatch")]
-    pub fn acknowledge_rejected_batch(&self, batch_id: String) -> napi::Result<bool> {
-        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.acknowledge_rejected_batch(batch_id).map_err(|e| {
-            napi::Error::from_reason(format!("Acknowledge rejected batch failed: {e}"))
-        })
-    }
-
     #[napi(
         js_name = "onMutationError",
         ts_args_type = "callback: (event: any) => void"
     )]
     pub fn on_mutation_error(&self, callback: MutationErrorTsfn) -> napi::Result<()> {
-        {
-            let mut slot = self
-                .mutation_error_callback
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            *slot = Some(callback);
-        }
-        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
+        let callback: MutationErrorCallback = Arc::new(move |event| {
+            callback.call(
+                Ok(serialize_mutation_error_event(event)),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        });
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .set_mutation_error_callback(Some(callback));
         Ok(())
     }
 
@@ -1647,7 +1607,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; peerSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string; telemetryCollectorUrl?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; peerSecret?: string; telemetryCollectorUrl?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1656,26 +1616,6 @@ impl DevServer {
 
         let app_id =
             AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
-
-        let catalogue_authority = match opts.catalogue_authority.as_deref() {
-            Some("forward") => {
-                let base_url = opts.catalogue_authority_url.ok_or_else(|| {
-                    napi::Error::from_reason(
-                        "catalogueAuthorityUrl is required when catalogueAuthority is 'forward'",
-                    )
-                })?;
-                let admin_secret = opts.catalogue_authority_admin_secret.ok_or_else(|| {
-                    napi::Error::from_reason(
-                        "catalogueAuthorityAdminSecret is required when catalogueAuthority is 'forward'",
-                    )
-                })?;
-                CatalogueAuthorityMode::Forward {
-                    base_url,
-                    admin_secret,
-                }
-            }
-            _ => CatalogueAuthorityMode::Local,
-        };
 
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
@@ -1693,9 +1633,7 @@ impl DevServer {
             opts.data_dir.unwrap_or_else(|| "./data".to_string())
         };
 
-        let mut server_builder = ServerBuilder::new(app_id)
-            .with_auth_config(auth_config)
-            .with_catalogue_authority(catalogue_authority);
+        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         if let Some(upstream_url) = opts.upstream_url.clone() {
             server_builder = server_builder.with_upstream_url(upstream_url);
         }
