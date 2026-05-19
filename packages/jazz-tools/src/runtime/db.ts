@@ -742,6 +742,10 @@ export class BranchDb {
   ) {}
 
   private scopeQuery<T>(query: QueryBuilder<T>): QueryBuilder<T> {
+    return this.markQuery(query);
+  }
+
+  private markQuery<T>(query: QueryBuilder<T>, extra?: Record<string, unknown>): QueryBuilder<T> {
     const branchId = this.branchId;
     return {
       ...query,
@@ -749,6 +753,7 @@ export class BranchDb {
         const raw = JSON.parse(query._build()) as Record<string, unknown>;
         return JSON.stringify({
           ...raw,
+          ...extra,
           branch: branchId,
           branchScope: { branchId },
         });
@@ -762,6 +767,12 @@ export class BranchDb {
 
   one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     return this.base.one(this.scopeQuery(query), options);
+  }
+
+  diff<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<Array<T & QueryDiffMetadata>> {
+    return this.base.all(this.markQuery(query, { diff: true }), options) as Promise<
+      Array<T & QueryDiffMetadata>
+    >;
   }
 
   subscribeAll<T extends { id: string }>(
@@ -789,6 +800,14 @@ export class BranchDb {
     return this.base.delete(table, id, { ...options, branch: this.branchId });
   }
 }
+
+export type QueryDiffMetadata = {
+  __diff?: {
+    kind: "insert" | "update" | "delete" | "unchanged" | "error";
+    changed: string[];
+    conflicts: string[];
+  };
+};
 
 /**
  * High-level database interface for typed queries and mutations.

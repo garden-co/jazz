@@ -1,4 +1,5 @@
 use super::*;
+use crate::query_manager::branch_scope::BranchDiffKind;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyValue};
 use crate::query_manager::types::{BranchTablePolicies, RowPolicyMode};
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
@@ -228,6 +229,72 @@ fn branch_scope_update_overrides_captured_base_row() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].1[1], Value::Integer(55));
+}
+
+#[test]
+fn branch_diff_compares_source_to_captured_base_and_current_main() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let branch_id = ObjectId::new();
+    qm.capture_branch_scope(&mut storage, branch_id, qm.query("users").build())
+        .unwrap();
+
+    qm.update(
+        &mut storage,
+        alice.row_id,
+        &[Value::Text("Alice".into()), Value::Integer(80)],
+    )
+    .unwrap();
+
+    let snapshot = storage
+        .load_branch_scope_snapshot(branch_id)
+        .unwrap()
+        .expect("branch scope should exist");
+    let entry = snapshot
+        .entry_for("users", alice.row_id)
+        .expect("alice should be in branch scope");
+    let base_row = storage
+        .load_history_query_row_batch(
+            "users",
+            entry.base_branch.as_str(),
+            alice.row_id,
+            entry.base_batch_id,
+        )
+        .unwrap()
+        .expect("captured base row should exist");
+    let base_provenance = base_row.row_provenance();
+    let branch = branch_id.to_string();
+    qm.write_existing_row_on_branch_with_write_context(
+        &mut storage,
+        RowBranchWrite {
+            table: "users",
+            branch: &branch,
+            id: alice.row_id,
+            values: &[Value::Text("Alice".into()), Value::Integer(90)],
+            old_data_for_policy: &base_row.data,
+            old_provenance_for_policy: &base_provenance,
+        },
+        None,
+    )
+    .unwrap();
+
+    let diff = qm
+        .diff_branch_query(&mut storage, branch_id, qm.query("users").build())
+        .unwrap();
+
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].row_id, alice.row_id);
+    assert_eq!(diff[0].kind, BranchDiffKind::Update);
+    assert_eq!(diff[0].changed, vec!["score"]);
 }
 
 #[test]

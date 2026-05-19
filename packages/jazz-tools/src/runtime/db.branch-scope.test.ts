@@ -79,6 +79,26 @@ describe("branch scoped Db", () => {
     expect(JSON.parse(queryJson).branch_scope.branch_id).toBe(branchId);
   });
 
+  it("marks branch diff queries", async () => {
+    const client = {
+      getSchema: vi.fn(() => schema),
+      query: vi.fn(async () => []),
+    } as unknown as JazzClient & {
+      query: ReturnType<typeof vi.fn>;
+    };
+    const db = new TestDb(client);
+    const app = { todos: todosTable() };
+
+    const draft = db.branch(branchId);
+    await draft.diff(app.todos.where({ projectId }));
+
+    const queryJson = client.query.mock.calls[0][0] as string;
+    expect(JSON.parse(queryJson)).toMatchObject({
+      branch_scope: { branch_id: branchId },
+      diff: true,
+    });
+  });
+
   it("sends branch id for branch-scoped inserts", () => {
     const runtime = {
       insert: vi.fn(),

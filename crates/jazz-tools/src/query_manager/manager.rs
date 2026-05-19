@@ -21,8 +21,8 @@ use crate::sync_manager::{
 };
 
 use super::branch_scope::{
-    BranchScopeSnapshot, scope_entries_from_rows_with_default_branch,
-    snapshot_from_branch_scope_query,
+    BranchDiffKind, BranchDiffRow, BranchScopeSnapshot,
+    scope_entries_from_rows_with_default_branch, snapshot_from_branch_scope_query,
 };
 use super::encoding::decode_row;
 use super::graph::{QueryCompileError, QueryGraph};
@@ -1195,6 +1195,230 @@ impl QueryManager {
                 QueryError::IndexError(format!("persist branch scope snapshot: {err}"))
             })?;
         Ok(snapshot)
+    }
+
+    pub fn diff_branch_query<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        branch_id: ObjectId,
+        query: Query,
+    ) -> Result<Vec<BranchDiffRow>, QueryError> {
+        let table = query.table.as_str().to_string();
+        let table_schema = self
+            .schema
+            .get(&query.table)
+            .ok_or(QueryError::TableNotFound(query.table))?;
+        let descriptor = &table_schema.columns;
+        let snapshot = storage
+            .load_branch_scope_snapshot(branch_id)
+            .map_err(|err| QueryError::IndexError(format!("load branch scope snapshot: {err}")))?
+            .ok_or(QueryError::ObjectNotFound(branch_id))?;
+
+        let branch = branch_id.to_string();
+        let target_branch = self.current_branch();
+        let mut candidate_ids: HashSet<ObjectId> = HashSet::new();
+
+        for entry in snapshot.entries.iter().filter(|entry| entry.table == table) {
+            candidate_ids.insert(entry.row_id);
+        }
+
+        for row in storage
+            .scan_visible_region(table.as_str(), target_branch.as_str())
+            .map_err(|err| QueryError::IndexError(format!("scan target branch: {err}")))?
+        {
+            if Self::stored_row_matches_diff_query(descriptor, &query, &row)? {
+                candidate_ids.insert(row.row_id);
+            }
+        }
+
+        for row in storage
+            .scan_visible_region(table.as_str(), branch.as_str())
+            .map_err(|err| QueryError::IndexError(format!("scan source branch: {err}")))?
+        {
+            if Self::stored_row_matches_diff_query(descriptor, &query, &row)? {
+                candidate_ids.insert(row.row_id);
+            }
+        }
+
+        let mut candidate_ids: Vec<_> = candidate_ids.into_iter().collect();
+        candidate_ids.sort_by_key(|id| id.to_string());
+
+        let mut rows = Vec::new();
+        for row_id in candidate_ids {
+            let base = Self::load_branch_diff_base_row(
+                storage,
+                &snapshot,
+                table.as_str(),
+                row_id,
+                descriptor,
+            )?;
+            let source = Self::load_branch_diff_source_row(
+                storage,
+                &snapshot,
+                table.as_str(),
+                branch.as_str(),
+                row_id,
+                descriptor,
+            )?;
+            let target = Self::load_branch_diff_visible_row(
+                storage,
+                table.as_str(),
+                target_branch.as_str(),
+                row_id,
+                descriptor,
+            )?;
+
+            let (kind, changed, row) = match (&source, &target) {
+                (Some(source), None) => (
+                    BranchDiffKind::Insert,
+                    descriptor
+                        .columns
+                        .iter()
+                        .map(|column| column.name.to_string())
+                        .collect(),
+                    Some(source.1.clone()),
+                ),
+                (None, Some(_target)) => (BranchDiffKind::Delete, Vec::new(), None),
+                (Some(source), Some(target)) if source.0 != target.0 => (
+                    BranchDiffKind::Update,
+                    Self::changed_columns(descriptor, &source.0, &target.0),
+                    Some(source.1.clone()),
+                ),
+                _ => continue,
+            };
+
+            let conflicts = match (&base, &source, &target) {
+                (Some(base), Some(source), Some(target)) => {
+                    Self::conflict_columns(descriptor, &base.0, &source.0, &target.0)
+                }
+                _ => Vec::new(),
+            };
+
+            rows.push(BranchDiffRow {
+                row_id,
+                kind,
+                changed,
+                conflicts,
+                row,
+            });
+        }
+
+        Ok(rows)
+    }
+
+    fn stored_row_matches_diff_query(
+        descriptor: &RowDescriptor,
+        query: &Query,
+        row: &StoredRowBatch,
+    ) -> Result<bool, QueryError> {
+        if row.is_soft_deleted() || row.is_hard_deleted() {
+            return Ok(false);
+        }
+        let values = decode_row(descriptor, &row.data)
+            .map_err(|err| QueryError::EncodingError(err.to_string()))?;
+        Ok(super::branch_scope::values_match_scope_query(
+            query, descriptor, row.row_id, &values,
+        ))
+    }
+
+    fn load_branch_diff_base_row(
+        storage: &dyn Storage,
+        snapshot: &BranchScopeSnapshot,
+        table: &str,
+        row_id: ObjectId,
+        descriptor: &RowDescriptor,
+    ) -> Result<Option<(Vec<Value>, Row)>, QueryError> {
+        let Some(entry) = snapshot.entry_for(table, row_id) else {
+            return Ok(None);
+        };
+        let row = storage
+            .load_history_query_row_batch(
+                entry.table.as_str(),
+                entry.base_branch.as_str(),
+                row_id,
+                entry.base_batch_id,
+            )
+            .map_err(|err| QueryError::IndexError(format!("load captured base row: {err}")))?;
+        Self::decode_branch_diff_query_row(row_id, descriptor, row)
+    }
+
+    fn load_branch_diff_source_row(
+        storage: &dyn Storage,
+        snapshot: &BranchScopeSnapshot,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        descriptor: &RowDescriptor,
+    ) -> Result<Option<(Vec<Value>, Row)>, QueryError> {
+        let overlay =
+            Self::load_branch_diff_visible_row(storage, table, branch, row_id, descriptor)?;
+        if overlay.is_some() {
+            return Ok(overlay);
+        }
+        Self::load_branch_diff_base_row(storage, snapshot, table, row_id, descriptor)
+    }
+
+    fn load_branch_diff_visible_row(
+        storage: &dyn Storage,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        descriptor: &RowDescriptor,
+    ) -> Result<Option<(Vec<Value>, Row)>, QueryError> {
+        let row = storage
+            .load_visible_query_row(table, branch, row_id)
+            .map_err(|err| QueryError::IndexError(format!("load visible row: {err}")))?;
+        Self::decode_branch_diff_query_row(row_id, descriptor, row)
+    }
+
+    fn decode_branch_diff_query_row(
+        row_id: ObjectId,
+        descriptor: &RowDescriptor,
+        row: Option<QueryRowBatch>,
+    ) -> Result<Option<(Vec<Value>, Row)>, QueryError> {
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.is_soft_deleted() || row.is_hard_deleted() {
+            return Ok(None);
+        }
+        let values = decode_row(descriptor, &row.data)
+            .map_err(|err| QueryError::EncodingError(err.to_string()))?;
+        let provenance = row.row_provenance();
+        let row = Row::new(row_id, row.data, row.batch_id, provenance);
+        Ok(Some((values, row)))
+    }
+
+    fn changed_columns(descriptor: &RowDescriptor, left: &[Value], right: &[Value]) -> Vec<String> {
+        descriptor
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(index, _column)| left.get(*index) != right.get(*index))
+            .map(|(_index, column)| column.name.to_string())
+            .collect()
+    }
+
+    fn conflict_columns(
+        descriptor: &RowDescriptor,
+        base: &[Value],
+        source: &[Value],
+        target: &[Value],
+    ) -> Vec<String> {
+        descriptor
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| {
+                let base_value = base.get(index);
+                let source_value = source.get(index);
+                let target_value = target.get(index);
+                (base_value != source_value
+                    && base_value != target_value
+                    && source_value != target_value)
+                    .then(|| column.name.to_string())
+            })
+            .collect()
     }
 
     /// Get all branches to query for a table (current + live schemas).

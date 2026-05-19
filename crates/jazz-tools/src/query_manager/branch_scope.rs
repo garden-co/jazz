@@ -7,7 +7,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::row_histories::BatchId;
 
 use super::query::{Condition, Query};
-use super::types::{RowDescriptor, Tuple, Value};
+use super::types::{Row, RowDescriptor, Tuple, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchScopeEntry {
@@ -23,6 +23,24 @@ pub struct BranchScopeSnapshot {
     pub scope_query: Query,
     pub scope_query_hash: String,
     pub entries: Vec<BranchScopeEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchDiffKind {
+    Insert,
+    Update,
+    Delete,
+    Unchanged,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchDiffRow {
+    pub row_id: ObjectId,
+    pub kind: BranchDiffKind,
+    pub changed: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub row: Option<Row>,
 }
 
 impl BranchScopeSnapshot {

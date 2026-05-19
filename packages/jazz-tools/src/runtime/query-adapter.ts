@@ -811,6 +811,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const query = {
     table: builder.table,
     ...(builder.branchScope ? { branch_scope: { branch_id: builder.branchScope.branchId } } : {}),
+    ...(builder.diff ? { diff: true } : {}),
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
       hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: builder.requireIncludes,
