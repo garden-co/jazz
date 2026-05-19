@@ -66,6 +66,50 @@ fn query_builder_single_branch_uses_correct_index() {
 }
 
 #[test]
+fn captures_branch_scope_with_visible_main_frontier() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let bob = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(10)],
+        )
+        .unwrap();
+
+    let branch_id = ObjectId::new();
+    let query = qm
+        .query("users")
+        .filter_ge("score", Value::Integer(50))
+        .build();
+
+    let snapshot = qm
+        .capture_branch_scope(&mut storage, branch_id, query)
+        .expect("scope capture should succeed");
+
+    let alice_entry = snapshot.entry_for("users", alice.row_id).unwrap();
+    assert_eq!(alice_entry.base_batch_id, alice.batch_id);
+    assert!(snapshot.entry_for("users", bob.row_id).is_none());
+    assert_eq!(
+        storage
+            .load_branch_scope_snapshot(branch_id)
+            .unwrap()
+            .unwrap()
+            .entries,
+        snapshot.entries
+    );
+}
+
+#[test]
 fn query_builder_explicit_main_branch() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();

@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::BatchId;
+
+use super::query::Query;
+use super::types::Tuple;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchScopeEntry {
@@ -43,6 +47,40 @@ impl BranchScopeSnapshot {
             .iter()
             .find(|entry| entry.table == table && entry.row_id == row_id)
     }
+}
+
+pub fn stable_scope_query_hash(query: &Query) -> String {
+    let json = serde_json::to_vec(query).expect("Query should serialize");
+    hex::encode(Sha256::digest(json))
+}
+
+pub fn scope_entries_from_rows(table: &str, tuples: &[Tuple]) -> Vec<BranchScopeEntry> {
+    scope_entries_from_rows_with_default_branch(table, "main", tuples)
+}
+
+pub fn scope_entries_from_rows_with_default_branch(
+    table: &str,
+    default_branch: &str,
+    tuples: &[Tuple],
+) -> Vec<BranchScopeEntry> {
+    tuples
+        .iter()
+        .filter_map(|tuple| {
+            let row = tuple.to_single_row()?;
+            let base_branch = tuple
+                .provenance()
+                .iter()
+                .find_map(|(id, branch)| (*id == row.id).then_some(*branch))
+                .unwrap_or_else(|| BranchName::new(default_branch));
+
+            Some(BranchScopeEntry {
+                table: table.to_string(),
+                row_id: row.id,
+                base_branch,
+                base_batch_id: row.batch_id,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

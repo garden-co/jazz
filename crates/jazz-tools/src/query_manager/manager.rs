@@ -20,6 +20,9 @@ use crate::sync_manager::{
     RowBatchKey, SchemaWarning, SyncManager,
 };
 
+use super::branch_scope::{
+    BranchScopeSnapshot, scope_entries_from_rows_with_default_branch, stable_scope_query_hash,
+};
 use super::encoding::decode_row;
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
@@ -1121,6 +1124,73 @@ impl QueryManager {
         } else {
             "main".to_string()
         }
+    }
+
+    pub fn capture_branch_scope<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        branch_id: ObjectId,
+        query: Query,
+    ) -> Result<BranchScopeSnapshot, QueryError> {
+        let table = query.table.as_str().to_string();
+        let default_branch = self.current_branch();
+        let branches = if query.branches.is_empty() {
+            vec![default_branch.clone()]
+        } else {
+            query.branches.clone()
+        };
+        let compile_schema = self.local_subscription_compile_schema(None);
+        let mut graph = Self::compile_graph(
+            &query,
+            &compile_schema,
+            None,
+            &self.schema_context,
+            self.row_policy_mode,
+        )
+        .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+
+        let entries = {
+            let storage_ref: &dyn Storage = storage;
+            let schema_context = &self.schema_context;
+            let branch_schema_map = &self.branch_schema_map;
+            let include_deleted = query.include_deleted;
+            let mut schema_warnings = SchemaWarningAccumulator::default();
+            let mut row_loader =
+                |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                    Self::load_visible_row_for_query(
+                        storage_ref,
+                        id,
+                        table_hint.as_ref().map(TableName::as_str),
+                        &branches,
+                        None,
+                        None,
+                        false,
+                        false,
+                        include_deleted,
+                        schema_context,
+                        branch_schema_map,
+                        &table,
+                        QuerySubscriptionId(0),
+                        &mut schema_warnings,
+                    )
+                };
+
+            graph.settle(storage_ref, &mut row_loader);
+            scope_entries_from_rows_with_default_branch(
+                &table,
+                &default_branch,
+                graph.current_output_tuples_ref(),
+            )
+        };
+
+        let snapshot =
+            BranchScopeSnapshot::new(branch_id, stable_scope_query_hash(&query), entries);
+        storage
+            .upsert_branch_scope_snapshot(&snapshot)
+            .map_err(|err| {
+                QueryError::IndexError(format!("persist branch scope snapshot: {err}"))
+            })?;
+        Ok(snapshot)
     }
 
     /// Get all branches to query for a table (current + live schemas).
