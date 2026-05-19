@@ -570,7 +570,17 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 if let Err(err) =
                     rt.on_sync_message_received_from_client(&main_client_id, arr.into())
                 {
-                    tracing::warn!("onSyncMessageReceivedFromClient main: {err:?}");
+                    let preview = payload
+                        .iter()
+                        .take(12)
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    tracing::warn!(
+                        "onSyncMessageReceivedFromClient main len={} preview={} err={err:?}",
+                        payload.len(),
+                        preview
+                    );
                 }
             }
             rt.batched_tick();

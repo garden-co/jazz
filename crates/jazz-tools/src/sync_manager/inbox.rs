@@ -1258,7 +1258,7 @@ impl SyncManager {
                     });
                 }
                 _ => {
-                    tracing::warn!(?server_id, error = ?err, "error from server");
+                    tracing::warn!("error from server server={server_id:?} error={err:?}");
                 }
             },
             // Servers shouldn't send these to us
