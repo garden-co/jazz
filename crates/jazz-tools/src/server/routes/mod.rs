@@ -18,7 +18,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::server::ServerState;
@@ -57,7 +57,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .nest(&app_route_prefix, traced_routes)
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive().allow_headers(AllowHeaders::mirror_request()))
         .with_state(state)
 }
 
@@ -69,7 +69,7 @@ mod tests {
     use super::*;
 
     use axum::extract::{Path, Query};
-    use axum::http::{HeaderMap, StatusCode, Uri};
+    use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
     use axum::response::Json;
 
     use uuid::Uuid;
@@ -617,6 +617,38 @@ mod tests {
             result.is_ok(),
             "sixty-payload batch should be accepted: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_mirrors_requested_auth_headers() {
+        let state = make_sync_test_state("test-backend-secret").await;
+        let app = make_test_router(state);
+
+        let requested_headers = "authorization,x-jazz-admin-secret";
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri(test_app_route("/schemas"))
+                    .header(header::ORIGIN, "http://localhost:3000")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, requested_headers)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.status().is_success(),
+            "preflight should be handled by the CORS layer"
+        );
+        let allow_headers = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(allow_headers, Some(requested_headers));
+        assert_ne!(allow_headers, Some("*"));
     }
 
     #[tokio::test]
