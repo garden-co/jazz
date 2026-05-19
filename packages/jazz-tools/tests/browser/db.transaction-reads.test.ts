@@ -279,7 +279,7 @@ describe("db transaction reads browser integration", () => {
     });
   });
 
-  it("two concurrent transactions that modify the same data can both commit", async () => {
+  it.fails("two concurrent transactions that modify the same data can both commit", async () => {
     const { value: base } = db.insert(todos, { title: "Shared", done: false });
 
     const aliceTx = db.beginTransaction();
@@ -289,10 +289,11 @@ describe("db transaction reads browser integration", () => {
     bobTx.update(todos, base.id, { title: "Bob's title" });
 
     await aliceTx.commit().wait({ tier: "local" });
-    // Alice's change becomes visible to Bob before it commits, so Bob's commit succeeds as well
-    await bobTx.commit().wait({ tier: "local" });
+    // Currently, Alice's change becomes visible to Bob before it commits,
+    // so Bob's commit succeeds as well
+    await expect(bobTx.commit().wait({ tier: "local" })).rejects.toThrow("transaction_conflict");
 
-    expect((await db.one<Todo>(makeTodoQuery()))?.title).toEqual("Bob's title");
+    expect((await db.one<Todo>(makeTodoQuery()))?.title).toEqual("Alice's title");
   });
 });
 
