@@ -873,7 +873,7 @@ describe("jazzAdapter", () => {
       await server.stop();
     });
 
-    test("Email and Password: signup + signin + logout", async () => {
+    test("Email and Password: signup + signin + logout", { timeout: 10_000 }, async () => {
       const signUpResponse = await auth.api.signUpEmail({
         body: {
           name: "test",

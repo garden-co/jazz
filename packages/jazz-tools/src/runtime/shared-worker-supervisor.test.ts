@@ -309,6 +309,32 @@ describe("createTabSupervisor", () => {
     expect(sup.state.role).toBe("none");
   });
 
+  it("shutdown while still a queued lock waiter (role=none): aborts the lock request, posts no release-leader, and completes", async () => {
+    const { brokerPort, locks, boot } = brokerHandshake();
+    const sup = boot();
+
+    // Lock requested but never granted: this tab is queued behind the
+    // current leader and stays role=none. Models the user navigating away
+    // before winning the election.
+    expect(sup.state.role).toBe("none");
+    const signal = locks.requests[0]!.signal;
+    expect(signal?.aborted).toBe(false);
+
+    const postedBefore = brokerPort.posted.length;
+
+    // Resolves only because shutdown aborts the lock signal, which rejects
+    // the still-pending request promise so `await lockPromise` can settle.
+    // Without the abort this await would hang and the test would time out.
+    await sup.shutdown();
+
+    expect(signal?.aborted).toBe(true);
+    // Never became leader, so the broker has nothing to release.
+    expect(brokerPort.postedTypes().slice(postedBefore)).not.toContain("release-leader");
+    expect(FakeWorker.instances).toHaveLength(0);
+    expect(sup.state.role).toBe("none");
+    expect(sup.state.endpoint).toBeNull();
+  });
+
   it("ignores broker messages after shutdown", async () => {
     const { brokerPort, boot } = brokerHandshake();
     const sup = boot();
