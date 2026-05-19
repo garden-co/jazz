@@ -204,11 +204,20 @@ export interface OperationPolicy {
   with_check?: PolicyExpr;
 }
 
+export interface BranchTablePolicies {
+  backing_table: string;
+  select?: OperationPolicy;
+  insert?: OperationPolicy;
+  update?: OperationPolicy;
+  delete?: OperationPolicy;
+}
+
 export interface TablePolicies {
   select?: OperationPolicy;
   insert?: OperationPolicy;
   update?: OperationPolicy;
   delete?: OperationPolicy;
+  branch?: BranchTablePolicies[];
 }
 
 export interface Table {

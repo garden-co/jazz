@@ -22,12 +22,14 @@ use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
     WriteTableCacheEntry,
 };
-use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id};
+use super::policy::{
+    ComplexClause, Operation, PolicyExpr, bind_branch_row_refs, evaluate_simple_parts_with_row_id,
+};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
-    ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash,
-    TableName, Value,
+    BranchTablePolicies, ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor,
+    Schema, SchemaHash, TableName, Value,
 };
 
 pub struct RowBranchWrite<'a> {
@@ -737,6 +739,51 @@ impl QueryManager {
             .unwrap_or_default()
     }
 
+    fn load_branch_scope_snapshot_for_branch<H: Storage>(
+        storage: &H,
+        branch: &str,
+    ) -> Result<Option<BranchScopeSnapshot>, QueryError> {
+        let Some(branch_id) = uuid::Uuid::parse_str(branch).ok().map(ObjectId::from_uuid) else {
+            return Ok(None);
+        };
+        storage
+            .load_branch_scope_snapshot(branch_id)
+            .map_err(|err| QueryError::EncodingError(format!("load branch scope: {err}")))
+    }
+
+    fn branch_scope_backing_table<H: Storage>(
+        storage: &H,
+        snapshot: Option<&BranchScopeSnapshot>,
+    ) -> Result<Option<TableName>, QueryError> {
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        let locator_table = storage
+            .load_row_locator(snapshot.branch_id)
+            .map_err(|err| QueryError::EncodingError(format!("load branch row locator: {err}")))?
+            .map(|locator| TableName::new(locator.table.as_str()));
+        Ok(locator_table.or(Some(snapshot.scope_query.table)))
+    }
+
+    fn branch_policy_for_backing_table(
+        schema: &Schema,
+        table_name: TableName,
+        backing_table: Option<TableName>,
+    ) -> Option<&BranchTablePolicies> {
+        let backing_table = backing_table?;
+        schema
+            .get(&table_name)?
+            .policies
+            .branch_for_backing_table(backing_table)
+    }
+
+    fn bind_branch_policy_for_snapshot(
+        policy: &PolicyExpr,
+        snapshot: &BranchScopeSnapshot,
+    ) -> PolicyExpr {
+        bind_branch_row_refs(policy, snapshot.branch_id).unwrap_or(PolicyExpr::False)
+    }
+
     fn prepare_update_write_for_schema<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -759,6 +806,33 @@ impl QueryManager {
         let descriptor = table_write.descriptor.as_ref();
         let using_policy = table_write.update_using_policy.as_deref();
         let check_policy = table_write.update_check_policy.as_deref();
+        let branch_scope_snapshot = Self::load_branch_scope_snapshot_for_branch(storage, branch)?;
+        let branch_backing_table =
+            Self::branch_scope_backing_table(storage, branch_scope_snapshot.as_ref())?;
+        let branch_policy =
+            Self::branch_policy_for_backing_table(write_schema, table_name, branch_backing_table);
+        let branch_using_policy = branch_policy
+            .and_then(BranchTablePolicies::update_using_policy)
+            .zip(branch_scope_snapshot.as_ref())
+            .map(|(policy, snapshot)| Self::bind_branch_policy_for_snapshot(policy, snapshot));
+        let branch_check_policy = branch_policy
+            .and_then(BranchTablePolicies::update_check_policy)
+            .zip(branch_scope_snapshot.as_ref())
+            .map(|(policy, snapshot)| Self::bind_branch_policy_for_snapshot(policy, snapshot));
+        let using_policy = branch_using_policy.as_ref().or_else(|| {
+            if branch_policy.is_some() {
+                None
+            } else {
+                using_policy
+            }
+        });
+        let check_policy = branch_check_policy.as_ref().or_else(|| {
+            if branch_policy.is_some() {
+                None
+            } else {
+                check_policy
+            }
+        });
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -789,8 +863,40 @@ impl QueryManager {
                         operation: Operation::Update,
                     });
                 };
+                let auth_branch_policy = Self::branch_policy_for_backing_table(
+                    &auth_schema,
+                    table_name,
+                    branch_backing_table,
+                );
+                let auth_branch_using_policy = auth_branch_policy
+                    .and_then(BranchTablePolicies::update_using_policy)
+                    .zip(branch_scope_snapshot.as_ref())
+                    .map(|(policy, snapshot)| {
+                        Self::bind_branch_policy_for_snapshot(policy, snapshot)
+                    });
+                let auth_branch_check_policy = auth_branch_policy
+                    .and_then(BranchTablePolicies::update_check_policy)
+                    .zip(branch_scope_snapshot.as_ref())
+                    .map(|(policy, snapshot)| {
+                        Self::bind_branch_policy_for_snapshot(policy, snapshot)
+                    });
+                let auth_using_policy = auth_branch_using_policy.as_ref().or_else(|| {
+                    if auth_branch_policy.is_some() {
+                        None
+                    } else {
+                        auth_table_schema.policies.update_using_policy()
+                    }
+                });
+                let auth_check_policy = auth_branch_check_policy.as_ref().or_else(|| {
+                    if auth_branch_policy.is_some() {
+                        None
+                    } else {
+                        auth_table_schema.policies.update_check_policy()
+                    }
+                });
                 if self.row_policy_mode.denies_missing_explicit_policy()
-                    && !auth_table_schema.policies.has_explicit_update_policy()
+                    && auth_using_policy.is_none()
+                    && auth_check_policy.is_none()
                 {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
@@ -798,7 +904,7 @@ impl QueryManager {
                     });
                 }
 
-                if let Some(policy) = auth_table_schema.policies.update_using_policy()
+                if let Some(policy) = auth_using_policy
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,
@@ -819,7 +925,7 @@ impl QueryManager {
                     });
                 }
 
-                if let Some(policy) = auth_table_schema.policies.update_check_policy()
+                if let Some(policy) = auth_check_policy
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,
@@ -849,7 +955,7 @@ impl QueryManager {
                         operation: Operation::Update,
                     });
                 }
-                if let Some(policy) = &using_policy {
+                if let Some(policy) = using_policy {
                     let mut visited = HashSet::new();
                     if !self.evaluate_policy_for_content_with_context_for_row(
                         storage,
@@ -1164,6 +1270,22 @@ impl QueryManager {
             self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
         let descriptor = table_write.descriptor.as_ref();
         let insert_policy = table_write.insert_policy.as_deref();
+        let branch_scope_snapshot = Self::load_branch_scope_snapshot_for_branch(storage, branch)?;
+        let branch_backing_table =
+            Self::branch_scope_backing_table(storage, branch_scope_snapshot.as_ref())?;
+        let branch_policy =
+            Self::branch_policy_for_backing_table(write_schema, table_name, branch_backing_table);
+        let branch_insert_policy = branch_policy
+            .and_then(BranchTablePolicies::insert_policy)
+            .zip(branch_scope_snapshot.as_ref())
+            .map(|(policy, snapshot)| Self::bind_branch_policy_for_snapshot(policy, snapshot));
+        let insert_policy = branch_insert_policy.as_ref().or_else(|| {
+            if branch_policy.is_some() {
+                None
+            } else {
+                insert_policy
+            }
+        });
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -1202,9 +1324,27 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
-                let allowed = auth_schema
-                    .get(&table_name)
-                    .and_then(|table_schema| table_schema.policies.insert_policy())
+                let auth_branch_policy = Self::branch_policy_for_backing_table(
+                    &auth_schema,
+                    table_name,
+                    branch_backing_table,
+                );
+                let auth_branch_insert_policy = auth_branch_policy
+                    .and_then(BranchTablePolicies::insert_policy)
+                    .zip(branch_scope_snapshot.as_ref())
+                    .map(|(policy, snapshot)| {
+                        Self::bind_branch_policy_for_snapshot(policy, snapshot)
+                    });
+                let policy = auth_branch_insert_policy.as_ref().or_else(|| {
+                    if auth_branch_policy.is_some() {
+                        None
+                    } else {
+                        auth_schema
+                            .get(&table_name)
+                            .and_then(|table_schema| table_schema.policies.insert_policy())
+                    }
+                });
+                let allowed = policy
                     .map(|policy| {
                         self.evaluate_current_authorization_policy_for_content(
                             storage,
@@ -2236,6 +2376,22 @@ impl QueryManager {
             self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
         let descriptor = table_write.descriptor.as_ref();
         let using_policy = table_write.delete_using_policy.as_deref();
+        let branch_scope_snapshot = Self::load_branch_scope_snapshot_for_branch(storage, branch)?;
+        let branch_backing_table =
+            Self::branch_scope_backing_table(storage, branch_scope_snapshot.as_ref())?;
+        let branch_policy =
+            Self::branch_policy_for_backing_table(write_schema, table_name, branch_backing_table);
+        let branch_delete_policy = branch_policy
+            .and_then(BranchTablePolicies::effective_delete_using)
+            .zip(branch_scope_snapshot.as_ref())
+            .map(|(policy, snapshot)| Self::bind_branch_policy_for_snapshot(policy, snapshot));
+        let using_policy = branch_delete_policy.as_ref().or_else(|| {
+            if branch_policy.is_some() {
+                None
+            } else {
+                using_policy
+            }
+        });
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
@@ -2247,11 +2403,26 @@ impl QueryManager {
                         operation: Operation::Delete,
                     });
                 };
+                let auth_branch_policy = Self::branch_policy_for_backing_table(
+                    &auth_schema,
+                    table_name,
+                    branch_backing_table,
+                );
+                let auth_branch_delete_policy = auth_branch_policy
+                    .and_then(BranchTablePolicies::effective_delete_using)
+                    .zip(branch_scope_snapshot.as_ref())
+                    .map(|(policy, snapshot)| {
+                        Self::bind_branch_policy_for_snapshot(policy, snapshot)
+                    });
+                let auth_using_policy = auth_branch_delete_policy.as_ref().or_else(|| {
+                    if auth_branch_policy.is_some() {
+                        None
+                    } else {
+                        auth_table_schema.policies.effective_delete_using()
+                    }
+                });
                 if self.row_policy_mode.denies_missing_explicit_policy()
-                    && auth_table_schema
-                        .policies
-                        .effective_delete_using()
-                        .is_none()
+                    && auth_using_policy.is_none()
                 {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
@@ -2259,7 +2430,7 @@ impl QueryManager {
                     });
                 }
 
-                if let Some(policy) = auth_table_schema.policies.effective_delete_using()
+                if let Some(policy) = auth_using_policy
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,

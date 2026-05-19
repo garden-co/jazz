@@ -234,6 +234,19 @@ describe("permissions type inference", () => {
     ]);
   });
 
+  it("exposes forBranch builders with typed branch rows", () => {
+    definePermissions(app, ({ policy, session }) => [
+      policy.todos.forBranch(policy.projects, ({ $branch, branchPolicy }) => [
+        expectTypeOf($branch.id.column).toEqualTypeOf<string>(),
+        branchPolicy.allowRead.where({ projectId: $branch.id }),
+        branchPolicy.allowInsert.where({
+          projectId: $branch.id,
+          ownerId: session.userId,
+        }),
+      ]),
+    ]);
+  });
+
   it("rejects invalid table/column usage at compile time where possible", () => {
     definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowRead.where({ done: true }),

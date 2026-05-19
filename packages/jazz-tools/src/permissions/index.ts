@@ -1,4 +1,5 @@
 import type {
+  BranchTablePolicies,
   OperationPolicy,
   PolicyCmpOp,
   PolicyExpr,
@@ -44,6 +45,7 @@ type WhereFor<QB> = QB extends { where(input: infer W): unknown } ? W : never;
 type PolicyAction = "read" | "insert" | "update" | "delete";
 
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
+const BRANCH_ROW_SESSION_PREFIX = "__jazz_branch";
 const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT = 10;
 const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP = 64;
 const CREATOR_CONDITION = {
@@ -80,6 +82,11 @@ interface RecursiveDepthOptions {
 
 interface RowRefValue {
   readonly __jazzPermissionKind: "row-ref";
+  readonly column: string;
+}
+
+interface BranchRefValue {
+  readonly __jazzPermissionKind: "branch-ref";
   readonly column: string;
 }
 
@@ -425,12 +432,17 @@ interface Rule {
   action: PolicyAction;
   using?: Condition;
   withCheck?: Condition;
+  branchBackingTable?: string;
 }
 
 type RuleLike = Rule | UpdateRuleBuilder<unknown, unknown>;
 
 type RowContext<Row> = {
   [K in keyof Row & string]: RowRefValue;
+};
+
+type BranchRowContext<Row> = {
+  [K in keyof Row & string]: BranchRefValue;
 };
 
 export type WhereInputOrCallback<WhereInput, Row> =
@@ -501,6 +513,25 @@ interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<Where
   allowUpdates: UpdateRuleBuilder<WhereInput, Row>;
   managedByCreator(): void;
   exists: ExistsBuilder<WhereInput>;
+  forBranch<BranchWhereInput, BranchRow>(
+    backingTable: TablePolicyBuilder<BranchWhereInput, BranchRow>,
+    factory: (ctx: {
+      $branch: BranchRowContext<BranchRow>;
+      branchPolicy: BranchPolicyBuilder<WhereInput, Row>;
+    }) => void,
+  ): void;
+}
+
+interface BranchPolicyBuilder<WhereInput, Row> {
+  allowRead: ActionBuilder<WhereInput, Row>;
+  allowReads: ActionBuilder<WhereInput, Row>;
+  allowInsert: ActionBuilder<WhereInput, Row>;
+  allowInserts: ActionBuilder<WhereInput, Row>;
+  allowDelete: ActionBuilder<WhereInput, Row>;
+  allowDeletes: ActionBuilder<WhereInput, Row>;
+  allowUpdate: UpdateRuleBuilder<WhereInput, Row>;
+  allowUpdates: UpdateRuleBuilder<WhereInput, Row>;
+  managedByCreator(): void;
 }
 
 export type PolicyContext<TApp extends AppLike> = {
@@ -522,18 +553,29 @@ export type PolicyContext<TApp extends AppLike> = {
 
 export type CompiledPermissions = Record<string, TablePolicies>;
 
-type PermissionWhereLeaf<T> = T | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+type PermissionWhereLeaf<T> =
+  | T
+  | SessionRefValue
+  | RowRefValue
+  | BranchRefValue
+  | RecursiveCurrentValue;
 
 type PermissionWhereObjectBase<T> = {
   [K in keyof T]?:
     | PermissionWhereInput<T[K]>
     | SessionRefValue
     | RowRefValue
+    | BranchRefValue
     | RecursiveCurrentValue;
 };
 
 type QualifiedPermissionWhereEntries = {
-  [K in `${string}.${string}`]?: unknown | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+  [K in `${string}.${string}`]?:
+    | unknown
+    | SessionRefValue
+    | RowRefValue
+    | BranchRefValue
+    | RecursiveCurrentValue;
 };
 
 type PermissionWhereObject<T> =
@@ -555,6 +597,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
   constructor(
     private readonly table: string,
     private readonly registerRule?: (ruleLike: RuleLike) => void,
+    private readonly branchBackingTable?: string,
   ) {}
 
   where(
@@ -566,6 +609,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
       action: "update",
       using: condition,
       withCheck: condition,
+      branchBackingTable: this.branchBackingTable,
     };
     this.registerRule?.(rule);
     return rule;
@@ -612,6 +656,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
       action: "update",
       using: this.oldCondition ?? this.newCondition,
       withCheck: this.newCondition ?? this.oldCondition,
+      branchBackingTable: this.branchBackingTable,
     };
   }
 }
@@ -729,6 +774,22 @@ function buildTablePolicyBuilder(
   };
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
     new UpdateRuleBuilder(table, collectRule);
+  const forBranch = (
+    backingTable: RelationJoinTarget,
+    factory: (ctx: {
+      $branch: BranchRowContext<Record<string, unknown>>;
+      branchPolicy: BranchPolicyBuilder<unknown, unknown>;
+    }) => void,
+  ): void => {
+    factory({
+      $branch: createBranchContext(),
+      branchPolicy: buildBranchPolicyBuilder(
+        table,
+        relationJoinTargetToTable(backingTable),
+        collectRule,
+      ),
+    });
+  };
   const managedByCreator = (): void => {
     read.where(CREATOR_CONDITION);
     insert.where(CREATOR_CONDITION);
@@ -760,6 +821,7 @@ function buildTablePolicyBuilder(
     },
     managedByCreator,
     exists,
+    forBranch,
     where(input: unknown): PermissionRelation {
       return createTableRelation(table, relationsByTable).where(input);
     },
@@ -776,6 +838,74 @@ function buildTablePolicyBuilder(
     }): PermissionRelation {
       return createTableRelation(table, relationsByTable).gather(options);
     },
+  };
+}
+
+function buildBranchPolicyBuilder(
+  table: string,
+  backingTable: string,
+  collectRule: (ruleLike: RuleLike) => void,
+): BranchPolicyBuilder<unknown, unknown> {
+  const registerRule = (rule: Rule): Rule => {
+    collectRule(rule);
+    return rule;
+  };
+  const read: ActionBuilder<unknown, unknown> = {
+    where: (input) =>
+      registerRule({
+        table,
+        action: "read",
+        using: resolveWhereInput(input),
+        branchBackingTable: backingTable,
+      }),
+    always: () => read.where(alwaysCondition()),
+    never: () => read.where(neverCondition()),
+  };
+  const insert: ActionBuilder<unknown, unknown> = {
+    where: (input) =>
+      registerRule({
+        table,
+        action: "insert",
+        withCheck: resolveWhereInput(input),
+        branchBackingTable: backingTable,
+      }),
+    always: () => insert.where(alwaysCondition()),
+    never: () => insert.where(neverCondition()),
+  };
+  const del: ActionBuilder<unknown, unknown> = {
+    where: (input) =>
+      registerRule({
+        table,
+        action: "delete",
+        using: resolveWhereInput(input),
+        branchBackingTable: backingTable,
+      }),
+    always: () => del.where(alwaysCondition()),
+    never: () => del.where(neverCondition()),
+  };
+  const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
+    new UpdateRuleBuilder(table, collectRule, backingTable);
+  const managedByCreator = (): void => {
+    read.where(CREATOR_CONDITION);
+    insert.where(CREATOR_CONDITION);
+    updateFactory().where(CREATOR_CONDITION);
+    del.where(CREATOR_CONDITION);
+  };
+
+  return {
+    allowRead: read,
+    allowReads: read,
+    allowInsert: insert,
+    allowInserts: insert,
+    allowDelete: del,
+    allowDeletes: del,
+    get allowUpdate() {
+      return updateFactory();
+    },
+    get allowUpdates() {
+      return updateFactory();
+    },
+    managedByCreator,
   };
 }
 
@@ -1151,6 +1281,9 @@ function toRelValueRef(value: unknown, options: { allowRowRefs: boolean }): RelV
   if (isSessionRefValue(value)) {
     return { SessionRef: value.path };
   }
+  if (isBranchRefValue(value)) {
+    return { SessionRef: [BRANCH_ROW_SESSION_PREFIX, value.column] };
+  }
   if (isRowRefValue(value)) {
     if (!options.allowRowRefs) {
       throw new Error("Row references are only valid inside exists() clauses.");
@@ -1169,7 +1302,7 @@ function relationFilterToPredicates(filter: RelationFilterEntry): RelPredicateEx
   if (raw === null) {
     return [{ IsNull: { column: left } }];
   }
-  if (isSessionRefValue(raw) || isRowRefValue(raw)) {
+  if (isSessionRefValue(raw) || isRowRefValue(raw) || isBranchRefValue(raw)) {
     return [
       {
         Cmp: {
@@ -1569,6 +1702,20 @@ function createRowContext(): RowContext<Record<string, unknown>> {
   });
 }
 
+function createBranchContext(): BranchRowContext<Record<string, unknown>> {
+  return new Proxy({} as BranchRowContext<Record<string, unknown>>, {
+    get(_target, prop) {
+      if (typeof prop === "string") {
+        return {
+          __jazzPermissionKind: "branch-ref",
+          column: prop,
+        } satisfies BranchRefValue;
+      }
+      return undefined;
+    },
+  });
+}
+
 function normalizeWhereObject(input: unknown): Record<string, unknown> {
   if (!isPlainObject(input)) {
     throw new Error("Expected a where-object condition.");
@@ -1735,6 +1882,9 @@ function columnFilterToExprs(
   if (isSessionRefValue(raw)) {
     return [cmpExpr(column, "Eq", raw, options)];
   }
+  if (isBranchRefValue(raw)) {
+    return [cmpExpr(column, "Eq", raw, options)];
+  }
   if (isRowRefValue(raw)) {
     if (!options.allowRowRefs) {
       throw new Error("Row references are only valid inside exists() clauses.");
@@ -1831,6 +1981,7 @@ function sessionPathFilterToExprs(path: string, raw: unknown): PolicyExpr[] {
     !isPlainObject(raw) ||
     isSessionRefValue(raw) ||
     isRowRefValue(raw) ||
+    isBranchRefValue(raw) ||
     isRecursiveCurrentValue(raw) ||
     isExistsCondition(raw) ||
     isExistsRelationCondition(raw) ||
@@ -1945,6 +2096,9 @@ function toPolicyValue(value: unknown, options: { allowRowRefs: boolean }): Poli
   if (isSessionRefValue(value)) {
     return { type: "SessionRef", path: value.path };
   }
+  if (isBranchRefValue(value)) {
+    return { type: "SessionRef", path: [BRANCH_ROW_SESSION_PREFIX, value.column] };
+  }
   if (isRowRefValue(value)) {
     if (!options.allowRowRefs) {
       throw new Error("Row references are only valid inside exists() clauses.");
@@ -1970,6 +2124,9 @@ function assertSessionWhereLiteralValue(value: unknown, context: string): void {
   }
   if (isRowRefValue(value)) {
     throw new Error(`${context} only accepts literal values; row references are not supported.`);
+  }
+  if (isBranchRefValue(value)) {
+    throw new Error(`${context} only accepts literal values; branch references are not supported.`);
   }
   if (isRecursiveCurrentValue(value)) {
     throw new Error(
@@ -2051,43 +2208,68 @@ function compileRules(
       compiled[rule.table] = emptyTablePolicies();
     }
     const tablePolicies = compiled[rule.table]!;
-    switch (rule.action) {
-      case "read":
-        tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {
-          using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
-        });
-        break;
-      case "insert":
-        tablePolicies.insert = mergeOperationPolicy(tablePolicies.insert, {
-          with_check: compileCondition(
-            rule.withCheck,
-            rule.table,
-            fkReferencesByTable,
-            relationsByTable,
-          ),
-        });
-        break;
-      case "update":
-        tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
-          using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
-          with_check: compileCondition(
-            rule.withCheck,
-            rule.table,
-            fkReferencesByTable,
-            relationsByTable,
-          ),
-        });
-        break;
-      case "delete":
-        tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
-          using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
-        });
-        break;
-      default:
-        throw new Error(`Unsupported action ${(rule as { action: string }).action}`);
+    if (rule.branchBackingTable) {
+      tablePolicies.branch ??= [];
+      let branchPolicies = tablePolicies.branch.find(
+        (candidate) => candidate.backing_table === rule.branchBackingTable,
+      );
+      if (!branchPolicies) {
+        branchPolicies = {
+          backing_table: rule.branchBackingTable,
+        };
+        tablePolicies.branch.push(branchPolicies);
+      }
+      mergeRuleIntoPolicies(rule, branchPolicies, fkReferencesByTable, relationsByTable);
+      continue;
     }
+    mergeRuleIntoPolicies(rule, tablePolicies, fkReferencesByTable, relationsByTable);
   }
   return compiled;
+}
+
+type PolicyBucket = Pick<TablePolicies, "select" | "insert" | "update" | "delete">;
+
+function mergeRuleIntoPolicies(
+  rule: Rule,
+  tablePolicies: PolicyBucket | BranchTablePolicies,
+  fkReferencesByTable: Map<string, Map<string, string>>,
+  relationsByTable: Map<string, Relation[]>,
+): void {
+  switch (rule.action) {
+    case "read":
+      tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {
+        using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
+      });
+      break;
+    case "insert":
+      tablePolicies.insert = mergeOperationPolicy(tablePolicies.insert, {
+        with_check: compileCondition(
+          rule.withCheck,
+          rule.table,
+          fkReferencesByTable,
+          relationsByTable,
+        ),
+      });
+      break;
+    case "update":
+      tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
+        using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
+        with_check: compileCondition(
+          rule.withCheck,
+          rule.table,
+          fkReferencesByTable,
+          relationsByTable,
+        ),
+      });
+      break;
+    case "delete":
+      tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
+        using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
+      });
+      break;
+    default:
+      throw new Error(`Unsupported action ${(rule as { action: string }).action}`);
+  }
 }
 
 function emptyOperationPolicy(): OperationPolicy {
@@ -2324,6 +2506,14 @@ function isRowRefValue(input: unknown): input is RowRefValue {
   return (
     isPlainObject(input) &&
     input.__jazzPermissionKind === "row-ref" &&
+    typeof input.column === "string"
+  );
+}
+
+function isBranchRefValue(input: unknown): input is BranchRefValue {
+  return (
+    isPlainObject(input) &&
+    input.__jazzPermissionKind === "branch-ref" &&
     typeof input.column === "string"
   );
 }

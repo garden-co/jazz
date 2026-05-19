@@ -97,6 +97,38 @@ fn column_descriptor_deserializes_payload_with_merge_strategy() {
 }
 
 #[test]
+fn table_policies_deserialize_branch_policy_blocks() {
+    let policies: TablePolicies = serde_json::from_str(
+        r#"{
+            "branch": [
+                {
+                    "backing_table": "projects",
+                    "select": {
+                        "using": {
+                            "type": "Cmp",
+                            "column": "projectId",
+                            "op": "Eq",
+                            "value": {
+                                "type": "SessionRef",
+                                "path": ["__jazz_branch", "id"]
+                            }
+                        }
+                    }
+                }
+            ]
+        }"#,
+    )
+    .expect("deserialize branch policies");
+
+    assert_eq!(policies.branch.len(), 1);
+    assert_eq!(policies.branch[0].backing_table, TableName::new("projects"));
+    assert!(matches!(
+        policies.branch[0].select.using,
+        Some(PolicyExpr::Cmp { .. })
+    ));
+}
+
+#[test]
 fn row_descriptor_column_lookup() {
     let descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("id", ColumnType::Uuid),

@@ -62,6 +62,32 @@ pub struct TablePolicies {
     pub insert: OperationPolicy,
     pub update: OperationPolicy,
     pub delete: OperationPolicy,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub branch: Vec<BranchTablePolicies>,
+}
+
+/// Operation policies that apply only when a row is accessed through a branch
+/// backed by another table row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BranchTablePolicies {
+    pub backing_table: TableName,
+    pub select: OperationPolicy,
+    pub insert: OperationPolicy,
+    pub update: OperationPolicy,
+    pub delete: OperationPolicy,
+}
+
+impl Default for BranchTablePolicies {
+    fn default() -> Self {
+        Self {
+            backing_table: TableName::new(""),
+            select: OperationPolicy::default(),
+            insert: OperationPolicy::default(),
+            update: OperationPolicy::default(),
+            delete: OperationPolicy::default(),
+        }
+    }
 }
 
 impl TablePolicies {
@@ -103,6 +129,83 @@ impl TablePolicies {
 
     /// Get the effective DELETE USING policy.
     /// Falls back to UPDATE's USING if DELETE has none.
+    pub fn effective_delete_using(&self) -> Option<&PolicyExpr> {
+        self.delete.using.as_ref().or(self.update.using.as_ref())
+    }
+
+    pub fn has_any_explicit_policy(&self) -> bool {
+        self.select.using.is_some()
+            || self.insert.with_check.is_some()
+            || self.update.using.is_some()
+            || self.update.with_check.is_some()
+            || self.delete.using.is_some()
+            || self
+                .branch
+                .iter()
+                .any(BranchTablePolicies::has_any_explicit_policy)
+    }
+
+    pub fn select_policy(&self) -> Option<&PolicyExpr> {
+        self.select.using.as_ref()
+    }
+
+    pub fn insert_policy(&self) -> Option<&PolicyExpr> {
+        self.insert.with_check.as_ref()
+    }
+
+    pub fn update_using_policy(&self) -> Option<&PolicyExpr> {
+        self.update.using.as_ref()
+    }
+
+    pub fn update_check_policy(&self) -> Option<&PolicyExpr> {
+        self.update.with_check.as_ref()
+    }
+
+    pub fn has_explicit_update_policy(&self) -> bool {
+        self.update.using.is_some() || self.update.with_check.is_some()
+    }
+
+    pub fn branch_for_backing_table(
+        &self,
+        backing_table: TableName,
+    ) -> Option<&BranchTablePolicies> {
+        self.branch
+            .iter()
+            .find(|policy| policy.backing_table == backing_table)
+    }
+}
+
+impl BranchTablePolicies {
+    pub fn new(backing_table: impl Into<TableName>) -> Self {
+        Self {
+            backing_table: backing_table.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_select(mut self, using: PolicyExpr) -> Self {
+        self.select = OperationPolicy::using(using);
+        self
+    }
+
+    pub fn with_insert(mut self, with_check: PolicyExpr) -> Self {
+        self.insert = OperationPolicy::with_check(with_check);
+        self
+    }
+
+    pub fn with_update(mut self, using: Option<PolicyExpr>, with_check: PolicyExpr) -> Self {
+        self.update = OperationPolicy {
+            using,
+            with_check: Some(with_check),
+        };
+        self
+    }
+
+    pub fn with_delete(mut self, using: PolicyExpr) -> Self {
+        self.delete = OperationPolicy::using(using);
+        self
+    }
+
     pub fn effective_delete_using(&self) -> Option<&PolicyExpr> {
         self.delete.using.as_ref().or(self.update.using.as_ref())
     }

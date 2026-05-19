@@ -1,5 +1,51 @@
 use super::*;
+use crate::query_manager::policy::{CmpOp, Operation, PolicyValue};
+use crate::query_manager::types::{BranchTablePolicies, RowPolicyMode};
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
+
+fn branch_permission_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("projects"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("todos"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("project_id", ColumnType::Uuid).references("projects"),
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ]),
+            TablePolicies {
+                branch: vec![
+                    BranchTablePolicies::new("projects").with_insert(PolicyExpr::And(vec![
+                        PolicyExpr::Cmp {
+                            column: "project_id".into(),
+                            op: CmpOp::Eq,
+                            value: PolicyValue::SessionRef(vec![
+                                "__jazz_branch".into(),
+                                "id".into(),
+                            ]),
+                        },
+                        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                    ])),
+                ],
+                ..TablePolicies::default()
+            },
+        ),
+    );
+    schema
+}
+
+fn create_enforcing_query_manager(
+    sync_manager: SyncManager,
+    schema: Schema,
+) -> (QueryManager, MemoryStorage) {
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema_with_policy_mode(schema, "dev", "main", RowPolicyMode::Enforcing);
+    let storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    (qm, storage)
+}
 
 #[test]
 fn index_key_includes_branch() {
@@ -283,6 +329,84 @@ fn branch_scope_insert_hidden_when_it_misses_scope_query() {
     let rows = execute_query(&mut qm, &mut storage, query).unwrap();
 
     assert!(rows.is_empty());
+}
+
+#[test]
+fn branch_policy_allows_insert_when_row_matches_branch() {
+    let sync_manager = SyncManager::new();
+    let schema = branch_permission_schema();
+    let (mut qm, mut storage) = create_enforcing_query_manager(sync_manager, schema);
+
+    let project = qm
+        .insert(&mut storage, "projects", &[Value::Text("Apollo".into())])
+        .unwrap();
+    qm.capture_branch_scope(
+        &mut storage,
+        project.row_id,
+        qm.query("todos")
+            .filter_eq("project_id", Value::Uuid(project.row_id))
+            .build(),
+    )
+    .unwrap();
+
+    let branch = project.row_id.to_string();
+    let inserted = qm
+        .insert_on_branch_with_session(
+            &mut storage,
+            "todos",
+            &branch,
+            &[
+                Value::Uuid(project.row_id),
+                Value::Text("alice".to_string()),
+            ],
+            Some(&PolicySession::new("alice")),
+        )
+        .expect("branch policy should allow matching insert");
+
+    let query = qm.query("todos").with_branch_scope(project.row_id).build();
+    let rows = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+        vec![inserted.row_id,]
+    );
+}
+
+#[test]
+fn branch_policy_denies_insert_when_session_misses() {
+    let sync_manager = SyncManager::new();
+    let schema = branch_permission_schema();
+    let (mut qm, mut storage) = create_enforcing_query_manager(sync_manager, schema);
+
+    let project = qm
+        .insert(&mut storage, "projects", &[Value::Text("Apollo".into())])
+        .unwrap();
+    qm.capture_branch_scope(
+        &mut storage,
+        project.row_id,
+        qm.query("todos")
+            .filter_eq("project_id", Value::Uuid(project.row_id))
+            .build(),
+    )
+    .unwrap();
+
+    let branch = project.row_id.to_string();
+    let err = qm
+        .insert_on_branch_with_session(
+            &mut storage,
+            "todos",
+            &branch,
+            &[Value::Uuid(project.row_id), Value::Text("bob".to_string())],
+            Some(&PolicySession::new("alice")),
+        )
+        .expect_err("branch policy should deny wrong owner");
+
+    assert!(matches!(
+        err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Insert,
+        } if table == TableName::new("todos")
+    ));
 }
 
 #[test]

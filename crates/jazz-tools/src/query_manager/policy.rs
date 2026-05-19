@@ -35,6 +35,8 @@ pub enum PolicyValue {
 
 /// Reserved session path prefix used to encode outer-row references in correlated EXISTS clauses.
 pub const OUTER_ROW_SESSION_PREFIX: &str = "__jazz_outer_row";
+/// Reserved session path prefix used to encode branch-row references in branch-scoped policies.
+pub const BRANCH_ROW_SESSION_PREFIX: &str = "__jazz_branch";
 
 /// Default recursion depth for recursive permission checks.
 pub const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT: usize = 10;
@@ -1256,6 +1258,149 @@ fn outer_row_ref_column(path: &[String]) -> Option<&str> {
         return None;
     }
     Some(path[1].as_str())
+}
+
+fn branch_row_ref_column(path: &[String]) -> Option<&str> {
+    if path.len() != 2 {
+        return None;
+    }
+    if path[0] != BRANCH_ROW_SESSION_PREFIX {
+        return None;
+    }
+    Some(path[1].as_str())
+}
+
+fn bind_branch_policy_value(value: &PolicyValue, branch_id: ObjectId) -> Option<PolicyValue> {
+    match value {
+        PolicyValue::Literal(value) => Some(PolicyValue::Literal(value.clone())),
+        PolicyValue::SessionRef(path) => match branch_row_ref_column(path) {
+            Some("id") => Some(PolicyValue::Literal(Value::Uuid(branch_id))),
+            Some(_) => None,
+            None => Some(PolicyValue::SessionRef(path.clone())),
+        },
+    }
+}
+
+/// Bind `@session.__jazz_branch.id` references to the concrete branch row id.
+pub fn bind_branch_row_refs(expr: &PolicyExpr, branch_id: ObjectId) -> Option<PolicyExpr> {
+    match expr {
+        PolicyExpr::Cmp { column, op, value } => Some(PolicyExpr::Cmp {
+            column: column.clone(),
+            op: op.clone(),
+            value: bind_branch_policy_value(value, branch_id)?,
+        }),
+        PolicyExpr::SessionCmp { path, op, value } => {
+            if branch_row_ref_column(path).is_some() {
+                return None;
+            }
+            Some(PolicyExpr::SessionCmp {
+                path: path.clone(),
+                op: op.clone(),
+                value: value.clone(),
+            })
+        }
+        PolicyExpr::IsNull { column } => Some(PolicyExpr::IsNull {
+            column: column.clone(),
+        }),
+        PolicyExpr::SessionIsNull { path } => {
+            if branch_row_ref_column(path).is_some() {
+                return None;
+            }
+            Some(PolicyExpr::SessionIsNull { path: path.clone() })
+        }
+        PolicyExpr::IsNotNull { column } => Some(PolicyExpr::IsNotNull {
+            column: column.clone(),
+        }),
+        PolicyExpr::SessionIsNotNull { path } => {
+            if branch_row_ref_column(path).is_some() {
+                return None;
+            }
+            Some(PolicyExpr::SessionIsNotNull { path: path.clone() })
+        }
+        PolicyExpr::Contains { column, value } => Some(PolicyExpr::Contains {
+            column: column.clone(),
+            value: bind_branch_policy_value(value, branch_id)?,
+        }),
+        PolicyExpr::SessionContains { path, value } => {
+            if branch_row_ref_column(path).is_some() {
+                return None;
+            }
+            Some(PolicyExpr::SessionContains {
+                path: path.clone(),
+                value: value.clone(),
+            })
+        }
+        PolicyExpr::In {
+            column,
+            session_path,
+        } => {
+            if branch_row_ref_column(session_path).is_some() {
+                return None;
+            }
+            Some(PolicyExpr::In {
+                column: column.clone(),
+                session_path: session_path.clone(),
+            })
+        }
+        PolicyExpr::InList { column, values } => Some(PolicyExpr::InList {
+            column: column.clone(),
+            values: values
+                .iter()
+                .map(|value| bind_branch_policy_value(value, branch_id))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        PolicyExpr::SessionInList { path, values } => {
+            if branch_row_ref_column(path).is_some() {
+                return None;
+            }
+            Some(PolicyExpr::SessionInList {
+                path: path.clone(),
+                values: values.clone(),
+            })
+        }
+        PolicyExpr::Exists { table, condition } => Some(PolicyExpr::Exists {
+            table: table.clone(),
+            condition: Box::new(bind_branch_row_refs(condition, branch_id)?),
+        }),
+        PolicyExpr::ExistsRel { rel } => Some(PolicyExpr::ExistsRel { rel: rel.clone() }),
+        PolicyExpr::Inherits {
+            operation,
+            via_column,
+            max_depth,
+        } => Some(PolicyExpr::Inherits {
+            operation: *operation,
+            via_column: via_column.clone(),
+            max_depth: *max_depth,
+        }),
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => Some(PolicyExpr::InheritsReferencing {
+            operation: *operation,
+            source_table: source_table.clone(),
+            via_column: via_column.clone(),
+            max_depth: *max_depth,
+        }),
+        PolicyExpr::And(exprs) => Some(PolicyExpr::And(
+            exprs
+                .iter()
+                .map(|expr| bind_branch_row_refs(expr, branch_id))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        PolicyExpr::Or(exprs) => Some(PolicyExpr::Or(
+            exprs
+                .iter()
+                .map(|expr| bind_branch_row_refs(expr, branch_id))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        PolicyExpr::Not(expr) => Some(PolicyExpr::Not(Box::new(bind_branch_row_refs(
+            expr, branch_id,
+        )?))),
+        PolicyExpr::True => Some(PolicyExpr::True),
+        PolicyExpr::False => Some(PolicyExpr::False),
+    }
 }
 
 /// Bind relation references that depend on session or outer-row context.

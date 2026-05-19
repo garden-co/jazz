@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, RowDescriptor, Schema,
-    SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    BranchTablePolicies, ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType,
+    RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use super::lens::{LensOp, LensTransform};
@@ -19,7 +19,7 @@ use super::lens::{LensOp, LensTransform};
 /// Current encoding version.
 const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V6 as u8;
 const LENS_VERSION: u8 = 2;
-const PERMISSIONS_VERSION: u8 = 1;
+const PERMISSIONS_VERSION: u8 = 2;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
 const PERMISSIONS_HEAD_VERSION: u8 = 2;
 
@@ -199,7 +199,7 @@ pub fn decode_table_descriptor_from_schema(
             skip_indexed_columns(data, &mut offset)?;
         }
         if version.has_table_policies() {
-            decode_table_policies(data, &mut offset)?;
+            decode_table_policies(data, &mut offset, 1)?;
         }
     }
 
@@ -238,7 +238,7 @@ fn decode_table_entry_with_version(
         // Legacy schema versions encoded policies inline, but structural schema
         // decode intentionally drops them now that permissions are catalogued
         // separately.
-        decode_table_policies(data, offset)?;
+        decode_table_policies(data, offset, 1)?;
     }
 
     Ok((
@@ -968,7 +968,7 @@ fn decode_table_schema_v1(
     offset: &mut usize,
 ) -> Result<TableSchema, CatalogueEncodingError> {
     let descriptor = decode_row_descriptor(data, offset)?;
-    decode_table_policies(data, offset)?;
+    decode_table_policies(data, offset, 1)?;
     Ok(TableSchema {
         columns: descriptor,
         indexed_columns: None,
@@ -1010,17 +1010,48 @@ fn encode_table_policies(buf: &mut Vec<u8>, policies: &TablePolicies) {
     encode_operation_policy(buf, &policies.insert);
     encode_operation_policy(buf, &policies.update);
     encode_operation_policy(buf, &policies.delete);
+    write_u32(buf, policies.branch.len() as u32);
+    for branch_policy in &policies.branch {
+        write_string(buf, branch_policy.backing_table.as_str());
+        encode_operation_policy(buf, &branch_policy.select);
+        encode_operation_policy(buf, &branch_policy.insert);
+        encode_operation_policy(buf, &branch_policy.update);
+        encode_operation_policy(buf, &branch_policy.delete);
+    }
 }
 
 fn decode_table_policies(
     data: &[u8],
     offset: &mut usize,
+    version: u8,
 ) -> Result<TablePolicies, CatalogueEncodingError> {
+    let select = decode_operation_policy(data, offset)?;
+    let insert = decode_operation_policy(data, offset)?;
+    let update = decode_operation_policy(data, offset)?;
+    let delete = decode_operation_policy(data, offset)?;
+    let branch = if version >= 2 {
+        let branch_count = read_u32(data, offset)? as usize;
+        let mut branch = Vec::with_capacity(branch_count);
+        for _ in 0..branch_count {
+            branch.push(BranchTablePolicies {
+                backing_table: TableName::new(read_string(data, offset, "backing_table")?),
+                select: decode_operation_policy(data, offset)?,
+                insert: decode_operation_policy(data, offset)?,
+                update: decode_operation_policy(data, offset)?,
+                delete: decode_operation_policy(data, offset)?,
+            });
+        }
+        branch
+    } else {
+        Vec::new()
+    };
+
     Ok(TablePolicies {
-        select: decode_operation_policy(data, offset)?,
-        insert: decode_operation_policy(data, offset)?,
-        update: decode_operation_policy(data, offset)?,
-        delete: decode_operation_policy(data, offset)?,
+        select,
+        insert,
+        update,
+        delete,
+        branch,
     })
 }
 
@@ -1051,7 +1082,7 @@ pub fn decode_permissions(
     }
 
     let version = data[0];
-    if version != PERMISSIONS_VERSION {
+    if version != 1 && version != PERMISSIONS_VERSION {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: PERMISSIONS_VERSION,
@@ -1064,7 +1095,7 @@ pub fn decode_permissions(
 
     for _ in 0..table_count {
         let table_name = TableName::new(read_string(data, &mut offset, "table_name")?);
-        let policies = decode_table_policies(data, &mut offset)?;
+        let policies = decode_table_policies(data, &mut offset, version)?;
         permissions.insert(table_name, policies);
     }
 

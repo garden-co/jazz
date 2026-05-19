@@ -428,6 +428,60 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("compiles forBranch policy blocks", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.forBranch(policy.projects, ({ $branch, branchPolicy }) => [
+        branchPolicy.allowRead.where({ projectId: $branch.id }),
+        branchPolicy.allowInsert.where({
+          projectId: $branch.id,
+          ownerId: session.userId,
+        }),
+      ]),
+    ]);
+
+    expect(compiled.todos!.branch).toEqual([
+      {
+        backing_table: "projects",
+        select: {
+          using: {
+            type: "Cmp",
+            column: "projectId",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["__jazz_branch", "id"],
+            },
+          },
+        },
+        insert: {
+          with_check: {
+            type: "And",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "projectId",
+                op: "Eq",
+                value: {
+                  type: "SessionRef",
+                  path: ["__jazz_branch", "id"],
+                },
+              },
+              {
+                type: "Cmp",
+                column: "ownerId",
+                op: "Eq",
+                value: {
+                  type: "SessionRef",
+                  path: ["userId"],
+                },
+              },
+            ],
+          },
+        },
+      },
+    ]);
+  });
+
   it("compiles provenance magic column policies", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.todos.allowRead.where({ $createdBy: session.userId }),
