@@ -11,17 +11,19 @@ A branch lets an app or user make changes without changing what normal `main` re
 useful for draft workflows, collaborative editing, review screens, and "try this before publishing"
 flows.
 
-The first version provides **write visibility isolation**:
+The first version provides **query-scoped read and write isolation**:
 
 - Writes made on a branch id do not appear in normal `main` reads.
-- Reads from that branch id see current `main` plus the branch's own changed rows.
+- Reads from that branch id see the query result captured when the branch was created, plus the
+  branch's own changed rows inside that query scope.
 - Branch access is controlled by explicit `forBranch(...)` rules in `permissions.ts`.
-- Branches are sparse. Jazz stores only rows changed on the branch, not a full copy of `main`.
+- Branches are sparse. Jazz stores the scope query, the captured row frontiers, and rows changed on
+  the branch, not a full copy of `main`.
 
-That means a branch initially behaves like a lightweight overlay:
+That means a branch initially behaves like a frozen query result with an overlay:
 
 ```text
-branch read = current main + branch changes
+branch read = captured query scope frontier + branch changes
 main read   = current main only
 ```
 
@@ -35,8 +37,8 @@ There is no required app-facing Jazz-managed branch registry in the first versio
 
 Most apps that want branch metadata can model it with their own `branches` table.
 
-This keeps branch creation simple: create the app object, then branch on that object's id. Jazz
-creates the row id; the app does not manually create a branch id.
+This keeps branch creation explicit: create the app object, then create a branch scope from a query
+using that object's id. Jazz creates the row id; the app does not manually create a branch id.
 
 A branch can be created when the user can create or use the backing row. For a normal app-level
 branch metadata table, that means normal insert permission on that table. For an existing object id,
@@ -50,15 +52,15 @@ const { value: branch } = db.insert(app.branches, {
   ownerId: session.user_id,
 });
 
-const draft = db.branch(branch.id);
+const draft = await db.createBranch(branch.id, app.todos.where({ projectId: branch.projectId }));
 ```
 
 Here `branch.id` is both the branch metadata row id and the branch id.
 
 The id does not have to come from a `branches` table. Any Jazz-created row id can identify a branch:
-`db.branch(project.id)`, `db.branch(document.id)`, and `db.branch(branch.id)` all use the same core
-API. The table that owns the id chooses which `forBranch(...)` rule can apply, leaving branch
-management and naming as app-level choices.
+`db.createBranch(project.id, query)`, `db.createBranch(document.id, query)`, and
+`db.createBranch(branch.id, query)` all use the same core API. The table that owns the id chooses
+which `forBranch(...)` rule can apply, leaving branch management and naming as app-level choices.
 
 ### Branch Permissions
 
@@ -89,7 +91,8 @@ policy for the table on the left, here `todos`.
 In this example:
 
 - creating a branch metadata row creates an object id that can be used as a branch id
-- Jazz resolves `branch.id` to the `branches` row
+- `db.createBranch(branch.id, query)` resolves `branch.id` to the `branches` row and captures the
+  query scope
 - `$branch` is that resolved `branches` row
 - reading todos through `db.branch(branch.id)` requires the branch-scoped todo read rule to pass
 - writing todos through `db.branch(branch.id)` requires the matching branch-scoped todo write rule
@@ -124,12 +127,13 @@ or edit those rows directly. They are separate from branch access.
 
 ### Branch-Scoped Database View
 
-`db.branch(branchId)` returns a database view where reads and writes use that branch.
+`db.createBranch(branchId, query)` captures a branch scope and returns a database view where reads
+and writes use that branch. `db.branch(branchId)` opens an existing branch scope.
 
 ```ts
-const draft = db.branch(branch.id);
+const draft = await db.createBranch(branch.id, app.todos.where({ projectId: branch.projectId }));
 
-await draft.insert(app.todos, {
+draft.insert(app.todos, {
   projectId: branch.projectId,
   title: "Write API docs",
   done: false,
@@ -137,6 +141,7 @@ await draft.insert(app.todos, {
 ```
 
 The inserted row is visible through `draft`, but not through normal `db` reads from `main`.
+Rows that were not in the captured query scope are not visible through `draft`.
 
 ### Query Builder Branch Selection
 
@@ -146,7 +151,8 @@ Queries can select a branch directly.
 const rows = await db.all(app.todos.branch(branch.id).where({ projectId: branch.projectId }));
 ```
 
-Query-level branch selection uses the same overlay behavior as `db.branch(branchId)`.
+Query-level branch selection uses the same captured-scope overlay behavior as
+`db.branch(branchId)`.
 
 If both are present, the query-level branch wins:
 
@@ -162,18 +168,16 @@ This query reads `bobBranch.id`, not `aliceBranch.id`.
 
 ### Query Builder Diff
 
-Diff is exposed on the query builder.
+Diff is exposed on the branch-scoped database view.
 
 ```ts
-const diff = await db.all(
-  app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff(),
-);
+const diff = await db.branch(branch.id).diff(app.todos.where({ projectId: branch.projectId }));
 ```
 
 This means:
 
 ```text
-source = todos in the selected branch for this query
+source = todos in the selected branch scope for this query
 target = todos in current main
 ```
 
@@ -206,9 +210,9 @@ For deletes, the row fields are the target row being removed, and `$diff.kind` i
 `$diff.changed` lists changed column names. `$diff.conflicts` lists columns where both sides changed
 and the merge strategy says the overlap should be surfaced as a conflict.
 
-The diff scope includes rows matching the query on the branch side or the `main` side. Jazz then
-computes the merge preview for that union of rows. This avoids hiding a row just because a branch
-edit moved it out of the query filter.
+The diff scope includes rows matching the query on the branch side or the `main` side, limited by
+the branch's captured query scope. Jazz then computes the merge preview for that union of rows. This
+avoids hiding a row just because a branch edit moved it out of the query filter.
 
 ### Merge
 

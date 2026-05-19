@@ -6,14 +6,16 @@ should be treated as the proposal to review. Choices in this file are notes, not
 
 ## Goal
 
-Add sparse branches for draft and collaborative editing.
+Add query-scoped sparse branches for draft and collaborative editing.
 
-Branches provide write isolation by visibility only. A normal read from `main` does not see branch
-writes. Non-main branch ids are Jazz object ids, and branch access is controlled by explicit
-branch-scoped permission rules in `permissions.ts`.
+Branches provide read and write isolation. A normal read from `main` does not see branch writes. A
+branch read only sees the query scope captured when the branch was created, plus that branch's own
+changes inside that scope. Non-main branch ids are Jazz object ids, and branch access is controlled
+by explicit branch-scoped permission rules in `permissions.ts`.
 
-The first implementation supports branch reads and writes as overlays on `main`, scoped diffs from
-a branch query to `main`, and merges from a branch to `main`.
+The first implementation supports creating a branch from a query, branch reads and writes over that
+captured query scope, scoped diffs from a branch query to `main`, and merges from a branch to
+`main`.
 
 ## Non-Goals
 
@@ -29,41 +31,38 @@ a branch query to `main`, and merges from a branch to `main`.
 `main` is the reserved system branch. Every non-main branch id must be a Jazz object id. The row
 that owns that id is the branch's backing row.
 
-A branch id is usable when it resolves to a backing row. The branch stores data only after rows are
-written with that branch id.
+A branch id is usable when it resolves to a backing row and has a stored branch scope snapshot. The
+branch stores data only after rows are written with that branch id.
 
 Example:
 
 ```text
 main
   todo-1: m3
+  todo-2: m7
 
 branch-1
+  scope: todos where project_id = project-1
+  base: todo-1 -> main:m3
   todo-1: b1, parent = main:m3
 ```
 
-Branches are sparse. They store only rows changed on that branch. Unchanged rows are read from
-current `main`.
+Branches are sparse. They store:
+
+- the query used to create the branch scope
+- the row ids and visible batch ids captured by that query
+- rows changed on that branch
+
+Unchanged rows are read from the captured base frontier, not from live `main`.
 
 The MVP fallback chain is always:
 
 ```text
-branch -> main
+branch overlay -> captured query scope frontier
 ```
 
-Because there is no branch registry or branch ancestry metadata, the system has no durable source
-for a longer fallback chain.
-
-## Possible Future Branch Isolation
-
-We may provide stronger branch isolation later in one of two brief shapes:
-
-1. Track device versions and create a branch frontier from the device versions visible when the
-   branch starts.
-2. Use query-based scope: the branch can only read data from that scope, and Jazz stores the row
-   versions used by that query as the branch frontier.
-
-This is only a memory note. It is not part of the proposal to review now.
+Because the snapshot is query-scoped, rows outside the captured query result are invisible to the
+branch even if they exist on `main`.
 
 ## Permission Model
 
@@ -73,8 +72,10 @@ The backing row's table chooses which `forBranch(...)` block applies. If the sel
 not resolve to a row, or resolves to a table with no matching `forBranch(...)` block for the data
 table being accessed, all branch permissions for that access fail.
 
-There is no separate branch creation API. Creating a branch means creating the backing row through
-normal `db.insert(...)`, then using that row's Jazz-created id as the branch id.
+Branch creation has two steps:
+
+1. Create or choose the backing row through normal app data.
+2. Capture a branch scope from a query using that backing row's Jazz-created id as the branch id.
 
 A branch can be created when the user can create or use the backing row. For a normal app-level
 branch metadata table, that means normal insert permission on that table. For an existing object id,
@@ -91,7 +92,7 @@ const { value: branch } = db.insert(app.branches, {
   ownerId: session.user_id,
 });
 
-const draft = db.branch(branch.id);
+const draft = await db.createBranch(branch.id, app.todos.where({ projectId: branch.projectId }));
 ```
 
 The common app pattern is that a user creates a branch metadata row, then policies for draft data
@@ -150,7 +151,10 @@ when users need to list or edit those metadata rows directly.
 
 In enforcing runtimes:
 
-- `db.branch(objectId)` must resolve `objectId` to a backing row.
+- `db.createBranch(objectId, query)` must resolve `objectId` to a backing row and must capture a
+  query scope that the caller is allowed to read.
+- `db.branch(objectId)` must resolve `objectId` to a backing row and an existing branch scope
+  snapshot.
 - Branch reads and query-builder branch reads require a matching `forBranch(...)` block whose
   branch-scoped `read` rule passes.
 - Branch writes require a matching `forBranch(...)` block whose branch-scoped `insert`, `update`, or
@@ -172,14 +176,15 @@ backing row cannot be resolved or no matching branch-scoped rule grants the oper
 Jazz already keeps row history, so branch ancestry should be represented through parent links,
 not a separate baseline table.
 
-For the first write to a row on a branch:
+For the first write to a captured row on a branch:
 
-1. Load the current visible frontier for that row on `main`.
+1. Load the row's captured base frontier from the branch scope snapshot.
 2. Write a normal row-history entry on the branch.
-3. Set the branch write's parents to the visible `main` frontier.
+3. Set the branch write's parents to the captured base frontier.
 
-If the row does not exist on `main`, the branch insert has no `main` parent. If the row is already
-deleted on `main`, the branch write uses that visible delete frontier as its parent.
+If the row is a branch insert that did not exist in the captured scope, it has no captured base
+parent. If the captured row was deleted in the scope, the branch write uses that captured delete
+frontier as its parent.
 
 For later writes to the same row on the branch, parent to the previous branch tip as usual.
 
@@ -227,66 +232,66 @@ const { value: branch } = db.insert(app.branches, {
 });
 
 db.branch(branch.id);
-app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff();
+await db.createBranch(branch.id, app.todos.where({ projectId: branch.projectId }));
+db.branch(branch.id).diff(app.todos.where({ projectId: branch.projectId }));
 db.branch(branch.id).merge();
 ```
 
-`db.branch(objectId)` returns a branch-scoped database view. Reads use overlay behavior. Writes
-target the branch id.
+`db.createBranch(objectId, query)` captures the query scope and returns a branch-scoped database
+view. `db.branch(objectId)` opens an existing branch-scoped database view. Reads use the captured
+query scope plus branch overlay behavior. Writes target the branch id.
 
-The query builder must also accept a branch selector. Query-builder branch selection uses the same
-overlay semantics as `db.branch(objectId)`. If a query is built from a branch-scoped database view
-and also selects a branch directly, the query-level branch wins because it is the closest explicit
-choice.
+The query builder may still accept a branch selector, but a query-scoped database view is the common
+API. If a query is built from a branch-scoped database view and also selects a branch directly, the
+query-level branch wins because it is the closest explicit choice.
 
-Diff is exposed through the query builder, not as a whole-branch API. Callers scope the diff by
-building the query they want to inspect, then call `.diff()`. The MVP does not expose a diff target
-argument; diff previews against `main`.
+Diff is exposed on the branch-scoped database view. Callers scope the diff by passing the query they
+want to inspect. The MVP does not expose a diff target argument; diff previews against `main`.
 
 Merge is exposed on the branch-scoped database view. `db.branch(sourceObjectId).merge()` merges the
 source branch into `main`. The MVP does not expose a merge target argument.
 
 ## Read Semantics
 
-Branch reads are overlays on current `main`.
+Branch reads are overlays on the captured query scope frontier.
 
 For direct row loads:
 
 ```text
 load row from branch
 if missing:
-  load row from main
+  load row from captured scope frontier
 ```
 
 For queries and scans:
 
 ```text
-current main query result
-minus main rows overridden or deleted on branch
-plus branch rows that match the query
+captured scope rows that match the query after branch overlay
+minus captured rows deleted on branch
+plus branch rows that match the query and scope predicate
 ```
 
-Deletes require branch tombstones. If `main` has `todo-1` and `branch-1` deletes it, reads from
-`branch-1` must hide `todo-1` even though it still exists on `main`.
+Deletes require branch tombstones. If the captured scope has `todo-1` and `branch-1` deletes it,
+reads from `branch-1` must hide `todo-1` even though it still exists on `main`.
 
 Branch indexes must reflect branch rows. Query planning must understand that a branch row overrides
-the corresponding main row.
+the corresponding captured base row, and that live `main` rows outside the snapshot are not branch
+inputs.
 
 ## Diff Semantics
 
-Query-builder diff compares a source branch query with current `main`.
+Query diff compares a source branch query with current `main`.
 
 ```ts
-app.todos.branch(branch.id).where({ projectId: branch.projectId }).diff();
+await db.branch(branch.id).diff(app.todos.where({ projectId: branch.projectId }));
 ```
 
-The source branch comes from the query builder's `.branch(...)` selection, or from the enclosing
-branch-scoped database view if the query does not select a branch directly. The target is current
-`main`.
+The source branch comes from the enclosing branch-scoped database view, unless the query selects a
+branch directly. The target is current `main`.
 
 The diff candidate set is concrete and non-circular:
 
-1. Evaluate the query against the source branch overlay.
+1. Evaluate the query against the source branch overlay on the captured scope.
 2. Evaluate the same query against current `main`.
 3. Take the union of those row ids.
 4. Compute the merged preview only for that candidate set.
@@ -301,7 +306,7 @@ tombstones and branch inserts.
 For each changed row:
 
 ```text
-base   = latest common ancestor(source tip, target tip)
+base   = captured scope frontier for the row, or latest common ancestor if the row was inserted later
 source = current visible row on source
 target = current visible row on target
 ```
@@ -403,7 +408,7 @@ must fail with a schema error.
 MVP does not support branch-of-branch.
 
 The parent-link model does not block it. A future branch can parent its first writes to another
-branch's visible row, the same way MVP branch writes parent to `main`.
+branch's visible row, the same way MVP branch writes parent to the captured scope frontier.
 
 The missing piece is read fallback ancestry:
 
@@ -421,7 +426,8 @@ Prefer integration tests that exercise the app-facing API.
 Required coverage:
 
 - branch write is invisible from `main`
-- branch read falls back to current `main`
+- branch read falls back to the captured query scope frontier
+- branch read does not see rows added to `main` after branch creation
 - non-main branch ids must be Jazz object ids
 - enforcing runtimes deny branch access when `forBranch(...)` is missing
 - branch reads require a matching branch-scoped read rule
@@ -431,9 +437,9 @@ Required coverage:
 - query-level branch selection overrides a branch-scoped database default
 - query-builder diff compares the selected source branch with current `main`
 - query-builder diff includes rows matching the query on the source or target side
-- branch edit overrides current `main`
-- branch delete hides current `main`
-- first branch write parents to the current `main` frontier
+- branch edit overrides the captured base row
+- branch delete hides the captured base row
+- first branch write parents to the captured base frontier
 - later branch write parents to the previous branch tip
 - `db.branch(source).merge()` writes to `main`
 - merge writes to `main` with parents from both locally visible current `main` and locally visible
@@ -455,6 +461,7 @@ Required coverage:
 Direct row overlay reads are straightforward. Query overlay is the hard part.
 
 A branch edit can change whether a row matches a filter, join, or index-backed query. The query
-manager must subtract overridden main rows and add matching branch rows consistently.
+manager must subtract overridden captured rows, add matching branch rows, and exclude live `main`
+rows outside the captured scope consistently.
 
 This should be tested at the query level, not only through direct row loads.
