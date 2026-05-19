@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::object::ObjectId;
 use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use uuid::Uuid;
 
 /// Maximum payload size allowed for a single BYTEA value (1 MiB).
 pub const BYTEA_MAX_BYTES: usize = 1_048_576;
@@ -1323,6 +1324,9 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
 /// Encode a Value to binary bytes with type information (needed for Row values).
 pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
     match (value, col_type) {
+        (Value::Text(raw), ColumnType::Uuid) => Uuid::parse_str(raw)
+            .map(|uuid| ObjectId::from_uuid(uuid).uuid().as_bytes().to_vec())
+            .unwrap_or_else(|_| encode_value(value)),
         (Value::Text(raw), ColumnType::Enum { variants }) if col_type.fixed_size().is_some() => {
             vec![encode_enum_variant_index(variants, raw).unwrap_or_else(|_| unreachable!())]
         }
