@@ -119,6 +119,29 @@ use jazz_tools::sync_manager::{
 use crate::query::parse_query;
 use crate::types::SubscriptionRow;
 
+#[cfg(test)]
+thread_local! {
+    static ADD_CLIENT_BEFORE_CORE_HOOK: RefCell<Option<Box<dyn Fn(ClientId)>>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_add_client_before_core_hook(hook: Option<Box<dyn Fn(ClientId)>>) {
+    ADD_CLIENT_BEFORE_CORE_HOOK.with(|cell| *cell.borrow_mut() = hook);
+}
+
+#[cfg(test)]
+fn notify_add_client_before_core(client_id: ClientId) {
+    ADD_CLIENT_BEFORE_CORE_HOOK.with(|cell| {
+        if let Some(hook) = cell.borrow().as_ref() {
+            hook(client_id);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_add_client_before_core(_client_id: ClientId) {}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WasmSchemaStateDebug {
@@ -989,6 +1012,15 @@ impl Clone for WasmRuntime {
 }
 
 impl WasmRuntime {
+    pub(crate) fn add_client_with_id(&self, client_id: ClientId) -> String {
+        let _span = info_span!("wasm::addClient", tier = self.tier_label).entered();
+        info!(%client_id, "registering client id");
+        notify_add_client_before_core(client_id);
+        let mut core = self.core.borrow_mut();
+        core.add_client(client_id, None);
+        client_id.0.to_string()
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_rejected_batch_acknowledged_callback(
         &self,
@@ -1781,12 +1813,7 @@ impl WasmRuntime {
     /// Add a client connection (for server-side use in tests).
     #[wasm_bindgen(js_name = addClient)]
     pub fn add_client(&self) -> String {
-        let _span = info_span!("wasm::addClient", tier = self.tier_label).entered();
-        let client_id = ClientId::new();
-        info!(%client_id, "generated client id");
-        let mut core = self.core.borrow_mut();
-        core.add_client(client_id, None);
-        client_id.0.to_string()
+        self.add_client_with_id(ClientId::new())
     }
 
     /// Set a client's role.

@@ -47,7 +47,7 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use jazz_tools::runtime_core::SyncSender;
-use jazz_tools::sync_manager::{Destination, OutboxEntry};
+use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry};
 use js_sys::{Array, Reflect, Uint8Array};
 use serde_bytes::ByteBuf;
 use wasm_bindgen::prelude::*;
@@ -958,12 +958,12 @@ fn handle_attach_tab_port(port: MessagePort) {
         }
     };
 
-    // Allocate a runtime client id for this follower.
-    let client_id = runtime.add_client();
-    if let Err(err) = runtime.set_client_role(&client_id, "peer") {
-        tracing::warn!("attach-tab-port: setClientRole failed: {err:?}");
-        return;
-    }
+    // Allocate the follower id in the host, not inside `runtime.add_client`.
+    // `add_client` queues storage-backed catalogue replay and schedules a
+    // tick, so the multiplexer must already know how to route this id before
+    // the runtime sees the client.
+    let client_id = ClientId::new();
+    let client_id_string = client_id.0.to_string();
 
     // Per-port outbox sender. Configured so its `main_client_id == client_id`
     // — that way `RustOutboxSender::send_sync_message` only enqueues
@@ -971,11 +971,11 @@ fn handle_attach_tab_port(port: MessagePort) {
     // only filter that needs to be correct.
     let sender = RustOutboxSender::new(true);
     let port_js: JsValue = port.clone().into();
-    sender.attach_target(port_js, Some(client_id.clone()), None);
+    sender.attach_target(port_js, Some(client_id_string.clone()), None);
 
     // Install per-port message handler.
     let port_for_closure = port.clone();
-    let client_id_for_closure = client_id.clone();
+    let client_id_for_closure = client_id_string.clone();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let data = event.data();
         match parse_main_to_worker(&data) {
@@ -990,7 +990,7 @@ fn handle_attach_tab_port(port: MessagePort) {
 
     PORT_PEERS.with(|cell| {
         cell.borrow_mut().insert(
-            client_id,
+            client_id_string.clone(),
             PortPeer {
                 port: port.clone(),
                 sender,
@@ -998,6 +998,12 @@ fn handle_attach_tab_port(port: MessagePort) {
             },
         );
     });
+
+    runtime.add_client_with_id(client_id);
+    if let Err(err) = runtime.set_client_role(&client_id_string, "peer") {
+        tracing::warn!("attach-tab-port: setClientRole failed: {err:?}");
+        deregister_port_peer(&client_id_string);
+    }
 }
 
 /// Dispatch one parsed `MainToWorkerMessage` arriving from a follower tab's
@@ -1200,8 +1206,10 @@ mod tests {
     use web_sys::{MessageChannel, MessageEvent};
 
     use super::{
-        handle_port_message, http_url_to_ws, map_auth_reason, HostState, WorkerHost, HOST,
+        handle_attach_tab_port, handle_port_message, http_url_to_ws, map_auth_reason, HostState,
+        MultiplexedSyncSender, WorkerHost, HOST, MAIN_CLIENT_ID, PORT_PEERS, RUNTIME,
     };
+    use crate::runtime::{set_add_client_before_core_hook, RustOutboxSender, WasmRuntime};
     use crate::worker_protocol::{
         parse_worker_to_main, InitPayload, InitPayloadFields, MainToWorkerMessage,
         ParsedWorkerToMain, WorkerToMainWire,
@@ -1305,6 +1313,19 @@ mod tests {
         }))
     }
 
+    fn reset_worker_host_cells() {
+        PORT_PEERS.with(|cell| {
+            let mut peers = cell.borrow_mut();
+            for (_, peer) in peers.drain() {
+                peer.port.set_onmessage(None);
+            }
+        });
+        HOST.with(|cell| *cell.borrow_mut() = None);
+        RUNTIME.with(|cell| *cell.borrow_mut() = None);
+        MAIN_CLIENT_ID.with(|cell| *cell.borrow_mut() = None);
+        set_add_client_before_core_hook(None);
+    }
+
     /// Resolve after one `setTimeout(0)` so queued `MessagePort` deliveries
     /// (each its own task) get a turn before the next assertion.
     async fn macrotask_yield() {
@@ -1315,6 +1336,114 @@ mod tests {
             let _ = set_timeout.call2(&JsValue::NULL, &resolve, &JsValue::from_f64(0.0));
         });
         let _ = JsFuture::from(promise).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn follower_attach_registers_port_before_storage_backed_client_replay() {
+        // `RuntimeCore::add_client` queues storage-backed catalogue replay
+        // and enters `immediate_tick`. The worker host must already have a
+        // PORT_PEERS entry for the newly allocated follower id before that
+        // call, otherwise replay addressed to the follower can fall through
+        // to the worker's main sender and be dropped as non-main client
+        // traffic.
+        reset_worker_host_cells();
+
+        let runtime = Rc::new(
+            WasmRuntime::new(
+                r#"{
+                    "todos": {
+                        "columns": [
+                            {"name": "title", "column_type": {"type": "Text"}, "nullable": false},
+                            {"name": "completed", "column_type": {"type": "Boolean"}, "nullable": false}
+                        ]
+                    }
+                }"#,
+                "test-app",
+                "dev",
+                "main",
+                Some("local".to_string()),
+                Some(true),
+                None,
+            )
+            .expect("runtime"),
+        );
+
+        let main_client_id = runtime.add_client();
+        let main_sender = RustOutboxSender::new(true);
+        runtime
+            .core
+            .borrow_mut()
+            .set_sync_sender(Box::new(MultiplexedSyncSender::new(main_sender)));
+        MAIN_CLIENT_ID.with(|cell| *cell.borrow_mut() = Some(main_client_id));
+
+        runtime
+            .debug_seed_live_schema(
+                r#"{
+                    "todos": {
+                        "columns": [
+                            {"name": "title", "column_type": {"type": "Text"}, "nullable": false}
+                        ]
+                    }
+                }"#,
+            )
+            .expect("seed historical schema");
+        macrotask_yield().await;
+
+        let mut host = WorkerHost::new();
+        host.state = HostState::Ready;
+        HOST.with(|cell| *cell.borrow_mut() = Some(host));
+        RUNTIME.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&runtime)));
+
+        let channel = MessageChannel::new().expect("MessageChannel::new");
+        let worker_side = channel.port1();
+        let follower_side = channel.port2();
+
+        let route_registered_before_add_client = Rc::new(RefCell::new(false));
+        let route_registered_probe = Rc::clone(&route_registered_before_add_client);
+        set_add_client_before_core_hook(Some(Box::new(move |client_id| {
+            let id = client_id.0.to_string();
+            *route_registered_probe.borrow_mut() =
+                PORT_PEERS.with(|cell| cell.borrow().contains_key(&id));
+        })));
+
+        let received: Rc<RefCell<Vec<WorkerToMainWire>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&received);
+        let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+            if let ParsedWorkerToMain::Wire(wire) = parse_worker_to_main(&event.data()) {
+                sink.borrow_mut().push(wire);
+            }
+        });
+        follower_side.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        follower_side.start();
+
+        handle_attach_tab_port(worker_side);
+
+        set_add_client_before_core_hook(None);
+        assert!(
+            *route_registered_before_add_client.borrow(),
+            "follower PORT_PEERS route must exist before runtime.add_client queues replay",
+        );
+
+        for _ in 0..50 {
+            if received.borrow().iter().any(
+                |wire| matches!(wire, WorkerToMainWire::Sync { payloads } if !payloads.is_empty()),
+            ) {
+                break;
+            }
+            macrotask_yield().await;
+        }
+
+        let collected = received.borrow().clone();
+        assert!(
+            collected.iter().any(|wire| {
+                matches!(wire, WorkerToMainWire::Sync { payloads } if !payloads.is_empty())
+            }),
+            "attach-time catalogue replay should be routed to the follower port, got {collected:?}",
+        );
+
+        follower_side.set_onmessage(None);
+        drop(on_message);
+        reset_worker_host_cells();
     }
 
     /// Drive `handle_port_message` with a follower `Init` against a worker
