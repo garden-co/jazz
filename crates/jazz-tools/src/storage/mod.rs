@@ -42,6 +42,7 @@ use crate::catalogue::CatalogueEntry;
 use crate::digest::Digest32;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::branch_scope::BranchScopeSnapshot;
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, SchemaHash, SharedString,
     Value,
@@ -158,6 +159,7 @@ const LOCAL_BATCH_RECORD_TABLE: &str = "__local_batch_record";
 const AUTHORITATIVE_BATCH_SETTLEMENT_TABLE: &str = "__authoritative_batch_settlement";
 const ACKNOWLEDGED_REJECTED_BATCH_TABLE: &str = "__acknowledged_rejected_batch";
 const SEALED_BATCH_SUBMISSION_TABLE: &str = "__sealed_batch_submission";
+const BRANCH_SCOPE_SNAPSHOT_TABLE: &str = "__branch_scope_snapshot";
 const RAW_TABLE_HEADER_TABLE: &str = "__raw_table_header";
 const BRANCH_ORD_BY_NAME_TABLE: &str = "__branch_ord_by_name";
 const BRANCH_NAME_BY_ORD_TABLE: &str = "__branch_name_by_ord";
@@ -177,6 +179,7 @@ const SEALED_BATCH_SUBMISSION_FORMAT_V2: i32 = 2;
 const AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2: i32 = 2;
 const ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1: i32 = 1;
 const LOCAL_BATCH_RECORD_FORMAT_V3: i32 = 3;
+const BRANCH_SCOPE_SNAPSHOT_FORMAT_V1: i32 = 1;
 
 pub type BranchOrd = i32;
 
@@ -190,6 +193,7 @@ const STORAGE_KIND_LOCAL_BATCH_RECORD: &str = "local_batch_record";
 const STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT: &str = "authoritative_batch_settlement";
 const STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH: &str = "acknowledged_rejected_batch";
 const STORAGE_KIND_SEALED_BATCH_SUBMISSION: &str = "sealed_batch_submission";
+const STORAGE_KIND_BRANCH_SCOPE_SNAPSHOT: &str = "branch_scope_snapshot";
 const STORAGE_KIND_CATALOGUE: &str = "catalogue";
 #[cfg(feature = "sqlite")]
 pub(crate) const SQLITE_STORE_KIND: &str = "sqlite";
@@ -825,6 +829,63 @@ fn decode_local_batch_record_key(key: &str) -> Result<BatchId, StorageError> {
     Ok(BatchId(bytes))
 }
 
+fn branch_scope_snapshot_storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("scope_query_hash", ColumnType::Text),
+        ColumnDescriptor::new("entries_json", ColumnType::Text),
+    ])
+}
+
+fn branch_scope_snapshot_key(branch_id: ObjectId) -> String {
+    format!("branch_scope:{}", metadata_raw_key(branch_id))
+}
+
+fn decode_branch_scope_snapshot_key(key: &str) -> Result<ObjectId, StorageError> {
+    let Some(raw_id) = key.strip_prefix("branch_scope:") else {
+        return Err(StorageError::IoError(format!(
+            "invalid branch scope snapshot key '{key}'"
+        )));
+    };
+    decode_metadata_raw_key(raw_id)
+}
+
+fn encode_branch_scope_snapshot(snapshot: &BranchScopeSnapshot) -> Result<Vec<u8>, StorageError> {
+    let entries_json = serde_json::to_string(&snapshot.entries)
+        .map_err(|err| StorageError::IoError(format!("encode branch scope entries: {err}")))?;
+
+    encode_row(
+        &branch_scope_snapshot_storage_descriptor(),
+        &[
+            Value::Text(snapshot.scope_query_hash.clone()),
+            Value::Text(entries_json),
+        ],
+    )
+    .map_err(|err| StorageError::IoError(format!("encode branch scope snapshot: {err}")))
+}
+
+fn decode_branch_scope_snapshot(
+    branch_id: ObjectId,
+    bytes: &[u8],
+) -> Result<BranchScopeSnapshot, StorageError> {
+    let values = decode_row(&branch_scope_snapshot_storage_descriptor(), bytes)
+        .map_err(|err| StorageError::IoError(format!("decode branch scope snapshot: {err}")))?;
+
+    let [Value::Text(scope_query_hash), Value::Text(entries_json)] = values.as_slice() else {
+        return Err(StorageError::IoError(
+            "branch scope snapshot storage row has unexpected shape".to_string(),
+        ));
+    };
+
+    let entries = serde_json::from_str(entries_json)
+        .map_err(|err| StorageError::IoError(format!("decode branch scope entries: {err}")))?;
+
+    Ok(BranchScopeSnapshot::new(
+        branch_id,
+        scope_query_hash.clone(),
+        entries,
+    ))
+}
+
 fn branch_ord_by_name_storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![ColumnDescriptor::new(
         "branch_ord",
@@ -1074,6 +1135,7 @@ fn supported_storage_format_version(storage_kind: &str) -> Result<i32, StorageEr
         STORAGE_KIND_BRANCH_ORD_META => Ok(BRANCH_ORD_META_FORMAT_V1),
         STORAGE_KIND_LOCAL_BATCH_RECORD => Ok(LOCAL_BATCH_RECORD_FORMAT_V3),
         STORAGE_KIND_SEALED_BATCH_SUBMISSION => Ok(SEALED_BATCH_SUBMISSION_FORMAT_V2),
+        STORAGE_KIND_BRANCH_SCOPE_SNAPSHOT => Ok(BRANCH_SCOPE_SNAPSHOT_FORMAT_V1),
         STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT => Ok(AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2),
         STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH => Ok(ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1),
         STORAGE_KIND_CATALOGUE => Ok(CATALOGUE_STORAGE_FORMAT_V1),

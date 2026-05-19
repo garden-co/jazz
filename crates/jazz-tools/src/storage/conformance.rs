@@ -11,7 +11,8 @@ use crate::batch_fate::{
 use crate::catalogue::CatalogueEntry;
 use crate::digest::Digest32;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
+use crate::query_manager::branch_scope::{BranchScopeEntry, BranchScopeSnapshot};
 use crate::query_manager::types::{
     ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableSchema, Value,
 };
@@ -1022,6 +1023,42 @@ pub fn test_local_batch_record_delete_removes_record(factory: &dyn Fn() -> Box<d
     assert_eq!(storage.load_local_batch_record(batch_id).unwrap(), None);
 }
 
+pub fn test_branch_scope_snapshot_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let branch_id = ObjectId::new();
+    let row_id = ObjectId::new();
+    let batch_id = BatchId::new();
+    let snapshot = BranchScopeSnapshot::new(
+        branch_id,
+        "todos-scope-v1".to_string(),
+        vec![BranchScopeEntry {
+            table: "todos".to_string(),
+            row_id,
+            base_branch: BranchName::new("main"),
+            base_batch_id: batch_id,
+        }],
+    );
+
+    storage.upsert_branch_scope_snapshot(&snapshot).unwrap();
+
+    let loaded = storage
+        .load_branch_scope_snapshot(branch_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded, snapshot);
+}
+
+pub fn test_branch_scope_snapshot_delete(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let branch_id = ObjectId::new();
+    let snapshot = BranchScopeSnapshot::new(branch_id, "empty".to_string(), vec![]);
+
+    storage.upsert_branch_scope_snapshot(&snapshot).unwrap();
+    storage.delete_branch_scope_snapshot(branch_id).unwrap();
+
+    assert_eq!(storage.load_branch_scope_snapshot(branch_id).unwrap(), None);
+}
+
 pub fn test_authoritative_batch_fate_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let batch_id = crate::row_histories::BatchId::new();
@@ -1598,6 +1635,16 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn local_batch_record_delete_removes_record() {
                 conformance::test_local_batch_record_delete_removes_record(&$factory);
+            }
+
+            #[test]
+            fn branch_scope_snapshot_round_trip() {
+                conformance::test_branch_scope_snapshot_round_trip(&$factory);
+            }
+
+            #[test]
+            fn branch_scope_snapshot_delete() {
+                conformance::test_branch_scope_snapshot_delete(&$factory);
             }
 
             #[test]

@@ -530,6 +530,78 @@ pub trait Storage {
         Ok(records)
     }
 
+    fn upsert_branch_scope_snapshot(
+        &mut self,
+        snapshot: &BranchScopeSnapshot,
+    ) -> Result<(), StorageError> {
+        ensure_raw_table_header(
+            self,
+            BRANCH_SCOPE_SNAPSHOT_TABLE,
+            &RawTableHeader::system(
+                STORAGE_KIND_BRANCH_SCOPE_SNAPSHOT,
+                BRANCH_SCOPE_SNAPSHOT_FORMAT_V1,
+            ),
+        )?;
+        let bytes = encode_branch_scope_snapshot(snapshot)?;
+        self.raw_table_put(
+            BRANCH_SCOPE_SNAPSHOT_TABLE,
+            &branch_scope_snapshot_key(snapshot.branch_id),
+            &bytes,
+        )
+    }
+
+    fn load_branch_scope_snapshot(
+        &self,
+        branch_id: ObjectId,
+    ) -> Result<Option<BranchScopeSnapshot>, StorageError> {
+        match self.raw_table_get(
+            BRANCH_SCOPE_SNAPSHOT_TABLE,
+            &branch_scope_snapshot_key(branch_id),
+        )? {
+            Some(bytes) => {
+                ensure_system_raw_table_header_validated_once(
+                    self,
+                    BRANCH_SCOPE_SNAPSHOT_TABLE,
+                    STORAGE_KIND_BRANCH_SCOPE_SNAPSHOT,
+                    BRANCH_SCOPE_SNAPSHOT_FORMAT_V1,
+                )?;
+                decode_branch_scope_snapshot(branch_id, &bytes).map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn delete_branch_scope_snapshot(&mut self, branch_id: ObjectId) -> Result<(), StorageError> {
+        self.raw_table_delete(
+            BRANCH_SCOPE_SNAPSHOT_TABLE,
+            &branch_scope_snapshot_key(branch_id),
+        )
+    }
+
+    fn scan_branch_scope_snapshots(&self) -> Result<Vec<BranchScopeSnapshot>, StorageError> {
+        let mut snapshots = Vec::new();
+        for (key, bytes) in
+            self.raw_table_scan_prefix(BRANCH_SCOPE_SNAPSHOT_TABLE, "branch_scope:")?
+        {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                BRANCH_SCOPE_SNAPSHOT_TABLE,
+                STORAGE_KIND_BRANCH_SCOPE_SNAPSHOT,
+                BRANCH_SCOPE_SNAPSHOT_FORMAT_V1,
+            )?;
+            let branch_id = decode_branch_scope_snapshot_key(&key)?;
+            let snapshot = decode_branch_scope_snapshot(branch_id, &bytes)?;
+            if snapshot.branch_id != branch_id {
+                return Err(StorageError::IoError(format!(
+                    "branch scope snapshot key/row mismatch for {key}"
+                )));
+            }
+            snapshots.push(snapshot);
+        }
+        snapshots.sort_by_key(|snapshot| snapshot.branch_id);
+        Ok(snapshots)
+    }
+
     fn upsert_sealed_batch_submission(
         &mut self,
         submission: &SealedBatchSubmission,
@@ -1729,6 +1801,28 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn scan_local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, StorageError> {
         (**self).scan_local_batch_records()
+    }
+
+    fn upsert_branch_scope_snapshot(
+        &mut self,
+        snapshot: &BranchScopeSnapshot,
+    ) -> Result<(), StorageError> {
+        (**self).upsert_branch_scope_snapshot(snapshot)
+    }
+
+    fn load_branch_scope_snapshot(
+        &self,
+        branch_id: ObjectId,
+    ) -> Result<Option<BranchScopeSnapshot>, StorageError> {
+        (**self).load_branch_scope_snapshot(branch_id)
+    }
+
+    fn delete_branch_scope_snapshot(&mut self, branch_id: ObjectId) -> Result<(), StorageError> {
+        (**self).delete_branch_scope_snapshot(branch_id)
+    }
+
+    fn scan_branch_scope_snapshots(&self) -> Result<Vec<BranchScopeSnapshot>, StorageError> {
+        (**self).scan_branch_scope_snapshots()
     }
 
     fn upsert_sealed_batch_submission(
