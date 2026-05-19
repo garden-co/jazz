@@ -574,6 +574,7 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 }
             }
             rt.batched_tick();
+            rt.flush_wal();
         }
         MainToWorkerWire::PeerOpen { peer_id } => {
             if let Some(rt) = runtime.as_ref() {
