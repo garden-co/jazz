@@ -22,21 +22,43 @@
 export type TabToBrokerMessage =
   | { type: "claim-leader" }
   | { type: "release-leader" }
-  | { type: "request-leader" };
+  | { type: "request-leader" }
+  | { type: "leader-pong"; seq: number };
 
 export type BrokerToTabMessage =
   | { type: "leader-port" }
   | { type: "follower-port" }
   | { type: "no-leader" }
-  | { type: "leader-changed" };
+  | { type: "leader-changed" }
+  | { type: "leader-ping"; seq: number };
 
 const CLAIM_LEADER = "claim-leader" as const;
 const RELEASE_LEADER = "release-leader" as const;
 const REQUEST_LEADER = "request-leader" as const;
+const LEADER_PONG = "leader-pong" as const;
 const LEADER_PORT = "leader-port" as const;
 const FOLLOWER_PORT = "follower-port" as const;
 const NO_LEADER = "no-leader" as const;
 const LEADER_CHANGED = "leader-changed" as const;
+const LEADER_PING = "leader-ping" as const;
+
+/**
+ * Round-trip budget for the broker's leader-liveness probe.
+ *
+ * Chrome reuses a `SharedWorker` across page reloads of the same origin,
+ * which means a dev-server restart (or any reload that doesn't drain the
+ * worker) leaves the broker holding a `leaderPort` whose tab is gone. The
+ * usual `postMessage` does not throw synchronously on a port whose owning
+ * context has been torn down, so `safePost` is not sufficient to detect
+ * the stale leader. Before minting a follower channel we therefore ping
+ * the leader and require a pong within this window — otherwise we evict
+ * and let the next `claim-leader` (the new page that just won the Web
+ * Lock) take over.
+ *
+ * 250 ms is generous for an in-process round-trip and small enough that
+ * a legitimate follower handshake doesn't visibly stall on it.
+ */
+const LEADER_PROBE_TIMEOUT_MS = 250;
 
 export interface SharedWorkerBrokerGlobal {
   onconnect: ((event: { ports: MessagePortLike[] }) => void) | null;
@@ -73,7 +95,13 @@ export interface SharedWorkerBrokerOptions {
 function isTabToBrokerMessage(value: unknown): value is TabToBrokerMessage {
   if (typeof value !== "object" || value === null) return false;
   const type = (value as { type?: unknown }).type;
-  return type === CLAIM_LEADER || type === RELEASE_LEADER || type === REQUEST_LEADER;
+  if (type === CLAIM_LEADER || type === RELEASE_LEADER || type === REQUEST_LEADER) {
+    return true;
+  }
+  if (type === LEADER_PONG && typeof (value as { seq?: unknown }).seq === "number") {
+    return true;
+  }
+  return false;
 }
 
 export function installSharedWorkerBroker(
@@ -89,6 +117,11 @@ export function installSharedWorkerBroker(
 
   const allPorts = new Set<MessagePortLike>();
   let leaderPort: MessagePortLike | null = null;
+  let probeSeq = 0;
+  const pendingProbes = new Map<
+    number,
+    { resolve: (alive: boolean) => void; timer: ReturnType<typeof setTimeout> }
+  >();
 
   /**
    * Posting to a `MessagePort` whose owning context is gone throws (Chrome:
@@ -138,15 +171,8 @@ export function installSharedWorkerBroker(
     broadcastLeaderChanged(null);
   };
 
-  const handleRequest = (port: MessagePortLike): void => {
+  const mintAndDeliver = (port: MessagePortLike): void => {
     if (!leaderPort) {
-      safePost(port, { type: NO_LEADER });
-      return;
-    }
-    if (leaderPort === port) {
-      // Leader's own tab asking for a port to itself is a programming error
-      // upstream — leaders talk to their worker directly, not via the broker.
-      // Respond with `no-leader` rather than wiring a self-loop.
       safePost(port, { type: NO_LEADER });
       return;
     }
@@ -171,6 +197,69 @@ export function installSharedWorkerBroker(
     }
   };
 
+  const probeLeader = (target: MessagePortLike): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      const seq = ++probeSeq;
+      const timer = setTimeout(() => {
+        if (pendingProbes.delete(seq)) resolve(false);
+      }, LEADER_PROBE_TIMEOUT_MS);
+      pendingProbes.set(seq, { resolve, timer });
+      const posted = safePost(target, { type: LEADER_PING, seq });
+      if (!posted) {
+        clearTimeout(timer);
+        pendingProbes.delete(seq);
+        resolve(false);
+      }
+    });
+
+  const handlePong = (port: MessagePortLike, seq: number): void => {
+    // Only pongs from the current leader count; stragglers from a port
+    // we've already evicted must not revive it.
+    if (leaderPort !== port) return;
+    const pending = pendingProbes.get(seq);
+    if (!pending) return;
+    pendingProbes.delete(seq);
+    clearTimeout(pending.timer);
+    pending.resolve(true);
+  };
+
+  const handleRequest = (port: MessagePortLike): void => {
+    const probeTarget = leaderPort;
+    if (!probeTarget) {
+      safePost(port, { type: NO_LEADER });
+      return;
+    }
+    if (probeTarget === port) {
+      // Leader's own tab asking for a port to itself is a programming error
+      // upstream — leaders talk to their worker directly, not via the broker.
+      // Respond with `no-leader` rather than wiring a self-loop.
+      safePost(port, { type: NO_LEADER });
+      return;
+    }
+    // Probe leader liveness before minting. A SharedWorker that survived
+    // a dev-server restart can hold a `leaderPort` whose owning tab is
+    // gone; `safePost` would still return true (no synchronous throw),
+    // and the new follower would attach to a `MessageChannel` whose other
+    // end nobody reads. Evict instead.
+    void probeLeader(probeTarget).then((alive) => {
+      if (leaderPort !== probeTarget) {
+        // Leadership transitioned during the probe (e.g. release-leader,
+        // or a fresh claim). Re-run against the current state — either we
+        // mint against the new leader or fall through to no-leader.
+        handleRequest(port);
+        return;
+      }
+      if (!alive) {
+        leaderPort = null;
+        dropPort(probeTarget);
+        broadcastLeaderChanged(null);
+        safePost(port, { type: NO_LEADER });
+        return;
+      }
+      mintAndDeliver(port);
+    });
+  };
+
   const adoptPort = (port: MessagePortLike): void => {
     allPorts.add(port);
     port.addEventListener("message", (event) => {
@@ -185,6 +274,9 @@ export function installSharedWorkerBroker(
           return;
         case REQUEST_LEADER:
           handleRequest(port);
+          return;
+        case LEADER_PONG:
+          handlePong(port, data.seq);
           return;
       }
     });

@@ -346,4 +346,33 @@ describe("createTabSupervisor", () => {
     expect(sup.state.role).toBe("none");
     expect(sup.state.endpoint).toBeNull();
   });
+
+  it("responds to broker leader-ping with a matching leader-pong while it holds the lock", async () => {
+    const { brokerPort, locks, boot } = brokerHandshake();
+    boot();
+    await locks.grant();
+
+    const postedBefore = brokerPort.posted.length;
+    brokerPort.emit({ type: "leader-ping", seq: 42 });
+
+    const pong = brokerPort.posted
+      .slice(postedBefore)
+      .find((e) => (e.message as { type?: unknown }).type === "leader-pong");
+    expect(pong).toBeDefined();
+    expect((pong!.message as { seq?: unknown }).seq).toBe(42);
+  });
+
+  it("does not respond to leader-ping before the lock has been granted", () => {
+    const { brokerPort, boot } = brokerHandshake();
+    boot();
+    // Lock not yet granted — `leaderClaimed` is false and the supervisor
+    // must not impersonate an unclaimed leadership. If it pongs here, a
+    // stale broker would incorrectly believe a fresh leader exists.
+    const postedBefore = brokerPort.posted.length;
+    brokerPort.emit({ type: "leader-ping", seq: 1 });
+    const newPosts = brokerPort.posted.slice(postedBefore);
+    expect(newPosts.some((e) => (e.message as { type?: unknown }).type === "leader-pong")).toBe(
+      false,
+    );
+  });
 });

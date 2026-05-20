@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   installSharedWorkerBroker,
@@ -15,9 +15,34 @@ class FakeMessagePort implements MessagePortLike {
   readonly messageErrorListeners = new Set<Listener>();
   startCount = 0;
   closed = false;
+  /**
+   * When true, the port auto-replies to broker `leader-ping` posts with a
+   * matching `leader-pong`. Tests that simulate a *live* leader (the
+   * common case) set this so the broker's probe resolves before the
+   * follower-port handoff. Leaving it false simulates a *stale* leader
+   * (e.g. a SharedWorker that survived a dev-server restart whose tab is
+   * gone) — those tests want the probe to time out and the broker to
+   * evict.
+   */
+  autoPongOnLeaderPing = false;
 
   postMessage(message: unknown, transfer?: Transferable[]): void {
     this.posted.push({ message, transfer });
+    if (
+      this.autoPongOnLeaderPing &&
+      typeof message === "object" &&
+      message !== null &&
+      (message as { type?: unknown }).type === "leader-ping"
+    ) {
+      const seq = (message as { seq?: unknown }).seq;
+      if (typeof seq === "number") {
+        // Synchronous emit lets the broker observe the pong before the
+        // probe-timeout fires. The probe's `.then` continuation still
+        // settles via a microtask, so callers need a `await
+        // Promise.resolve()` before asserting the resulting channel.
+        this.emit({ type: "leader-pong", seq });
+      }
+    }
   }
 
   addEventListener(type: "message" | "messageerror", listener: Listener): void {
@@ -109,15 +134,17 @@ describe("SharedWorker broker", () => {
     expect(follower.posted[0]!.transfer).toBeUndefined();
   });
 
-  it("hands a fresh MessageChannel out on follower request once a leader has claimed", () => {
+  it("hands a fresh MessageChannel out on follower request once a leader has claimed", async () => {
     const { globalScope, channels } = setup();
     const leader = new FakeMessagePort();
+    leader.autoPongOnLeaderPing = true;
     const follower = new FakeMessagePort();
     globalScope.connect(leader);
     globalScope.connect(follower);
 
     leader.emit({ type: "claim-leader" });
     follower.emit({ type: "request-leader" });
+    await Promise.resolve();
 
     expect(channels).toHaveLength(1);
     const channel = channels[0]!;
@@ -189,10 +216,11 @@ describe("SharedWorker broker", () => {
     expect(b.posted.length).toBe(bPostedBeforeOwnClaim);
   });
 
-  it("routes follower-request to whichever port last claimed", () => {
+  it("routes follower-request to whichever port last claimed", async () => {
     const { globalScope, channels } = setup();
     const a = new FakeMessagePort();
     const b = new FakeMessagePort();
+    b.autoPongOnLeaderPing = true;
     const follower = new FakeMessagePort();
     globalScope.connect(a);
     globalScope.connect(b);
@@ -202,6 +230,7 @@ describe("SharedWorker broker", () => {
     b.emit({ type: "claim-leader" });
 
     follower.emit({ type: "request-leader" });
+    await Promise.resolve();
 
     expect(channels).toHaveLength(1);
     const followerToLeader = follower.posted.find(
@@ -217,15 +246,17 @@ describe("SharedWorker broker", () => {
     ).toBe(false);
   });
 
-  it("clears the leader on release and broadcasts leader-changed to everyone", () => {
+  it("clears the leader on release and broadcasts leader-changed to everyone", async () => {
     const { globalScope } = setup();
     const leader = new FakeMessagePort();
+    leader.autoPongOnLeaderPing = true;
     const follower = new FakeMessagePort();
     globalScope.connect(leader);
     globalScope.connect(follower);
 
     leader.emit({ type: "claim-leader" });
     follower.emit({ type: "request-leader" });
+    await Promise.resolve();
     expect(follower.messageTypes()).toContain("leader-port");
 
     leader.emit({ type: "release-leader" });
@@ -266,6 +297,102 @@ describe("SharedWorker broker", () => {
 
     expect(channels).toHaveLength(0);
     expect(leader.messageTypes()).toEqual(["no-leader"]);
+  });
+
+  it("probes the leader before minting and posts leader-port only after a pong", async () => {
+    const { globalScope, channels } = setup();
+    const leader = new FakeMessagePort();
+    leader.autoPongOnLeaderPing = true;
+    const follower = new FakeMessagePort();
+    globalScope.connect(leader);
+    globalScope.connect(follower);
+
+    leader.emit({ type: "claim-leader" });
+    follower.emit({ type: "request-leader" });
+
+    // Synchronously the broker has posted the ping but not yet the channel.
+    expect(leader.messageTypes()).toContain("leader-ping");
+    expect(channels).toHaveLength(0);
+    expect(follower.messageTypes().filter((t) => t === "leader-port")).toEqual([]);
+
+    // After the pong settles via microtask, the channel is minted.
+    await Promise.resolve();
+    expect(channels).toHaveLength(1);
+    expect(follower.messageTypes()).toContain("leader-port");
+  });
+
+  it("evicts a stale leader whose port never pongs and replies no-leader", async () => {
+    vi.useFakeTimers();
+    try {
+      const { globalScope, channels } = setup();
+      // Stale leader: claimed before but is no longer alive (e.g. a
+      // SharedWorker that survived a dev-server restart while the
+      // previous leader tab is gone). autoPongOnLeaderPing stays false.
+      const stale = new FakeMessagePort();
+      const observer = new FakeMessagePort();
+      const follower = new FakeMessagePort();
+      globalScope.connect(stale);
+      globalScope.connect(observer);
+      globalScope.connect(follower);
+
+      stale.emit({ type: "claim-leader" });
+      // observer already saw the original leader-changed; clear so we can
+      // assert the eviction broadcast cleanly.
+      observer.posted.length = 0;
+
+      follower.emit({ type: "request-leader" });
+      // Probe fires synchronously but the timeout drives the eviction.
+      expect(stale.messageTypes()).toContain("leader-ping");
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(channels).toHaveLength(0);
+      expect(follower.messageTypes()).toContain("no-leader");
+      expect(observer.messageTypes()).toContain("leader-changed");
+
+      // A fresh claim can now succeed; the next follower request mints.
+      const fresh = new FakeMessagePort();
+      fresh.autoPongOnLeaderPing = true;
+      globalScope.connect(fresh);
+      fresh.emit({ type: "claim-leader" });
+      follower.posted.length = 0;
+      follower.emit({ type: "request-leader" });
+      await Promise.resolve();
+      expect(follower.messageTypes()).toContain("leader-port");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores a leader-pong from a port that is no longer the current leader", async () => {
+    vi.useFakeTimers();
+    try {
+      const { globalScope, channels } = setup();
+      const stale = new FakeMessagePort(); // does NOT auto-pong
+      const follower = new FakeMessagePort();
+      globalScope.connect(stale);
+      globalScope.connect(follower);
+
+      stale.emit({ type: "claim-leader" });
+      follower.emit({ type: "request-leader" });
+      const ping = stale.posted.find(
+        (e) => (e.message as { type?: unknown }).type === "leader-ping",
+      )!;
+      const seq = (ping.message as { seq: number }).seq;
+
+      // Simulate the stale tab being evicted (release-leader fired by
+      // some teardown path) before its tardy pong shows up.
+      stale.emit({ type: "release-leader" });
+      stale.emit({ type: "leader-pong", seq });
+
+      // The stale pong must not revive the evicted port; probe still
+      // resolves false at the timeout boundary and follower gets
+      // no-leader.
+      await vi.advanceTimersByTimeAsync(300);
+      expect(channels).toHaveLength(0);
+      expect(follower.messageTypes()).toContain("no-leader");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ignores non-protocol messages", () => {

@@ -121,6 +121,8 @@ type Listener = (state: TabSupervisorState) => void;
 const CLAIM_LEADER = "claim-leader" as const;
 const RELEASE_LEADER = "release-leader" as const;
 const REQUEST_LEADER = "request-leader" as const;
+const LEADER_PONG = "leader-pong" as const;
+const LEADER_PING = "leader-ping" as const;
 const LEADER_PORT = "leader-port" as const;
 const FOLLOWER_PORT = "follower-port" as const;
 const NO_LEADER = "no-leader" as const;
@@ -194,6 +196,18 @@ export function createTabSupervisor(options: TabSupervisorOptions): TabSuperviso
         ownWorker.postMessage({ type: ATTACH_TAB_PORT } satisfies AttachTabPortMessage, [
           port as Transferable,
         ]);
+        return;
+      }
+      case LEADER_PING: {
+        // The broker is probing leader liveness before minting a follower
+        // channel. Ack synchronously while we still hold the Web Lock —
+        // staying silent here would let the broker evict us, even though
+        // we are healthy and own the dedicated worker. Pong before the
+        // probe window (broker default: 250ms) elapses.
+        const seq = (data as { seq?: unknown }).seq;
+        if (typeof seq !== "number") return;
+        if (!leaderClaimed) return;
+        options.brokerPort.postMessage({ type: LEADER_PONG, seq });
         return;
       }
     }
