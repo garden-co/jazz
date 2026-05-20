@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::{cmp::Ordering, ops::Bound};
 
-use crate::object::BranchName;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode,
     Schema, SchemaHash, TableName, TupleDescriptor, Value,
@@ -35,6 +35,7 @@ use super::super::query::{ArraySubquerySpec, Condition, Conjunction, Query, Quer
 use super::super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::super::session::Session;
+use uuid::Uuid;
 
 use super::{CompactNode, GraphNode, QueryCompileError, QueryGraph, RelationCompileFeatures};
 
@@ -2124,7 +2125,7 @@ fn index_scan_plan(
             .iter()
             .any(|plan: &ColumnScanPlan| plan.column == condition.column())
         {
-            column_plans.push(column_scan_plan(disjunct, condition.column()));
+            column_plans.push(column_scan_plan(disjunct, table_schema, condition.column()));
         }
     }
 
@@ -2163,17 +2164,22 @@ fn index_scan_plan(
     }
 }
 
-fn column_scan_plan(disjunct: &Conjunction, column: &str) -> ColumnScanPlan {
+fn column_scan_plan(
+    disjunct: &Conjunction,
+    table_schema: &crate::query_manager::types::TableSchema,
+    column: &str,
+) -> ColumnScanPlan {
     let mut intersection = ScanIntersection::default();
     let mut first_scan = None;
+    let column_type = column_type_for_scan(table_schema, column);
 
     for condition in disjunct
         .conditions
         .iter()
         .filter(|c| c.column() == column && c.is_index_scannable())
     {
-        first_scan.get_or_insert_with(|| condition_to_scan(condition));
-        if !intersection.add(condition) {
+        first_scan.get_or_insert_with(|| condition_to_scan(condition, column_type));
+        if !intersection.add(condition, column_type) {
             return ColumnScanPlan {
                 column: column.to_string(),
                 condition: first_scan.unwrap_or(ScanCondition::All),
@@ -2197,27 +2203,62 @@ fn column_scan_plan(disjunct: &Conjunction, column: &str) -> ColumnScanPlan {
 }
 
 impl ScanIntersection {
-    fn add(&mut self, condition: &Condition) -> bool {
+    fn add(&mut self, condition: &Condition, column_type: Option<&ColumnType>) -> bool {
         match condition {
             Condition::Eq { value, .. } => {
-                if self.eq.as_ref().is_some_and(|existing| existing != value) {
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
+                if self.eq.as_ref().is_some_and(|existing| existing != &value) {
                     self.empty = true;
                 } else {
-                    self.eq = Some(value.clone());
+                    self.eq = Some(value);
                 }
                 true
             }
-            Condition::Lt { value, .. } => self.tighten_upper(Bound::Excluded(value.clone())),
-            Condition::Le { value, .. } => self.tighten_upper(Bound::Included(value.clone())),
-            Condition::Gt { value, .. } => self.tighten_lower(Bound::Excluded(value.clone())),
-            Condition::Ge { value, .. } => self.tighten_lower(Bound::Included(value.clone())),
+            Condition::Lt { value, .. } => {
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_upper(Bound::Excluded(value))
+            }
+            Condition::Le { value, .. } => {
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_upper(Bound::Included(value))
+            }
+            Condition::Gt { value, .. } => {
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_lower(Bound::Excluded(value))
+            }
+            Condition::Ge { value, .. } => {
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_lower(Bound::Included(value))
+            }
             Condition::Between {
                 min: lower,
                 max: upper,
                 ..
             } => {
-                self.tighten_lower(Bound::Included(lower.clone()))
-                    && self.tighten_upper(Bound::Included(upper.clone()))
+                let (Some(lower), Some(upper)) = (
+                    normalize_scan_value(lower, column_type),
+                    normalize_scan_value(upper, column_type),
+                ) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_lower(Bound::Included(lower))
+                    && self.tighten_upper(Bound::Included(upper))
             }
             _ => true,
         }
@@ -2386,29 +2427,120 @@ fn apply_condition_to_builder(mut builder: QueryBuilder, condition: &Condition) 
 }
 
 /// Convert a condition to a scan condition.
-fn condition_to_scan(cond: &Condition) -> ScanCondition {
+fn column_type_for_scan<'a>(
+    table_schema: &'a crate::query_manager::types::TableSchema,
+    column: &str,
+) -> Option<&'a ColumnType> {
+    if column == "_id" || column == "id" {
+        return Some(&ColumnType::Uuid);
+    }
+    table_schema
+        .columns
+        .columns
+        .iter()
+        .find(|descriptor| descriptor.name == column)
+        .map(|descriptor| &descriptor.column_type)
+}
+
+fn normalize_scan_value(value: &Value, column_type: Option<&ColumnType>) -> Option<Value> {
+    match (value, column_type) {
+        (Value::Text(raw), Some(ColumnType::Uuid)) => Uuid::parse_str(raw)
+            .map(|uuid| Value::Uuid(ObjectId::from_uuid(uuid)))
+            .ok(),
+        _ => Some(value.clone()),
+    }
+}
+
+fn condition_to_scan(cond: &Condition, column_type: Option<&ColumnType>) -> ScanCondition {
     match cond {
-        Condition::Eq { value, .. } => ScanCondition::Eq(value.clone()),
+        Condition::Eq { value, .. } => normalize_scan_value(value, column_type)
+            .map(ScanCondition::Eq)
+            .unwrap_or(ScanCondition::Empty),
         Condition::Lt { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
-            max: Bound::Excluded(value.clone()),
+            max: match normalize_scan_value(value, column_type) {
+                Some(value) => Bound::Excluded(value),
+                None => return ScanCondition::Empty,
+            },
         },
         Condition::Le { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
-            max: Bound::Included(value.clone()),
+            max: match normalize_scan_value(value, column_type) {
+                Some(value) => Bound::Included(value),
+                None => return ScanCondition::Empty,
+            },
         },
         Condition::Gt { value, .. } => ScanCondition::Range {
-            min: Bound::Excluded(value.clone()),
+            min: match normalize_scan_value(value, column_type) {
+                Some(value) => Bound::Excluded(value),
+                None => return ScanCondition::Empty,
+            },
             max: Bound::Unbounded,
         },
         Condition::Ge { value, .. } => ScanCondition::Range {
-            min: Bound::Included(value.clone()),
+            min: match normalize_scan_value(value, column_type) {
+                Some(value) => Bound::Included(value),
+                None => return ScanCondition::Empty,
+            },
             max: Bound::Unbounded,
         },
-        Condition::Between { min, max, .. } => ScanCondition::Range {
-            min: Bound::Included(min.clone()),
-            max: Bound::Included(max.clone()),
-        },
+        Condition::Between { min, max, .. } => {
+            let (Some(min), Some(max)) = (
+                normalize_scan_value(min, column_type),
+                normalize_scan_value(max, column_type),
+            ) else {
+                return ScanCondition::Empty;
+            };
+            ScanCondition::Range {
+                min: Bound::Included(min),
+                max: Bound::Included(max),
+            }
+        }
         _ => ScanCondition::All,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uuid_owner_schema() -> crate::query_manager::types::TableSchema {
+        crate::query_manager::types::TableSchema::builder("documents")
+            .fk_column("owner_id", "users")
+            .build()
+    }
+
+    #[test]
+    fn text_uuid_owner_column_scan_plan_matches_uuid_index() {
+        let alice_uuid = Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+        let alice = ObjectId::from_uuid(alice_uuid);
+        let disjunct = Conjunction {
+            conditions: vec![Condition::Eq {
+                column: "owner_id".to_string(),
+                value: Value::Text(alice_uuid.to_string()),
+            }],
+        };
+
+        let plan = index_scan_plan(&disjunct, &uuid_owner_schema());
+
+        assert_eq!(plan.column, "owner_id");
+        assert_eq!(plan.condition, ScanCondition::Eq(Value::Uuid(alice)));
+        assert!(plan.fully_covers);
+    }
+
+    #[test]
+    fn invalid_text_uuid_owner_column_scan_plan_is_empty() {
+        let disjunct = Conjunction {
+            conditions: vec![Condition::Eq {
+                column: "owner_id".to_string(),
+                value: Value::Text("not-a-uuid".to_string()),
+            }],
+        };
+
+        let plan = index_scan_plan(&disjunct, &uuid_owner_schema());
+
+        assert_eq!(plan.column, "owner_id");
+        assert_eq!(plan.condition, ScanCondition::Empty);
+        assert!(plan.fully_covers);
     }
 }
