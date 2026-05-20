@@ -42,9 +42,16 @@ import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 import {
   LeaderMigratedError,
   WorkerBridge,
+  type WorkerBridgeDebugSink,
   type WorkerBridgeEndpoint,
   type WorkerBridgeOptions,
 } from "./worker-bridge.js";
+import {
+  emptyJazzDebugCounters,
+  jazzDebugEnabled,
+  jazzDebugLog,
+  type JazzDebugCounters,
+} from "./forwarder-debug.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -776,6 +783,51 @@ export class Db {
    * those decisions stable across handoffs.
    */
   private usesSharedWorker = false;
+  /**
+   * Opt-in diagnostic counters. Always allocated (one POJO per Db) but
+   * only mutated when `globalThis.__JAZZ_DEBUG_FORWARDER__ === true`.
+   * See {@link forwarder-debug} for the use case (subscription deltas
+   * silently dropping after a bridge re-attach).
+   */
+  private readonly jazzDebugCounters: JazzDebugCounters = emptyJazzDebugCounters();
+  private readonly jazzDebugSink: WorkerBridgeDebugSink = {
+    onBridgeCreated: (id) => {
+      this.jazzDebugCounters.bridgesCreated++;
+      jazzDebugLog("WorkerBridge created", { instanceId: id, appId: this.config.appId });
+    },
+    onInitStarted: (id) => {
+      this.jazzDebugCounters.bridgeInitsStarted++;
+      jazzDebugLog("WorkerBridge init started", { instanceId: id });
+    },
+    onInitResolved: (id, clientId) => {
+      this.jazzDebugCounters.bridgeInitsResolved++;
+      jazzDebugLog("WorkerBridge init resolved", { instanceId: id, clientId });
+    },
+    onInitRejected: (id, error) => {
+      this.jazzDebugCounters.bridgeInitsRejected++;
+      jazzDebugLog("WorkerBridge init rejected", { instanceId: id, error });
+    },
+    onShutdown: (id) => {
+      this.jazzDebugCounters.bridgesShutdown++;
+      jazzDebugLog("WorkerBridge shutdown", { instanceId: id });
+    },
+    onMigrated: (id) => {
+      this.jazzDebugCounters.bridgesMigrated++;
+      jazzDebugLog("WorkerBridge migrated", { instanceId: id });
+    },
+    onForwarderSetPending: (id) => {
+      this.jazzDebugCounters.forwardersSetPending++;
+      jazzDebugLog("WorkerBridge setServerPayloadForwarder(non-null)", { instanceId: id });
+    },
+    onForwarderSetCleared: (id) => {
+      this.jazzDebugCounters.forwardersSetCleared++;
+      jazzDebugLog("WorkerBridge setServerPayloadForwarder(null)", { instanceId: id });
+    },
+    onForwarderInstalled: (id) => {
+      this.jazzDebugCounters.forwardersInstalled++;
+      jazzDebugLog("WorkerBridge installForwarderInternal", { instanceId: id });
+    },
+  };
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -1056,6 +1108,14 @@ export class Db {
   private onSupervisorStateChange(state: TabSupervisorState): void {
     const nextEndpoint = state.endpoint;
     if (nextEndpoint === this.workerEndpoint) return;
+    this.jazzDebugCounters.dbSupervisorStateChanges++;
+    jazzDebugLog("Db.onSupervisorStateChange", {
+      appId: this.config.appId,
+      role: state.role,
+      hadEndpoint: this.workerEndpoint !== null,
+      hasEndpoint: nextEndpoint !== null,
+      changeCount: this.jazzDebugCounters.dbSupervisorStateChanges,
+    });
     if (this.workerBridge) {
       const stale = this.workerBridge;
       this.workerBridge = null;
@@ -1297,7 +1357,15 @@ export class Db {
       throw new Error("Cannot attach worker bridge without an active worker");
     }
 
+    this.jazzDebugCounters.dbAttachWorkerBridge++;
+    jazzDebugLog("Db.attachWorkerBridge", {
+      appId: this.config.appId,
+      attachCount: this.jazzDebugCounters.dbAttachWorkerBridge,
+      forwardersInstalledSoFar: this.jazzDebugCounters.forwardersInstalled,
+    });
+
     const bridge = new WorkerBridge(this.workerEndpoint, client.getRuntime());
+    bridge.setDebugSink(this.jazzDebugSink);
     bridge.onAuthFailure((reason) => {
       this.markUnauthenticated(reason);
     });
@@ -2260,7 +2328,23 @@ export class Db {
             transformOutputRow(outputTable === builtQuery.table ? query : {}, row)
         : undefined;
 
+    const debugTable = builtQuery.table;
+    this.jazzDebugCounters.dbSubscriptionsCreated++;
+    jazzDebugLog("Db.subscribeAll registered", {
+      appId: this.config.appId,
+      table: debugTable,
+      subscriptionCount: this.jazzDebugCounters.dbSubscriptionsCreated,
+    });
+
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
+      this.jazzDebugCounters.dbSubscriptionDeltasObserved++;
+      if (jazzDebugEnabled()) {
+        jazzDebugLog("Db.subscribeAll delta", {
+          appId: this.config.appId,
+          table: debugTable,
+          deltasObserved: this.jazzDebugCounters.dbSubscriptionDeltasObserved,
+        });
+      }
       const typedDelta = manager.handleDelta(
         delta,
         transform,
@@ -2294,6 +2378,24 @@ export class Db {
       client.unsubscribe(subId);
       manager.clear();
     };
+  }
+
+  /**
+   * Snapshot of the opt-in diagnostic counters for this Db. Always
+   * available; populated only when `globalThis.__JAZZ_DEBUG_FORWARDER__`
+   * is true at the moment an event fires.
+   *
+   * Useful for diagnosing the "writes are durable but subscriptions
+   * silently stop firing" failure mode: after a reproduction, compare
+   * `dbAttachWorkerBridge` (how many times a bridge attached) against
+   * `forwardersInstalled` (how many times the server-payload forwarder
+   * was installed against a bridge). If attach > install, the
+   * post-migration bridge has no path to echo deltas back to the
+   * main-thread cache, and the subscription will appear stuck even
+   * though the Inspector still sees data in the worker.
+   */
+  jazzDebugDump(): JazzDebugCounters {
+    return { ...this.jazzDebugCounters };
   }
 
   /**

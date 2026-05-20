@@ -102,6 +102,25 @@ export class LeaderMigratedError extends Error {
   }
 }
 
+let workerBridgeInstanceCounter = 0;
+
+/**
+ * Optional sink for diagnostic events. Attached by `Db` so the per-Db
+ * counter aggregate gets incremented across bridge re-attaches; absent
+ * for tests that construct a `WorkerBridge` directly.
+ */
+export interface WorkerBridgeDebugSink {
+  onBridgeCreated(instanceId: number): void;
+  onInitStarted(instanceId: number): void;
+  onInitResolved(instanceId: number, clientId: string): void;
+  onInitRejected(instanceId: number, error: unknown): void;
+  onShutdown(instanceId: number): void;
+  onMigrated(instanceId: number): void;
+  onForwarderSetPending(instanceId: number): void;
+  onForwarderSetCleared(instanceId: number): void;
+  onForwarderInstalled(instanceId: number): void;
+}
+
 export class WorkerBridge {
   private readonly endpoint: WorkerBridgeEndpoint;
   private readonly runtime: Runtime;
@@ -112,6 +131,8 @@ export class WorkerBridge {
   private workerClientId: string | null = null;
   private disposed = false;
   private migrated = false;
+  private readonly instanceId: number;
+  private debugSink: WorkerBridgeDebugSink | null = null;
   /**
    * In-flight waiters that should reject with `LeaderMigratedError` when the
    * bridge is marked migrated. Each entry is the per-call rejector. The Rust
@@ -125,6 +146,13 @@ export class WorkerBridge {
   constructor(endpoint: WorkerBridgeEndpoint, runtime: Runtime) {
     this.endpoint = endpoint;
     this.runtime = runtime;
+    this.instanceId = ++workerBridgeInstanceCounter;
+  }
+
+  /** @internal Used by `Db` to attach per-Db diagnostic counters. */
+  setDebugSink(sink: WorkerBridgeDebugSink | null): void {
+    this.debugSink = sink;
+    if (sink) sink.onBridgeCreated(this.instanceId);
   }
 
   init(options: WorkerBridgeOptions): Promise<string> {
@@ -133,6 +161,7 @@ export class WorkerBridge {
       this.clientIdPromise = Promise.reject(new Error("WorkerBridge has been disposed"));
       return this.clientIdPromise;
     }
+    this.debugSink?.onInitStarted(this.instanceId);
 
     const create = (this.runtime as RuntimeWithWorkerBridge).createWorkerBridge;
     if (typeof create !== "function") {
@@ -160,9 +189,11 @@ export class WorkerBridge {
       .init()
       .then((result) => {
         this.workerClientId = result.clientId;
+        this.debugSink?.onInitResolved(this.instanceId, result.clientId);
         return result.clientId;
       })
       .catch((error: unknown) => {
+        this.debugSink?.onInitRejected(this.instanceId, error);
         if (error instanceof Error) throw error;
         if (typeof error === "string") throw new Error(error);
         throw new Error(String(error));
@@ -181,6 +212,7 @@ export class WorkerBridge {
   async shutdown(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.debugSink?.onShutdown(this.instanceId);
     this.rejectPendingWaiters();
     if (this.bridge) {
       try {
@@ -201,6 +233,7 @@ export class WorkerBridge {
   notifyMigrated(): void {
     if (this.migrated) return;
     this.migrated = true;
+    this.debugSink?.onMigrated(this.instanceId);
     this.rejectPendingWaiters();
   }
 
@@ -245,12 +278,15 @@ export class WorkerBridge {
 
   setServerPayloadForwarder(forwarder: ServerPayloadForwarder | null): void {
     this.pendingForwarder = forwarder;
+    if (forwarder) this.debugSink?.onForwarderSetPending(this.instanceId);
+    else this.debugSink?.onForwarderSetCleared(this.instanceId);
     if (!this.bridge) return;
     if (forwarder) this.installForwarderInternal(forwarder);
     else this.bridge.setServerPayloadForwarder(null);
   }
 
   private installForwarderInternal(forwarder: ServerPayloadForwarder): void {
+    this.debugSink?.onForwarderInstalled(this.instanceId);
     // Server-bound payloads are always binary postcard; the Rust outbox sender
     // calls the forwarder with a single `Uint8Array`.
     this.bridge?.setServerPayloadForwarder((payload) => {
