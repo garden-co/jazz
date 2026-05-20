@@ -90,7 +90,6 @@ pub struct TransportHandle {
     /// catalogue-state digest so the server can emit schema diagnostics
     /// against a real schema hash.
     pub(crate) declared_schema_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) can_publish_catalogue: bool,
 }
 
 impl TransportHandle {
@@ -134,9 +133,6 @@ impl TransportHandle {
         let _ = self.outbox_tx.unbounded_send(entry);
     }
 
-    pub(crate) fn can_publish_catalogue(&self) -> bool {
-        self.can_publish_catalogue
-    }
     pub fn has_ever_connected(&self) -> bool {
         self.ever_connected
             .load(std::sync::atomic::Ordering::Acquire)
@@ -195,12 +191,6 @@ pub struct AuthConfig {
     pub peer_secret: Option<String>,
     #[serde(default, with = "auth_backend_session_serde")]
     pub backend_session: Option<serde_json::Value>,
-}
-
-impl AuthConfig {
-    pub fn can_publish_catalogue(&self) -> bool {
-        self.admin_secret.is_some() || self.peer_secret.is_some()
-    }
 }
 
 mod auth_backend_session_serde {
@@ -484,7 +474,6 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         control_tx,
         catalogue_state_hash: catalogue_state_hash.clone(),
         declared_schema_hash: declared_schema_hash.clone(),
-        can_publish_catalogue: auth.can_publish_catalogue(),
     };
     let manager = TransportManager {
         server_id,
@@ -541,6 +530,11 @@ pub(crate) enum HandshakeResult {
 
 /// Handshake helpers shared between the Tokio and WASM run loops.
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
+    #[cfg(all(test, feature = "transport-websocket"))]
+    pub(crate) fn try_recv_outbox_for_test(&mut self) -> Option<OutboxEntry> {
+        self.outbox_rx.try_recv().ok()
+    }
+
     fn trace_outbound_payload(&self, payload: &SyncPayload) {
         match payload {
             crate::sync_manager::types::SyncPayload::QuerySubscription {

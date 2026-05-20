@@ -521,10 +521,33 @@ impl SyncManager {
         self.remote_query_scope_dirty.extend(removed_query_ids);
     }
 
+    /// Add a client connection without automatically replaying catalogue state.
+    pub fn add_client(&mut self, client_id: ClientId) {
+        self.clients.insert(client_id, ClientState::default());
+    }
+
     /// Add a client connection using storage-backed catalogue replay.
     pub fn add_client_with_storage<H: Storage>(&mut self, storage: &H, client_id: ClientId) {
-        self.clients.insert(client_id, ClientState::default());
+        self.add_client(client_id);
         self.queue_catalogue_sync_to_client_from_storage(client_id, storage);
+    }
+
+    /// Replay catalogue entries to a client when its digest is missing or stale.
+    ///
+    /// Returns true when a replay was queued.
+    pub fn queue_catalogue_sync_to_client_if_hash_mismatch<H: Storage>(
+        &mut self,
+        storage: &H,
+        client_id: ClientId,
+        remote_catalogue_state_hash: Option<&str>,
+        local_catalogue_state_hash: &str,
+    ) -> bool {
+        if remote_catalogue_state_hash == Some(local_catalogue_state_hash) {
+            return false;
+        }
+
+        self.queue_catalogue_sync_to_client_from_storage(client_id, storage);
+        true
     }
 
     /// Remove a client connection and all associated state.
