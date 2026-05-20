@@ -436,6 +436,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             let has_more_work = {
                 let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
                 if core.has_storage_write_pending_flush()
+                    && core.has_storage_flush_retry_scheduled()
                     && core.has_storage_flush_error()
                     && let Some(error) = core.take_storage_flush_error()
                 {
@@ -1023,6 +1024,34 @@ mod tests {
             .flush()
             .await
             .expect("explicit runtime flush should retry transient WAL flush failure");
+    }
+
+    #[tokio::test]
+    async fn flush_retries_stored_wal_error_before_returning_failure() {
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-stored-wal-flush-error");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
+
+        {
+            let mut core = runtime.core.lock().expect("lock runtime core");
+            core.mark_storage_write_pending_flush();
+            core.record_storage_flush_error(StorageError::IoError(
+                "previous transient WAL flush failure".to_string(),
+            ));
+        }
+
+        runtime
+            .flush()
+            .await
+            .expect("explicit runtime flush should retry the pending WAL barrier");
+
+        let flush_wal_calls = runtime
+            .with_storage(|storage| storage.flush_wal_call_count())
+            .expect("inspect storage calls");
+        assert_eq!(flush_wal_calls, 1);
     }
 
     #[tokio::test]

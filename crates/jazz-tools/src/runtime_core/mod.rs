@@ -598,6 +598,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.storage_flush_error.is_some()
     }
 
+    pub(crate) fn has_storage_flush_retry_scheduled(&self) -> bool {
+        self.storage_flush_retry_scheduled
+    }
+
     pub(crate) fn clear_storage_write_pending_flush(&mut self) {
         self.storage_write_pending_flush = false;
         self.storage_flush_retry_scheduled = false;
