@@ -489,6 +489,9 @@ impl RnRuntime {
                 })?;
                 core.scheduler_mut().clear_scheduled();
                 core.batched_tick();
+                if let Some(error) = core.take_storage_flush_error() {
+                    return Err(runtime_err(format!("storage WAL flush failed: {error}")));
+                }
             }
             Ok(())
         })
@@ -1028,10 +1031,10 @@ impl RnRuntime {
 
     pub fn flush(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("flush", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.flush_storage();
+            core.flush_storage().map_err(runtime_err)?;
             Ok(())
         })
     }
@@ -1093,12 +1096,16 @@ impl RnRuntime {
     /// Flush and close the underlying storage, releasing filesystem locks.
     pub fn close(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("close", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.flush_storage();
-            core.storage().close().map_err(runtime_err)?;
-            Ok(())
+            let flush_result = core.flush_storage();
+            let flush_wal_result = core.flush_wal();
+            let close_result = core.storage().close();
+
+            flush_result.map_err(runtime_err)?;
+            flush_wal_result.map_err(runtime_err)?;
+            close_result.map_err(runtime_err)
         })
     }
 

@@ -435,8 +435,19 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             // Synchronous tick and check if more work was generated
             let has_more_work = {
                 let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+                if core.has_storage_write_pending_flush()
+                    && core.has_storage_flush_retry_scheduled()
+                    && core.has_storage_flush_error()
+                    && let Some(error) = core.take_storage_flush_error()
+                {
+                    return Err(RuntimeError::WriteError(format!(
+                        "storage WAL flush failed: {error}"
+                    )));
+                }
                 core.batched_tick();
-                core.has_outbound() || core.scheduler().is_scheduled()
+                core.has_outbound()
+                    || core.scheduler().is_scheduled()
+                    || core.has_storage_write_pending_flush()
             };
 
             if !has_more_work {
@@ -447,6 +458,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             if attempts > 200 {
                 break;
             }
+        }
+
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        if let Some(error) = core.take_storage_flush_error() {
+            return Err(RuntimeError::WriteError(format!(
+                "storage WAL flush failed: {error}"
+            )));
+        }
+        if core.has_storage_write_pending_flush() {
+            return Err(RuntimeError::WriteError(
+                "storage WAL flush did not complete".to_string(),
+            ));
         }
 
         Ok(())
@@ -902,7 +925,7 @@ mod tests {
     use super::*;
     use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
     use crate::schema_manager::AppId;
-    use crate::storage::MemoryStorage;
+    use crate::storage::{MemoryStorage, StorageError};
     use crate::sync_manager::SyncManager;
     use std::sync::atomic::AtomicUsize;
 
@@ -998,6 +1021,92 @@ mod tests {
             .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn flush_returns_error_when_wal_flush_fails() {
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-wal-flush-failure");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+
+        let storage = MemoryStorage::new().with_flush_wal_error(StorageError::IoError(
+            "injected WAL flush failure".to_string(),
+        ));
+        let runtime = TokioRuntime::new(schema_manager, storage, |_| {});
+
+        runtime
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+        let error = runtime
+            .flush()
+            .await
+            .expect_err("explicit runtime flush should surface WAL flush failure");
+        assert!(
+            error.to_string().contains("injected WAL flush failure"),
+            "unexpected error: {error}"
+        );
+        let flush_wal_calls = runtime
+            .with_storage(|storage| storage.flush_wal_call_count())
+            .expect("inspect storage calls");
+        assert!(
+            flush_wal_calls <= 2,
+            "persistent WAL flush failures should not be retried in a tight loop, got {flush_wal_calls} attempts"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_recovers_after_transient_wal_flush_failure() {
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-transient-wal-flush-failure");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+
+        let storage = MemoryStorage::new().with_transient_flush_wal_failures(
+            StorageError::IoError("transient WAL flush failure".to_string()),
+            1,
+        );
+        let runtime = TokioRuntime::new(schema_manager, storage, |_| {});
+
+        runtime
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+        runtime
+            .flush()
+            .await
+            .expect("explicit runtime flush should retry transient WAL flush failure");
+    }
+
+    #[tokio::test]
+    async fn flush_retries_stored_wal_error_before_returning_failure() {
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-stored-wal-flush-error");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
+
+        {
+            let mut core = runtime.core.lock().expect("lock runtime core");
+            core.mark_storage_write_pending_flush();
+            core.record_storage_flush_error(StorageError::IoError(
+                "previous transient WAL flush failure".to_string(),
+            ));
+        }
+
+        runtime
+            .flush()
+            .await
+            .expect("explicit runtime flush should retry the pending WAL barrier");
+
+        let flush_wal_calls = runtime
+            .with_storage(|storage| storage.flush_wal_call_count())
+            .expect("inspect storage calls");
+        assert_eq!(flush_wal_calls, 1);
     }
 
     #[tokio::test]

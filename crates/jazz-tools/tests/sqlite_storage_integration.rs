@@ -1119,7 +1119,7 @@ async fn sealed_batch_acceptance_recovers_after_restart() {
     let (batch_id, row_id) = {
         let mut storage = SqliteStorage::open(&db_path).expect("open sqlite storage");
         let seeded = seed_sqlite_sealed_batch_acceptance(&mut storage, &schema);
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().expect("close seeded sqlite storage");
         seeded
     };
@@ -1169,7 +1169,7 @@ async fn sealed_batch_frontier_conflict_rejects_after_restart() {
     let (batch_id, target_branch, staged_row_id, _existing_row_id) = {
         let mut storage = SqliteStorage::open(&db_path).expect("open sqlite storage");
         let seeded = seed_sqlite_sealed_batch_frontier_conflict(&mut storage, &schema);
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().expect("close seeded sqlite storage");
         seeded
     };

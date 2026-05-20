@@ -1176,7 +1176,7 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
                 row_id,
             )
             .unwrap();
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().unwrap();
     }
 
@@ -1238,7 +1238,7 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
     {
         let mut storage = factory(path);
         storage.upsert_local_batch_record(&record).unwrap();
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().unwrap();
     }
 
@@ -1278,7 +1278,7 @@ pub fn test_authoritative_batch_fate_survives_close_reopen(factory: &PersistentS
         storage
             .upsert_authoritative_batch_fate(&settlement)
             .unwrap();
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().unwrap();
     }
 
@@ -1319,7 +1319,7 @@ pub fn test_sealed_batch_submission_survives_close_reopen(factory: &PersistentSt
     {
         let mut storage = factory(path);
         storage.upsert_sealed_batch_submission(&submission).unwrap();
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().unwrap();
     }
 
@@ -1354,7 +1354,7 @@ pub fn test_branch_ord_survives_close_reopen(factory: &PersistentStorageFactory)
         let mut storage = factory(path);
         let main_ord = storage.resolve_or_alloc_branch_ord(main).unwrap();
         let draft_ord = storage.resolve_or_alloc_branch_ord(draft).unwrap();
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().unwrap();
         (main_ord, draft_ord)
     };

@@ -47,7 +47,7 @@ use crate::query_manager::types::{
 use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
 use crate::schema_manager::{Lens, SchemaManager};
-use crate::storage::Storage;
+use crate::storage::{Storage, StorageError};
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +306,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     scheduler: Sch,
     /// True when storage was mutated since the last WAL flush barrier.
     storage_write_pending_flush: bool,
+    /// True after scheduling one retry for the current failed WAL flush barrier.
+    storage_flush_retry_scheduled: bool,
+    /// Last storage flush error recorded by a durability barrier.
+    storage_flush_error: Option<StorageError>,
     /// Transport handle for WebSocket sync.
     pub(crate) transport: Option<crate::transport_manager::TransportHandle>,
     /// True when an inbound catalogue sync changed local catalogue state and
@@ -448,6 +452,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             storage,
             scheduler,
             storage_write_pending_flush: false,
+            storage_flush_retry_scheduled: false,
+            storage_flush_error: None,
             transport: None,
             transport_catalogue_state_hash_dirty: false,
             sync_sender: None,
@@ -565,21 +571,74 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     /// Flush the storage to persistent medium.
-    pub fn flush_storage(&self) {
-        self.storage.flush();
+    pub fn flush_storage(&mut self) -> Result<(), StorageError> {
+        match self.storage.flush() {
+            Ok(()) => {
+                self.clear_storage_write_pending_flush();
+                Ok(())
+            }
+            Err(error) => {
+                self.record_storage_flush_error(error.clone());
+                Err(error)
+            }
+        }
     }
 
     /// Flush only the WAL buffer (not the full snapshot).
-    pub fn flush_wal(&self) {
-        self.storage.flush_wal();
+    pub fn flush_wal(&mut self) -> Result<(), StorageError> {
+        self.flush_wal_barrier()
     }
 
     pub(crate) fn mark_storage_write_pending_flush(&mut self) {
         self.storage_write_pending_flush = true;
+        self.storage_flush_retry_scheduled = false;
+    }
+
+    pub(crate) fn has_storage_write_pending_flush(&self) -> bool {
+        self.storage_write_pending_flush
+    }
+
+    pub(crate) fn has_storage_flush_error(&self) -> bool {
+        self.storage_flush_error.is_some()
+    }
+
+    pub(crate) fn has_storage_flush_retry_scheduled(&self) -> bool {
+        self.storage_flush_retry_scheduled
     }
 
     pub(crate) fn clear_storage_write_pending_flush(&mut self) {
         self.storage_write_pending_flush = false;
+        self.storage_flush_retry_scheduled = false;
+        self.storage_flush_error = None;
+    }
+
+    pub(crate) fn should_schedule_storage_flush_retry(&mut self) -> bool {
+        if self.storage_flush_retry_scheduled {
+            return false;
+        }
+        self.storage_flush_retry_scheduled = true;
+        true
+    }
+
+    pub(crate) fn record_storage_flush_error(&mut self, error: StorageError) {
+        self.storage_flush_error = Some(error);
+    }
+
+    pub fn take_storage_flush_error(&mut self) -> Option<StorageError> {
+        self.storage_flush_error.take()
+    }
+
+    pub(crate) fn flush_wal_barrier(&mut self) -> Result<(), StorageError> {
+        match self.storage.flush_wal() {
+            Ok(()) => {
+                self.clear_storage_write_pending_flush();
+                Ok(())
+            }
+            Err(error) => {
+                self.record_storage_flush_error(error.clone());
+                Err(error)
+            }
+        }
     }
 
     /// Consume RuntimeCore and return the Storage.

@@ -1980,16 +1980,22 @@ impl WasmRuntime {
 
     /// Flush all data to persistent storage (snapshot).
     #[wasm_bindgen]
-    pub fn flush(&self) {
+    pub fn flush(&self) -> Result<(), JsValue> {
         let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
-        self.core.borrow().flush_storage();
+        self.core
+            .borrow_mut()
+            .flush_storage()
+            .map_err(|e| JsValue::from_str(&format!("flush failed: {e}")))
     }
 
     /// Flush only the WAL buffer to OPFS (not the snapshot).
     #[wasm_bindgen(js_name = flushWal)]
-    pub fn flush_wal(&self) {
+    pub fn flush_wal(&self) -> Result<(), JsValue> {
         let _span = debug_span!("wasm::flushWal", tier = self.tier_label).entered();
-        self.core.borrow().flush_wal();
+        self.core
+            .borrow_mut()
+            .flush_wal()
+            .map_err(|e| JsValue::from_str(&format!("flush WAL failed: {e}")))
     }
 
     /// Create a persistent WasmRuntime backed by OPFS.

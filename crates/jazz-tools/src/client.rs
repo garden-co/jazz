@@ -484,19 +484,29 @@ impl JazzClient {
         }
 
         // Flush pending operations
-        self.runtime
+        let runtime_flush_result = self
+            .runtime
             .flush()
             .await
-            .map_err(|e| JazzError::Connection(e.to_string()))?;
+            .map_err(|e| JazzError::Connection(e.to_string()));
 
         // Flush storage state to disk for persistence
-        self.runtime
+        let storage_result = self
+            .runtime
             .with_storage(|storage| {
-                storage.flush();
-                storage.close()
+                let flush_result = storage.flush();
+                let flush_wal_result = storage.flush_wal();
+                let close_result = storage.close();
+
+                flush_result?;
+                flush_wal_result?;
+                close_result
             })
-            .map_err(|e| JazzError::Storage(e.to_string()))?
-            .map_err(|e| JazzError::Storage(e.to_string()))?;
+            .map_err(|e| JazzError::Storage(e.to_string()))
+            .and_then(|result| result.map_err(|e| JazzError::Storage(e.to_string())));
+
+        runtime_flush_result?;
+        storage_result?;
 
         Ok(())
     }
@@ -941,7 +951,7 @@ mod tests {
         }
 
         let storage = runtime.into_storage();
-        storage.flush();
+        storage.flush().expect("flush seeded client storage");
         storage.close().expect("close seeded client storage");
 
         (bundled_hash, learned_hash)
