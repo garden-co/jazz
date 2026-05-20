@@ -343,7 +343,7 @@ describe("SharedWorker broker", () => {
       follower.emit({ type: "request-leader" });
       // Probe fires synchronously but the timeout drives the eviction.
       expect(stale.messageTypes()).toContain("leader-ping");
-      await vi.advanceTimersByTimeAsync(300);
+      await vi.advanceTimersByTimeAsync(800);
 
       expect(channels).toHaveLength(0);
       expect(follower.messageTypes()).toContain("no-leader");
@@ -387,7 +387,7 @@ describe("SharedWorker broker", () => {
       // The stale pong must not revive the evicted port; probe still
       // resolves false at the timeout boundary and follower gets
       // no-leader.
-      await vi.advanceTimersByTimeAsync(300);
+      await vi.advanceTimersByTimeAsync(800);
       expect(channels).toHaveLength(0);
       expect(follower.messageTypes()).toContain("no-leader");
     } finally {

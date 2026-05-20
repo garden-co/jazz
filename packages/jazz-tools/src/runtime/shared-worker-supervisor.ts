@@ -179,10 +179,28 @@ export function createTabSupervisor(options: TabSupervisorOptions): TabSuperviso
         return;
       }
       case LEADER_CHANGED: {
-        // Leader migrated. If we're the leader, ignore (broker echoes our own
-        // claim broadcasts to other ports, not to us). Followers must drop
-        // the stale port and ask for a fresh one.
-        if (state.role === "leader") return;
+        // Leader migrated. Two cases for a tab in `role: "leader"`:
+        //
+        //  1. The broker just accepted *our* claim and broadcast to peers.
+        //     The broker uses `broadcastLeaderChanged(port)` with `port`
+        //     as the except-set, so we won't receive that broadcast — no
+        //     work needed.
+        //
+        //  2. The broker evicted us as a stale leader because we missed a
+        //     liveness probe (e.g. our main thread was momentarily busy
+        //     and didn't reply to `leader-ping` within the broker's
+        //     timeout). In that case we still hold the Web Lock and the
+        //     dedicated worker, but the broker has cleared its
+        //     `leaderPort`. Re-claim to put it back in sync — the claim
+        //     handler is idempotent and the broker just stores the new
+        //     port. Without this, followers would keep getting `no-leader`
+        //     even though we're alive and own the runtime.
+        if (state.role === "leader") {
+          if (leaderClaimed) {
+            options.brokerPort.postMessage({ type: CLAIM_LEADER });
+          }
+          return;
+        }
         setState({ role: "none", endpoint: null });
         requestLeaderFromBroker();
         return;

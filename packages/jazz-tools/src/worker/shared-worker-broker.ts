@@ -55,10 +55,15 @@ const LEADER_PING = "leader-ping" as const;
  * and let the next `claim-leader` (the new page that just won the Web
  * Lock) take over.
  *
- * 250 ms is generous for an in-process round-trip and small enough that
- * a legitimate follower handshake doesn't visibly stall on it.
+ * 750 ms is generous enough to absorb a leader main-thread that's
+ * processing a tight insert loop or a brief GC pause without false
+ * eviction, and short enough that the dev-server-restart scenario
+ * surfaces well before the bridge-init timeout. A false eviction is
+ * self-correcting — the still-alive leader re-claims on receiving
+ * `leader-changed` (see {@link createTabSupervisor}) — so this timeout
+ * controls a worst-case stall, not data correctness.
  */
-const LEADER_PROBE_TIMEOUT_MS = 250;
+const LEADER_PROBE_TIMEOUT_MS = 750;
 
 export interface SharedWorkerBrokerGlobal {
   onconnect: ((event: { ports: MessagePortLike[] }) => void) | null;

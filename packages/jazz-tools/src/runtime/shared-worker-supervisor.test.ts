@@ -362,6 +362,25 @@ describe("createTabSupervisor", () => {
     expect((pong!.message as { seq?: unknown }).seq).toBe(42);
   });
 
+  it("re-claims leadership on leader-changed if it still holds the lock", async () => {
+    const { brokerPort, locks, boot } = brokerHandshake();
+    boot();
+    await locks.grant();
+    // Confirm we claimed once on grant.
+    const claimsAfterGrant = brokerPort.postedTypes().filter((t) => t === "claim-leader").length;
+    expect(claimsAfterGrant).toBe(1);
+
+    // Broker evicted us as stale (e.g. we missed a leader-ping window
+    // because the main thread was busy) and broadcast leader-changed.
+    // We still hold the Web Lock, so we must re-claim to put the broker
+    // back in sync — otherwise followers would keep getting `no-leader`
+    // while we sit on the runtime they want to attach to.
+    brokerPort.emit({ type: "leader-changed" });
+
+    const claimsAfterEvent = brokerPort.postedTypes().filter((t) => t === "claim-leader").length;
+    expect(claimsAfterEvent).toBe(2);
+  });
+
   it("does not respond to leader-ping before the lock has been granted", () => {
     const { brokerPort, boot } = brokerHandshake();
     boot();
