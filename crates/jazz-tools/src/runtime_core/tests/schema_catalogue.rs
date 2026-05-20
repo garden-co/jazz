@@ -609,6 +609,61 @@ fn peer_with_matching_catalogue_hash_skips_catalogue_replay() {
 }
 
 #[test]
+fn backend_with_matching_catalogue_hash_skips_catalogue_replay() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
+
+    core.persist_schema();
+    core.batched_tick();
+    core.sync_sender().take();
+
+    let catalogue_state_hash = core.schema_manager().catalogue_state_hash();
+    let backend_id = ClientId::new();
+
+    core.ensure_client_as_backend_with_catalogue_state_hash(
+        backend_id,
+        Some(&catalogue_state_hash),
+    );
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    assert_eq!(
+        catalogue_replay_to_client_count(&messages, backend_id),
+        0,
+        "backend with matching catalogue hash should not receive catalogue replay; messages: {messages:?}"
+    );
+}
+
+#[test]
+fn admin_with_matching_catalogue_hash_skips_catalogue_replay() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
+
+    core.persist_schema();
+    core.batched_tick();
+    core.sync_sender().take();
+
+    let catalogue_state_hash = core.schema_manager().catalogue_state_hash();
+    let admin_id = ClientId::new();
+
+    core.ensure_client_as_admin_with_catalogue_state_hash(admin_id, Some(&catalogue_state_hash));
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    assert_eq!(
+        catalogue_replay_to_client_count(&messages, admin_id),
+        0,
+        "admin with matching catalogue hash should not receive catalogue replay; messages: {messages:?}"
+    );
+}
+
+#[test]
 fn peer_without_catalogue_hash_gets_full_catalogue_replay() {
     let schema = test_schema();
     let app_id = AppId::from_name("test-app");

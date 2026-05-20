@@ -773,11 +773,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     if matches!(
                         msg.payload,
                         crate::sync_manager::SyncPayload::CatalogueEntryUpdated { .. }
-                    ) && !handle.can_publish_catalogue()
-                    {
+                    ) {
                         tracing::debug!(
                             server_id = %handle.server_id,
-                            "dropping catalogue publish for transport without catalogue authority"
+                            "dropping catalogue publish for transport; catalogue publication uses HTTP admin forwarding"
                         );
                         continue;
                     }
@@ -828,14 +827,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     if let Some(next_sync_seq) = next_sync_seq {
                         self.set_next_expected_server_sequence(server_id, next_sync_seq);
                     }
-                    let can_publish_catalogue = self
-                        .transport
-                        .as_ref()
-                        .is_some_and(|handle| handle.can_publish_catalogue());
                     self.add_server_with_catalogue_state_hash_and_permission(
                         server_id,
                         catalogue_state_hash.as_deref(),
-                        can_publish_catalogue,
+                        false,
                     );
                 }
                 crate::transport_manager::TransportInbound::Sync { entry, sequence } => {
@@ -1070,14 +1065,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 next_sync_seq,
             } => {
                 self.remove_server(server_id);
-                let can_publish_catalogue = self
-                    .transport
-                    .as_ref()
-                    .is_some_and(|handle| handle.can_publish_catalogue());
                 self.add_server_with_catalogue_state_hash_and_permission(
                     server_id,
                     catalogue_state_hash.as_deref(),
-                    can_publish_catalogue,
+                    false,
                 );
                 if let Some(seq) = next_sync_seq {
                     self.set_next_expected_server_sequence(server_id, seq);

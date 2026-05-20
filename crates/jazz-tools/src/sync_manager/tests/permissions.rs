@@ -388,3 +388,57 @@ fn catalogue_update_from_peer_client_is_denied() {
         "peer client should receive CatalogueWriteDenied; outbox: {outbox:?}"
     );
 }
+
+#[test]
+fn catalogue_row_batch_from_peer_client_is_denied() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::GlobalServer);
+    let mut io = MemoryStorage::new();
+    let peer_id = ClientId::new();
+    let catalogue_object_id = ObjectId::new();
+    let row = visible_row(
+        catalogue_object_id,
+        "main",
+        Vec::new(),
+        1_000,
+        b"edge-catalogue-row",
+    );
+
+    add_client(&mut sm, &io, peer_id);
+    sm.set_client_role(peer_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(peer_id),
+        payload: SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: catalogue_object_id,
+                metadata: HashMap::from([(
+                    crate::metadata::MetadataKey::Type.to_string(),
+                    crate::metadata::ObjectType::CatalogueSchema.to_string(),
+                )]),
+            }),
+            row,
+        },
+    });
+    sm.process_inbox(&mut io);
+
+    assert!(
+        sm.take_pending_catalogue_updates().is_empty(),
+        "denied peer catalogue row batches must not reach SchemaManager"
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.iter().any(|message| matches!(
+            message,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                    object_id,
+                    ..
+                }),
+            } if *id == peer_id && *object_id == catalogue_object_id
+        )),
+        "peer client should receive CatalogueWriteDenied for catalogue RowBatchCreated; outbox: {outbox:?}"
+    );
+}

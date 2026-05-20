@@ -90,7 +90,6 @@ pub struct TransportHandle {
     /// catalogue-state digest so the server can emit schema diagnostics
     /// against a real schema hash.
     pub(crate) declared_schema_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) can_publish_catalogue: bool,
 }
 
 impl TransportHandle {
@@ -134,9 +133,6 @@ impl TransportHandle {
         let _ = self.outbox_tx.unbounded_send(entry);
     }
 
-    pub(crate) fn can_publish_catalogue(&self) -> bool {
-        self.can_publish_catalogue
-    }
     pub fn has_ever_connected(&self) -> bool {
         self.ever_connected
             .load(std::sync::atomic::Ordering::Acquire)
@@ -195,12 +191,6 @@ pub struct AuthConfig {
     pub peer_secret: Option<String>,
     #[serde(default, with = "auth_backend_session_serde")]
     pub backend_session: Option<serde_json::Value>,
-}
-
-impl AuthConfig {
-    pub fn can_publish_catalogue(&self) -> bool {
-        false
-    }
 }
 
 mod auth_backend_session_serde {
@@ -355,27 +345,6 @@ mod handshake_tests {
     }
 
     #[test]
-    fn peer_secret_does_not_grant_catalogue_publish_permission() {
-        let peer_auth = AuthConfig {
-            peer_secret: Some("cluster-peer-secret".to_string()),
-            ..Default::default()
-        };
-        assert!(
-            !peer_auth.can_publish_catalogue(),
-            "peer-secret edge transports receive catalogue from core but must not publish catalogue upstream"
-        );
-
-        let admin_auth = AuthConfig {
-            admin_secret: Some("admin-secret".to_string()),
-            ..Default::default()
-        };
-        assert!(
-            !admin_auth.can_publish_catalogue(),
-            "admin-secret WS transports authenticate as backend clients; catalogue publication must use HTTP admin forwarding"
-        );
-    }
-
-    #[test]
     fn auth_handshake_postcard_roundtrip_preserves_backend_session() {
         let handshake = AuthHandshake {
             sync_protocol_version: SYNC_PROTOCOL_VERSION,
@@ -505,7 +474,6 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         control_tx,
         catalogue_state_hash: catalogue_state_hash.clone(),
         declared_schema_hash: declared_schema_hash.clone(),
-        can_publish_catalogue: auth.can_publish_catalogue(),
     };
     let manager = TransportManager {
         server_id,

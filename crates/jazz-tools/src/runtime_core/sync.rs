@@ -224,6 +224,24 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
+    /// Ensure an authenticated session client exists, replaying catalogue
+    /// entries only when the client's digest is missing or stale.
+    pub fn ensure_client_with_session_and_catalogue_state_hash(
+        &mut self,
+        client_id: ClientId,
+        session: Session,
+        remote_catalogue_state_hash: Option<&str>,
+    ) {
+        use crate::sync_manager::ClientRole;
+
+        self.ensure_client_with_role_and_catalogue_state_hash(
+            client_id,
+            ClientRole::User,
+            Some(session),
+            remote_catalogue_state_hash,
+        );
+    }
+
     /// Remove a client connection.
     ///
     /// Returns `false` if the client has unprocessed messages — either
@@ -271,6 +289,23 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
+    /// Ensure an admin client exists, replaying catalogue entries only when
+    /// its digest is missing or stale.
+    pub fn ensure_client_as_admin_with_catalogue_state_hash(
+        &mut self,
+        client_id: ClientId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) {
+        use crate::sync_manager::ClientRole;
+
+        self.ensure_client_with_role_and_catalogue_state_hash(
+            client_id,
+            ClientRole::Admin,
+            None,
+            remote_catalogue_state_hash,
+        );
+    }
+
     /// Promote a client to Backend role (row access, no catalogue writes).
     pub fn set_client_backend(&mut self, client_id: ClientId) {
         use crate::sync_manager::ClientRole;
@@ -291,6 +326,23 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             sm.set_client_role(client_id, ClientRole::Backend);
             self.immediate_tick();
         }
+    }
+
+    /// Ensure a backend client exists, replaying catalogue entries only when
+    /// its digest is missing or stale.
+    pub fn ensure_client_as_backend_with_catalogue_state_hash(
+        &mut self,
+        client_id: ClientId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) {
+        use crate::sync_manager::ClientRole;
+
+        self.ensure_client_with_role_and_catalogue_state_hash(
+            client_id,
+            ClientRole::Backend,
+            None,
+            remote_catalogue_state_hash,
+        );
     }
 
     /// Ensure a client exists and is marked as Peer without resetting state.
@@ -315,6 +367,35 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             sm.add_client(client_id);
         }
         sm.set_client_role(client_id, ClientRole::Peer);
+
+        let queued_catalogue_replay = sm.queue_catalogue_sync_to_client_if_hash_mismatch(
+            &self.storage,
+            client_id,
+            remote_catalogue_state_hash,
+            &local_catalogue_state_hash,
+        );
+        if queued_catalogue_replay {
+            self.immediate_tick();
+        }
+    }
+
+    fn ensure_client_with_role_and_catalogue_state_hash(
+        &mut self,
+        client_id: ClientId,
+        role: crate::sync_manager::ClientRole,
+        session: Option<Session>,
+        remote_catalogue_state_hash: Option<&str>,
+    ) {
+        let local_catalogue_state_hash = self.schema_manager.catalogue_state_hash();
+        let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
+
+        if sm.get_client(client_id).is_none() {
+            sm.add_client(client_id);
+        }
+        sm.set_client_role(client_id, role);
+        if let Some(session) = session {
+            sm.set_client_session(client_id, session);
+        }
 
         let queued_catalogue_replay = sm.queue_catalogue_sync_to_client_if_hash_mismatch(
             &self.storage,

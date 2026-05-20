@@ -373,10 +373,21 @@ async fn handle_ws_connection(
                 );
         }
         WsClientSetup::Backend => {
-            let _ = state.runtime.ensure_client_as_backend(client_id);
+            let _ = state
+                .runtime
+                .ensure_client_as_backend_with_catalogue_state_hash(
+                    client_id,
+                    handshake.catalogue_state_hash.as_deref(),
+                );
         }
         WsClientSetup::Session(session) => {
-            let _ = state.runtime.ensure_client_with_session(client_id, session);
+            let _ = state
+                .runtime
+                .ensure_client_with_session_and_catalogue_state_hash(
+                    client_id,
+                    session,
+                    handshake.catalogue_state_hash.as_deref(),
+                );
         }
     }
 

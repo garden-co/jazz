@@ -480,7 +480,19 @@ impl SyncPayload {
 
     /// Check if this payload carries a catalogue object (schema or lens).
     pub fn is_catalogue(&self) -> bool {
-        matches!(self, SyncPayload::CatalogueEntryUpdated { entry } if entry.is_catalogue())
+        match self {
+            SyncPayload::CatalogueEntryUpdated { entry } => entry.is_catalogue(),
+            SyncPayload::RowBatchCreated { metadata, .. }
+            | SyncPayload::RowBatchNeeded { metadata, .. } => metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata
+                        .metadata
+                        .get(crate::metadata::MetadataKey::Type.as_str())
+                })
+                .is_some_and(|kind| crate::metadata::ObjectType::is_catalogue_type_str(kind)),
+            _ => false,
+        }
     }
 
     /// Check if this payload carries a structural schema catalogue object.
