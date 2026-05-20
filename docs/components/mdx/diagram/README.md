@@ -6,8 +6,8 @@ the engine handles layout, measurement, orthogonal edge routing, responsive
 scaling, theming and animation.
 
 Two primitives cover every diagram today: `<Graph>` (data-flow graphs and
-DAGs, static or interactive — the version-history DAG, tier-sync and lens are
-all `<Graph>`) and `<Sequence>` (sequence diagrams).
+DAGs, static or interactive — the version-history DAG, tier-sync, lens and
+write-tier are all `<Graph>`) and `<Sequence>` (sequence diagrams).
 
 ## Design posture: extract-ready island
 
@@ -314,7 +314,7 @@ For overlays that draw bespoke connectors rather than relying on `edges`:
 - `roundedPath(points, r)` — the low-level builder behind `connectChain`:
   a polyline through `Point[]` with genuine bends rounded by quadratic arcs
   (collinear vertices stay straight). Use it for fully bespoke elbow
-  connectors.
+  connectors — the write-tier trunk/branch is built from it.
 - `loopRoundedBox` — a rounded self-loop around a box (`LoopSide`).
 - `RoutedEdge` — `{ id, from, to, d, reverse, length, source, target }`;
   `reverse` is the same path reversed (use it to animate an upward hop along a
