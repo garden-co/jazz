@@ -1,16 +1,26 @@
 <!-- #region auth-localfirst-svelte -->
 <script lang="ts">
-  import { BrowserAuthSecretStore, createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+  import {
+    LocalFirstAuth,
+    createJazzClient,
+    JazzSvelteProvider,
+  } from 'jazz-tools/svelte';
   import type { Snippet } from 'svelte';
 
   let { children }: { children: Snippet } = $props();
 
-  const client = BrowserAuthSecretStore.getOrCreateSecret().then((secret) =>
-    createJazzClient({ appId: 'my-app', secret }),
+  const auth = new LocalFirstAuth();
+
+  let client = $derived(
+    !auth.isLoading && auth.secret
+      ? createJazzClient({ appId: 'my-app', secret: auth.secret })
+      : null,
   );
 </script>
 
-<JazzSvelteProvider {client}>
-  {@render children()}
-</JazzSvelteProvider>
+{#if client}
+  <JazzSvelteProvider {client}>
+    {@render children()}
+  </JazzSvelteProvider>
+{/if}
 <!-- #endregion auth-localfirst-svelte -->

@@ -82,6 +82,9 @@ pub struct SyncManager {
     pub(super) my_tiers: HashSet<DurabilityTier>,
     /// Tracks which clients are interested in row batch-member state updates.
     pub(super) row_batch_interest: HashMap<RowBatchKey, HashSet<ClientId>>,
+    /// Tracks clients that explicitly requested the current or next known fate
+    /// for a batch whose row member state may not be present on this peer.
+    pub(super) batch_fate_interest: HashMap<BatchId, HashSet<ClientId>>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
@@ -141,6 +144,7 @@ impl std::fmt::Debug for SyncManager {
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
             .field("row_batch_interest", &self.row_batch_interest)
+            .field("batch_fate_interest", &self.batch_fate_interest)
             .field("query_origin", &self.query_origin)
             .field("remote_query_scopes", &self.remote_query_scopes)
             .field("remote_query_scope_tiers", &self.remote_query_scope_tiers)
@@ -244,6 +248,7 @@ impl SyncManager {
             next_pending_id: 0,
             my_tiers: HashSet::new(),
             row_batch_interest: HashMap::new(),
+            batch_fate_interest: HashMap::new(),
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
             remote_query_scope_tiers: HashMap::new(),
@@ -366,6 +371,11 @@ impl SyncManager {
         }
         for (row_batch_key, clients) in &self.row_batch_interest {
             subscriptions += std::mem::size_of_val(row_batch_key);
+            subscriptions += clients.len() * std::mem::size_of::<ClientId>();
+            subscriptions += 48;
+        }
+        for (batch_id, clients) in &self.batch_fate_interest {
+            subscriptions += std::mem::size_of_val(batch_id);
             subscriptions += clients.len() * std::mem::size_of::<ClientId>();
             subscriptions += 48;
         }
@@ -562,6 +572,10 @@ impl SyncManager {
         self.clients.remove(&client_id);
         // Clean up interest map
         self.row_batch_interest.retain(|_, clients| {
+            clients.remove(&client_id);
+            !clients.is_empty()
+        });
+        self.batch_fate_interest.retain(|_, clients| {
             clients.remove(&client_id);
             !clients.is_empty()
         });

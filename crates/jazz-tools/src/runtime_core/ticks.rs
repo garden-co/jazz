@@ -258,13 +258,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                                 Some(fate.clone()),
                             )
                         });
-                    self.durability.queue_mutation_error_event(
-                        crate::runtime_core::MutationErrorEvent {
-                            code: code.clone(),
-                            reason: reason.clone(),
-                            batch,
-                        },
-                    );
+                    self.queue_mutation_error_event(crate::runtime_core::MutationErrorEvent {
+                        code: code.clone(),
+                        reason: reason.clone(),
+                        batch,
+                    });
                 }
             }
         } else if matches!(fate, crate::batch_fate::BatchFate::Missing { .. }) {
@@ -764,36 +762,46 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         let mut unsent = Vec::new();
         for msg in outbox {
+            let peer_kind = msg.destination.peer_kind();
+            let peer_id = msg.destination.peer_uuid();
+            let payload = msg.payload.variant_name();
+            let _send_span = debug_span!(
+                "sync.send",
+                peer_kind = peer_kind,
+                peer_id = %peer_id,
+                payload = payload,
+                payload_json = %serde_json::to_string(&msg.payload).unwrap_or_default(),
+                tier = self.tier_label,
+            )
+            .entered();
+
             let handled_by_transport = self
                 .transport
                 .as_ref()
                 .is_some_and(|handle| matches!(msg.destination, crate::sync_manager::Destination::Server(server_id) if server_id == handle.server_id));
+            if handled_by_transport
+                && matches!(msg.payload, SyncPayload::CatalogueEntryUpdated { .. })
+            {
+                if let Some(handle) = self.transport.as_ref() {
+                    tracing::debug!(
+                        server_id = %handle.server_id,
+                        "dropping catalogue publish for transport; catalogue publication uses HTTP admin forwarding"
+                    );
+                }
+                continue;
+            }
+
+            if let Some((ref tracer, ref name)) = self.sync_tracer {
+                tracer.record_outgoing(name, &msg.destination, &msg.payload);
+            }
+
             if handled_by_transport {
                 if let Some(handle) = self.transport.as_ref() {
-                    if matches!(
-                        msg.payload,
-                        crate::sync_manager::SyncPayload::CatalogueEntryUpdated { .. }
-                    ) {
-                        tracing::debug!(
-                            server_id = %handle.server_id,
-                            "dropping catalogue publish for transport; catalogue publication uses HTTP admin forwarding"
-                        );
-                        continue;
-                    }
-                    if let Some((ref tracer, ref name)) = self.sync_tracer {
-                        tracer.record_outgoing(name, &msg.destination, &msg.payload);
-                    }
                     handle.send_outbox(msg);
                 }
             } else if let Some(sync_sender) = self.sync_sender.as_ref() {
-                if let Some((ref tracer, ref name)) = self.sync_tracer {
-                    tracer.record_outgoing(name, &msg.destination, &msg.payload);
-                }
                 sync_sender.send_sync_message(msg);
             } else {
-                if let Some((ref tracer, ref name)) = self.sync_tracer {
-                    tracer.record_outgoing(name, &msg.destination, &msg.payload);
-                }
                 unsent.push(msg);
             }
         }
@@ -945,7 +953,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     /// Park a sync message for processing in next batched_tick.
     pub fn park_sync_message(&mut self, message: InboxEntry) {
-        trace!(source = ?message.source, payload = message.payload.variant_name(), "parking sync message");
+        let _recv_span = debug_span!(
+            "sync.recv",
+            peer_kind = message.source.peer_kind(),
+            peer_id = %message.source.peer_uuid(),
+            payload = message.payload.variant_name(),
+            payload_json = %serde_json::to_string(&message.payload).unwrap_or_default(),
+            tier = self.tier_label,
+        )
+        .entered();
         if let Some((ref tracer, ref name)) = self.sync_tracer {
             tracer.record_incoming(&message.source, name, &message.payload);
         }
@@ -957,6 +973,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn park_sync_message_with_sequence(&mut self, message: InboxEntry, sequence: u64) {
         match message.source {
             crate::sync_manager::Source::Server(server_id) => {
+                let _recv_span = debug_span!(
+                    "sync.recv",
+                    peer_kind = "server",
+                    peer_id = %server_id,
+                    payload = message.payload.variant_name(),
+                    payload_json = %serde_json::to_string(&message.payload).unwrap_or_default(),
+                    sequence = sequence,
+                    tier = self.tier_label,
+                )
+                .entered();
                 let next_expected = self
                     .next_expected_server_seq
                     .entry(server_id)

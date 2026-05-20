@@ -128,6 +128,20 @@ describe("BrowserAuthSecretStore", () => {
     expect(aliceAgainSecret).toBe(aliceSecret);
   });
 
+  it("throws a clear error if used in a non-browser env (no localStorage)", async () => {
+    const original = (globalThis as { localStorage?: Storage }).localStorage;
+    delete (globalThis as { localStorage?: Storage }).localStorage;
+    try {
+      const ssrStore = new BrowserAuthSecretStore();
+      expect(() => ssrStore.getOrCreateSecret()).toThrow(/browser environment/);
+      await expect(ssrStore.loadSecret()).rejects.toThrow(/browser environment/);
+    } finally {
+      if (original !== undefined) {
+        (globalThis as { localStorage?: Storage }).localStorage = original;
+      }
+    }
+  });
+
   it("static helpers can isolate secrets by namespace hints", async () => {
     const aliceSecret = await BrowserAuthSecretStore.getOrCreateSecret({
       storage,

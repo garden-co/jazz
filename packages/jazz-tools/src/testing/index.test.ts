@@ -343,7 +343,7 @@ describe("pushSchemaCatalogue", () => {
         serverUrl: server.url,
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret,
-        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures/basic"),
+        schemaDir: join(import.meta.dirname, "fixtures/basic"),
       });
 
       expect(hash).toBeTruthy();
@@ -368,7 +368,7 @@ describe("pushSchemaCatalogue", () => {
         serverUrl: "http://127.0.0.1:9",
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret: "admin-secret",
-        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures/basic"),
+        schemaDir: join(import.meta.dirname, "fixtures/basic"),
       }),
     ).rejects.toThrow();
   }, 10_000);

@@ -27,54 +27,19 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
 
   </Tab>
   <Tab value="Vue">
-    ```vue title="App.vue"
-    <script setup lang="ts">
-    import { createJazzClient, JazzProvider } from "jazz-tools/vue";
-    import { BrowserAuthSecretStore } from "jazz-tools";
-    import TodoList from "./TodoList.vue";
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/AuthLocalfirst.vue
+    </include>
 
-    const secret = await BrowserAuthSecretStore.getOrCreateSecret();
-
-    const client = await createJazzClient({
-      appId: "<your-app-id>",
-      secret,
-    });
-    </script>
-
-    <template>
-      <JazzProvider :client="client">
-        <h1>Todos</h1>
-        <TodoList />
-      </JazzProvider>
-    </template>
-    ```
+    `useLocalFirstAuth()` from `jazz-tools/vue` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
   </Tab>
   <Tab value="Svelte">
-    ```svelte title="App.svelte"
-    <script lang="ts">
-      import {
-        createJazzClient,
-        JazzSvelteProvider,
-        BrowserAuthSecretStore,
-      } from 'jazz-tools/svelte';
-      import TodoList from './TodoList.svelte';
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthLocalfirst.svelte#auth-localfirst-svelte
+    </include>
 
-      const client = BrowserAuthSecretStore.getOrCreateSecret().then(
-        (secret) => createJazzClient({ appId: '<your-app-id>', secret })
-      );
-    </script>
-
-    <JazzSvelteProvider {client}>
-      {#snippet children()}
-        <h1>Todos</h1>
-        <TodoList />
-      {/snippet}
-      {#snippet fallback()}
-        <p>Loading...</p>
-      {/snippet}
-    </JazzSvelteProvider>
-    ```
+    `LocalFirstAuth` from `jazz-tools/svelte` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
   </Tab>
   <Tab value="Expo">

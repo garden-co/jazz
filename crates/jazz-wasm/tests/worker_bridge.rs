@@ -27,6 +27,9 @@ use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 use web_sys::Worker;
 
+use jazz_tools::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
+use jazz_tools::row_histories::BatchId;
+use jazz_tools::sync_manager::DurabilityTier;
 use jazz_wasm::worker_protocol::{
     encode_main_to_worker, encode_worker_to_main, MainToWorkerWire, WorkerToMainWire,
 };
@@ -135,8 +138,16 @@ fn build_options(server_url: Option<&str>) -> JsValue {
 }
 
 fn fresh_runtime() -> WasmRuntime {
-    WasmRuntime::new(SCHEMA_JSON, "test-app", "dev", "main", None, Some(true))
-        .expect("WasmRuntime::new")
+    WasmRuntime::new(
+        SCHEMA_JSON,
+        "test-app",
+        "dev",
+        "main",
+        None,
+        Some(true),
+        None,
+    )
+    .expect("WasmRuntime::new")
 }
 
 // =============================================================================
@@ -461,21 +472,13 @@ fn main_to_worker_main_side_sync_envelope() {
     // contract independently of any send-path test.
     let bytes = encode_main_to_worker(&MainToWorkerWire::Sync {
         payloads: vec![ByteBuf::from(vec![9])],
-        ack_id: None,
-        ack_batch_id: None,
     })
     .expect("encode");
     let decoded: MainToWorkerWire = postcard::from_bytes(&bytes).expect("decode");
     match decoded {
-        MainToWorkerWire::Sync {
-            payloads,
-            ack_id,
-            ack_batch_id,
-        } => {
+        MainToWorkerWire::Sync { payloads } => {
             assert_eq!(payloads.len(), 1);
             assert_eq!(&*payloads[0], &[9]);
-            assert_eq!(ack_id, None);
-            assert_eq!(ack_batch_id, None);
         }
         other => panic!("expected Sync, got {other:?}"),
     }
@@ -496,21 +499,6 @@ async fn yield_once() {
         let _ = set_timeout.call2(&JsValue::NULL, &resolve, &JsValue::from_f64(0.0));
     });
     JsFuture::from(promise).await.expect("yield");
-}
-
-/// Resolve with the sentinel string `"deadline"` after `ms` so a `Promise::race`
-/// can tell whether the racee settled before the deadline.
-fn deadline_marker(ms: i32) -> js_sys::Promise {
-    js_sys::Promise::new(&mut |resolve, _reject| {
-        let global = js_sys::global();
-        let set_timeout: Function = Reflect::get(&global, &"setTimeout".into())
-            .unwrap()
-            .unchecked_into();
-        let cb = Closure::once_into_js(move || {
-            let _ = resolve.call1(&JsValue::NULL, &JsValue::from_str("deadline"));
-        });
-        let _ = set_timeout.call2(&JsValue::NULL, &cb, &JsValue::from_f64(ms as f64));
-    })
 }
 
 // =============================================================================
@@ -579,19 +567,46 @@ fn send_peer_sync_drops_empty_payload() {
 }
 
 #[wasm_bindgen_test]
-fn acknowledge_rejected_batch_emits_postcard_binary() {
+fn runtime_mutation_error_emission_acknowledges_and_forwards_to_worker() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
         .expect("attach");
+    let batch_id = "00000000000000000000000000000008";
 
-    bridge.acknowledge_rejected_batch("batch-7");
-    match fw.last_posted_decoded() {
-        Some(MainToWorkerWire::AcknowledgeRejectedBatch { batch_id }) => {
-            assert_eq!(batch_id, "batch-7");
-        }
-        other => panic!("expected AcknowledgeRejectedBatch, got {other:?}"),
-    }
+    let seen = Rc::new(RefCell::new(false));
+    let seen_clone = Rc::clone(&seen);
+    let on_mutation_error = Closure::<dyn FnMut(JsValue)>::new(move |_event: JsValue| {
+        *seen_clone.borrow_mut() = true;
+    });
+    runtime.on_mutation_error(
+        on_mutation_error
+            .as_ref()
+            .unchecked_ref::<Function>()
+            .clone(),
+    );
+
+    runtime
+        .replay_batch_rejection(batch_id, "rejected", "server denied write")
+        .expect("replay rejected batch");
+    let posted_before = fw.posted.borrow().len();
+
+    runtime.batched_tick();
+
+    assert!(
+        *seen.borrow(),
+        "mutation error callback should receive event"
+    );
+    let posted = fw.posted_decoded();
+    assert!(
+        posted[posted_before..].iter().any(|wire| matches!(
+            wire,
+            MainToWorkerWire::AcknowledgeRejectedBatch { batch_id: posted_batch_id }
+                if posted_batch_id == batch_id
+        )),
+        "mutation error emission should acknowledge through the bridge, got {posted:?}"
+    );
+    drop(on_mutation_error);
 }
 
 #[wasm_bindgen_test]
@@ -773,80 +788,64 @@ fn auth_failed_fires_listener() {
 }
 
 #[wasm_bindgen_test]
-fn local_batch_records_sync_listener_decodes_json() {
+fn local_batch_records_sync_hydrates_main_runtime() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
         .expect("attach");
 
-    let captured = Rc::new(RefCell::new(Option::<JsValue>::None));
-    let captured_clone = Rc::clone(&captured);
-    let on_records = Closure::<dyn FnMut(JsValue)>::new(move |batches: JsValue| {
-        *captured_clone.borrow_mut() = Some(batches);
-    });
-    let listeners = Object::new();
-    Reflect::set(
-        &listeners,
-        &"onLocalBatchRecordsSync".into(),
-        on_records.as_ref().unchecked_ref(),
-    )
-    .unwrap();
-    bridge.set_listeners(listeners.into());
+    let batch_id = BatchId::new();
+    let record = LocalBatchRecord::new(
+        batch_id,
+        BatchMode::Direct,
+        true,
+        Some(BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+        }),
+    );
+    let encoded_record = record.encode_storage_row().expect("encode record");
 
-    // Worker host serialises `Vec<LocalBatchRecord>` as JSON inside the
-    // postcard envelope; bridge `JSON.parse`s on receive and hands the JS
-    // shape to the listener.
     fw.emit_wire(&WorkerToMainWire::LocalBatchRecordsSync {
-        batches_json: r#"[{"batchId":"b1"}]"#.into(),
+        encoded_records: vec![ByteBuf::from(encoded_record)],
     });
 
-    let batches = captured.borrow().clone().expect("listener fired");
-    let arr: js_sys::Array = batches.dyn_into().expect("batches array");
-    assert_eq!(arr.length(), 1);
-    let first = arr.get(0);
-    let batch_id = Reflect::get(&first, &"batchId".into())
+    let fate = runtime
+        .load_batch_fate(&batch_id.to_string())
+        .expect("load fate");
+    let kind = Reflect::get(&fate, &"kind".into())
         .ok()
-        .and_then(|v| v.as_string());
-    assert_eq!(batch_id.as_deref(), Some("b1"));
-    drop(on_records);
+        .and_then(|value| value.as_string());
+    let tier = Reflect::get(&fate, &"confirmedTier".into())
+        .ok()
+        .and_then(|value| value.as_string());
+    assert_eq!(kind.as_deref(), Some("durableDirect"));
+    assert_eq!(tier.as_deref(), Some("global"));
 }
 
 #[wasm_bindgen_test]
-fn mutation_error_replay_listener_decodes_json() {
+fn mutation_error_replay_hydrates_main_runtime() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
         .expect("attach");
-
-    let captured = Rc::new(RefCell::new(Option::<JsValue>::None));
-    let captured_clone = Rc::clone(&captured);
-    let on_replay = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
-        *captured_clone.borrow_mut() = Some(event);
-    });
-    let listeners = Object::new();
-    Reflect::set(
-        &listeners,
-        &"onMutationErrorReplay".into(),
-        on_replay.as_ref().unchecked_ref(),
-    )
-    .unwrap();
-    bridge.set_listeners(listeners.into());
+    let batch_id = "00000000000000000000000000000009";
 
     fw.emit_wire(&WorkerToMainWire::MutationErrorReplay {
-        event_json: r#"{"code":"rejected","reason":"boom","batch":{"batchId":"b9"}}"#.into(),
+        batch_id: batch_id.into(),
+        code: "rejected".into(),
+        reason: "boom".into(),
     });
 
-    let event = captured.borrow().clone().expect("listener fired");
-    let code = Reflect::get(&event, &"code".into())
+    let fate = runtime.load_batch_fate(batch_id).expect("load fate");
+    let kind = Reflect::get(&fate, &"kind".into())
         .ok()
-        .and_then(|v| v.as_string());
+        .and_then(|value| value.as_string());
+    let code = Reflect::get(&fate, &"code".into())
+        .ok()
+        .and_then(|value| value.as_string());
+    assert_eq!(kind.as_deref(), Some("rejected"));
     assert_eq!(code.as_deref(), Some("rejected"));
-    let batch = Reflect::get(&event, &"batch".into()).expect("event.batch");
-    let batch_id = Reflect::get(&batch, &"batchId".into())
-        .ok()
-        .and_then(|v| v.as_string());
-    assert_eq!(batch_id.as_deref(), Some("b9"));
-    drop(on_replay);
 }
 
 // =============================================================================
@@ -911,57 +910,6 @@ fn ready_js_object_does_not_break_dispatch() {
     let ready = Object::new();
     Reflect::set(&ready, &"type".into(), &"ready".into()).unwrap();
     fw.emit_data(ready.into());
-}
-
-/// Ports the intent of the JS test `does not hang forever when a local sync
-/// flush ack is dropped`. If the worker never replies with `SyncAck`, the
-/// `wait_for_local_sync_flush` promise still settles inside the budget.
-#[wasm_bindgen_test]
-async fn wait_for_local_sync_flush_does_not_hang_when_ack_is_dropped() {
-    let fw = FakeWorker::new();
-    let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
-        .expect("attach");
-
-    let init = bridge.init();
-    fw.emit_wire(&WorkerToMainWire::InitOk {
-        client_id: "c1".into(),
-    });
-    JsFuture::from(init).await.expect("init resolved");
-
-    // Caller asks the bridge to drain — but the worker never replies. The
-    // promise must still resolve (within ~2s) rather than hanging forever.
-    JsFuture::from(bridge.wait_for_local_sync_flush(None))
-        .await
-        .expect("wait_for_local_sync_flush resolves on dropped ack");
-}
-
-/// Regression: after init has failed, `wait_for_local_sync_flush` must settle
-/// promptly rather than spending the full `LOCAL_SYNC_ACK_TIMEOUT_MS` posting
-/// to a worker that already errored. Pre-fix the bridge's `is_disposed_like`
-/// only covered `Disposed | ShuttingDown`, so `Failed` slipped through and the
-/// call hung ~2s on every invocation.
-#[wasm_bindgen_test]
-async fn wait_for_local_sync_flush_returns_promptly_after_failed_init() {
-    let fw = FakeWorker::new();
-    let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
-        .expect("attach");
-
-    let init = bridge.init();
-    fw.emit_wire(&WorkerToMainWire::Error {
-        message: "boom".into(),
-    });
-    let init_result = JsFuture::from(init).await;
-    assert!(init_result.is_err(), "init should reject");
-
-    let flush = bridge.wait_for_local_sync_flush(None);
-    let race = js_sys::Promise::race(&js_sys::Array::of2(&flush, &deadline_marker(500)));
-    let outcome = JsFuture::from(race).await.expect("race resolves");
-    assert!(
-        outcome.as_string().as_deref() != Some("deadline"),
-        "wait_for_local_sync_flush did not settle within 500ms after Failed state"
-    );
 }
 
 #[wasm_bindgen_test]

@@ -11,6 +11,9 @@ import {
   type Direction,
   type Version,
 } from "./lens-diagram-path";
+import { DiagramFrame } from "./diagram/frame";
+import { DiagramStyles } from "./diagram/styles";
+import { drawPath, snapPathDrawn, trackDotAlongPath } from "./diagram/trace-anim";
 
 type Row =
   | { title: string; completed?: never; done?: never }
@@ -395,60 +398,40 @@ export function LensDiagram() {
   useLayoutEffect(() => {
     const el = arrowPathRef.current;
     if (!el || !pathD) return;
-    const len = el.getTotalLength();
-    if (len <= 0) return;
+    if (el.getTotalLength() <= 0) return;
 
     // Re-trigger the draw animation only on user interaction (when the
     // selected version pair changes). Path updates from a window resize
     // arrive on the same key and should snap to the fully-drawn state.
     const key = `${dataVersion}-${client}`;
     if (lastAnimatedKey.current === key) {
-      el.style.transition = "none";
-      el.style.strokeDasharray = `${len}`;
-      el.style.strokeDashoffset = "0";
-      const dot = tipDotRef.current;
-      if (dot) {
-        const end = el.getPointAtLength(len);
-        dot.setAttribute("cx", String(end.x));
-        dot.setAttribute("cy", String(end.y));
-      }
+      snapPathDrawn(el, tipDotRef.current);
       return;
     }
     lastAnimatedKey.current = key;
 
-    el.style.transition = "none";
-    el.style.strokeDasharray = `${len}`;
-    el.style.strokeDashoffset = `${len}`;
-    void el.getBoundingClientRect();
+    const len = el.getTotalLength();
     const duration = Math.max(500, Math.min(len * 1.43, 3000));
-    el.style.transition = `stroke-dashoffset ${duration}ms ease-out`;
-    el.style.strokeDashoffset = "0";
+    drawPath(el, duration);
 
     const dot = tipDotRef.current;
     if (!dot) return;
-    let rafId = 0;
-    const tick = () => {
-      const offset = parseFloat(getComputedStyle(el).strokeDashoffset);
-      if (Number.isNaN(offset)) return;
-      const distance = Math.max(0, len - offset);
-      const point = el.getPointAtLength(distance);
-      dot.setAttribute("cx", String(point.x));
-      dot.setAttribute("cy", String(point.y));
-      if (offset > 0.5) {
-        rafId = requestAnimationFrame(tick);
-      }
-    };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    return trackDotAlongPath(el, dot);
   }, [pathD]);
 
   return (
-    <div className="my-6 rounded-xl border border-fd-border bg-fd-card/30 p-5 not-prose hidden lg:block">
+    <DiagramFrame
+      eyebrow="Interactive Demo"
+      description={
+        <>
+          Choose data from the left, then pick a schema version on the client device. The row is
+          loaded as-is, and the client applies all the lenses needed to interpret it using its
+          schema.
+        </>
+      }
+    >
+      <DiagramStyles />
       <style precedence="default">{`
-        .lens-arrow-path {
-          stroke-dasharray: 99999;
-          stroke-dashoffset: 99999;
-        }
         @keyframes lens-projection-in {
           from { opacity: 0; transform: translateX(-4px); }
           to { opacity: 1; transform: translateY(0); }
@@ -457,12 +440,6 @@ export function LensDiagram() {
           animation: lens-projection-in 200ms ease-out 350ms both;
         }
       `}</style>
-
-      <p className="uppercase text-xs font-bold text-fd-primary">Interactive Demo</p>
-      <p className="text-sm text-fd-muted-foreground mb-4">
-        Choose data from the left, then pick a schema version on the client device. The row is
-        loaded as-is, and the client applies all the lenses needed to interpret it using its schema.
-      </p>
 
       <div
         ref={containerRef}
@@ -562,7 +539,7 @@ export function LensDiagram() {
             >
               <path
                 ref={arrowPathRef}
-                className="lens-arrow-path"
+                className="diagram-path"
                 d={pathD}
                 stroke="currentColor"
                 strokeWidth="2"
@@ -581,6 +558,6 @@ export function LensDiagram() {
           </>
         )}
       </div>
-    </div>
+    </DiagramFrame>
   );
 }

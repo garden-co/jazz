@@ -131,7 +131,9 @@ fn e2e_two_clients_server_schema_sync() {
         ("owner_id".to_string(), Value::Text("alice".into())),
         ("title".to_string(), Value::Text("Test Document".into())),
     ]);
-    let handle = client_a.insert(&mut io_a, "documents", doc_values).unwrap();
+    let handle = client_a
+        .insert(&mut io_a, "documents", doc_values, None, None)
+        .unwrap();
     let doc_id = handle.row_id; // The actual row object ID
     client_a.process(&mut io_a);
 

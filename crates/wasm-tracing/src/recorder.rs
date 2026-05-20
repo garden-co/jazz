@@ -23,6 +23,25 @@ impl StringRecorder {
 }
 
 impl Visit for StringRecorder {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.record_debug(field, &value);
+            return;
+        }
+        if !self.show_fields {
+            return;
+        }
+        if self.is_following_args {
+            writeln!(self.display).unwrap();
+        } else {
+            write!(self.display, " ").unwrap();
+            self.is_following_args = true;
+        }
+        write!(self.display, "{} = {:?};", field.name(), value).unwrap();
+        self.fields
+            .insert(field.name().to_owned(), value.to_owned());
+    }
+
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         if field.name() == "message" {
             let message = format!("{value:?}");

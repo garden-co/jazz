@@ -45,8 +45,9 @@ src/
 Every browser gets its own Ed25519 secret, generated and stored by
 `BrowserAuthSecretStore` on first load. That secret becomes the identity
 Jazz uses for all subsequent writes. `src/routes/+layout.svelte` does
-exactly one thing: call `BrowserAuthSecretStore.getOrCreateSecret()` and
-hand the result to `createJazzClient` as `secret`.
+exactly one thing: instantiate `LocalFirstAuth` (a reactive class from
+`jazz-tools/svelte` that loads or generates the secret client-side) and
+hand `auth.secret` to `createJazzClient`.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the

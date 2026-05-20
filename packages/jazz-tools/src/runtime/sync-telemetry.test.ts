@@ -311,9 +311,9 @@ describe("telemetry OTLP helpers", () => {
           name: "OpfsBTree::put",
           target: "opfs_btree::db",
           level: "TRACE",
-          fields: { key_len: "8" },
-          startUnixNano: "1775000000000000000",
-          endUnixNano: "1775000000000001000",
+          fields: { key_len: "8", "jazz.span.target": "reserved" },
+          startUnixNano: [1775000000, 0],
+          endUnixNano: [1775000000, 1000],
         },
         {
           kind: "log",
@@ -322,7 +322,7 @@ describe("telemetry OTLP helpers", () => {
           level: "WARN",
           fields: { attempt: "2" },
           message: "retrying write",
-          timestampUnixNano: "1775000000000002000",
+          timestampUnixNano: [1775000000, 2000],
         },
         { kind: "dropped", count: 3 },
       ],
@@ -351,6 +351,19 @@ describe("telemetry OTLP helpers", () => {
         attributes: expect.objectContaining({
           "jazz.runtime_thread": "worker",
           "jazz.span.target": "opfs_btree::db",
+          "jazz.span.fields": JSON.stringify({
+            key_len: "8",
+            "jazz.span.target": "reserved",
+          }),
+          key_len: "8",
+        }),
+      }),
+    );
+    expect(otelMocks.startSpan).not.toHaveBeenCalledWith(
+      "OpfsBTree::put",
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          "jazz.span.target": "reserved",
         }),
       }),
     );
@@ -362,6 +375,8 @@ describe("telemetry OTLP helpers", () => {
         attributes: expect.objectContaining({
           "jazz.runtime_thread": "worker",
           "jazz.log.target": "opfs_btree::db",
+          "jazz.log.fields": JSON.stringify({ attempt: "2" }),
+          attempt: "2",
         }),
       }),
     );
