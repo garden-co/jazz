@@ -2017,28 +2017,43 @@ export class Db {
       throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
     }
 
-    if (!isBrowser() || !this.supervisor) {
+    // Gate on the construction-time mode latch, not `!this.supervisor`.
+    // A prior `deleteClientStorage()` call that succeeded at the
+    // broadcast + shutdown phase but failed at the OPFS delete (e.g.
+    // the OS hadn't finished releasing the terminated leader worker's
+    // `FileSystemSyncAccessHandle` within the retry budget) leaves
+    // `this.supervisor === null` even though the namespace is still
+    // there. With the old guard the user could never retry. The
+    // remaining work — `removeBrowserStorageNamespace` under
+    // `withLeaderLockHeld` — only needs `navigator.storage` and
+    // `navigator.locks`, neither of which depends on the supervisor.
+    if (!isBrowser() || !this.usesSharedWorker) {
       console.error(
         "deleteClientStorage() is only available on browser SharedWorker-backed Db instances.",
       );
       return;
     }
 
-    // Capture the namespace before `shutdown()` clears the supervisor/config
-    // pathway that `currentWorkerNamespace()` resolves through.
     const namespace = this.currentWorkerNamespace();
 
-    // 1. Tell every other tab on this namespace to release its bridge /
-    //    leader worker before we try to delete. Their reset-channel
-    //    listener calls `this.shutdown()` — terminating the leader tab's
-    //    dedicated worker, which is what actually frees OPFS.
-    this.broadcastStorageResetStart();
+    // First call: announce + tear ourselves down. On a retry after a
+    // failed OPFS delete `this.supervisor` is already null and the
+    // broadcast already went out — skip straight to the delete attempt
+    // so we don't double-broadcast or double-await an already-shut-down
+    // Db.
+    if (this.supervisor) {
+      // 1. Tell every other tab on this namespace to release its bridge /
+      //    leader worker before we try to delete. Their reset-channel
+      //    listener calls `this.shutdown()` — terminating the leader tab's
+      //    dedicated worker, which is what actually frees OPFS.
+      this.broadcastStorageResetStart();
 
-    // 2. Tear ourselves down. If we were the leader this terminates our
-    //    own dedicated worker (and releases the lock); if we were a
-    //    follower, our port closes here while the leader is being told
-    //    to step down by step 1.
-    await this.shutdown();
+      // 2. Tear ourselves down. If we were the leader this terminates our
+      //    own dedicated worker (and releases the lock); if we were a
+      //    follower, our port closes here while the leader is being told
+      //    to step down by step 1.
+      await this.shutdown();
+    }
 
     // 3. Hold the leader-tab lock across the delete so no other tab's
     //    supervisor can promote itself to leader (and reopen the OPFS

@@ -268,6 +268,54 @@ describe("Db leader-tab runtime bootstrap", () => {
     await db.shutdown();
   });
 
+  it("deleteClientStorage is retryable after a prior failure (gates on usesSharedWorker, not the transient supervisor)", async () => {
+    const removedEntries: string[] = [];
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/app/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+    (globalThis as Record<string, unknown>).SharedWorker = FakeSharedWorker;
+    installNavigatorLocksStub();
+    installOpfsStub(removedEntries);
+
+    const db = await createSharedWorkerDb({
+      appId: "leader-tab-reset-retry",
+      driver: { type: "persistent", dbName: "leader-tab-reset-retry-db" },
+      runtimeSources: {
+        sharedWorkerUrl: "/custom/jazz-shared-worker.js",
+        wasmSource: new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
+      },
+    });
+
+    // Simulate the state after a prior `deleteClientStorage()` ran the
+    // broadcast + shutdown phase but then threw at the OPFS delete:
+    // `this.supervisor` is null (runShutdown nulled it) even though the
+    // namespace still exists and the caller wants to retry.
+    await db.shutdown();
+    const internals = db as unknown as {
+      supervisor: unknown;
+      usesSharedWorker: boolean;
+    };
+    expect(internals.supervisor).toBeNull();
+    expect(internals.usesSharedWorker).toBe(true);
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // With the old `!this.supervisor` guard this returned early with
+      // "is only available on browser SharedWorker-backed Db instances".
+      // With the stable `usesSharedWorker` guard, the retry proceeds and
+      // attempts the OPFS removal.
+      await db.deleteClientStorage();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(removedEntries).toContain("leader-tab-reset-retry-db.opfsbtree");
+  });
+
   it("ensureQueryReady rejects with LeaderMigratedError when a handoff never produces a fresh endpoint", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).location = {
