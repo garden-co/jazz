@@ -76,14 +76,32 @@ single current visible result.
 
 You can think of it like this:
 
-```mermaid
-flowchart LR
-    v1["v1"] --> v2["v2"]
-    v2 --> a3["a3"]
-    v2 --> b3["b3"]
-    a3 --> m4["m4"]
-    b3 --> m4
-```
+<Graph
+  eyebrow="Row version history"
+  description={
+    <>
+      One device edits linearly. Concurrent edits branch into separate row versions, then reconcile
+      into a single current visible result.
+    </>
+  }
+  direction="LR"
+  converge
+  grid={{ gap: "1.25rem 3rem" }}
+  nodes={[
+    { id: "v1", rank: 0, label: "v1" },
+    { id: "v2", rank: 1, label: "v2" },
+    { id: "a3", rank: 2, order: 0, label: "a3" },
+    { id: "b3", rank: 2, order: 1, label: "b3" },
+    { id: "m4", rank: 3, label: "m4" },
+  ]}
+  edges={[
+    { from: "v1", to: "v2" },
+    { from: "v2", to: "a3" },
+    { from: "v2", to: "b3" },
+    { from: "a3", to: "m4" },
+    { from: "b3", to: "m4" },
+  ]}
+/>
 
 The important point is not the exact shape of the graph. The important point is that Jazz preserves
 enough row history to converge deterministically after peers reconnect.
