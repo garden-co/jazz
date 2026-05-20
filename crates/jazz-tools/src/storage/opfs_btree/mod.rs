@@ -432,17 +432,15 @@ impl Storage for OpfsBTreeStorage {
         )
     }
 
-    fn flush(&self) {
+    fn flush(&self) -> Result<(), StorageError> {
         let _span = tracing::debug_span!("OpfsBTreeStorage::flush").entered();
-        if let Err(error) = self.with_tree_mut(|tree| tree.checkpoint().map_err(map_storage_err)) {
-            tracing::warn!(?error, "OpfsBTreeStorage flush failed");
-        }
+        self.with_tree_mut(|tree| tree.checkpoint().map_err(map_storage_err))
     }
 
-    fn flush_wal(&self) {
+    fn flush_wal(&self) -> Result<(), StorageError> {
         let _span = tracing::debug_span!("OpfsBTreeStorage::flush_wal").entered();
         // opfs-btree has no separate WAL; flush_wal maps to an incremental checkpoint.
-        self.flush();
+        self.flush()
     }
 }
 
@@ -590,7 +588,7 @@ mod tests {
                 &crate::storage::encode_store_manifest(&bad_manifest).unwrap(),
             )
             .unwrap();
-        storage.flush();
+        storage.flush().unwrap();
         drop(storage);
 
         let err = match OpfsBTreeStorage::open(&path, 4 * 1024 * 1024) {
@@ -613,7 +611,7 @@ mod tests {
         storage
             .tree_delete(crate::storage::STORE_MANIFEST_KEY)
             .unwrap();
-        storage.flush();
+        storage.flush().unwrap();
         drop(storage);
 
         let err = match OpfsBTreeStorage::open(&path, 4 * 1024 * 1024) {
@@ -801,7 +799,7 @@ mod tests {
                 )
                 .unwrap();
 
-            storage.flush();
+            storage.flush().unwrap();
         }
 
         {

@@ -745,8 +745,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
         if self.storage_write_pending_flush {
             let _span = tracing::debug_span!("flush_wal").entered();
-            self.storage.flush_wal();
-            self.clear_storage_write_pending_flush();
+            if let Err(error) = self.flush_wal_barrier() {
+                tracing::error!(%error, "storage WAL flush failed");
+                if self.should_schedule_storage_flush_retry() {
+                    self.scheduler.schedule_batched_tick();
+                }
+            }
         }
     }
 

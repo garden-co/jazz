@@ -21,6 +21,9 @@ use jazz_tools::middleware::AuthConfig;
 #[cfg(feature = "otel")]
 use jazz_tools::otel;
 
+const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 60 * 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeEnvMode {
     Production,
@@ -62,6 +65,20 @@ fn resolve_jwt_public_key_input(value: String) -> Result<String, String> {
     }
 
     Ok(trimmed.to_string())
+}
+
+fn parse_shutdown_timeout_secs(value: &str) -> Result<u64, String> {
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|error| format!("invalid shutdown timeout: {error}"))?;
+
+    if !(1..=MAX_SHUTDOWN_TIMEOUT_SECS).contains(&seconds) {
+        return Err(format!(
+            "shutdown timeout must be between 1 and {MAX_SHUTDOWN_TIMEOUT_SECS} seconds"
+        ));
+    }
+
+    Ok(seconds)
 }
 
 #[derive(Parser)]
@@ -133,6 +150,15 @@ enum Commands {
         #[arg(long, env = "JAZZ_PEER_SECRET")]
         peer_secret: Option<String>,
 
+        /// Graceful shutdown network-drain timeout in seconds.
+        #[arg(
+            long,
+            env = "JAZZ_SHUTDOWN_TIMEOUT_SECS",
+            default_value_t = DEFAULT_SHUTDOWN_TIMEOUT_SECS,
+            value_parser = parse_shutdown_timeout_secs,
+        )]
+        shutdown_timeout_secs: u64,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -180,6 +206,7 @@ async fn main() {
             admin_secret,
             upstream_url,
             peer_secret,
+            shutdown_timeout_secs,
             bound_port_file,
         } => {
             let node_env_mode = resolve_node_env_mode();
@@ -215,6 +242,7 @@ async fn main() {
                 auth_config,
                 upstream_url,
                 bound_port_file,
+                std::time::Duration::from_secs(shutdown_timeout_secs),
             )
             .await
             {
@@ -259,8 +287,54 @@ fn make_env_filter() -> tracing_subscriber::EnvFilter {
 mod tests {
     use super::*;
 
+    // Clap reads env-backed args during parsing, so every Cli::try_parse_from
+    // test in this module holds this lock. The tests that mutate env vars keep
+    // it held until their EnvVarGuard restores the previous value.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: all CLI parser tests hold ENV_LOCK, and env-mutating tests
+            // keep holding it until EnvVarGuard restores the previous value.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: all CLI parser tests hold ENV_LOCK, and env-mutating tests
+            // keep holding it until EnvVarGuard restores the previous value.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: all CLI parser tests hold ENV_LOCK, and env-mutating tests
+            // keep holding it until EnvVarGuard restores the previous value.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn server_command_parses_allow_local_first_auth_flag() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -280,6 +354,7 @@ mod tests {
 
     #[test]
     fn server_command_parses_jwt_public_key_flag() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -296,7 +371,82 @@ mod tests {
     }
 
     #[test]
+    fn server_command_defaults_shutdown_timeout_secs() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env_guard = EnvVarGuard::remove("JAZZ_SHUTDOWN_TIMEOUT_SECS");
+        let cli = Cli::try_parse_from(["jazz-tools", "server", "test-app"])
+            .expect("server command should parse");
+
+        match cli.command {
+            Commands::Server {
+                shutdown_timeout_secs,
+                ..
+            } => assert_eq!(shutdown_timeout_secs, DEFAULT_SHUTDOWN_TIMEOUT_SECS),
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn server_command_parses_shutdown_timeout_secs() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "test-app",
+            "--shutdown-timeout-secs",
+            "7",
+        ])
+        .expect("server command should parse");
+
+        match cli.command {
+            Commands::Server {
+                shutdown_timeout_secs,
+                ..
+            } => assert_eq!(shutdown_timeout_secs, 7),
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn server_command_reads_shutdown_timeout_secs_from_env() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env_guard = EnvVarGuard::set("JAZZ_SHUTDOWN_TIMEOUT_SECS", "11");
+        let cli = Cli::try_parse_from(["jazz-tools", "server", "test-app"])
+            .expect("server command should parse");
+
+        match cli.command {
+            Commands::Server {
+                shutdown_timeout_secs,
+                ..
+            } => assert_eq!(shutdown_timeout_secs, 11),
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn server_command_rejects_shutdown_timeout_secs_above_limit() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let error = match Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "test-app",
+            "--shutdown-timeout-secs",
+            "18446744073709551615",
+        ]) {
+            Ok(_) => panic!("absurd shutdown timeout should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("shutdown timeout must be between 1 and")
+        );
+    }
+
+    #[test]
     fn server_command_parses_upstream_url_and_peer_secret() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -323,6 +473,7 @@ mod tests {
 
     #[test]
     fn server_cli_validation_requires_peer_secret_in_edge_mode() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -341,6 +492,7 @@ mod tests {
 
     #[test]
     fn server_cli_validation_requires_admin_secret_in_edge_mode() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",

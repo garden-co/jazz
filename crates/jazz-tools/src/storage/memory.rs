@@ -42,6 +42,12 @@ impl TableRowHistories {
 /// - Main thread in browser (acts as cache of worker state)
 pub struct MemoryStorage {
     cache_namespace: usize,
+    #[cfg(test)]
+    flush_failures: std::cell::RefCell<Option<(StorageError, Option<usize>)>>,
+    #[cfg(test)]
+    flush_wal_failures: std::cell::RefCell<Option<(StorageError, Option<usize>)>>,
+    #[cfg(test)]
+    flush_wal_call_count: std::cell::RefCell<usize>,
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
     authoritative_batch_fates: std::cell::RefCell<HashMap<BatchId, BatchFate>>,
@@ -59,6 +65,37 @@ impl MemoryStorage {
     /// Create a new empty MemoryStorage.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_flush_wal_error(mut self, error: StorageError) -> Self {
+        self.flush_wal_failures = std::cell::RefCell::new(Some((error, None)));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_transient_flush_failures(
+        mut self,
+        error: StorageError,
+        failures: usize,
+    ) -> Self {
+        self.flush_failures = std::cell::RefCell::new(Some((error, Some(failures))));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_transient_flush_wal_failures(
+        mut self,
+        error: StorageError,
+        failures: usize,
+    ) -> Self {
+        self.flush_wal_failures = std::cell::RefCell::new(Some((error, Some(failures))));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_wal_call_count(&self) -> usize {
+        *self.flush_wal_call_count.borrow()
     }
 
     fn ensure_cached_raw_table_header(
@@ -92,6 +129,12 @@ impl Default for MemoryStorage {
     fn default() -> Self {
         Self {
             cache_namespace: next_storage_cache_namespace(),
+            #[cfg(test)]
+            flush_failures: std::cell::RefCell::new(None),
+            #[cfg(test)]
+            flush_wal_failures: std::cell::RefCell::new(None),
+            #[cfg(test)]
+            flush_wal_call_count: std::cell::RefCell::new(0),
             raw_tables: HashMap::new(),
             authoritative_batch_fates: std::cell::RefCell::new(HashMap::new()),
             ensured_raw_table_headers: HashSet::new(),
@@ -1127,6 +1170,37 @@ impl Storage for MemoryStorage {
             )
         });
         Ok(rows)
+    }
+
+    #[cfg(test)]
+    fn flush(&self) -> Result<(), StorageError> {
+        if let Some((error, remaining)) = self.flush_failures.borrow_mut().as_mut() {
+            match remaining {
+                Some(0) => {}
+                Some(count) => {
+                    *count -= 1;
+                    return Err(error.clone());
+                }
+                None => return Err(error.clone()),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        *self.flush_wal_call_count.borrow_mut() += 1;
+        if let Some((error, remaining)) = self.flush_wal_failures.borrow_mut().as_mut() {
+            match remaining {
+                Some(0) => {}
+                Some(count) => {
+                    *count -= 1;
+                    return Err(error.clone());
+                }
+                None => return Err(error.clone()),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3024,7 +3098,7 @@ mod tests {
         let (schema_hash, row_id, row) = {
             let mut storage = SqliteStorage::open(&path).unwrap();
             let seeded = seed_common_case_visible_task_row(&mut storage);
-            storage.flush();
+            storage.flush().unwrap();
             storage.close().unwrap();
             seeded
         };
@@ -3060,7 +3134,7 @@ mod tests {
         let (schema_hash, row_id, row) = {
             let mut storage = RocksDBStorage::open(&path, 8 * 1024 * 1024).unwrap();
             let seeded = seed_common_case_visible_task_row(&mut storage);
-            storage.flush();
+            storage.flush().unwrap();
             storage.close().unwrap();
             seeded
         };

@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     http::HeaderMap,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 
 use crate::middleware::auth::{
@@ -26,6 +26,16 @@ pub(super) async fn ws_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> Response {
+    if state.shutdown.is_shutting_down() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(crate::jazz_transport::ErrorResponse::internal(
+                "server is shutting down".to_string(),
+            )),
+        )
+            .into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
 }
 
@@ -274,16 +284,45 @@ async fn close_ws_with_protocol_reason(socket: &mut WebSocket, reason: &str) {
         .await;
 }
 
+async fn close_ws_for_shutdown(socket: &mut WebSocket) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: close_code::RESTART,
+            reason: "server shutting down".into(),
+        })))
+        .await;
+}
+
 async fn handle_ws_connection(
     mut socket: WebSocket,
     state: Arc<ServerState>,
     request_headers: HeaderMap,
 ) {
+    let mut shutdown_rx = state.shutdown.subscribe();
+    let Some(_websocket_guard) = state.shutdown.try_enter_websocket() else {
+        close_ws_for_shutdown(&mut socket).await;
+        return;
+    };
+    if state.shutdown.is_shutting_down() {
+        close_ws_for_shutdown(&mut socket).await;
+        return;
+    }
+
     // 1. Read the first binary frame — expected to be AuthHandshake.
-    let first = match socket.recv().await {
-        Some(Ok(Message::Binary(b))) => b,
-        _ => {
-            let _ = socket.close().await;
+    let first = tokio::select! {
+        msg = socket.recv() => match msg {
+            Some(Ok(Message::Binary(b))) => b,
+            _ => {
+                let _ = socket.close().await;
+                return;
+            }
+        },
+        changed = shutdown_rx.changed() => {
+            if changed.is_ok() && state.shutdown.is_shutting_down() {
+                close_ws_for_shutdown(&mut socket).await;
+            } else {
+                let _ = socket.close().await;
+            }
             return;
         }
     };
@@ -335,11 +374,21 @@ async fn handle_ws_connection(
     };
 
     // 3. Authenticate.
-    let setup = match authenticate_ws_handshake(&handshake, &request_headers, &state).await {
-        Ok(s) => s,
-        Err(msg) => {
-            send_ws_error(&mut socket, &msg).await;
-            let _ = socket.close().await;
+    let setup = tokio::select! {
+        auth = authenticate_ws_handshake(&handshake, &request_headers, &state) => match auth {
+            Ok(s) => s,
+            Err(msg) => {
+                send_ws_error(&mut socket, &msg).await;
+                let _ = socket.close().await;
+                return;
+            }
+        },
+        changed = shutdown_rx.changed() => {
+            if changed.is_ok() && state.shutdown.is_shutting_down() {
+                close_ws_for_shutdown(&mut socket).await;
+            } else {
+                let _ = socket.close().await;
+            }
             return;
         }
     };
@@ -440,6 +489,13 @@ async fn handle_ws_connection(
     heartbeat.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && state.shutdown.is_shutting_down() {
+                    close_ws_for_shutdown(&mut socket).await;
+                    break;
+                }
+            }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(data))) => {
                     let Some(payload) = crate::transport_manager::frame_decode(&data) else {

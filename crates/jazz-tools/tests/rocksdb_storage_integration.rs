@@ -1123,7 +1123,7 @@ async fn sealed_batch_acceptance_recovers_after_restart() {
         let mut storage =
             RocksDBStorage::open(&db_path, 8 * 1024 * 1024).expect("open rocksdb storage");
         let seeded = seed_rocksdb_sealed_batch_acceptance(&mut storage, &schema);
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().expect("close seeded rocksdb storage");
         seeded
     };
@@ -1174,7 +1174,7 @@ async fn sealed_batch_frontier_conflict_rejects_after_restart() {
         let mut storage =
             RocksDBStorage::open(&db_path, 8 * 1024 * 1024).expect("open rocksdb storage");
         let seeded = seed_rocksdb_sealed_batch_frontier_conflict(&mut storage, &schema);
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().expect("close seeded rocksdb storage");
         seeded
     };
