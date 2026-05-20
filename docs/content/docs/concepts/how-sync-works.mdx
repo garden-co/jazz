@@ -64,15 +64,6 @@ Jazz sync runs across three tiers:
 
 <TierSyncDiagram />
 
-<div className="lg:hidden">
-  <Mermaid
-    chart={`graph TD
-    G["Global\\n(global core)"] --- E1["Edge\\n(sync server)"] & E2["Edge\\n(sync server)"]
-    E1 --- W1["Local"] & W2["Local"]
-    E2 --- W3["Local"]`}
-  />
-</div>
-
 **Local** is the first tier on the client itself. In browser persistent mode, a dedicated worker
 hosts that local durable copy in OPFS so it can respond immediately while updates from higher tiers
 stream in.
