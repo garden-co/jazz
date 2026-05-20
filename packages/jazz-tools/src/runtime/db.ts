@@ -40,6 +40,7 @@ import {
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 import {
+  LeaderMigratedError,
   WorkerBridge,
   type WorkerBridgeEndpoint,
   type WorkerBridgeOptions,
@@ -765,6 +766,16 @@ export class Db {
   private disposeWasmTelemetry: (() => void) | null = null;
   private bridgeReady: Promise<void> | null = null;
   private primaryDbName: string | null = null;
+  /**
+   * Latched at construction for SharedWorker-backed instances. The
+   * `workerEndpoint` and `workerBridge` fields are nulled transiently
+   * during leader handoffs; gating client creation and the upstream-wait
+   * on those fields lets a follower silently mint a direct-transport
+   * client (bypassing the leader) or short-circuit the upstream wait
+   * during the migration window. Latching the mode independently keeps
+   * those decisions stable across handoffs.
+   */
+  private usesSharedWorker = false;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -955,6 +966,7 @@ export class Db {
     }
 
     db.primaryDbName = resolveDefaultPersistentDbName(config);
+    db.usesSharedWorker = true;
 
     const locks = createBrowserLocksBackend();
     if (!locks) {
@@ -1076,6 +1088,57 @@ export class Db {
   }
 
   /**
+   * Wait until a fresh `WorkerBridge` is attached and initialized after a
+   * leader handoff. Resolves to the bridge's init promise so the caller
+   * awaits the same completion semantics as on the happy path. Rejects with
+   * {@link LeaderMigratedError} after {@link WAIT_FOR_FRESH_BRIDGE_TIMEOUT_MS}
+   * if the supervisor never produces a new endpoint — callers can retry the
+   * higher-level operation against a freshly-constructed Db.
+   *
+   * Only called from SharedWorker-backed paths; non-worker Dbs never hit a
+   * null-bridge window because they never had one to begin with.
+   */
+  private async waitForFreshBridge(): Promise<void> {
+    if (this.workerBridge && this.bridgeReady) {
+      await this.bridgeReady;
+      return;
+    }
+    if (this.isShuttingDown || !this.supervisor) {
+      throw new LeaderMigratedError();
+    }
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        unsubscribe();
+        action();
+      };
+      const timeout = setTimeout(() => {
+        finish(() => reject(new LeaderMigratedError()));
+      }, Db.WAIT_FOR_FRESH_BRIDGE_TIMEOUT_MS);
+      const unsubscribe = this.supervisor!.subscribe(() => {
+        // Drive `ensureWorkerBridge` on each state change so a freshly
+        // arrived endpoint is attached before we re-check our predicate.
+        this.ensureWorkerBridge();
+        if (this.workerBridge && this.bridgeReady) {
+          finish(() => resolve());
+        }
+      });
+      // Re-check synchronously in case the bridge became live between the
+      // outer guard and `subscribe()`.
+      this.ensureWorkerBridge();
+      if (this.workerBridge && this.bridgeReady) {
+        finish(() => resolve());
+      }
+    });
+    if (this.bridgeReady) {
+      await this.bridgeReady;
+    }
+  }
+
+  /**
    * Wait until the supervisor has produced its first non-null endpoint.
    * Resolves immediately if one is already present, otherwise on the first
    * state change carrying a non-null `endpoint`.
@@ -1143,8 +1206,13 @@ export class Db {
       const client = this.runtimeModule.createClient({
         config: { ...this.config },
         schema: runtimeSchema,
-        hasWorker: this.workerEndpoint !== null,
-        useBinaryEncoding: this.workerEndpoint !== null,
+        // Latch off the construction-time mode, not `workerEndpoint`: during
+        // a leader handoff `workerEndpoint` is transiently null and would
+        // otherwise mint a non-worker client that opens its own direct
+        // transport, violating the "one upstream socket per (appId, dbName)"
+        // invariant the leader-tab topology guarantees.
+        hasWorker: this.usesSharedWorker,
+        useBinaryEncoding: this.usesSharedWorker,
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
@@ -1153,7 +1221,7 @@ export class Db {
       this.attachMutationErrorHandler(client);
       // Direct (non-worker) clients with a serverUrl must open their own
       // Rust transport — the worker bridge is not doing it for them.
-      if (!this.workerEndpoint && this.config.serverUrl) {
+      if (!this.usesSharedWorker && this.config.serverUrl) {
         client.connectTransport(this.config.serverUrl, {
           jwt_token: this.config.jwtToken,
           admin_secret: this.config.adminSecret,
@@ -1203,7 +1271,18 @@ export class Db {
   }
 
   protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
-    await this.ensureBridgeReady();
+    if (this.usesSharedWorker && (!this.workerBridge || !this.bridgeReady)) {
+      // SharedWorker-backed Db in a leader-handoff window: `workerBridge`
+      // was cleared by `onSupervisorStateChange` and `ensureWorkerBridge`
+      // couldn't reattach (no live endpoint yet). Wait for the supervisor
+      // to publish a fresh endpoint and the bridge to come back —
+      // returning here would let the query proceed past the upstream-wait
+      // below against an absent transport, and `await this.bridgeReady`
+      // would be a no-op since the field is null.
+      await this.waitForFreshBridge();
+    } else {
+      await this.ensureBridgeReady();
+    }
     if (!this.workerBridge || !this.config.serverUrl) {
       return;
     }
@@ -1466,6 +1545,15 @@ export class Db {
    * loop blocked, or it crashed while holding the lock without releasing).
    */
   private static readonly STORAGE_RESET_LOCK_TIMEOUT_MS = 15_000;
+
+  /**
+   * Upper bound on how long `ensureQueryReady` will wait for a new bridge
+   * to attach after a leader handoff before surfacing
+   * {@link LeaderMigratedError}. Matched to `waitForInitialEndpoint` so a
+   * tab whose leader vanishes and never returns sees the same envelope it
+   * would have hit when first booting.
+   */
+  private static readonly WAIT_FOR_FRESH_BRIDGE_TIMEOUT_MS = 15_000;
 
   /**
    * Run `fn` while holding the leader-tab lock for this namespace. Acts as a

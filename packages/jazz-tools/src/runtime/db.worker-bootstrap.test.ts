@@ -14,6 +14,7 @@ vi.mock("./client.js", async (importOriginal) => {
 
 import { Db, type DbConfig } from "./db.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
+import { LeaderMigratedError } from "./worker-bridge.js";
 
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalLocation = globalThis.location;
@@ -225,6 +226,96 @@ describe("Db leader-tab runtime bootstrap", () => {
 
     expect(runtimeWorker.terminated).toBe(true);
     expect(removedEntries).toEqual(["leader-tab-reset-db.opfsbtree"]);
+
+    await db.shutdown();
+  });
+
+  it("latches SharedWorker mode at construction so transient null endpoints don't downgrade clients", async () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/app/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+    (globalThis as Record<string, unknown>).SharedWorker = FakeSharedWorker;
+    installNavigatorLocksStub();
+
+    const db = await createSharedWorkerDb({
+      appId: "leader-tab-latch",
+      driver: { type: "persistent", dbName: "leader-tab-latch-db" },
+      runtimeSources: {
+        sharedWorkerUrl: "/custom/jazz-shared-worker.js",
+        wasmSource: new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
+      },
+    });
+
+    const internals = db as unknown as {
+      usesSharedWorker: boolean;
+      workerEndpoint: unknown;
+      onSupervisorStateChange: (state: { role: string; endpoint: unknown }) => void;
+    };
+
+    expect(internals.usesSharedWorker).toBe(true);
+    expect(internals.workerEndpoint).not.toBeNull();
+
+    // Simulate a leader handoff window: supervisor publishes endpoint=null.
+    internals.onSupervisorStateChange({ role: "none", endpoint: null });
+    expect(internals.workerEndpoint).toBeNull();
+
+    // The mode latch survives the transient null so `getClient` still
+    // builds worker-backed clients and skips its own `connectTransport`.
+    expect(internals.usesSharedWorker).toBe(true);
+
+    await db.shutdown();
+  });
+
+  it("ensureQueryReady rejects with LeaderMigratedError when a handoff never produces a fresh endpoint", async () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/app/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+    (globalThis as Record<string, unknown>).SharedWorker = FakeSharedWorker;
+    installNavigatorLocksStub();
+
+    const db = await createSharedWorkerDb({
+      appId: "leader-tab-stuck-handoff",
+      driver: { type: "persistent", dbName: "leader-tab-stuck-handoff-db" },
+      runtimeSources: {
+        sharedWorkerUrl: "/custom/jazz-shared-worker.js",
+        wasmSource: new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
+      },
+    });
+
+    const internals = db as unknown as {
+      onSupervisorStateChange: (state: { role: string; endpoint: unknown }) => void;
+      ensureQueryReady: (options?: { tier?: string }) => Promise<void>;
+    };
+
+    // Push the supervisor into a stuck null-endpoint state (leader gone,
+    // no replacement publishing). `ensureQueryReady` should not silently
+    // succeed — it must wait for a fresh bridge and eventually surface a
+    // typed `LeaderMigratedError` if one never arrives.
+    internals.onSupervisorStateChange({ role: "none", endpoint: null });
+
+    vi.useFakeTimers();
+    let caught: unknown;
+    try {
+      // Pre-attach the catch so the rejection doesn't transit through
+      // node's unhandled-rejection bookkeeping before the test observes it.
+      const settled = internals.ensureQueryReady({ tier: "local" }).then(
+        () => undefined,
+        (error: unknown) => {
+          caught = error;
+        },
+      );
+      // Yield once so the inner subscribe registers before we advance.
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(caught).toBeInstanceOf(LeaderMigratedError);
 
     await db.shutdown();
   });
