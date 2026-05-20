@@ -367,7 +367,6 @@ impl<'a> PolicyContextEvaluator<'a> {
                 table: *parent_table,
                 id: parent_id,
                 operation,
-                parent_eval_depth: depth + 1,
             })
         } else {
             None
@@ -381,24 +380,14 @@ impl<'a> PolicyContextEvaluator<'a> {
             {
                 crate::query_manager::policy_counters::increment(
                     "ref_access_subexpr_cache",
-                    format!(
-                        "hit table={} op={:?} depth={}",
-                        cache_key.table.as_str(),
-                        operation,
-                        cache_key.parent_eval_depth
-                    ),
+                    format!("hit table={} op={:?}", cache_key.table.as_str(), operation),
                 );
                 return result;
             }
 
             crate::query_manager::policy_counters::increment(
                 "ref_access_subexpr_cache",
-                format!(
-                    "miss table={} op={:?} depth={}",
-                    cache_key.table.as_str(),
-                    operation,
-                    cache_key.parent_eval_depth
-                ),
+                format!("miss table={} op={:?}", cache_key.table.as_str(), operation),
             );
         }
 
