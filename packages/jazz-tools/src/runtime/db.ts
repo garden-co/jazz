@@ -2542,9 +2542,14 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     isBrowser() &&
     driver.type === "persistent"
   ) {
-    if (!isSharedWorkerAvailable() || !hasNavigatorLocks()) {
+    if (!isSharedWorkerAvailable()) {
       throw new Error(
-        "driver.type='persistent' in the browser requires SharedWorker and navigator.locks support, which this environment lacks.",
+        "This browser does not support SharedWorker, which Jazz requires for persistent browser storage. Please update your browser or configure driver.type='memory'.",
+      );
+    }
+    if (!hasNavigatorLocks()) {
+      throw new Error(
+        "driver.type='persistent' in the browser requires navigator.locks support, which this environment lacks.",
       );
     }
     db = await Db.createWithSharedWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);

@@ -83,7 +83,7 @@ describe("runtime/createDb driver mode", () => {
         appId: "driver-mode-shared-worker-missing",
         driver: { type: "persistent", dbName: "driver-mode-shared-worker-missing-db" },
       }),
-    ).rejects.toThrow(/SharedWorker and navigator\.locks/);
+    ).rejects.toThrow(/This browser does not support SharedWorker.*Please update your browser/);
   });
 
   it("throws in browser with persistent driver when navigator.locks is unavailable", async () => {
