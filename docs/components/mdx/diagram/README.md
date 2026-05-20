@@ -218,7 +218,7 @@ look without Tailwind or `fd-*`.
 | `NodeTitle`    | `div.dg-node-title`     | 0.75rem, weight 600, `--diagram-fg`. The canonical node header (sequence actor boxes match this).               |
 | `NodeSubtitle` | `div.dg-node-subtitle`  | 0.625rem, muted.                                                                                                |
 | `NodeFooter`   | `div.dg-node-footer`    | Layout slot for actions/extras.                                                                                 |
-| `NodeAction`   | `button.dg-node-action` | Clickable affordance; `onClick`, `aria-label`.                                                                  |
+| `NodeAction`   | `button.dg-node-action` | Clickable affordance; `onClick`, `disabled`, `aria-label`. `disabled` greys it out (not-allowed, no hover).     |
 
 Genuine outliers (the lens diagram's phone frame, tier-sync's hex tally
 swatch) stay diagram-side and are dropped into `NodeShell` as raw children.
@@ -311,10 +311,15 @@ playWaves(traces, bfsWaves(adjacency, source), {
 For overlays that draw bespoke connectors rather than relying on `edges`:
 
 - `connectChain` — orthogonal rounded path through an ordered point list.
+- `roundedPath(points, r)` — the low-level builder behind `connectChain`:
+  a polyline through `Point[]` with genuine bends rounded by quadratic arcs
+  (collinear vertices stay straight). Use it for fully bespoke elbow
+  connectors.
 - `loopRoundedBox` — a rounded self-loop around a box (`LoopSide`).
 - `RoutedEdge` — `{ id, from, to, d, reverse, length, source, target }`;
   `reverse` is the same path reversed (use it to animate an upward hop along a
   downward-drawn link).
+- `Point` — `{ x, y }`; the input to `roundedPath`.
 - `Anchors` — per-node edge anchor points in natural coordinates.
 - `PATH_INSET`, `DEFAULT_CORNER_RADIUS` — shared constants.
 

@@ -154,7 +154,7 @@ function straightLength(pts: Point[]): number {
 // Polyline through `pts`, with genuine bends rounded by a quadratic arc
 // (corner radius clamped to half the shorter adjacent segment). Collinear
 // vertices stay as straight `L`s so straight runs are byte-identical.
-function roundedPath(pts: Point[], r: number): string {
+export function roundedPath(pts: Point[], r: number): string {
   if (pts.length === 0) return "";
   const seg = (p: Point, cmd: "M" | "L") => `${cmd} ${fmt(p.x)} ${fmt(p.y)}`;
   if (pts.length < 3 || r <= 0) {

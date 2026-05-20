@@ -60,11 +60,13 @@ export function NodeFooter({
 
 export function NodeAction({
   onClick,
+  disabled,
   className,
   "aria-label": ariaLabel,
   children,
 }: {
   onClick?: () => void;
+  disabled?: boolean;
   className?: string;
   "aria-label"?: string;
   children: ReactNode;
@@ -73,6 +75,7 @@ export function NodeAction({
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       aria-label={ariaLabel}
       className={cx("dg-node-action", className)}
     >
