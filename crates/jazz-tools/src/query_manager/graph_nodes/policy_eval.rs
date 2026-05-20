@@ -22,6 +22,7 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     branch: &'a str,
     row_policy_mode: RowPolicyMode,
     settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
+    structural_exists_rel_scans: bool,
 }
 
 impl<'a> PolicyContextEvaluator<'a> {
@@ -37,6 +38,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             branch,
             row_policy_mode,
             settlement_eval_cache: None,
+            structural_exists_rel_scans: false,
         }
     }
 
@@ -45,6 +47,11 @@ impl<'a> PolicyContextEvaluator<'a> {
         settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
     ) -> Self {
         self.settlement_eval_cache = settlement_eval_cache;
+        self
+    }
+
+    pub(crate) fn with_structural_exists_rel_scans(mut self, structural_scans: bool) -> Self {
+        self.structural_exists_rel_scans = structural_scans;
         self
     }
 
@@ -270,7 +277,14 @@ impl<'a> PolicyContextEvaluator<'a> {
                 table, condition, operation, row, descriptor, io, row_loader, depth,
             ),
             PolicyExpr::ExistsRel { rel } => self.evaluate_exists_rel_with_context(
-                rel, true, row, descriptor, table_name, io, row_loader, depth,
+                rel,
+                self.structural_exists_rel_scans,
+                row,
+                descriptor,
+                table_name,
+                io,
+                row_loader,
+                depth,
             ),
             PolicyExpr::And(exprs) => exprs.iter().all(|e| {
                 self.evaluate_expr_with_context(
@@ -419,9 +433,8 @@ impl<'a> PolicyContextEvaluator<'a> {
             Operation::Delete => parent_schema.policies.effective_delete_using(),
         };
 
-        let parent_policy = match parent_policy {
-            Some(p) => p,
-            None => return false,
+        let Some(parent_policy) = parent_policy else {
+            return !self.row_policy_mode.denies_missing_explicit_policy();
         };
 
         let parent_row = Row::new(
