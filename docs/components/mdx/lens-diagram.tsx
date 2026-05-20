@@ -1,19 +1,27 @@
 "use client";
 
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "@/lib/cn";
 
 import {
+  type Anchors,
+  Graph,
+  type GraphNode,
+  type GraphOverlayCtx,
+  useDiagramTraces,
+} from "./diagram";
+import {
   buildPath,
+  CLIENT_ID,
   collectCards,
-  getDirection,
+  dataId,
   type Direction,
+  getDirection,
+  lensId,
+  schemaId,
   type Version,
 } from "./lens-diagram-path";
-import { DiagramFrame } from "./diagram/frame";
-import { DiagramStyles } from "./diagram/styles";
-import { drawPath, snapPathDrawn, trackDotAlongPath } from "./diagram/trace-anim";
 
 type Row =
   | { title: string; completed?: never; done?: never }
@@ -21,11 +29,7 @@ type Row =
   | { title: string; done: boolean; completed?: never };
 
 const SCHEMAS: Record<Version, { hash: string; fields: string[]; sample: Row }> = {
-  1: {
-    hash: "a01f5c",
-    fields: ["title: s.string()"],
-    sample: { title: "Buy milk" },
-  },
+  1: { hash: "a01f5c", fields: ["title: s.string()"], sample: { title: "Buy milk" } },
   2: {
     hash: "311995",
     fields: ["title: s.string()", "completed: s.boolean()"],
@@ -107,22 +111,27 @@ function isLensOnPath(lensIdx: number, fromV: Version, toV: Version): boolean {
   return lensIdx + 1 >= lo && lensIdx + 2 <= hi;
 }
 
+function Header({ children }: { children: ReactNode }) {
+  return (
+    <div className="text-[10px] uppercase tracking-wide text-fd-muted-foreground font-semibold pb-1">
+      {children}
+    </div>
+  );
+}
+
 function DataCard({
   version,
   row,
   isActive,
   onSelect,
-  innerRef,
 }: {
   version: Version;
   row: Row;
   isActive: boolean;
   onSelect: () => void;
-  innerRef: (el: HTMLButtonElement | null) => void;
 }) {
   return (
     <button
-      ref={innerRef}
       type="button"
       onClick={onSelect}
       className={cn(
@@ -145,18 +154,9 @@ function DataCard({
   );
 }
 
-function SchemaCard({
-  version,
-  isOnPath,
-  innerRef,
-}: {
-  version: Version;
-  isOnPath: boolean;
-  innerRef: (el: HTMLDivElement | null) => void;
-}) {
+function SchemaCard({ version, isOnPath }: { version: Version; isOnPath: boolean }) {
   return (
     <div
-      ref={innerRef}
       className={cn(
         "rounded-lg border-2 bg-fd-card p-3 h-full flex flex-col justify-center transition-all duration-300 leading-4",
         isOnPath ? "border-transparent shadow-md bg-clip-padding" : "border-fd-border opacity-50",
@@ -176,24 +176,17 @@ function LensCard({
   lens,
   isOnPath,
   direction,
-  innerRef,
 }: {
   lens: Lens;
   isOnPath: boolean;
   direction: Direction;
-  innerRef: (el: HTMLDivElement | null) => void;
 }) {
-  // Pick the longer of the two labels to reserve consistent height regardless
-  // of direction or active state — prevents layout shift when toggling.
   const spacerLabel =
     lens.forwardLabel.length >= lens.backwardLabel.length ? lens.forwardLabel : lens.backwardLabel;
-  // Off-path lenses always show the forward label; the direction only flips
-  // the label when this lens is actually being walked.
   const visibleLabel =
     isOnPath && direction === "backward" ? lens.backwardLabel : lens.forwardLabel;
   return (
     <div
-      ref={innerRef}
       style={{ borderRadius: "50% / 35%" }}
       className={cn(
         "rounded-md border-2 bg-fd-card px-3 py-1.5 text-xs max-w-full transition-all duration-300",
@@ -244,18 +237,24 @@ function StatusBarIcons() {
   );
 }
 
+const PROJECTION_CSS = `
+@keyframes lens-projection-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.projection-row { animation: lens-projection-in 200ms ease-out 350ms both; }
+`;
+
 function ClientDevice({
   client,
   setClient,
   projectedRow,
   dataVersion,
-  innerRef,
 }: {
   client: Version;
   setClient: (v: Version) => void;
   projectedRow: Row;
   dataVersion: Version;
-  innerRef: (el: HTMLDivElement | null) => void;
 }) {
   const [time, setTime] = useState(() => new Date());
   useEffect(() => {
@@ -268,17 +267,13 @@ function ClientDevice({
     return () => clearTimeout(timeoutId);
   }, []);
   return (
-    <div
-      ref={innerRef}
-      className="rounded-2xl border-5 border-fd-primary bg-fd-card p-2 pt-4 h-full flex flex-col gap-2"
-    >
+    <div className="relative rounded-2xl border-5 border-fd-primary bg-fd-card p-2 pt-4 h-full flex flex-col gap-2">
+      <style href="lens-projection" precedence="default">
+        {PROJECTION_CSS}
+      </style>
       <div className="grid grid-cols-3 w-full absolute h-4 top-0 left-0 rounded-b-lg gap-2">
         <div className="col-span-1 ps-5 flex flex-col text-xs pt-1.5 uppercase">
-          {time.toLocaleTimeString("en-GB", {
-            hour: "numeric",
-            minute: "2-digit",
-            hour12: false,
-          })}
+          {time.toLocaleTimeString("en-GB", { hour: "numeric", minute: "2-digit", hour12: false })}
         </div>
         <div className="bg-fd-primary rounded-b-lg"></div>
         <div className="flex justify-end pt-1.5 pe-4 items-center">
@@ -343,84 +338,133 @@ function ClientDevice({
 export function LensDiagram() {
   const [client, setClient] = useState<Version>(3);
   const [dataVersion, setDataVersion] = useState<Version>(1);
-
   const direction = getDirection(dataVersion, client);
   const projectedRow = project(SCHEMAS[dataVersion].sample, dataVersion, client);
 
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const dataRefs = useRef<Partial<Record<Version, HTMLButtonElement | null>>>({});
-  const schemaRefs = useRef<Partial<Record<Version, HTMLDivElement | null>>>({});
-  const lensRefs = useRef<Partial<Record<number, HTMLDivElement | null>>>({});
-  const clientRef = useRef<HTMLDivElement | null>(null);
+  const traces = useDiagramTraces();
+  const [anchors, setAnchors] = useState<Record<string, Anchors>>({});
+  const onGeometry = useCallback((ctx: GraphOverlayCtx) => setAnchors(ctx.anchors), []);
 
-  const [pathD, setPathD] = useState("");
-  const [svgSize, setSvgSize] = useState({ w: 0, h: 0 });
-  const arrowPathRef = useRef<SVGPathElement | null>(null);
-  const tipDotRef = useRef<SVGCircleElement | null>(null);
-  const lastAnimatedKey = useRef<string>("");
+  const pathD = useMemo(() => {
+    return buildPath({
+      cards: collectCards(dataVersion, client),
+      anchors,
+      dataId: dataId(dataVersion),
+      clientId: CLIENT_ID,
+      direction,
+    });
+  }, [anchors, dataVersion, client, direction]);
 
-  useLayoutEffect(() => {
-    function measure() {
-      const container = containerRef.current;
-      const dataEl = dataRefs.current[dataVersion];
-      const clientEl = clientRef.current;
-      if (!container || !dataEl || !clientEl) return;
-
-      const cards = collectCards(dataVersion, client, schemaRefs.current, lensRefs.current);
-      if (!cards) return;
-
-      const c = container.getBoundingClientRect();
-      const d = dataEl.getBoundingClientRect();
-      const cl = clientEl.getBoundingClientRect();
-      const rects = cards.map((card) => card.el.getBoundingClientRect());
-
-      setSvgSize((prev) =>
-        prev.w === c.width && prev.h === c.height ? prev : { w: c.width, h: c.height },
-      );
-      setPathD(
-        buildPath({
-          cards,
-          rects,
-          container: c,
-          data: d,
-          client: cl,
-          direction,
-        }),
-      );
-    }
-
-    measure();
-    const ro = new ResizeObserver(measure);
-    if (containerRef.current) ro.observe(containerRef.current);
-    return () => ro.disconnect();
-  }, [client, dataVersion]);
-
-  useLayoutEffect(() => {
-    const el = arrowPathRef.current;
-    if (!el || !pathD) return;
-    if (el.getTotalLength() <= 0) return;
-
-    // Re-trigger the draw animation only on user interaction (when the
-    // selected version pair changes). Path updates from a window resize
-    // arrive on the same key and should snap to the fully-drawn state.
+  // Draw on a selection change; snap (no replay) when geometry changes for the
+  // same selection (resize).
+  const lastKey = useRef("");
+  useEffect(() => {
+    if (!pathD) return;
     const key = `${dataVersion}-${client}`;
-    if (lastAnimatedKey.current === key) {
-      snapPathDrawn(el, tipDotRef.current);
+    if (lastKey.current === key) {
+      traces.snap("lens");
       return;
     }
-    lastAnimatedKey.current = key;
+    lastKey.current = key;
+    traces.play({
+      id: "lens",
+      d: pathD,
+      follow: true,
+      timing: { min: 700, max: 4000, perPx: 2.9 },
+    });
+  }, [pathD, dataVersion, client, traces]);
 
-    const len = el.getTotalLength();
-    const duration = Math.max(500, Math.min(len * 1.43, 3000));
-    drawPath(el, duration);
+  // Path runs behind the cards; the tip dot rides above them.
+  const overlay = useCallback(
+    () => (
+      <path
+        ref={traces.pathRef("lens")}
+        className="diagram-path"
+        d={pathD}
+        fill="none"
+        stroke="var(--diagram-accent, #146aff)"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    ),
+    [pathD, traces],
+  );
 
-    const dot = tipDotRef.current;
-    if (!dot) return;
-    return trackDotAlongPath(el, dot);
-  }, [pathD]);
+  const overlayFront = useCallback(
+    () => (
+      <circle
+        ref={traces.dotRef("lens")}
+        className="diagram-dot"
+        r={4}
+        cx={0}
+        cy={0}
+        fill="var(--diagram-accent, #146aff)"
+        style={{ opacity: 0 }}
+      />
+    ),
+    [traces],
+  );
+
+  const nodes: GraphNode[] = [
+    { id: "hdr-data", slot: { row: "1 / 2", col: "1 / 2" }, content: <Header>Data</Header> },
+    {
+      id: "hdr-mid",
+      slot: { row: "1 / 2", col: "2 / 3" },
+      content: <Header>Schemas + lenses</Header>,
+    },
+    { id: "hdr-client", slot: { row: "1 / 2", col: "3 / 4" }, content: <Header>Client</Header> },
+    ...([1, 2, 3] as const).flatMap((v): GraphNode[] => {
+      const rowLine = `${2 * v} / ${2 * v + 1}`;
+      return [
+        {
+          id: dataId(v),
+          slot: { row: rowLine, col: "1 / 2" },
+          content: (
+            <DataCard
+              version={v}
+              row={SCHEMAS[v].sample}
+              isActive={dataVersion === v}
+              onSelect={() => setDataVersion(v)}
+            />
+          ),
+        },
+        {
+          id: schemaId(v),
+          slot: { row: rowLine, col: "2 / 3" },
+          content: <SchemaCard version={v} isOnPath={isSchemaOnPath(v, dataVersion, client)} />,
+        },
+      ];
+    }),
+    ...([0, 1] as const).map(
+      (idx): GraphNode => ({
+        id: lensId(idx),
+        slot: { row: `${2 * (idx + 1) + 1} / ${2 * (idx + 1) + 2}`, col: "2 / 3" },
+        content: (
+          <LensCard
+            lens={LENSES[idx]}
+            isOnPath={isLensOnPath(idx, dataVersion, client)}
+            direction={direction}
+          />
+        ),
+      }),
+    ),
+    {
+      id: CLIENT_ID,
+      slot: { row: "2 / 7", col: "3 / 4" },
+      content: (
+        <ClientDevice
+          client={client}
+          setClient={setClient}
+          projectedRow={projectedRow}
+          dataVersion={dataVersion}
+        />
+      ),
+    },
+  ];
 
   return (
-    <DiagramFrame
+    <Graph
       eyebrow="Interactive Demo"
       description={
         <>
@@ -429,135 +473,22 @@ export function LensDiagram() {
           schema.
         </>
       }
-    >
-      <DiagramStyles />
-      <style precedence="default">{`
-        @keyframes lens-projection-in {
-          from { opacity: 0; transform: translateX(-4px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        .projection-row {
-          animation: lens-projection-in 200ms ease-out 350ms both;
-        }
-      `}</style>
-
-      <div
-        ref={containerRef}
-        className="relative grid items-stretch gap-x-4"
-        style={{
-          gridTemplateColumns: "minmax(120px, 0.9fr) minmax(160px, 1fr) minmax(220px, 1.1fr)",
-          gridTemplateRows: "auto auto auto auto auto auto",
-          rowGap: "0.5rem",
-        }}
-      >
-        <div
-          className="text-[10px] uppercase tracking-wide text-fd-muted-foreground font-semibold pb-1"
-          style={{ gridRow: "1 / 2", gridColumn: "1 / 2" }}
-        >
-          Data
-        </div>
-        <div
-          className="text-[10px] uppercase tracking-wide text-fd-muted-foreground font-semibold pb-1"
-          style={{ gridRow: "1 / 2", gridColumn: "2 / 3" }}
-        >
-          Schemas + lenses
-        </div>
-        <div
-          className="text-[10px] uppercase tracking-wide text-fd-muted-foreground font-semibold pb-1"
-          style={{ gridRow: "1 / 2", gridColumn: "3 / 3" }}
-        >
-          Client
-        </div>
-        {([1, 2, 3] as const).map((v) => {
-          const dataRow = `${2 * v} / ${2 * v + 1}`;
-          const lensIdx = v - 1;
-          return (
-            <Fragment key={v}>
-              <div style={{ gridRow: dataRow, gridColumn: "1 / 2" }} className="relative z-10">
-                <DataCard
-                  version={v}
-                  row={SCHEMAS[v].sample}
-                  isActive={dataVersion === v}
-                  onSelect={() => setDataVersion(v)}
-                  innerRef={(el) => {
-                    dataRefs.current[v] = el;
-                  }}
-                />
-              </div>
-              <div className="relative z-10" style={{ gridRow: dataRow, gridColumn: "2 / 3" }}>
-                <SchemaCard
-                  version={v}
-                  isOnPath={isSchemaOnPath(v, dataVersion, client)}
-                  innerRef={(el) => {
-                    schemaRefs.current[v] = el;
-                  }}
-                />
-              </div>
-              {v < 3 && (
-                <div
-                  style={{
-                    gridRow: `${2 * v + 1} / ${2 * v + 2}`,
-                    gridColumn: "2 / 3",
-                  }}
-                  className="relative z-10 flex justify-center"
-                >
-                  <LensCard
-                    lens={LENSES[lensIdx]}
-                    isOnPath={isLensOnPath(lensIdx, dataVersion, client)}
-                    direction={direction}
-                    innerRef={(el) => {
-                      lensRefs.current[lensIdx] = el;
-                    }}
-                  />
-                </div>
-              )}
-            </Fragment>
-          );
-        })}
-        <div
-          className="relative z-10 self-stretch"
-          style={{ gridRow: "2 / 7", gridColumn: "3 / 4" }}
-        >
-          <ClientDevice
-            client={client}
-            setClient={setClient}
-            projectedRow={projectedRow}
-            dataVersion={dataVersion}
-            innerRef={(el) => {
-              clientRef.current = el;
-            }}
-          />
-        </div>
-        {svgSize.w > 0 && (
-          <>
-            <svg
-              className="absolute pointer-events-none inset-0 text-[#146aff]"
-              style={{ zIndex: 0 }}
-              width={svgSize.w}
-              height={svgSize.h}
-              viewBox={`0 0 ${svgSize.w} ${svgSize.h}`}
-            >
-              <path
-                ref={arrowPathRef}
-                className="diagram-path"
-                d={pathD}
-                stroke="currentColor"
-                strokeWidth="2"
-                fill="none"
-              />
-            </svg>
-            <svg
-              className="absolute pointer-events-none inset-0 text-[#146aff]"
-              style={{ zIndex: 20 }}
-              width={svgSize.w}
-              height={svgSize.h}
-              viewBox={`0 0 ${svgSize.w} ${svgSize.h}`}
-            >
-              <circle ref={tipDotRef} r="4" cx="0" cy="0" fill="currentColor" />
-            </svg>
-          </>
-        )}
-      </div>
-    </DiagramFrame>
+      direction="LR"
+      nodes={nodes}
+      edges={[]}
+      naturalWidth={560}
+      grid={{
+        columns: "minmax(120px, 0.9fr) minmax(160px, 1fr) minmax(220px, 1.1fr)",
+        rows: "auto auto auto auto auto auto",
+        gap: "0.5rem 1rem",
+      }}
+      nodeAlign="stretch"
+      arrows={false}
+      traces={traces}
+      overlay={overlay}
+      overlayBehindNodes
+      overlayFront={overlayFront}
+      onGeometry={onGeometry}
+    />
   );
 }
