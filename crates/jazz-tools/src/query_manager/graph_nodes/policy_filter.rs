@@ -368,7 +368,7 @@ impl PolicyFilterNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
-        let evaluator = PolicyContextEvaluator::new(
+        let mut evaluator = PolicyContextEvaluator::new(
             &self.schema,
             &self.session,
             &self.branch,
