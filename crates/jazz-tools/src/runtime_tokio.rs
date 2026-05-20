@@ -587,10 +587,38 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    pub fn ensure_client_with_session_and_catalogue_state_hash(
+        &self,
+        client_id: ClientId,
+        session: Session,
+        remote_catalogue_state_hash: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_with_session_and_catalogue_state_hash(
+            client_id,
+            session,
+            remote_catalogue_state_hash,
+        );
+        Ok(())
+    }
+
     /// Ensure a client exists and is marked as Backend without resetting state.
     pub fn ensure_client_as_backend(&self, client_id: ClientId) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.ensure_client_as_backend(client_id);
+        Ok(())
+    }
+
+    pub fn ensure_client_as_backend_with_catalogue_state_hash(
+        &self,
+        client_id: ClientId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_backend_with_catalogue_state_hash(
+            client_id,
+            remote_catalogue_state_hash,
+        );
         Ok(())
     }
 
@@ -601,10 +629,37 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Ensure a peer client exists and replay catalogue only when its digest is stale.
+    pub fn ensure_client_as_peer_with_catalogue_state_hash(
+        &self,
+        client_id: ClientId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_peer_with_catalogue_state_hash(
+            client_id,
+            remote_catalogue_state_hash,
+        );
+        Ok(())
+    }
+
     /// Ensure a client exists and is marked as Admin without resetting state.
     pub fn ensure_client_as_admin(&self, client_id: ClientId) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.ensure_client_as_admin(client_id);
+        Ok(())
+    }
+
+    pub fn ensure_client_as_admin_with_catalogue_state_hash(
+        &self,
+        client_id: ClientId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_admin_with_catalogue_state_hash(
+            client_id,
+            remote_catalogue_state_hash,
+        );
         Ok(())
     }
 
