@@ -1966,7 +1966,7 @@ impl QueryManager {
                         Some(session.clone()),
                         self.row_policy_mode,
                         Some(table),
-                        false,
+                        true,
                     ) {
                         graphs.push(graph);
                     } else {

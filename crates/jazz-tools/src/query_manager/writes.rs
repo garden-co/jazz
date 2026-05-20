@@ -25,7 +25,7 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id}
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
-    ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash,
+    ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash,
     TableName, Value,
 };
 
@@ -1383,6 +1383,59 @@ impl QueryManager {
     ) -> bool {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
+        }
+        if let Some(current_row_id) = row_id {
+            let storage_ref: &dyn Storage = storage;
+            let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+            let mut row_loader =
+                |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                    let (_, row) = Self::load_best_visible_row_batch_with_hint_or_locator(
+                        storage_ref,
+                        id,
+                        table_hint.as_ref().map(TableName::as_str),
+                        &[branch.to_string()],
+                        None,
+                        &self.schema_context,
+                        &branch_schema_map,
+                    )?;
+                    if row.is_hard_deleted() {
+                        return None;
+                    }
+                    let batch_id = row.batch_id;
+                    let provenance = row.row_provenance();
+                    let source_branch = BranchName::new(&row.branch);
+                    Some(LoadedRow::new(
+                        row.data,
+                        provenance,
+                        [(id, source_branch)].into_iter().collect(),
+                        batch_id,
+                    ))
+                };
+            let row = Row::new(
+                current_row_id,
+                content.to_vec(),
+                BatchId([0; 16]),
+                provenance.clone(),
+            );
+            let mut evaluator =
+                crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator::new(
+                    self.schema.as_ref(),
+                    session,
+                    branch,
+                    self.row_policy_mode,
+                );
+            let mut visited_referencing = HashSet::new();
+            return evaluator.evaluate_row_access(
+                operation,
+                &row,
+                descriptor,
+                table,
+                Some(policy),
+                storage_ref,
+                &mut row_loader,
+                depth,
+                &mut visited_referencing,
+            );
         }
         let simple_result = evaluate_simple_parts_with_row_id(
             policy, content, provenance, descriptor, session, row_id,

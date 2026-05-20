@@ -151,15 +151,27 @@ impl<'a> PolicyContextEvaluator<'a> {
         }
 
         let candidate_ids = match &col.column_type {
-            ColumnType::Uuid => io.index_lookup(
-                source_table_name.as_str(),
-                col.name.as_str(),
-                self.branch,
-                &Value::Uuid(row.id),
-            ),
-            ColumnType::Array { element } if **element == ColumnType::Uuid => {
-                io.index_scan_all(source_table_name.as_str(), col.name.as_str(), self.branch)
+            ColumnType::Uuid => {
+                if source_schema.is_indexed_column(col.name.as_str()) {
+                    io.index_lookup(
+                        source_table_name.as_str(),
+                        col.name.as_str(),
+                        self.branch,
+                        &Value::Uuid(row.id),
+                    )
+                } else {
+                    io.index_scan_all(source_table_name.as_str(), "_id", self.branch)
+                }
             }
+            ColumnType::Array { element } if **element == ColumnType::Uuid => io.index_scan_all(
+                source_table_name.as_str(),
+                if source_schema.is_indexed_column(col.name.as_str()) {
+                    col.name.as_str()
+                } else {
+                    "_id"
+                },
+                self.branch,
+            ),
             _ => return false,
         };
 
@@ -258,14 +270,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                 table, condition, operation, row, descriptor, io, row_loader, depth,
             ),
             PolicyExpr::ExistsRel { rel } => self.evaluate_exists_rel_with_context(
-                rel,
-                operation == Operation::Select,
-                row,
-                descriptor,
-                table_name,
-                io,
-                row_loader,
-                depth,
+                rel, true, row, descriptor, table_name, io, row_loader, depth,
             ),
             PolicyExpr::And(exprs) => exprs.iter().all(|e| {
                 self.evaluate_expr_with_context(
