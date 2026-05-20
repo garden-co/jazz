@@ -17,7 +17,7 @@ use crate::query_manager::types::{
     ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::schema_manager::{Lens, LensOp, LensTransform};
-use crate::server::ServerState;
+use crate::server::{ServerState, ShutdownPhase};
 
 use super::utils::{
     parse_app_id_param, parse_object_id_param, parse_schema_hash_param, permissions_head_view,
@@ -142,6 +142,11 @@ pub(super) struct StoredPermissionsResponse {
 #[derive(Debug, Serialize)]
 pub(super) struct SchemaConnectivityResponse {
     connected: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ShutdownResponse {
+    status: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -1130,8 +1135,49 @@ pub(super) async fn admin_subscription_introspection_handler(
     }
 }
 
-pub(super) async fn health_handler() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "status": "healthy"
-    }))
+pub(super) async fn internal_shutdown_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    let first_request = state.shutdown.request_shutdown();
+    let status = if first_request {
+        "shutting_down"
+    } else {
+        "already_shutting_down"
+    };
+
+    (StatusCode::ACCEPTED, Json(ShutdownResponse { status })).into_response()
+}
+
+pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    let mut phase = state.shutdown.phase();
+    if !state.shutdown.is_shutting_down() && phase.is_running() {
+        return Json(serde_json::json!({
+            "status": "healthy"
+        }))
+        .into_response();
+    }
+    if phase.is_running() {
+        phase = ShutdownPhase::ShuttingDown;
+    }
+
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "status": "shutting_down",
+            "phase": phase
+        })),
+    )
+        .into_response()
 }

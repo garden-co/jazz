@@ -790,22 +790,24 @@ impl Storage for SqliteStorage {
         )
     }
 
-    fn flush_wal(&self) {
-        let Ok(mut inner) = self.lock_inner() else {
-            return;
-        };
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        let mut inner = self.lock_inner()?;
         if let Some(inner) = inner.as_mut() {
             // Commit the open write transaction so writes land in the WAL
             // and survive a process crash.
-            let _ = inner.commit_write_tx();
+            inner.commit_write_tx()?;
             // PASSIVE checkpoint: moves WAL pages into the main db file without
             // blocking concurrent readers.
-            let _ = inner.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)");
+            inner
+                .conn
+                .execute_batch("PRAGMA wal_checkpoint(PASSIVE)")
+                .map_err(|e| StorageError::IoError(format!("sqlite wal checkpoint: {e}")))?;
         }
+        Ok(())
     }
 
-    fn flush(&self) {
-        self.flush_wal();
+    fn flush(&self) -> Result<(), StorageError> {
+        self.flush_wal()
     }
 
     fn close(&self) -> Result<(), StorageError> {
@@ -866,8 +868,8 @@ mod tests {
                 .unwrap();
         }
 
-        // flush() should not panic or return an error (it returns ())
-        storage.flush();
+        // flush() should not panic or return an error for an open empty store.
+        storage.flush().unwrap();
     }
 
     #[test]

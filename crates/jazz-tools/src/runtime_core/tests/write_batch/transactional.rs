@@ -1095,8 +1095,10 @@ fn assert_single_user_named(core: &mut TestCore, row_id: ObjectId, name: &str, m
     );
 }
 
+/// Two transactions modify the same object unaware of each other.
+/// The server accepts the first tx and rejects the second.
 #[test]
-fn rc_two_clients_reject_stale_transactional_update_after_first_client_commits() {
+fn rc_authority_rejects_stale_update_after_concurrent_commit() {
     let mut harness = create_two_client_transaction_harness("two-client-transaction-conflict");
 
     let alice_context = transactional_write_context();
@@ -1149,9 +1151,12 @@ fn rc_two_clients_reject_stale_transactional_update_after_first_client_commits()
     ));
 }
 
+/// Two transactions modify the same object.
+/// Alice's tx commits first and Bob's tx sees Alice's update
+/// AFTER its write (and before its commit).
+/// The server accepts the first tx and rejects the second.
 #[test]
-fn rc_two_clients_accept_second_transactional_update_if_second_client_receives_first_before_commit()
-{
+fn rc_authority_rejects_update_staged_before_receiving_concurrent_commit() {
     let mut harness =
         create_two_client_transaction_harness("two-client-transaction-conflict-after-sync");
 
@@ -1202,17 +1207,103 @@ fn rc_two_clients_accept_second_transactional_update_if_second_client_receives_f
             },
         ],
     );
-    // Right now transactions have a "read committed" isolation level, which means
-    // transactions can read data written after they began (including other transactions
-    // that were concurrently committed).
-    // We want to move into snapshot or serializable isolation, so that transactions can
-    // only read writes that happened BEFORE they began
     assert_single_user_named(
         &mut harness.bob,
         harness.row_id,
         "Alice",
         "Bob should learn Alice's accepted transaction before sealing his own",
     );
+
+    harness.bob.seal_batch(bob_batch_id).unwrap();
+    sync_server_with_clients(
+        &mut harness.server,
+        &mut [
+            ClientForServer {
+                core: &mut harness.alice,
+                server_id: harness.alice_server_id,
+                client_id: harness.alice_client_id,
+            },
+            ClientForServer {
+                core: &mut harness.bob,
+                server_id: harness.bob_server_id,
+                client_id: harness.bob_client_id,
+            },
+        ],
+    );
+    assert!(matches!(
+        harness.server.batch_fate(bob_batch_id).unwrap(),
+        Some(crate::batch_fate::BatchFate::Rejected { code, .. })
+            if code == "transaction_conflict"
+    ));
+    assert_single_user_named(
+        &mut harness.server,
+        harness.row_id,
+        "Alice",
+        "Bob's stale staged transaction should not replace Alice's accepted transaction",
+    );
+}
+
+/// Two transactions modify the same object.
+/// Alice's tx commits first and Bob's tx sees Alice's update BEFORE its write.
+/// The server accepts both transactions.
+#[test]
+fn rc_authority_accepts_update_staged_after_receiving_concurrent_commit() {
+    let mut harness =
+        create_two_client_transaction_harness("two-client-transaction-conflict-after-stage");
+
+    let alice_context = transactional_write_context();
+    let alice_batch_id = harness
+        .alice
+        .update(
+            harness.row_id,
+            vec![("name".to_string(), Value::Text("Alice".to_string()))],
+            Some(&alice_context),
+        )
+        .unwrap();
+
+    harness.alice.seal_batch(alice_batch_id).unwrap();
+    pump_client_messages_to_server(
+        &mut harness.alice,
+        &mut harness.server,
+        harness.alice_server_id,
+        harness.alice_client_id,
+    );
+    assert!(matches!(
+        harness.server.batch_fate(alice_batch_id).unwrap(),
+        Some(crate::batch_fate::BatchFate::AcceptedTransaction { .. })
+    ));
+
+    sync_server_with_clients(
+        &mut harness.server,
+        &mut [
+            ClientForServer {
+                core: &mut harness.alice,
+                server_id: harness.alice_server_id,
+                client_id: harness.alice_client_id,
+            },
+            ClientForServer {
+                core: &mut harness.bob,
+                server_id: harness.bob_server_id,
+                client_id: harness.bob_client_id,
+            },
+        ],
+    );
+    assert_single_user_named(
+        &mut harness.bob,
+        harness.row_id,
+        "Alice",
+        "Bob should stage his transaction from Alice's visible row",
+    );
+
+    let bob_context = transactional_write_context();
+    let bob_batch_id = harness
+        .bob
+        .update(
+            harness.row_id,
+            vec![("name".to_string(), Value::Text("Bob".to_string()))],
+            Some(&bob_context),
+        )
+        .unwrap();
 
     harness.bob.seal_batch(bob_batch_id).unwrap();
     sync_server_with_clients(

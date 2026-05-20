@@ -470,6 +470,25 @@ async fn claim_array_id_policy_gates_updates_by_primary_key() {
     let query = QueryBuilder::new(table_name).build();
 
     wait_for_query(
+        &alice,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(3),
+        "alice sees seeded documents before updates",
+        |rows| {
+            (rows.len() == 2
+                && rows.iter().any(|(id, values)| {
+                    *id == allowed_doc && *values == title_document_values("allowed")
+                })
+                && rows.iter().any(|(id, values)| {
+                    *id == blocked_doc && *values == title_document_values("blocked")
+                }))
+            .then_some(())
+        },
+    )
+    .await;
+
+    wait_for_query(
         &observer,
         query.clone(),
         Some(DurabilityTier::EdgeServer),

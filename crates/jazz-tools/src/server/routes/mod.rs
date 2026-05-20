@@ -16,6 +16,11 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    body::Body,
+    extract::State,
+    http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use tower_http::cors::CorsLayer;
@@ -24,11 +29,30 @@ use tower_http::trace::TraceLayer;
 use crate::server::ServerState;
 
 use http::{
-    admin_subscription_introspection_handler, health_handler, permissions_handler,
-    permissions_head_handler, publish_migration_handler, publish_permissions_handler,
-    publish_schema_handler, schema_connectivity_handler, schema_handler, schema_hashes_handler,
+    admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
+    permissions_handler, permissions_head_handler, publish_migration_handler,
+    publish_permissions_handler, publish_schema_handler, schema_connectivity_handler,
+    schema_handler, schema_hashes_handler,
 };
 use websocket::ws_handler;
+
+async fn app_shutdown_gate(
+    State(state): State<Arc<ServerState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let Some(_guard) = state.shutdown.try_enter_app_request() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(crate::jazz_transport::ErrorResponse::internal(
+                "server is shutting down".to_string(),
+            )),
+        )
+            .into_response();
+    };
+
+    next.run(request).await
+}
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
     // TODO: Accept app-name aliases in app-scoped route matching
@@ -52,10 +76,15 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .nest("/admin", admin_routes)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            app_shutdown_gate,
+        ))
         .layer(TraceLayer::new_for_http());
 
     Router::new()
         .route("/health", get(health_handler))
+        .route("/internal/shutdown", post(internal_shutdown_handler))
         .nest(&app_route_prefix, traced_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -85,7 +114,7 @@ mod tests {
     use crate::jazz_transport::SyncBatchRequest;
     use crate::query_manager::query::QueryBuilder;
     use crate::query_manager::types::{
-        ColumnType, SchemaBuilder, TableSchema, Value as QueryValue,
+        ColumnType, Schema, SchemaBuilder, TableSchema, Value as QueryValue,
     };
     use crate::sync_manager::{
         ClientId, ConnectionSchemaDiagnostics, InboxEntry, QueryId, QueryPropagation, Source,
@@ -179,6 +208,21 @@ mod tests {
 
     fn make_test_router(state: Arc<ServerState>) -> axum::Router {
         create_router(state)
+    }
+
+    async fn post_internal_shutdown(
+        app: axum::Router,
+        admin_secret: Option<&str>,
+    ) -> axum::response::Response {
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri("/internal/shutdown");
+        if let Some(admin_secret) = admin_secret {
+            builder = builder.header("X-Jazz-Admin-Secret", admin_secret);
+        }
+        app.oneshot(builder.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap()
     }
 
     fn test_app_id_text() -> String {
@@ -295,6 +339,122 @@ mod tests {
         fn record_u64(&mut self, field: &Field, value: u64) {
             self.record_value(field, value.to_string());
         }
+    }
+
+    #[tokio::test]
+    async fn internal_shutdown_requires_configured_admin_secret() {
+        let auth_config = AuthConfig {
+            admin_secret: None,
+            allow_local_first_auth: true,
+            ..Default::default()
+        };
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build server without admin secret")
+            .state;
+
+        let response = post_internal_shutdown(make_test_router(state), Some("admin-secret")).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn internal_shutdown_requires_admin_secret_header() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let response = post_internal_shutdown(make_test_router(state), None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn internal_shutdown_rejects_wrong_admin_secret() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let response = post_internal_shutdown(make_test_router(state), Some("wrong-secret")).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn internal_shutdown_accepts_valid_admin_secret_and_marks_health_unhealthy() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let app = make_test_router(state.clone());
+
+        let response = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("shutdown body");
+        let json: Value = serde_json::from_slice(&body).expect("shutdown json");
+        assert_eq!(json["status"].as_str(), Some("shutting_down"));
+
+        let repeated = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+        let repeated_body = body::to_bytes(repeated.into_body(), usize::MAX)
+            .await
+            .expect("repeated shutdown body");
+        let repeated_json: Value = serde_json::from_slice(&repeated_body).expect("repeated json");
+        assert_eq!(
+            repeated_json["status"].as_str(),
+            Some("already_shutting_down")
+        );
+
+        let health = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let health_body = body::to_bytes(health.into_body(), usize::MAX)
+            .await
+            .expect("health body");
+        let health_json: Value = serde_json::from_slice(&health_body).expect("health json");
+        assert_eq!(health_json["status"].as_str(), Some("shutting_down"));
+        assert_eq!(health_json["phase"].as_str(), Some("shutting_down"));
+
+        assert_eq!(
+            state.shutdown.phase(),
+            crate::server::ShutdownPhase::ShuttingDown
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_new_app_scoped_http_requests_but_keeps_internal_routes_available() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let app = make_test_router(state);
+
+        let shutdown = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
+        assert_eq!(shutdown.status(), StatusCode::ACCEPTED);
+
+        let app_scoped = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/schemas"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(app_scoped.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let repeated = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+
+        let health = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -2271,7 +2431,9 @@ mod tests {
         // upgrade, handshake, and ConnectedResponse path the server uses.
         let collector = EventCollector::default();
         let subscriber = Registry::default().with(collector.clone());
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _ = tracing::dispatcher::set_global_default(dispatch.clone());
+        let _guard = tracing::dispatcher::set_default(&dispatch);
 
         let state = make_sync_test_state("test-backend-secret").await;
         let app = create_router(state);
@@ -2280,7 +2442,9 @@ mod tests {
             .await
             .expect("bind ws listener");
         let addr = listener.local_addr().expect("ws local addr");
+        let server_dispatch = dispatch.clone();
         let server_task = tokio::spawn(async move {
+            let _guard = tracing::dispatcher::set_default(&server_dispatch);
             axum::serve(listener, app).await.expect("serve ws app");
         });
 
@@ -2322,21 +2486,148 @@ mod tests {
             crate::transport_manager::SYNC_PROTOCOL_VERSION
         );
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let events = collector.snapshot();
-        assert!(
-            events.iter().any(|event| {
-                event.level == tracing::Level::INFO
-                    && event.message.as_deref() == Some("ws client connected")
-                    && event.fields.get("client_id").map(String::as_str) == Some(client_id.as_str())
-                    && event.fields.get("connection_id").map(String::as_str) == Some("1")
-                    && event.fields.get("role").map(String::as_str) == Some("backend")
-            }),
-            "expected ws client connected log, captured events: {events:#?}"
-        );
+        let mut events = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                events = collector.snapshot();
+                if events.iter().any(|event| {
+                    event.level == tracing::Level::INFO
+                        && event.message.as_deref() == Some("ws client connected")
+                        && event.fields.get("client_id").map(String::as_str)
+                            == Some(client_id.as_str())
+                        && event.fields.get("connection_id").map(String::as_str) == Some("1")
+                        && event.fields.get("role").map(String::as_str) == Some("backend")
+                }) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("expected ws client connected log, captured events: {events:#?}")
+        });
 
         let _ = ws.close(None).await;
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_closes_active_websocket_with_service_restart_code() {
+        let state = make_sync_test_state("test-backend-secret").await;
+        let app = create_router(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws listener");
+        let addr = listener.local_addr().expect("ws local addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve ws app");
+        });
+
+        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
+        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
+
+        let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig {
+                backend_secret: Some("test-backend-secret".to_string()),
+                ..Default::default()
+            },
+            catalogue_state_hash: None,
+            declared_schema_hash: None,
+        };
+        let payload = serde_json::to_vec(&handshake).expect("serialize handshake");
+        ws.send(WsMessage::Binary(
+            crate::transport_manager::frame_encode(&payload).into(),
+        ))
+        .await
+        .expect("send handshake");
+
+        let connected = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for ConnectedResponse")
+            .expect("ws frame")
+            .expect("ws result");
+        assert!(matches!(connected, WsMessage::Binary(_)));
+
+        assert_eq!(state.shutdown.active_websockets(), 1);
+        assert!(state.shutdown.request_shutdown());
+
+        let close_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for close")
+            .expect("ws frame")
+            .expect("ws result");
+        let WsMessage::Close(Some(close)) = close_frame else {
+            panic!("expected close frame, got {close_frame:?}");
+        };
+        assert_eq!(
+            close.code,
+            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart
+        );
+        assert_eq!(close.reason.as_ref(), "server shutting down");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.shutdown.active_websockets() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("websocket cleanup");
+
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_closes_upgraded_websocket_before_handshake() {
+        let state = make_sync_test_state("test-backend-secret").await;
+        let app = create_router(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws listener");
+        let addr = listener.local_addr().expect("ws local addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve ws app");
+        });
+
+        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
+        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.shutdown.active_websockets() != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("upgraded websocket should be tracked before handshake");
+
+        assert!(state.shutdown.request_shutdown());
+
+        let close_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for close")
+            .expect("ws frame")
+            .expect("ws result");
+        let WsMessage::Close(Some(close)) = close_frame else {
+            panic!("expected close frame, got {close_frame:?}");
+        };
+        assert_eq!(
+            close.code,
+            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart
+        );
+        assert_eq!(close.reason.as_ref(), "server shutting down");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.shutdown.active_websockets() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("websocket cleanup");
+
         server_task.abort();
     }
 

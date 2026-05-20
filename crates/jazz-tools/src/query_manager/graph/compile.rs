@@ -2206,7 +2206,10 @@ impl ScanIntersection {
     fn add(&mut self, condition: &Condition, column_type: Option<&ColumnType>) -> bool {
         match condition {
             Condition::Eq { value, .. } => {
-                let value = normalize_scan_value(value, column_type);
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
                 if self.eq.as_ref().is_some_and(|existing| existing != &value) {
                     self.empty = true;
                 } else {
@@ -2215,24 +2218,47 @@ impl ScanIntersection {
                 true
             }
             Condition::Lt { value, .. } => {
-                self.tighten_upper(Bound::Excluded(normalize_scan_value(value, column_type)))
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_upper(Bound::Excluded(value))
             }
             Condition::Le { value, .. } => {
-                self.tighten_upper(Bound::Included(normalize_scan_value(value, column_type)))
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_upper(Bound::Included(value))
             }
             Condition::Gt { value, .. } => {
-                self.tighten_lower(Bound::Excluded(normalize_scan_value(value, column_type)))
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_lower(Bound::Excluded(value))
             }
             Condition::Ge { value, .. } => {
-                self.tighten_lower(Bound::Included(normalize_scan_value(value, column_type)))
+                let Some(value) = normalize_scan_value(value, column_type) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_lower(Bound::Included(value))
             }
             Condition::Between {
                 min: lower,
                 max: upper,
                 ..
             } => {
-                self.tighten_lower(Bound::Included(normalize_scan_value(lower, column_type)))
-                    && self.tighten_upper(Bound::Included(normalize_scan_value(upper, column_type)))
+                let (Some(lower), Some(upper)) = (
+                    normalize_scan_value(lower, column_type),
+                    normalize_scan_value(upper, column_type),
+                ) else {
+                    self.empty = true;
+                    return true;
+                };
+                self.tighten_lower(Bound::Included(lower))
+                    && self.tighten_upper(Bound::Included(upper))
             }
             _ => true,
         }
@@ -2416,38 +2442,105 @@ fn column_type_for_scan<'a>(
         .map(|descriptor| &descriptor.column_type)
 }
 
-fn normalize_scan_value(value: &Value, column_type: Option<&ColumnType>) -> Value {
+fn normalize_scan_value(value: &Value, column_type: Option<&ColumnType>) -> Option<Value> {
     match (value, column_type) {
         (Value::Text(raw), Some(ColumnType::Uuid)) => Uuid::parse_str(raw)
             .map(|uuid| Value::Uuid(ObjectId::from_uuid(uuid)))
-            .unwrap_or_else(|_| value.clone()),
-        _ => value.clone(),
+            .ok(),
+        _ => Some(value.clone()),
     }
 }
 
 fn condition_to_scan(cond: &Condition, column_type: Option<&ColumnType>) -> ScanCondition {
     match cond {
-        Condition::Eq { value, .. } => ScanCondition::Eq(normalize_scan_value(value, column_type)),
+        Condition::Eq { value, .. } => normalize_scan_value(value, column_type)
+            .map(ScanCondition::Eq)
+            .unwrap_or(ScanCondition::Empty),
         Condition::Lt { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
-            max: Bound::Excluded(normalize_scan_value(value, column_type)),
+            max: match normalize_scan_value(value, column_type) {
+                Some(value) => Bound::Excluded(value),
+                None => return ScanCondition::Empty,
+            },
         },
         Condition::Le { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
-            max: Bound::Included(normalize_scan_value(value, column_type)),
+            max: match normalize_scan_value(value, column_type) {
+                Some(value) => Bound::Included(value),
+                None => return ScanCondition::Empty,
+            },
         },
         Condition::Gt { value, .. } => ScanCondition::Range {
-            min: Bound::Excluded(normalize_scan_value(value, column_type)),
+            min: match normalize_scan_value(value, column_type) {
+                Some(value) => Bound::Excluded(value),
+                None => return ScanCondition::Empty,
+            },
             max: Bound::Unbounded,
         },
         Condition::Ge { value, .. } => ScanCondition::Range {
-            min: Bound::Included(normalize_scan_value(value, column_type)),
+            min: match normalize_scan_value(value, column_type) {
+                Some(value) => Bound::Included(value),
+                None => return ScanCondition::Empty,
+            },
             max: Bound::Unbounded,
         },
-        Condition::Between { min, max, .. } => ScanCondition::Range {
-            min: Bound::Included(normalize_scan_value(min, column_type)),
-            max: Bound::Included(normalize_scan_value(max, column_type)),
-        },
+        Condition::Between { min, max, .. } => {
+            let (Some(min), Some(max)) = (
+                normalize_scan_value(min, column_type),
+                normalize_scan_value(max, column_type),
+            ) else {
+                return ScanCondition::Empty;
+            };
+            ScanCondition::Range {
+                min: Bound::Included(min),
+                max: Bound::Included(max),
+            }
+        }
         _ => ScanCondition::All,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uuid_owner_schema() -> crate::query_manager::types::TableSchema {
+        crate::query_manager::types::TableSchema::builder("documents")
+            .fk_column("owner_id", "users")
+            .build()
+    }
+
+    #[test]
+    fn text_uuid_owner_column_scan_plan_matches_uuid_index() {
+        let alice_uuid = Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+        let alice = ObjectId::from_uuid(alice_uuid);
+        let disjunct = Conjunction {
+            conditions: vec![Condition::Eq {
+                column: "owner_id".to_string(),
+                value: Value::Text(alice_uuid.to_string()),
+            }],
+        };
+
+        let plan = index_scan_plan(&disjunct, &uuid_owner_schema());
+
+        assert_eq!(plan.column, "owner_id");
+        assert_eq!(plan.condition, ScanCondition::Eq(Value::Uuid(alice)));
+        assert!(plan.fully_covers);
+    }
+
+    #[test]
+    fn invalid_text_uuid_owner_column_scan_plan_is_empty() {
+        let disjunct = Conjunction {
+            conditions: vec![Condition::Eq {
+                column: "owner_id".to_string(),
+                value: Value::Text("not-a-uuid".to_string()),
+            }],
+        };
+
+        let plan = index_scan_plan(&disjunct, &uuid_owner_schema());
+
+        assert_eq!(plan.column, "owner_id");
+        assert_eq!(plan.condition, ScanCondition::Empty);
+        assert!(plan.fully_covers);
     }
 }

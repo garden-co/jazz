@@ -739,22 +739,22 @@ impl Storage for RocksDBStorage {
         )
     }
 
-    fn flush(&self) {
-        let _ = self.with_inner(|inner| {
+    fn flush(&self) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
             inner
                 .db
                 .flush()
                 .map_err(|e| StorageError::IoError(format!("rocksdb flush: {e}")))
-        });
+        })
     }
 
-    fn flush_wal(&self) {
-        let _ = self.with_inner(|inner| {
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
             inner
                 .db
                 .flush_wal(true)
                 .map_err(|e| StorageError::IoError(format!("rocksdb flush_wal: {e}")))
-        });
+        })
     }
 
     fn close(&self) -> Result<(), StorageError> {

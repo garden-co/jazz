@@ -13,7 +13,6 @@ pub(crate) struct RefAccessSubexprKey {
     pub(crate) table: TableName,
     pub(crate) id: ObjectId,
     pub(crate) operation: Operation,
-    pub(crate) parent_eval_depth: usize,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -67,7 +66,6 @@ mod tests {
             table: TableName::new("parent"),
             id: row_id,
             operation: Operation::Select,
-            parent_eval_depth: 1,
         };
         let other_branch_key = RefAccessSubexprKey {
             branch: "preview".to_string(),

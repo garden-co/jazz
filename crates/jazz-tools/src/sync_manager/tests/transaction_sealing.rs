@@ -1352,6 +1352,400 @@ fn seal_batch_accepts_when_family_visible_frontier_matches() {
 }
 
 #[test]
+fn seal_batch_rejects_when_transactional_row_parent_frontier_changed() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    let target_branch = "dev-aaaaaaaaaaaa-main";
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let base_row = visible_row(row_id, target_branch, Vec::new(), 900, b"base");
+    seed_visible_row(&mut sm, &mut io, "users", base_row.clone());
+
+    let staged_row = row_with_batch_state(
+        visible_row(
+            row_id,
+            target_branch,
+            vec![base_row.batch_id()],
+            1_000,
+            b"alice",
+        ),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: staged_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: staged_row.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    let newer_row = visible_row(
+        row_id,
+        target_branch,
+        vec![base_row.batch_id()],
+        1_100,
+        b"bob",
+    );
+    io.append_history_region_rows("users", std::slice::from_ref(&newer_row))
+        .unwrap();
+    io.upsert_visible_region_rows(
+        "users",
+        std::slice::from_ref(&crate::row_histories::VisibleRowEntry::rebuild(
+            newer_row.clone(),
+            &[base_row.clone(), newer_row.clone()],
+        )),
+    )
+    .unwrap();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                batch_id,
+                target_branch,
+                vec![SealedBatchMember {
+                    object_id: row_id,
+                    row_digest: staged_row.content_digest(),
+                }],
+                vec![CapturedFrontierMember {
+                    object_id: row_id,
+                    branch_name: BranchName::new(target_branch),
+                    batch_id: newer_row.batch_id(),
+                }],
+            ),
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::Rejected {
+            batch_id,
+            code: "transaction_conflict".to_string(),
+            reason: "row visible parent changed since transaction write was staged".to_string(),
+        })
+    );
+    assert_eq!(
+        io.load_visible_region_row("users", target_branch, row_id)
+            .unwrap()
+            .expect("newer visible row should remain visible")
+            .batch_id(),
+        newer_row.batch_id()
+    );
+}
+
+#[test]
+fn seal_batch_accepts_when_transactional_row_parent_frontier_matches() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    let target_branch = "dev-aaaaaaaaaaaa-main";
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let base_row = visible_row(row_id, target_branch, Vec::new(), 900, b"base");
+    seed_visible_row(&mut sm, &mut io, "users", base_row.clone());
+
+    let staged_row = row_with_batch_state(
+        visible_row(
+            row_id,
+            target_branch,
+            vec![base_row.batch_id()],
+            1_000,
+            b"alice",
+        ),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: staged_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: staged_row.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                batch_id,
+                target_branch,
+                vec![SealedBatchMember {
+                    object_id: row_id,
+                    row_digest: staged_row.content_digest(),
+                }],
+                vec![CapturedFrontierMember {
+                    object_id: row_id,
+                    branch_name: BranchName::new(target_branch),
+                    batch_id: base_row.batch_id(),
+                }],
+            ),
+        },
+    );
+
+    assert!(matches!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::AcceptedTransaction {
+            batch_id: settled_batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        }) if settled_batch_id == batch_id
+    ));
+}
+
+#[test]
+fn seal_batch_rejects_transactional_insert_when_row_is_already_visible() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    let target_branch = "dev-aaaaaaaaaaaa-main";
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let existing_row = visible_row(row_id, target_branch, Vec::new(), 900, b"base");
+    seed_visible_row(&mut sm, &mut io, "users", existing_row.clone());
+
+    let staged_row = row_with_batch_state(
+        visible_row(row_id, target_branch, Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: staged_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: staged_row.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                batch_id,
+                target_branch,
+                vec![SealedBatchMember {
+                    object_id: row_id,
+                    row_digest: staged_row.content_digest(),
+                }],
+                vec![CapturedFrontierMember {
+                    object_id: row_id,
+                    branch_name: BranchName::new(target_branch),
+                    batch_id: existing_row.batch_id(),
+                }],
+            ),
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::Rejected {
+            batch_id,
+            code: "transaction_conflict".to_string(),
+            reason: "row visible parent changed since transaction write was staged".to_string(),
+        })
+    );
+}
+
+#[test]
+fn seal_batch_accepts_transactional_insert_when_row_is_not_visible() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    let target_branch = "dev-aaaaaaaaaaaa-main";
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let staged_row = row_with_batch_state(
+        visible_row(row_id, target_branch, Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: staged_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: staged_row.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: transactional_sealed_submission(
+                batch_id,
+                target_branch,
+                vec![SealedBatchMember {
+                    object_id: row_id,
+                    row_digest: staged_row.content_digest(),
+                }],
+                Vec::new(),
+            ),
+        },
+    );
+
+    assert!(matches!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::AcceptedTransaction {
+            batch_id: settled_batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        }) if settled_batch_id == batch_id
+    ));
+}
+
+#[test]
+fn seal_batch_validates_full_transactional_parent_frontier() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    let target_branch = "dev-aaaaaaaaaaaa-main";
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let base_row = visible_row(row_id, target_branch, Vec::new(), 900, b"base");
+    let left_row = visible_row(
+        row_id,
+        target_branch,
+        vec![base_row.batch_id()],
+        1_000,
+        b"left",
+    );
+    let right_row = visible_row(
+        row_id,
+        target_branch,
+        vec![base_row.batch_id()],
+        1_001,
+        b"right",
+    );
+    create_test_row_with_id(&mut io, row_id, Some(row_metadata("users")));
+    io.append_history_region_rows(
+        "users",
+        &[base_row.clone(), left_row.clone(), right_row.clone()],
+    )
+    .unwrap();
+    io.upsert_visible_region_rows(
+        "users",
+        std::slice::from_ref(&crate::row_histories::VisibleRowEntry::rebuild(
+            right_row.clone(),
+            &[base_row.clone(), left_row.clone(), right_row.clone()],
+        )),
+    )
+    .unwrap();
+    let current_frontier = io
+        .load_visible_region_frontier("users", target_branch, row_id)
+        .unwrap()
+        .expect("multi-parent visible row should expose a frontier");
+    assert_eq!(current_frontier.len(), 2);
+    let captured_frontier = io
+        .capture_family_visible_frontier(BranchName::new(target_branch))
+        .unwrap();
+
+    let staged_row = row_with_batch_state(
+        visible_row(
+            row_id,
+            target_branch,
+            current_frontier.iter().rev().copied().collect(),
+            1_100,
+            b"alice",
+        ),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: staged_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: staged_row.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                batch_id,
+                target_branch,
+                vec![SealedBatchMember {
+                    object_id: row_id,
+                    row_digest: staged_row.content_digest(),
+                }],
+                captured_frontier,
+            ),
+        },
+    );
+
+    assert!(matches!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::AcceptedTransaction {
+            batch_id: settled_batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        }) if settled_batch_id == batch_id
+    ));
+}
+
+#[test]
 fn seal_batch_replay_returns_existing_settlement_after_frontier_moves() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
