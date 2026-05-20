@@ -8,7 +8,7 @@
     "ensure:rust-toolchain": "bash dev/scripts/install-jazz-rn-deps.sh",
     "build:vercel-docs": "bash dev/scripts/install-vercel-deps.sh && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build --filter=docs --only",
     "build:vercel-inspector": "pnpm --filter inspector run build:vercel",
-    "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
+    "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --filter=!nextjs-csr-ssr --only",
     "build:core": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=./packages/** --filter=jazz-napi --only",
     "build:ci": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=jazz-napi --filter=jazz-tools --only",
     "build:all": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build:rn --filter=jazz-rn && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",

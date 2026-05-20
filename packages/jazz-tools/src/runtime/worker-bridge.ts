@@ -37,19 +37,20 @@ export interface WorkerBridgeOptions {
   telemetryCollectorUrl?: string;
 }
 
-export interface PeerSyncBatch {
-  peerId: string;
-  term: number;
-  payload: Uint8Array[];
+export interface WorkerBridgeEndpoint {
+  postMessage(message: unknown, transfer?: Transferable[]): void;
+  addEventListener?(type: "message", listener: (event: MessageEvent) => void): void;
+  removeEventListener?(type: "message", listener: (event: MessageEvent) => void): void;
+  onmessage?: ((event: MessageEvent) => void) | null;
+  start?(): void;
+  close?(): void;
+  terminate?(): void;
 }
 
 interface WasmBridgeHandle {
   init(): Promise<{ clientId: string }>;
   updateAuth(jwtToken?: string | null): void;
   sendLifecycleHint(event: string): void;
-  openPeer(peerId: string): void;
-  sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void;
-  closePeer(peerId: string): void;
   setServerPayloadForwarder(
     callback:
       | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
@@ -67,18 +68,61 @@ interface WasmBridgeHandle {
 }
 
 interface RuntimeWithWorkerBridge extends Runtime {
-  createWorkerBridge?(worker: Worker, options: object): WasmBridgeHandle;
+  createWorkerBridge?(endpoint: WorkerBridgeEndpoint, options: object): WasmBridgeHandle;
 }
 
 interface ListenerSlots {
-  onPeerSync?: (batch: PeerSyncBatch) => void;
   onAuthFailure?: (reason: AuthFailureReason) => void;
 }
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
 
+/**
+ * Thrown by `waitForUpstreamServerConnection` when
+ * the bridge it was called on has been marked migrated — i.e. the leader
+ * tab handed off to a different tab and the supervisor swapped the
+ * underlying endpoint underneath this bridge.
+ *
+ * Callers see this synchronously (deterministic rejection) instead of
+ * silently hanging until the Rust-side timeout silently resolves. The runtime
+ * `Db` retries against the new bridge when appropriate; opaque callers
+ * should re-issue the wait against the fresh bridge.
+ *
+ * The `code` field is stable and intended for programmatic checks; the
+ * exception name and message are not.
+ */
+export class LeaderMigratedError extends Error {
+  readonly code = "leader-migrated" as const;
+  constructor(message?: string) {
+    super(
+      message ??
+        "Worker bridge endpoint replaced (leader tab handed off). Retry against the new bridge.",
+    );
+    this.name = "LeaderMigratedError";
+  }
+}
+
+let workerBridgeInstanceCounter = 0;
+
+/**
+ * Optional sink for diagnostic events. Attached by `Db` so the per-Db
+ * counter aggregate gets incremented across bridge re-attaches; absent
+ * for tests that construct a `WorkerBridge` directly.
+ */
+export interface WorkerBridgeDebugSink {
+  onBridgeCreated(instanceId: number): void;
+  onInitStarted(instanceId: number): void;
+  onInitResolved(instanceId: number, clientId: string): void;
+  onInitRejected(instanceId: number, error: unknown): void;
+  onShutdown(instanceId: number): void;
+  onMigrated(instanceId: number): void;
+  onForwarderSetPending(instanceId: number): void;
+  onForwarderSetCleared(instanceId: number): void;
+  onForwarderInstalled(instanceId: number): void;
+}
+
 export class WorkerBridge {
-  private readonly worker: Worker;
+  private readonly endpoint: WorkerBridgeEndpoint;
   private readonly runtime: Runtime;
   private bridge: WasmBridgeHandle | null = null;
   private readonly listeners: ListenerSlots = {};
@@ -86,10 +130,29 @@ export class WorkerBridge {
   private clientIdPromise: Promise<string> | null = null;
   private workerClientId: string | null = null;
   private disposed = false;
+  private migrated = false;
+  private readonly instanceId: number;
+  private debugSink: WorkerBridgeDebugSink | null = null;
+  /**
+   * In-flight waiters that should reject with `LeaderMigratedError` when the
+   * bridge is marked migrated. Each entry is the per-call rejector. The Rust
+   * promise underlying the wait still settles internally (usually via the
+   * ack timeout) and is left to garbage-collect; the JS-visible promise
+   * surfaces the typed rejection immediately so callers don't hang waiting
+   * on a leader that's no longer attached.
+   */
+  private readonly pendingWaiters = new Set<(error: LeaderMigratedError) => void>();
 
-  constructor(worker: Worker, runtime: Runtime) {
-    this.worker = worker;
+  constructor(endpoint: WorkerBridgeEndpoint, runtime: Runtime) {
+    this.endpoint = endpoint;
     this.runtime = runtime;
+    this.instanceId = ++workerBridgeInstanceCounter;
+  }
+
+  /** @internal Used by `Db` to attach per-Db diagnostic counters. */
+  setDebugSink(sink: WorkerBridgeDebugSink | null): void {
+    this.debugSink = sink;
+    if (sink) sink.onBridgeCreated(this.instanceId);
   }
 
   init(options: WorkerBridgeOptions): Promise<string> {
@@ -98,6 +161,7 @@ export class WorkerBridge {
       this.clientIdPromise = Promise.reject(new Error("WorkerBridge has been disposed"));
       return this.clientIdPromise;
     }
+    this.debugSink?.onInitStarted(this.instanceId);
 
     const create = (this.runtime as RuntimeWithWorkerBridge).createWorkerBridge;
     if (typeof create !== "function") {
@@ -109,7 +173,7 @@ export class WorkerBridge {
 
     let bridge: WasmBridgeHandle;
     try {
-      bridge = create.call(this.runtime, this.worker, options as unknown as object);
+      bridge = create.call(this.runtime, this.endpoint, options as unknown as object);
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
       this.clientIdPromise = Promise.reject(err);
@@ -125,9 +189,11 @@ export class WorkerBridge {
       .init()
       .then((result) => {
         this.workerClientId = result.clientId;
+        this.debugSink?.onInitResolved(this.instanceId, result.clientId);
         return result.clientId;
       })
       .catch((error: unknown) => {
+        this.debugSink?.onInitRejected(this.instanceId, error);
         if (error instanceof Error) throw error;
         if (typeof error === "string") throw new Error(error);
         throw new Error(String(error));
@@ -146,12 +212,62 @@ export class WorkerBridge {
   async shutdown(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.debugSink?.onShutdown(this.instanceId);
+    this.rejectPendingWaiters();
     if (this.bridge) {
       try {
         await this.bridge.shutdown();
       } finally {
         this.bridge = null;
       }
+    }
+  }
+
+  /**
+   * Mark this bridge as migrated (leader handoff). In-flight
+   * `waitForUpstreamServerConnection` calls reject with
+   * {@link LeaderMigratedError}; subsequent calls reject immediately with the
+   * same error. Idempotent. Callers should retry against the fresh bridge
+   * attached after the supervisor's endpoint swap.
+   */
+  notifyMigrated(): void {
+    if (this.migrated) return;
+    this.migrated = true;
+    this.debugSink?.onMigrated(this.instanceId);
+    this.rejectPendingWaiters();
+  }
+
+  isMigrated(): boolean {
+    return this.migrated;
+  }
+
+  private rejectPendingWaiters(): void {
+    if (this.pendingWaiters.size === 0) return;
+    const error = new LeaderMigratedError();
+    const waiters = Array.from(this.pendingWaiters);
+    this.pendingWaiters.clear();
+    for (const reject of waiters) {
+      try {
+        reject(error);
+      } catch {
+        // Reject handlers run user code that shouldn't crash the loop.
+      }
+    }
+  }
+
+  private async raceMigration<T>(work: Promise<T>): Promise<T> {
+    if (this.migrated) {
+      throw new LeaderMigratedError();
+    }
+    let onMigrate!: (error: LeaderMigratedError) => void;
+    const migration = new Promise<never>((_, reject) => {
+      onMigrate = reject;
+    });
+    this.pendingWaiters.add(onMigrate);
+    try {
+      return await Promise.race([work, migration]);
+    } finally {
+      this.pendingWaiters.delete(onMigrate);
     }
   }
 
@@ -162,12 +278,15 @@ export class WorkerBridge {
 
   setServerPayloadForwarder(forwarder: ServerPayloadForwarder | null): void {
     this.pendingForwarder = forwarder;
+    if (forwarder) this.debugSink?.onForwarderSetPending(this.instanceId);
+    else this.debugSink?.onForwarderSetCleared(this.instanceId);
     if (!this.bridge) return;
     if (forwarder) this.installForwarderInternal(forwarder);
     else this.bridge.setServerPayloadForwarder(null);
   }
 
   private installForwarderInternal(forwarder: ServerPayloadForwarder): void {
+    this.debugSink?.onForwarderInstalled(this.instanceId);
     // Server-bound payloads are always binary postcard; the Rust outbox sender
     // calls the forwarder with a single `Uint8Array`.
     this.bridge?.setServerPayloadForwarder((payload) => {
@@ -177,7 +296,8 @@ export class WorkerBridge {
 
   async waitForUpstreamServerConnection(): Promise<void> {
     if (!this.bridge) return;
-    await this.bridge.waitForUpstreamServerConnection();
+    if (this.migrated) throw new LeaderMigratedError();
+    await this.raceMigration(this.bridge.waitForUpstreamServerConnection());
   }
 
   applyIncomingServerPayload(payload: Uint8Array): void {
@@ -208,25 +328,8 @@ export class WorkerBridge {
     await this.bridge.simulateCrash();
   }
 
-  onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
-    this.listeners.onPeerSync = listener;
-    this.bridge?.setListeners(this.listeners);
-  }
-
   onAuthFailure(listener: (reason: AuthFailureReason) => void): void {
     this.listeners.onAuthFailure = listener;
     this.bridge?.setListeners(this.listeners);
-  }
-
-  openPeer(peerId: string): void {
-    this.bridge?.openPeer(peerId);
-  }
-
-  sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void {
-    this.bridge?.sendPeerSync(peerId, term, payload);
-  }
-
-  closePeer(peerId: string): void {
-    this.bridge?.closePeer(peerId);
   }
 }

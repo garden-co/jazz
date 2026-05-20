@@ -39,7 +39,19 @@ import {
 } from "./client.js";
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
-import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
+import {
+  LeaderMigratedError,
+  WorkerBridge,
+  type WorkerBridgeDebugSink,
+  type WorkerBridgeEndpoint,
+  type WorkerBridgeOptions,
+} from "./worker-bridge.js";
+import {
+  emptyJazzDebugCounters,
+  jazzDebugEnabled,
+  jazzDebugLog,
+  type JazzDebugCounters,
+} from "./forwarder-debug.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -55,7 +67,6 @@ import {
 } from "./file-storage.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
-import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "./worker-bridge.js";
 import {
   normalizeBuiltQuery,
@@ -65,22 +76,19 @@ import {
 } from "./query-builder-shape.js";
 import { resolveSelectedColumns } from "./select-projection.js";
 import {
-  appendWorkerRuntimeWasmUrl,
+  appendSharedWorkerRuntimeUrls,
   resolveRuntimeConfigSyncInitInput,
   resolveWorkerBootstrapWasmUrl,
   resolveRuntimeConfigWorkerUrl,
+  resolveRuntimeConfigSharedWorkerUrl,
 } from "./runtime-config.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 import {
-  isTabSyncMessage,
-  resolveBroadcastChannelCtor,
-  type BroadcastChannelLike,
-  type FollowerCloseMessage,
-  type FollowerSyncMessage,
-  type LeaderSyncMessage,
-  type TabSyncMessage,
-} from "./tab-sync-protocol.js";
-import { StorageResetCoordinator, type StorageResetHost } from "./storage-reset-coordinator.js";
+  createBrowserLocksBackend,
+  createTabSupervisor,
+  type TabSupervisor,
+  type TabSupervisorState,
+} from "./shared-worker-supervisor.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyDbRuntimeModule = DbRuntimeModule<any>;
@@ -125,6 +133,10 @@ function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
 
 function shouldBypassLocalPolicies(config: DbConfig): boolean {
   return !!config.adminSecret;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function stripSchemaPolicies(schema: WasmSchema): WasmSchema {
@@ -752,22 +764,70 @@ export class Db {
   private readonly runtimeModule: AnyDbRuntimeModule | null;
   private readonly authStateStore;
   private workerBridge: WorkerBridge | null = null;
-  private worker: Worker | null = null;
+  private sharedWorker: SharedWorker | null = null;
+  private supervisor: TabSupervisor | null = null;
+  private supervisorUnsubscribe: (() => void) | null = null;
+  private workerEndpoint: WorkerBridgeEndpoint | null = null;
+  private resetChannel: BroadcastChannel | null = null;
+  private resetChannelListener: ((event: MessageEvent) => void) | null = null;
   private disposeWasmTelemetry: (() => void) | null = null;
   private bridgeReady: Promise<void> | null = null;
   private primaryDbName: string | null = null;
-  private workerDbName: string | null = null;
-  private leaderElection: TabLeaderElection | null = null;
-  private leaderElectionUnsubscribe: (() => void) | null = null;
-  private tabRole: LeaderRole = "follower";
-  private tabId: string | null = null;
-  private currentLeaderTabId: string | null = null;
-  private currentLeaderTerm = 0;
-  private syncChannel: BroadcastChannelLike | null = null;
-  private readonly leaderPeerIds = new Set<string>();
-  private activeRemoteLeaderTabId: string | null = null;
-  private workerReconfigure: Promise<void> = Promise.resolve();
-  private storageReset: StorageResetCoordinator | null = null;
+  /**
+   * Latched at construction for SharedWorker-backed instances. The
+   * `workerEndpoint` and `workerBridge` fields are nulled transiently
+   * during leader handoffs; gating client creation and the upstream-wait
+   * on those fields lets a follower silently mint a direct-transport
+   * client (bypassing the leader) or short-circuit the upstream wait
+   * during the migration window. Latching the mode independently keeps
+   * those decisions stable across handoffs.
+   */
+  private usesSharedWorker = false;
+  /**
+   * Opt-in diagnostic counters. Always allocated (one POJO per Db) but
+   * only mutated when `globalThis.__JAZZ_DEBUG_FORWARDER__ === true`.
+   * See {@link forwarder-debug} for the use case (subscription deltas
+   * silently dropping after a bridge re-attach).
+   */
+  private readonly jazzDebugCounters: JazzDebugCounters = emptyJazzDebugCounters();
+  private readonly jazzDebugSink: WorkerBridgeDebugSink = {
+    onBridgeCreated: (id) => {
+      this.jazzDebugCounters.bridgesCreated++;
+      jazzDebugLog("WorkerBridge created", { instanceId: id, appId: this.config.appId });
+    },
+    onInitStarted: (id) => {
+      this.jazzDebugCounters.bridgeInitsStarted++;
+      jazzDebugLog("WorkerBridge init started", { instanceId: id });
+    },
+    onInitResolved: (id, clientId) => {
+      this.jazzDebugCounters.bridgeInitsResolved++;
+      jazzDebugLog("WorkerBridge init resolved", { instanceId: id, clientId });
+    },
+    onInitRejected: (id, error) => {
+      this.jazzDebugCounters.bridgeInitsRejected++;
+      jazzDebugLog("WorkerBridge init rejected", { instanceId: id, error });
+    },
+    onShutdown: (id) => {
+      this.jazzDebugCounters.bridgesShutdown++;
+      jazzDebugLog("WorkerBridge shutdown", { instanceId: id });
+    },
+    onMigrated: (id) => {
+      this.jazzDebugCounters.bridgesMigrated++;
+      jazzDebugLog("WorkerBridge migrated", { instanceId: id });
+    },
+    onForwarderSetPending: (id) => {
+      this.jazzDebugCounters.forwardersSetPending++;
+      jazzDebugLog("WorkerBridge setServerPayloadForwarder(non-null)", { instanceId: id });
+    },
+    onForwarderSetCleared: (id) => {
+      this.jazzDebugCounters.forwardersSetCleared++;
+      jazzDebugLog("WorkerBridge setServerPayloadForwarder(null)", { instanceId: id });
+    },
+    onForwarderInstalled: (id) => {
+      this.jazzDebugCounters.forwardersInstalled++;
+      jazzDebugLog("WorkerBridge installForwarderInternal", { instanceId: id });
+    },
+  };
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -791,9 +851,6 @@ export class Db {
    */
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
-  private readonly onSyncChannelMessage = (event: MessageEvent): void => {
-    this.handleSyncChannelMessage(event.data);
-  };
   private readonly onVisibilityChange = (): void => {
     if (typeof document === "undefined") return;
     const hidden = document.visibilityState === "hidden";
@@ -938,56 +995,233 @@ export class Db {
    *
    * @internal Use {@link createDb} instead — it auto-detects browser.
    */
-  static async createWithWorker(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Promise<Db> {
+  /**
+   * Create a Db instance backed by the leader-tab runtime topology.
+   *
+   * The page owns an in-memory WASM runtime for synchronous reads and writes.
+   * A `SharedWorker` acts as a `MessagePort` broker between tabs and the
+   * current leader. A per-tab supervisor races for the `navigator.locks`
+   * leader lease; the winner spawns its own dedicated `Worker` that hosts the
+   * durable runtime (OPFS, upstream socket) and routes follower-tab requests
+   * through it. See `specs/todo/b_launch/leader_tab_runtime.md`.
+   *
+   * @internal Use {@link createDb} instead — it auto-detects browser support.
+   */
+  static async createWithSharedWorker(
+    config: DbConfig,
+    runtimeModule: AnyDbRuntimeModule,
+  ): Promise<Db> {
     const db = new Db(config, runtimeModule);
     const persistentDriver = resolveStorageDriver(config.driver);
     if (persistentDriver.type !== "persistent") {
-      throw new Error("Worker-backed Db requires driver.type='persistent'");
+      throw new Error("SharedWorker-backed Db requires driver.type='persistent'");
     }
+
     db.primaryDbName = resolveDefaultPersistentDbName(config);
-    db.workerDbName = db.primaryDbName;
+    db.usesSharedWorker = true;
+
+    const locks = createBrowserLocksBackend();
+    if (!locks) {
+      throw new Error("Persistent driver requires navigator.locks, which this environment lacks.");
+    }
 
     try {
-      const election = new TabLeaderElection({
-        appId: config.appId,
-        dbName: db.primaryDbName,
+      db.sharedWorker = Db.spawnSharedWorkerBroker(config, db.primaryDbName);
+      const brokerPort = db.sharedWorker.port;
+      brokerPort.start();
+      const { workerUrl, workerOptions } = Db.resolveRuntimeWorkerSpec(config);
+      db.supervisor = createTabSupervisor({
+        brokerPort: brokerPort as unknown as Parameters<
+          typeof createTabSupervisor
+        >[0]["brokerPort"],
+        lockName: `jazz:leader:${config.appId}:${db.primaryDbName}:v1`,
+        locks,
+        WorkerCtor: Worker as unknown as Parameters<typeof createTabSupervisor>[0]["WorkerCtor"],
+        workerUrl,
+        workerOptions,
       });
-      db.leaderElection = election;
-      election.start();
-
-      let initialLeader: LeaderSnapshot | null = null;
-      try {
-        // Allow at least one startup election window with default heartbeat settings.
-        initialLeader = await election.waitForInitialLeader(1600);
-      } catch {
-        // Fall back to whatever state election has reached so far.
-        initialLeader = election.snapshot();
-      }
-      db.adoptLeaderSnapshot(initialLeader);
-      db.workerDbName = Db.resolveWorkerDbNameForSnapshot(db.primaryDbName, initialLeader);
-      db.openSyncChannel();
-      db.storageReset = new StorageResetCoordinator(db.createStorageResetHost());
+      db.supervisorUnsubscribe = db.supervisor.subscribe((state) => {
+        db.onSupervisorStateChange(state);
+      });
       db.attachLifecycleHooks();
-      db.leaderElectionUnsubscribe = election.onChange((snapshot) => {
-        db.onLeaderElectionChange(snapshot);
-      });
+      db.subscribeToResetChannel();
 
-      db.worker = await Db.spawnWorker(config.runtimeSources);
+      await db.waitForInitialEndpoint();
 
       return db;
     } catch (error) {
-      db.closeSyncChannel();
+      await db.supervisor?.shutdown();
+      db.supervisor = null;
+      db.supervisorUnsubscribe?.();
+      db.supervisorUnsubscribe = null;
       db.detachLifecycleHooks();
-      if (db.leaderElectionUnsubscribe) {
-        db.leaderElectionUnsubscribe();
-        db.leaderElectionUnsubscribe = null;
-      }
-      if (db.leaderElection) {
-        db.leaderElection.stop();
-        db.leaderElection = null;
-      }
+      db.closeResetChannel();
+      db.sharedWorker?.port.close();
+      db.sharedWorker = null;
+      db.workerEndpoint = null;
       throw error;
     }
+  }
+
+  /**
+   * Resolve the URL + options for the dedicated runtime `Worker` the leader
+   * tab spawns. Mirrors the previous `spawnSharedWorker` URL resolution but
+   * for the per-tab `Worker`, not the SharedWorker.
+   */
+  private static resolveRuntimeWorkerSpec(config: DbConfig): {
+    workerUrl: string | URL;
+    workerOptions: WorkerOptions;
+  } {
+    const runtimeSources = config.runtimeSources;
+    const locationHref = typeof location !== "undefined" ? location.href : undefined;
+    let workerUrl: string | URL;
+    if (runtimeSources?.workerUrl || runtimeSources?.baseUrl) {
+      workerUrl = resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources);
+    } else {
+      workerUrl = new URL("../worker/jazz-worker.js", import.meta.url);
+    }
+    return {
+      workerUrl,
+      workerOptions: {
+        type: "module",
+        name: `jazz-runtime:${config.appId}`,
+      },
+    };
+  }
+
+  /**
+   * Reacts to supervisor state transitions. Drops the stale `WorkerBridge`
+   * synchronously and points `workerEndpoint` at the new value. The next
+   * `getClient()` call (and the {@link ensureWorkerBridge} helper) will
+   * attach a fresh bridge against the new endpoint, so existing
+   * `JazzClient`s keep working across a leader handoff.
+   *
+   * In-flight `waitForUpstreamServerConnection` waiters on the *old* bridge
+   * reject synchronously with
+   * {@link LeaderMigratedError} via {@link WorkerBridge.notifyMigrated} so
+   * callers learn the bridge is no longer authoritative without waiting for
+   * the Rust-side ack timeout. Transparent retry of those waiters against
+   * the freshly-attached bridge is not yet implemented — see
+   * `specs/todo/b_launch/leader_tab_runtime.md` §5 — but rejection is
+   * deterministic and typed rather than a silent hang.
+   */
+  private onSupervisorStateChange(state: TabSupervisorState): void {
+    const nextEndpoint = state.endpoint;
+    if (nextEndpoint === this.workerEndpoint) return;
+    this.jazzDebugCounters.dbSupervisorStateChanges++;
+    jazzDebugLog("Db.onSupervisorStateChange", {
+      appId: this.config.appId,
+      role: state.role,
+      hadEndpoint: this.workerEndpoint !== null,
+      hasEndpoint: nextEndpoint !== null,
+      changeCount: this.jazzDebugCounters.dbSupervisorStateChanges,
+    });
+    if (this.workerBridge) {
+      const stale = this.workerBridge;
+      this.workerBridge = null;
+      this.bridgeReady = null;
+      // Reject in-flight waiters synchronously so callers see the typed
+      // `LeaderMigratedError` instead of hanging until the Rust ack timeout.
+      stale.notifyMigrated();
+      void stale.shutdown().catch(() => undefined);
+    }
+    this.workerEndpoint = nextEndpoint;
+    this.ensureWorkerBridge();
+  }
+
+  /**
+   * Reattach the `WorkerBridge` if we have an active endpoint and at least
+   * one existing client but no live bridge. Idempotent. Called both from
+   * `getClient()` when a new client is created and from
+   * `onSupervisorStateChange()` after the supervisor swaps the endpoint
+   * (leader handoff, follower-port refresh).
+   */
+  private ensureWorkerBridge(): void {
+    if (this.isShuttingDown) return;
+    if (this.workerBridge) return;
+    if (!this.workerEndpoint) return;
+    if (this.clients.size === 0) return;
+    const entry = this.clients.entries().next();
+    if (entry.done) return;
+    const [schemaJson, client] = entry.value;
+    this.attachWorkerBridge(schemaJson, client);
+  }
+
+  /**
+   * Wait until a fresh `WorkerBridge` is attached and initialized after a
+   * leader handoff. Resolves to the bridge's init promise so the caller
+   * awaits the same completion semantics as on the happy path. Rejects with
+   * {@link LeaderMigratedError} after {@link WAIT_FOR_FRESH_BRIDGE_TIMEOUT_MS}
+   * if the supervisor never produces a new endpoint — callers can retry the
+   * higher-level operation against a freshly-constructed Db.
+   *
+   * Only called from SharedWorker-backed paths; non-worker Dbs never hit a
+   * null-bridge window because they never had one to begin with.
+   */
+  private async waitForFreshBridge(): Promise<void> {
+    if (this.workerBridge && this.bridgeReady) {
+      await this.bridgeReady;
+      return;
+    }
+    if (this.isShuttingDown || !this.supervisor) {
+      throw new LeaderMigratedError();
+    }
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        unsubscribe();
+        action();
+      };
+      const timeout = setTimeout(() => {
+        finish(() => reject(new LeaderMigratedError()));
+      }, Db.WAIT_FOR_FRESH_BRIDGE_TIMEOUT_MS);
+      const unsubscribe = this.supervisor!.subscribe(() => {
+        // Drive `ensureWorkerBridge` on each state change so a freshly
+        // arrived endpoint is attached before we re-check our predicate.
+        this.ensureWorkerBridge();
+        if (this.workerBridge && this.bridgeReady) {
+          finish(() => resolve());
+        }
+      });
+      // Re-check synchronously in case the bridge became live between the
+      // outer guard and `subscribe()`.
+      this.ensureWorkerBridge();
+      if (this.workerBridge && this.bridgeReady) {
+        finish(() => resolve());
+      }
+    });
+    if (this.bridgeReady) {
+      await this.bridgeReady;
+    }
+  }
+
+  /**
+   * Wait until the supervisor has produced its first non-null endpoint.
+   * Resolves immediately if one is already present, otherwise on the first
+   * state change carrying a non-null `endpoint`.
+   */
+  private async waitForInitialEndpoint(): Promise<void> {
+    if (this.supervisor?.state.endpoint) {
+      this.workerEndpoint = this.supervisor.state.endpoint;
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for leader-tab runtime endpoint.")),
+        15_000,
+      );
+      const unsubscribe = this.supervisor!.subscribe((state) => {
+        if (state.endpoint) {
+          clearTimeout(timeout);
+          unsubscribe();
+          this.workerEndpoint = state.endpoint;
+          resolve();
+        }
+      });
+    });
   }
 
   /**
@@ -1000,6 +1234,21 @@ export class Db {
   protected getClient(schema: WasmSchema): JazzClient {
     if (!this.runtimeModule) {
       throw new Error("Db runtime module is not initialized for this Db implementation");
+    }
+    if (this.isShuttingDown && this.primaryDbName !== null) {
+      // SharedWorker-backed terminal contract: after `shutdown()` (including
+      // `deleteClientStorage()`'s wipe) the supervisor is gone, the
+      // dedicated worker has been terminated, and OPFS may have been
+      // deleted out from under us. Refuse to lazily mint a direct
+      // main-thread client that would silently re-use stale state.
+      //
+      // Non-SharedWorker Db instances (React Native, in-memory test
+      // harnesses) never set `primaryDbName`, and their pre-existing
+      // contract is that `shutdown()` clears cached clients but the same
+      // Db can lazily recreate them on next `insert` / `all`. Preserving
+      // that contract keeps the platform-specific terminal behavior to
+      // the path that actually needs it.
+      throw new Error("Db has been shut down; create a new instance to keep working.");
     }
 
     const runtimeSchema =
@@ -1017,21 +1266,22 @@ export class Db {
       const client = this.runtimeModule.createClient({
         config: { ...this.config },
         schema: runtimeSchema,
-        hasWorker: this.worker !== null,
-        useBinaryEncoding: this.worker !== null,
+        // Latch off the construction-time mode, not `workerEndpoint`: during
+        // a leader handoff `workerEndpoint` is transiently null and would
+        // otherwise mint a non-worker client that opens its own direct
+        // transport, violating the "one upstream socket per (appId, dbName)"
+        // invariant the leader-tab topology guarantees.
+        hasWorker: this.usesSharedWorker,
+        useBinaryEncoding: this.usesSharedWorker,
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
       });
 
       this.attachMutationErrorHandler(client);
-      // In worker mode, set up the bridge for this client
-      if (this.worker && !this.workerBridge) {
-        this.attachWorkerBridge(key, client);
-      }
       // Direct (non-worker) clients with a serverUrl must open their own
       // Rust transport — the worker bridge is not doing it for them.
-      if (!this.worker && this.config.serverUrl) {
+      if (!this.usesSharedWorker && this.config.serverUrl) {
         client.connectTransport(this.config.serverUrl, {
           jwt_token: this.config.jwtToken,
           admin_secret: this.config.adminSecret,
@@ -1039,6 +1289,13 @@ export class Db {
       }
       this.clients.set(key, client);
     }
+
+    // Always ensure a bridge is attached when an endpoint is available — both
+    // on first-client creation (when the bridge has never been built) and on
+    // re-creation after a leader handoff (when `onSupervisorStateChange`
+    // dropped the stale bridge and we need to reattach against the new
+    // endpoint before serving this client's queries).
+    this.ensureWorkerBridge();
 
     return this.clients.get(key)!;
   }
@@ -1068,14 +1325,24 @@ export class Db {
    * No-op if not using a worker.
    */
   protected async ensureBridgeReady(): Promise<void> {
-    await this.workerReconfigure;
     if (this.bridgeReady) {
       await this.bridgeReady;
     }
   }
 
   protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
-    await this.ensureBridgeReady();
+    if (this.usesSharedWorker && (!this.workerBridge || !this.bridgeReady)) {
+      // SharedWorker-backed Db in a leader-handoff window: `workerBridge`
+      // was cleared by `onSupervisorStateChange` and `ensureWorkerBridge`
+      // couldn't reattach (no live endpoint yet). Wait for the supervisor
+      // to publish a fresh endpoint and the bridge to come back —
+      // returning here would let the query proceed past the upstream-wait
+      // below against an absent transport, and `await this.bridgeReady`
+      // would be a no-op since the field is null.
+      await this.waitForFreshBridge();
+    } else {
+      await this.ensureBridgeReady();
+    }
     if (!this.workerBridge || !this.config.serverUrl) {
       return;
     }
@@ -1086,23 +1353,30 @@ export class Db {
   }
 
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
-    if (!this.worker) {
+    if (!this.workerEndpoint) {
       throw new Error("Cannot attach worker bridge without an active worker");
     }
 
-    const bridge = new WorkerBridge(this.worker, client.getRuntime());
-    this.leaderPeerIds.clear();
-    bridge.onPeerSync((batch) => {
-      this.handleWorkerPeerSync(batch);
+    this.jazzDebugCounters.dbAttachWorkerBridge++;
+    jazzDebugLog("Db.attachWorkerBridge", {
+      appId: this.config.appId,
+      attachCount: this.jazzDebugCounters.dbAttachWorkerBridge,
+      forwardersInstalledSoFar: this.jazzDebugCounters.forwardersInstalled,
     });
-    this.applyBridgeRoutingForCurrentLeader(bridge, false);
+
+    const bridge = new WorkerBridge(this.workerEndpoint, client.getRuntime());
+    bridge.setDebugSink(this.jazzDebugSink);
     bridge.onAuthFailure((reason) => {
       this.markUnauthenticated(reason);
     });
     this.workerBridge = bridge;
-    const bridgeReady = bridge
-      .init(this.buildWorkerBridgeOptions(schemaJson))
-      .then(() => undefined);
+    // `notifyLeaderReady` is now a no-op — the supervisor claims leadership
+    // eagerly upon winning the lock. Kept here for forward-compat with any
+    // future supervisor that goes back to deferring claim until the worker
+    // bootstraps.
+    const bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => {
+      this.supervisor?.notifyLeaderReady();
+    });
     bridgeReady.catch(() => undefined);
     this.bridgeReady = bridgeReady;
   }
@@ -1184,7 +1458,7 @@ export class Db {
       appId: this.config.appId,
       env: this.config.env ?? "dev",
       userBranch: this.config.userBranch ?? "main",
-      dbName: this.workerDbName ?? driver.dbName ?? this.config.appId,
+      dbName: this.primaryDbName ?? driver.dbName ?? this.config.appId,
       serverUrl: this.config.serverUrl,
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
@@ -1193,43 +1467,6 @@ export class Db {
       logLevel: this.config.logLevel,
       telemetryCollectorUrl: this.resolveTelemetryCollectorUrl(),
     };
-  }
-
-  private adoptLeaderSnapshot(snapshot: LeaderSnapshot): void {
-    this.tabRole = snapshot.role;
-    this.tabId = snapshot.tabId;
-    this.currentLeaderTabId = snapshot.leaderTabId;
-    this.currentLeaderTerm = snapshot.term;
-  }
-
-  private openSyncChannel(): void {
-    if (this.syncChannel || !this.primaryDbName) return;
-    const ChannelCtor = resolveBroadcastChannelCtor();
-    if (!ChannelCtor) {
-      return;
-    }
-
-    const channelName = `jazz-tab-sync:${this.config.appId}:${this.primaryDbName}`;
-    this.syncChannel = new ChannelCtor(channelName);
-    this.syncChannel.addEventListener("message", this.onSyncChannelMessage);
-  }
-
-  private closeSyncChannel(): void {
-    if (!this.syncChannel) return;
-    this.syncChannel.removeEventListener("message", this.onSyncChannelMessage);
-    this.syncChannel.close();
-    this.syncChannel = null;
-  }
-
-  private postSyncChannelMessage(message: TabSyncMessage): void {
-    this.syncChannel?.postMessage(message);
-  }
-
-  private async resumeWorker(): Promise<void> {
-    if (this.worker || this.isShuttingDown) {
-      return;
-    }
-    this.worker = await Db.spawnWorker(this.config.runtimeSources);
   }
 
   private attachLifecycleHooks(): void {
@@ -1256,201 +1493,18 @@ export class Db {
   }
 
   private sendLifecycleHint(event: WorkerLifecycleEvent): void {
-    if (this.isShuttingDown || !this.worker) return;
+    if (this.isShuttingDown || !this.workerEndpoint) return;
 
     if (this.workerBridge) {
       this.workerBridge.sendLifecycleHint(event);
       return;
     }
 
-    this.worker.postMessage({
+    this.workerEndpoint.postMessage({
       type: "lifecycle-hint",
       event,
       sentAtMs: Date.now(),
     });
-  }
-
-  private handleSyncChannelMessage(raw: unknown): void {
-    if (this.isShuttingDown || !this.tabId) return;
-    if (!isTabSyncMessage(raw)) return;
-
-    if (this.storageReset?.handleSyncChannelMessage(raw)) {
-      return;
-    }
-
-    switch (raw.type) {
-      case "follower-sync":
-        this.handleFollowerSync(raw);
-        return;
-      case "leader-sync":
-        this.handleLeaderSync(raw);
-        return;
-      case "follower-close":
-        this.handleFollowerClose(raw);
-        return;
-    }
-  }
-
-  private handleFollowerSync(message: FollowerSyncMessage): void {
-    if (this.tabRole !== "leader") return;
-    if (!this.workerBridge) return;
-    if (!this.tabId || message.toLeaderTabId !== this.tabId) return;
-    if (message.term !== this.currentLeaderTerm) return;
-
-    if (!this.leaderPeerIds.has(message.fromTabId)) {
-      this.leaderPeerIds.add(message.fromTabId);
-      this.workerBridge.openPeer(message.fromTabId);
-    }
-    this.workerBridge.sendPeerSync(message.fromTabId, message.term, message.payload);
-  }
-
-  private handleLeaderSync(message: LeaderSyncMessage): void {
-    if (this.tabRole !== "follower") return;
-    if (!this.workerBridge) return;
-    if (!this.tabId || message.toTabId !== this.tabId) return;
-    if (!this.currentLeaderTabId || message.fromLeaderTabId !== this.currentLeaderTabId) return;
-    if (message.term !== this.currentLeaderTerm) return;
-
-    for (const payload of message.payload) {
-      this.workerBridge.applyIncomingServerPayload(payload);
-    }
-  }
-
-  private handleFollowerClose(message: FollowerCloseMessage): void {
-    if (this.tabRole !== "leader") return;
-    if (!this.workerBridge) return;
-    if (!this.tabId || message.toLeaderTabId !== this.tabId) return;
-    if (message.term !== this.currentLeaderTerm) return;
-    if (!this.leaderPeerIds.has(message.fromTabId)) return;
-
-    this.leaderPeerIds.delete(message.fromTabId);
-    this.workerBridge.closePeer(message.fromTabId);
-  }
-
-  private handleWorkerPeerSync(batch: PeerSyncBatch): void {
-    if (this.isShuttingDown) return;
-    if (this.tabRole !== "leader") return;
-    if (!this.tabId) return;
-    if (batch.term !== this.currentLeaderTerm) return;
-
-    this.postSyncChannelMessage({
-      type: "leader-sync",
-      fromLeaderTabId: this.tabId,
-      toTabId: batch.peerId,
-      term: batch.term,
-      payload: batch.payload,
-    });
-  }
-
-  private sendFollowerClose(leaderTabId: string | null, term: number): void {
-    if (!leaderTabId || !this.tabId) return;
-    if (leaderTabId === this.tabId) return;
-
-    this.postSyncChannelMessage({
-      type: "follower-close",
-      fromTabId: this.tabId,
-      toLeaderTabId: leaderTabId,
-      term,
-    });
-  }
-
-  private applyBridgeRoutingForCurrentLeader(
-    bridge: WorkerBridge,
-    replayConnection: boolean,
-  ): void {
-    if (this.tabRole === "leader") {
-      bridge.setServerPayloadForwarder(null);
-      this.activeRemoteLeaderTabId = null;
-    } else {
-      bridge.setServerPayloadForwarder((payload) => {
-        if (!this.tabId || !this.currentLeaderTabId) return;
-        if (this.currentLeaderTabId === this.tabId) return;
-
-        this.postSyncChannelMessage({
-          type: "follower-sync",
-          fromTabId: this.tabId,
-          toLeaderTabId: this.currentLeaderTabId,
-          term: this.currentLeaderTerm,
-          payload: [payload],
-        });
-      });
-      this.activeRemoteLeaderTabId = this.currentLeaderTabId;
-    }
-
-    if (replayConnection) {
-      bridge.replayServerConnection();
-    }
-  }
-
-  private onLeaderElectionChange(snapshot: LeaderSnapshot): void {
-    if (this.isShuttingDown || !this.primaryDbName) return;
-
-    const previousRole = this.tabRole;
-    const previousLeaderTabId = this.currentLeaderTabId;
-    const previousTerm = this.currentLeaderTerm;
-    this.adoptLeaderSnapshot(snapshot);
-
-    if (previousRole === "follower" && previousLeaderTabId !== this.currentLeaderTabId) {
-      this.sendFollowerClose(previousLeaderTabId, previousTerm);
-    }
-
-    const nextDbName = Db.resolveWorkerDbNameForSnapshot(this.primaryDbName, snapshot);
-    const dbNameChanged = nextDbName !== this.workerDbName;
-    this.workerDbName = nextDbName;
-
-    // No bridge means no runtime server edge exists yet.
-    if (!this.workerBridge) return;
-
-    this.enqueueWorkerReconfigure(async () => {
-      if (this.isShuttingDown) return;
-      if (dbNameChanged) {
-        await this.restartWorkerWithCurrentDbName();
-        return;
-      }
-
-      if (this.workerBridge) {
-        this.applyBridgeRoutingForCurrentLeader(this.workerBridge, true);
-      }
-    });
-  }
-
-  private enqueueWorkerReconfigure(task: () => Promise<void>): void {
-    this.workerReconfigure = this.workerReconfigure.then(task).catch((error) => {
-      console.error("[db] Worker reconfigure failed:", error);
-    });
-  }
-
-  private async restartWorkerWithCurrentDbName(): Promise<void> {
-    const currentWorker = this.worker;
-    if (!currentWorker) return;
-
-    // If bridge init is in flight, wait before tearing down.
-    if (this.bridgeReady) {
-      await this.bridgeReady;
-    }
-
-    if (this.workerBridge) {
-      try {
-        await this.workerBridge.shutdown();
-      } catch {
-        // Best effort
-      }
-      this.workerBridge = null;
-    }
-    this.bridgeReady = null;
-
-    currentWorker.terminate();
-    this.worker = await Db.spawnWorker(this.config.runtimeSources);
-
-    // Re-attach immediately for existing client runtime(s) so subscriptions replay.
-    const first = this.clients.entries().next();
-    if (!first.done) {
-      const [schemaJson, client] = first.value;
-      this.attachWorkerBridge(schemaJson, client);
-      if (this.bridgeReady) {
-        await this.bridgeReady;
-      }
-    }
   }
 
   private currentWorkerNamespace(): string {
@@ -1458,106 +1512,277 @@ export class Db {
     if (driver.type !== "persistent") {
       throw new Error("Worker namespace is only available for driver.type='persistent'");
     }
-    return this.workerDbName ?? driver.dbName ?? this.config.appId;
+    return this.primaryDbName ?? driver.dbName ?? this.config.appId;
   }
 
-  private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
-    const currentWorker = this.worker;
+  private resetChannelName(): string | null {
+    if (!this.primaryDbName) return null;
+    return `jazz:storage-reset:${this.config.appId}:${this.primaryDbName}`;
+  }
 
-    if (this.workerBridge && currentWorker) {
+  private leaderLockName(): string | null {
+    if (!this.primaryDbName) return null;
+    return `jazz:leader:${this.config.appId}:${this.primaryDbName}:v1`;
+  }
+
+  /**
+   * Subscribe to the cross-tab reset channel for this `(appId, dbName)`. When
+   * any tab announces `storage-reset-start`, every other tab's `Db` quietly
+   * tears itself down so the originating tab can safely delete the OPFS
+   * namespace without racing a live leader worker.
+   */
+  private subscribeToResetChannel(): void {
+    if (this.resetChannel) return;
+    const name = this.resetChannelName();
+    if (!name) return;
+    if (typeof BroadcastChannel === "undefined") return;
+    const channel = new BroadcastChannel(name);
+    const listener = (event: MessageEvent): void => {
+      const data = event.data as { type?: unknown } | null;
+      if (!data || typeof data !== "object") return;
+      if ((data as { type?: unknown }).type !== "storage-reset-start") return;
+      // Another tab is about to wipe storage. Drop our local state so the
+      // leader's dedicated worker (if it lives in this tab) releases its
+      // OPFS handles, and so any further client/bridge creation refuses
+      // rather than silently re-attaching to a now-deleted namespace.
+      void this.shutdown().catch(() => undefined);
+    };
+    channel.addEventListener("message", listener);
+    this.resetChannel = channel;
+    this.resetChannelListener = listener;
+  }
+
+  private closeResetChannel(): void {
+    if (!this.resetChannel) return;
+    if (this.resetChannelListener) {
+      this.resetChannel.removeEventListener("message", this.resetChannelListener);
+    }
+    try {
+      this.resetChannel.close();
+    } catch {
+      // BroadcastChannel may already be closed.
+    }
+    this.resetChannel = null;
+    this.resetChannelListener = null;
+  }
+
+  /**
+   * Broadcast `storage-reset-start` on this Db's reset channel so every other
+   * tab on the same `(appId, dbName)` releases its leader worker / follower
+   * port before we try to delete the OPFS namespace.
+   *
+   * Throws if `BroadcastChannel` is unavailable: cross-tab coordination is a
+   * correctness requirement for follower-initiated wipes (the leader tab's
+   * dedicated worker would otherwise keep OPFS open), not a nice-to-have.
+   * Callers should surface this error to the user rather than silently
+   * removing the OPFS file while another tab is still writing to it.
+   */
+  private broadcastStorageResetStart(): void {
+    const name = this.resetChannelName();
+    if (!name) {
+      throw new Error(
+        "deleteClientStorage() cannot resolve a reset-channel name (no primaryDbName).",
+      );
+    }
+    if (typeof BroadcastChannel === "undefined") {
+      throw new Error(
+        "deleteClientStorage() requires BroadcastChannel for cross-tab reset coordination, " +
+          "but it is unavailable in this environment. Close other tabs on this origin and retry, " +
+          "or call deleteClientStorage() from a tab that does support BroadcastChannel.",
+      );
+    }
+    let channel: BroadcastChannel | null = null;
+    try {
+      channel = new BroadcastChannel(name);
+      channel.postMessage({ type: "storage-reset-start" });
+    } finally {
       try {
-        await this.workerBridge.shutdown();
+        channel?.close();
       } catch {
-        // Best effort: if the bridge shutdown times out, we still terminate below.
+        // Already closed.
       }
     }
-    this.workerBridge = null;
-    this.bridgeReady = null;
+  }
 
-    for (const client of this.clients.values()) {
-      await client.shutdown();
+  /**
+   * Default deadline for acquiring the leader lock during
+   * `deleteClientStorage()`. The supervisor's `shutdown()` is fast (low ms),
+   * and reset listeners on other tabs also call `shutdown()` synchronously;
+   * 15s is the same envelope used by `waitForInitialEndpoint`. If we hit the
+   * timeout it almost always means a peer tab is non-responsive (e.g. JS
+   * loop blocked, or it crashed while holding the lock without releasing).
+   */
+  private static readonly STORAGE_RESET_LOCK_TIMEOUT_MS = 15_000;
+
+  /**
+   * Upper bound on how long `ensureQueryReady` will wait for a new bridge
+   * to attach after a leader handoff before surfacing
+   * {@link LeaderMigratedError}. Matched to `waitForInitialEndpoint` so a
+   * tab whose leader vanishes and never returns sees the same envelope it
+   * would have hit when first booting.
+   */
+  private static readonly WAIT_FOR_FRESH_BRIDGE_TIMEOUT_MS = 15_000;
+
+  /**
+   * Run `fn` while holding the leader-tab lock for this namespace. Acts as a
+   * cross-tab mutual exclusion: while we hold the lock, no other tab's
+   * supervisor can win it and spawn a dedicated worker against this OPFS
+   * namespace — meaning the file is guaranteed not to be reopened mid-delete.
+   *
+   * Aborts the wait after `STORAGE_RESET_LOCK_TIMEOUT_MS` so the caller
+   * surfaces an actionable error instead of hanging when another tab fails
+   * to release the lock (e.g. a non-responsive page that ignored the
+   * `storage-reset-start` broadcast). Once the lock is granted, `fn` runs
+   * without a timeout — only the queued wait is bounded.
+   *
+   * If `navigator.locks` is unavailable, runs `fn` without the lock — the
+   * broadcast + per-tab shutdown is the only safeguard in that environment.
+   */
+  private async withLeaderLockHeld<T>(fn: () => Promise<T>): Promise<T> {
+    const lockName = this.leaderLockName();
+    const nav = (globalThis as { navigator?: { locks?: { request: Function } } }).navigator;
+    if (!lockName || !nav?.locks || typeof nav.locks.request !== "function") {
+      return await fn();
     }
-    this.clients.clear();
-    this.leaderPeerIds.clear();
-    this.activeRemoteLeaderTabId = null;
-
-    if (currentWorker) {
-      currentWorker.terminate();
+    const ac = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ac ? setTimeout(() => ac.abort(), Db.STORAGE_RESET_LOCK_TIMEOUT_MS) : null;
+    let result!: T;
+    let acquired = false;
+    try {
+      await nav.locks.request(
+        lockName,
+        { mode: "exclusive", ...(ac ? { signal: ac.signal } : {}) },
+        async () => {
+          acquired = true;
+          result = await fn();
+        },
+      );
+    } catch (error) {
+      // `navigator.locks.request` rejects with `AbortError` when the signal
+      // fires before the lock is granted. Translate to an actionable error.
+      const name = (error as { name?: string } | undefined)?.name;
+      if (!acquired && (name === "AbortError" || ac?.signal.aborted)) {
+        throw new Error(
+          `Timed out after ${Db.STORAGE_RESET_LOCK_TIMEOUT_MS}ms waiting for the leader lock on ` +
+            `"${lockName}". Another tab is still holding the namespace open — close it and retry.`,
+        );
+      }
+      throw error;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
-    this.worker = null;
+    return result;
   }
 
-  private createStorageResetHost(): StorageResetHost {
-    return {
-      isShuttingDown: () => this.isShuttingDown,
-      getTabId: () => this.tabId,
-      getTabRole: () => this.tabRole,
-      getCurrentLeaderTabId: () => this.currentLeaderTabId,
-      getCurrentLeaderTerm: () => this.currentLeaderTerm,
-      hasSyncChannel: () => this.syncChannel !== null,
-      getPrimaryDbName: () => this.primaryDbName,
-      getCurrentWorkerNamespace: () => this.currentWorkerNamespace(),
-      postSyncChannelMessage: (message) => this.postSyncChannelMessage(message),
-      ensureBridgeReady: async () => {
-        if (this.bridgeReady) await this.bridgeReady;
-      },
-      shutdownWorkerAndClients: () => this.shutdownWorkerAndClientsForStorageReset(),
-      resumeWorker: () => this.resumeWorker(),
-    };
+  /**
+   * Remove the OPFS file backing `namespace`, retrying transient
+   * OPFS-locked failures.
+   *
+   * By the time this runs we hold the leader lock, so the leader tab's
+   * dedicated worker has finished `runShutdown()` — it was gracefully
+   * shut down *and* `terminate()`d. But Chrome releases a terminated
+   * worker's `FileSystemSyncAccessHandle` only when it finishes tearing
+   * the worker down, which happens asynchronously after `terminate()`
+   * returns (typically within a few hundred ms). Until then
+   * `removeEntry` rejects with `NoModificationAllowedError` /
+   * `InvalidStateError`.
+   *
+   * Holding the leader lock proves leadership was released; it does not
+   * prove the OS-level handle is gone. So we poll the real condition —
+   * retry the delete with capped backoff — the same handle conflict the
+   * OPFS *open* path already absorbs (`OpfsFile::open` in
+   * `crates/opfs-btree/src/file.rs`). If it is still locked after the
+   * budget, a live tab is genuinely holding it open: surface the
+   * actionable error.
+   */
+  private async removeBrowserStorageNamespace(namespace: string): Promise<void> {
+    const rootDirectory = await navigator.storage.getDirectory();
+    const fileName = `${namespace}.opfsbtree`;
+
+    // ~4.25s total budget across 12 attempts: well past the few-hundred-ms
+    // GC lag, bounded so a genuinely stuck handle still surfaces an error.
+    const maxAttempts = 12;
+    const baseDelayMs = 50;
+    const maxDelayMs = 500;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        await rootDirectory.removeEntry(fileName, { recursive: false });
+        return;
+      } catch (error) {
+        const name = (error as { name?: string } | undefined)?.name;
+        if (name === "NotFoundError") {
+          return;
+        }
+        const opfsLocked = name === "NoModificationAllowedError" || name === "InvalidStateError";
+        if (opfsLocked && attempt < maxAttempts - 1) {
+          await sleep(Math.min(baseDelayMs * 2 ** attempt, maxDelayMs));
+          continue;
+        }
+        if (opfsLocked) {
+          throw new Error(
+            `Failed to delete browser storage for "${namespace}" because OPFS is still ` +
+              `locked after ${maxAttempts} attempts. Another tab is holding it open — ` +
+              `close it and retry.`,
+          );
+        }
+        throw new Error(
+          `Failed to delete browser storage for "${namespace}": ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
   }
 
-  private static resolveWorkerDbNameForSnapshot(
-    primaryDbName: string,
-    snapshot: LeaderSnapshot,
-  ): string {
-    if (snapshot.role === "leader") return primaryDbName;
-    return `${primaryDbName}__fallback__${snapshot.tabId}`;
+  private static sharedWorkerName(config: DbConfig, dbName: string): string {
+    return `jazz:${config.appId}:${dbName}`;
   }
 
-  private static async spawnWorker(runtimeSources?: RuntimeSourcesConfig): Promise<Worker> {
-    let worker: Worker;
+  /**
+   * Spawn the SharedWorker port broker (`jazz-shared-worker.js`). The broker
+   * does not run any runtime code — it only relays MessagePorts between tabs
+   * and the current leader tab (see {@link installSharedWorkerBroker}). No
+   * bootstrap handshake is needed.
+   */
+  private static spawnSharedWorkerBroker(config: DbConfig, dbName: string): SharedWorker {
+    if (typeof SharedWorker === "undefined") {
+      throw new Error("SharedWorker is not available in this environment");
+    }
 
-    if (runtimeSources?.workerUrl || runtimeSources?.baseUrl) {
-      // Explicit worker location — use dynamic URL resolution.
+    const runtimeSources = config.runtimeSources;
+    let sharedWorkerUrl: string | URL;
+    const hasDynamicRuntimeUrl =
+      !!runtimeSources?.sharedWorkerUrl ||
+      !!runtimeSources?.baseUrl ||
+      !!runtimeSources?.workerUrl ||
+      !!runtimeSources?.wasmUrl;
+
+    if (hasDynamicRuntimeUrl) {
       const locationHref = typeof location !== "undefined" ? location.href : undefined;
       const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
       const wasmUrl = syncInitInput
         ? null
         : resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources);
-      const workerUrl = appendWorkerRuntimeWasmUrl(
-        resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
-        wasmUrl,
+      const childWorkerUrl = runtimeSources?.workerUrl
+        ? resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources)
+        : null;
+
+      sharedWorkerUrl = appendSharedWorkerRuntimeUrls(
+        resolveRuntimeConfigSharedWorkerUrl(import.meta.url, locationHref, runtimeSources),
+        {
+          wasmUrl,
+          workerUrl: childWorkerUrl,
+        },
       );
-      worker = new Worker(workerUrl, { type: "module" });
     } else {
-      // Static URL pattern — bundlers (Turbopack, webpack, Vite) detect this
-      // and automatically bundle the worker script + its WASM dependency.
-      worker = new Worker(new URL("../worker/jazz-worker.js", import.meta.url), {
-        type: "module",
-      });
+      sharedWorkerUrl = new URL("../worker/jazz-shared-worker.js", import.meta.url);
     }
 
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Worker bootstrap timeout")), 15000);
-      const handler = (event: MessageEvent) => {
-        if (event.data.type === "ready") {
-          clearTimeout(timeout);
-          worker.removeEventListener("message", handler);
-          resolve();
-        } else if (event.data.type === "error") {
-          clearTimeout(timeout);
-          worker.removeEventListener("message", handler);
-          reject(new Error(event.data.message));
-        }
-      };
-      worker.addEventListener("message", handler);
-      worker.addEventListener("error", (e) => {
-        clearTimeout(timeout);
-        reject(new Error(`Worker load error: ${e.message}`));
-      });
+    return new SharedWorker(sharedWorkerUrl, {
+      type: "module",
+      name: Db.sharedWorkerName(config, dbName),
     });
-
-    return worker;
   }
 
   updateAuthToken(jwtToken: string | null): void {
@@ -1816,45 +2041,99 @@ export class Db {
   }
 
   /**
-   * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
+   * Wipe this Db's browser OPFS namespace. Terminal: the `Db` is fully shut
+   * down before the delete (so the leader's dedicated worker releases its
+   * OPFS handles) and is not reusable afterwards — callers must recreate
+   * the instance to keep working. `logout({ wipeData: true })` already
+   * does this; direct callers should follow the same pattern.
    *
-   * This clears the primary namespace plus any active follower fallback namespaces for the same
-   * browser app/database. It does not touch localStorage-based local-first auth state.
+   * Cross-tab coordination:
+   *
+   * When called from any tab (leader *or* follower) on a namespace that is
+   * also open in other tabs, this method first broadcasts
+   * `storage-reset-start` on `jazz:storage-reset:${appId}:${dbName}`. Every
+   * other tab's `Db` reacts by shutting itself down — releasing follower
+   * ports and, critically, terminating the leader tab's dedicated worker so
+   * OPFS handles are freed. Once all tabs have stepped down we acquire the
+   * `navigator.locks` leader lock for this namespace and remove the OPFS
+   * file while holding it, so no concurrent supervisor can win the lock and
+   * spawn a worker against the namespace mid-delete.
+   *
+   * Without this coordination, a follower-initiated wipe would only tear
+   * down the caller's bridge while the leader's worker kept the OPFS file
+   * open — the subsequent `removeEntry` would either fail with
+   * `NoModificationAllowedError` or, worse, succeed and leave the leader
+   * writing into a deleted/recreated namespace.
    *
    * Behavior:
-   * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
+   * - Browser persistent (SharedWorker-backed) Db only; throws otherwise
    * - Can be initiated from either leader or follower tabs
-   * - Coordinates worker shutdown over the tab sync channel before deleting OPFS files
-   * - Serializes with worker reconfigure operations
-   * - Tears down worker + clients, deletes OPFS files, respawns workers
-   * - If deletion fails, all participating tabs still respawn their workers before surfacing the error
+   * - Does not touch localStorage-based local-first auth state
+   *
+   * Failure modes (all thrown before any destructive work happens):
+   * - `BroadcastChannel` unavailable in this environment → throws; cross-tab
+   *   coordination is a correctness requirement, not a nice-to-have.
+   * - Another tab holds the leader lock beyond
+   *   {@link Db.STORAGE_RESET_LOCK_TIMEOUT_MS} (e.g. it ignored or didn't
+   *   process the `storage-reset-start` broadcast) → throws an actionable
+   *   error asking the user to close the offending tab and retry. We have
+   *   already shut down our own `Db` by this point, so the caller must
+   *   recreate the instance regardless.
    */
   async deleteClientStorage(): Promise<void> {
     if (resolveStorageDriver(this.config.driver).type !== "persistent") {
       throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
     }
 
-    if (!isBrowser()) {
+    // Gate on the construction-time mode latch, not `!this.supervisor`.
+    // A prior `deleteClientStorage()` call that succeeded at the
+    // broadcast + shutdown phase but failed at the OPFS delete (e.g.
+    // the OS hadn't finished releasing the terminated leader worker's
+    // `FileSystemSyncAccessHandle` within the retry budget) leaves
+    // `this.supervisor === null` even though the namespace is still
+    // there. With the old guard the user could never retry. The
+    // remaining work — `removeBrowserStorageNamespace` under
+    // `withLeaderLockHeld` — only needs `navigator.storage` and
+    // `navigator.locks`, neither of which depends on the supervisor.
+    if (!isBrowser() || !this.usesSharedWorker) {
       console.error(
-        "deleteClientStorage() is only available on browser worker-backed Db instances.",
+        "deleteClientStorage() is only available on browser SharedWorker-backed Db instances.",
       );
       return;
     }
 
-    const coordinator = this.storageReset;
-    if (!coordinator) {
-      throw new Error("deleteClientStorage() requires an initialized storage-reset coordinator.");
+    const namespace = this.currentWorkerNamespace();
+
+    // First call: announce + tear ourselves down. On a retry after a
+    // failed OPFS delete `this.supervisor` is already null and the
+    // broadcast already went out — skip straight to the delete attempt
+    // so we don't double-broadcast or double-await an already-shut-down
+    // Db.
+    if (this.supervisor) {
+      // 1. Tell every other tab on this namespace to release its bridge /
+      //    leader worker before we try to delete. Their reset-channel
+      //    listener calls `this.shutdown()` — terminating the leader tab's
+      //    dedicated worker, which is what actually frees OPFS.
+      this.broadcastStorageResetStart();
+
+      // 2. Tear ourselves down. If we were the leader this terminates our
+      //    own dedicated worker (and releases the lock); if we were a
+      //    follower, our port closes here while the leader is being told
+      //    to step down by step 1.
+      await this.shutdown();
     }
-    const operation = this.workerReconfigure.then(async () => {
-      await coordinator.requestReset();
+
+    // 3. Hold the leader-tab lock across the delete so no other tab's
+    //    supervisor can promote itself to leader (and reopen the OPFS
+    //    file) while `removeEntry` is in flight. `navigator.locks`
+    //    serializes requests — if other tabs are queued waiting for the
+    //    lock, they'll only get it once we release, after the file is
+    //    gone. Their listener-driven shutdown also prevents them from
+    //    contending in the first place, but the lock is the belt to the
+    //    broadcast's braces.
+    await this.withLeaderLockHeld(async () => {
+      await this.removeBrowserStorageNamespace(namespace);
     });
-
-    this.workerReconfigure = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-
-    await operation;
   }
 
   /**
@@ -2049,7 +2328,23 @@ export class Db {
             transformOutputRow(outputTable === builtQuery.table ? query : {}, row)
         : undefined;
 
+    const debugTable = builtQuery.table;
+    this.jazzDebugCounters.dbSubscriptionsCreated++;
+    jazzDebugLog("Db.subscribeAll registered", {
+      appId: this.config.appId,
+      table: debugTable,
+      subscriptionCount: this.jazzDebugCounters.dbSubscriptionsCreated,
+    });
+
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
+      this.jazzDebugCounters.dbSubscriptionDeltasObserved++;
+      if (jazzDebugEnabled()) {
+        jazzDebugLog("Db.subscribeAll delta", {
+          appId: this.config.appId,
+          table: debugTable,
+          deltasObserved: this.jazzDebugCounters.dbSubscriptionDeltasObserved,
+        });
+      }
       const typedDelta = manager.handleDelta(
         delta,
         transform,
@@ -2086,6 +2381,24 @@ export class Db {
   }
 
   /**
+   * Snapshot of the opt-in diagnostic counters for this Db. Always
+   * available; populated only when `globalThis.__JAZZ_DEBUG_FORWARDER__`
+   * is true at the moment an event fires.
+   *
+   * Useful for diagnosing the "writes are durable but subscriptions
+   * silently stop firing" failure mode: after a reproduction, compare
+   * `dbAttachWorkerBridge` (how many times a bridge attached) against
+   * `forwardersInstalled` (how many times the server-payload forwarder
+   * was installed against a bridge). If attach > install, the
+   * post-migration bridge has no path to echo deltas back to the
+   * main-thread cache, and the subscription will appear stuck even
+   * though the Inspector still sees data in the worker.
+   */
+  jazzDebugDump(): JazzDebugCounters {
+    return { ...this.jazzDebugCounters };
+  }
+
+  /**
    * Shutdown the Db and release all resources.
    * Closes all memoized JazzClient connections and the worker.
    *
@@ -2104,30 +2417,32 @@ export class Db {
       this.localFirstRefreshTimer = null;
     }
     this.clearActiveQuerySubscriptionTraces();
-    this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
-    this.activeRemoteLeaderTabId = null;
-    this.leaderPeerIds.clear();
-    this.closeSyncChannel();
     this.detachLifecycleHooks();
 
-    if (this.leaderElectionUnsubscribe) {
-      this.leaderElectionUnsubscribe();
-      this.leaderElectionUnsubscribe = null;
+    // Wait for bridge init to settle before tearing the bridge down —
+    // otherwise the worker may still be opening OPFS handles. A *failed*
+    // init must not abort teardown: the supervisor (leader lock), the
+    // SharedWorker broker port and the reset channel still need releasing,
+    // or a worker-init failure strands the namespace's leader lease and
+    // dedicated worker for every other tab. Capture the error, finish the
+    // teardown best-effort, and rethrow it once the runtime is fully down.
+    let bridgeInitError: unknown;
+    let bridgeInitFailed = false;
+    try {
+      await this.ensureBridgeReady();
+    } catch (error) {
+      bridgeInitError = error;
+      bridgeInitFailed = true;
     }
-    if (this.leaderElection) {
-      this.leaderElection.stop();
-      this.leaderElection = null;
-    }
 
-    await this.workerReconfigure;
-
-    // Ensure bridge init has completed before sending shutdown —
-    // otherwise the worker may still be opening OPFS handles
-    await this.ensureBridgeReady();
-
-    // Shutdown worker bridge — waits for OPFS handles to be released
-    if (this.workerBridge && this.worker) {
-      await this.workerBridge.shutdown();
+    // Shutdown worker bridge — waits for OPFS handles to be released.
+    if (this.workerBridge && this.workerEndpoint) {
+      try {
+        await this.workerBridge.shutdown();
+      } catch {
+        // Best-effort: a bridge teardown failure must not strand the
+        // supervisor's leader lock released below.
+      }
       this.workerBridge = null;
     }
 
@@ -2135,13 +2450,33 @@ export class Db {
     this.disposeWasmTelemetry?.();
     this.disposeWasmTelemetry = null;
     for (const client of this.clients.values()) {
-      await client.shutdown();
+      try {
+        await client.shutdown();
+      } catch {
+        // Best-effort, as above.
+      }
     }
     this.clients.clear();
 
-    if (this.worker) {
-      this.worker.terminate();
-      this.worker = null;
+    if (this.supervisor) {
+      try {
+        await this.supervisor.shutdown();
+      } finally {
+        this.supervisor = null;
+      }
+    }
+    this.supervisorUnsubscribe?.();
+    this.supervisorUnsubscribe = null;
+    this.closeResetChannel();
+    this.sharedWorker?.port.close();
+    this.sharedWorker = null;
+    this.workerEndpoint = null;
+
+    // Teardown ran to completion; surface a failed bridge init to the caller.
+    // The Db never became usable, and callers (`deleteClientStorage`) and
+    // tests rely on `shutdown()` rejecting in that case.
+    if (bridgeInitFailed) {
+      throw bridgeInitError;
     }
   }
 
@@ -2308,6 +2643,15 @@ function isBrowser(): boolean {
   return typeof Worker !== "undefined" && typeof window !== "undefined";
 }
 
+function isSharedWorkerAvailable(): boolean {
+  return typeof SharedWorker !== "undefined";
+}
+
+function hasNavigatorLocks(): boolean {
+  const nav = (globalThis as { navigator?: { locks?: unknown } }).navigator;
+  return !!nav && typeof nav.locks === "object" && nav.locks !== null;
+}
+
 /**
  * Generate a 32-byte ephemeral seed for anonymous auth.
  *
@@ -2403,7 +2747,17 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     isBrowser() &&
     driver.type === "persistent"
   ) {
-    db = await Db.createWithWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
+    if (!isSharedWorkerAvailable()) {
+      throw new Error(
+        "This browser does not support SharedWorker, which Jazz requires for persistent browser storage. Please update your browser or configure driver.type='memory'.",
+      );
+    }
+    if (!hasNavigatorLocks()) {
+      throw new Error(
+        "driver.type='persistent' in the browser requires navigator.locks support, which this environment lacks.",
+      );
+    }
+    db = await Db.createWithSharedWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
   } else {
     db = Db.create(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
   }

@@ -6,6 +6,7 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
+import type { WorkerBridgeEndpoint } from "./worker-bridge.js";
 import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./sync-transport.js";
@@ -84,7 +85,7 @@ export interface Runtime {
    * an opaque handle that the TS `WorkerBridge` adapter wraps. WASM-only.
    * Options are parsed at attach time; `bridge.init()` is parameter-less.
    */
-  createWorkerBridge?(worker: Worker, options: object): unknown;
+  createWorkerBridge?(endpoint: WorkerBridgeEndpoint, options: object): unknown;
   /** Drive a synchronous batched tick. Used by callers that need to flush
    * pending state before a synchronous teardown. */
   batchedTick?(): void;
@@ -109,6 +110,16 @@ export interface Runtime {
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure?(callback: (reason: string) => void): void;
 }
+
+type WasmRuntimeConstructor = new (
+  schemaJson: string,
+  appId: string,
+  env: string,
+  userBranch: string,
+  tier?: string,
+  useBinaryEncoding?: boolean,
+  nonDurableClientRuntime?: boolean,
+) => Runtime;
 
 /**
  * Authentication configuration for connecting to a Jazz server.
@@ -1012,7 +1023,8 @@ export class JazzClient {
 
     // Create WASM runtime (storage is now synchronous in-memory)
     const schemaJson = serializeRuntimeSchema(context.schema);
-    const runtime = new wasmModule.WasmRuntime(
+    const WasmRuntime = wasmModule.WasmRuntime as unknown as WasmRuntimeConstructor;
+    const runtime = new WasmRuntime(
       schemaJson,
       context.appId,
       context.env ?? "dev",
@@ -1047,7 +1059,8 @@ export class JazzClient {
   ): JazzClient {
     // Create WASM runtime (storage is now synchronous in-memory)
     const schemaJson = serializeRuntimeSchema(context.schema);
-    const runtime = new wasmModule.WasmRuntime(
+    const WasmRuntime = wasmModule.WasmRuntime as unknown as WasmRuntimeConstructor;
+    const runtime = new WasmRuntime(
       schemaJson,
       context.appId,
       context.env ?? "dev",

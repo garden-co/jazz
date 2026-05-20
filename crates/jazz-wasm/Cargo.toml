@@ -51,6 +51,7 @@ wasm-bindgen-test = "0.3"
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 web-sys = { version = "0.3", features = [
   "FileSystemDirectoryHandle",
+  "MessageChannel",
   "StorageManager",
   "Navigator",
   "WorkerGlobalScope",

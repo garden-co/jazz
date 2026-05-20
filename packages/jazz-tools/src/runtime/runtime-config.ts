@@ -147,6 +147,29 @@ export function resolveRuntimeConfigWorkerUrl(
   return new URL("worker/jazz-worker.js", resolveBrowserAssetBase(locationHref)).href;
 }
 
+export function resolveRuntimeConfigSharedWorkerUrl(
+  runtimeModuleUrl: string,
+  locationHref: string | undefined,
+  runtime?: RuntimeSourcesConfig,
+): string {
+  if (runtime?.sharedWorkerUrl) {
+    return resolveConfiguredUrl(runtime.sharedWorkerUrl, locationHref);
+  }
+
+  if (runtime?.baseUrl) {
+    const baseUrl = resolveConfiguredBaseUrl(runtime.baseUrl, locationHref);
+    if (baseUrl) {
+      return new URL("worker/jazz-shared-worker.js", baseUrl).href;
+    }
+  }
+
+  if (!locationHref || isHttpUrl(runtimeModuleUrl)) {
+    return new URL("../worker/jazz-shared-worker.js", runtimeModuleUrl).href;
+  }
+
+  return new URL("worker/jazz-shared-worker.js", resolveBrowserAssetBase(locationHref)).href;
+}
+
 export function appendWorkerRuntimeWasmUrl(workerUrl: string, wasmUrl: string | null): string {
   if (!wasmUrl) {
     return workerUrl;
@@ -154,6 +177,23 @@ export function appendWorkerRuntimeWasmUrl(workerUrl: string, wasmUrl: string | 
 
   const url = new URL(workerUrl);
   url.searchParams.set("jazz-wasm-url", wasmUrl);
+  return url.href;
+}
+
+export function appendSharedWorkerRuntimeUrls(
+  sharedWorkerUrl: string,
+  options: {
+    wasmUrl?: string | null;
+    workerUrl?: string | null;
+  },
+): string {
+  const url = new URL(sharedWorkerUrl);
+  if (options.workerUrl) {
+    url.searchParams.set("jazz-worker-url", options.workerUrl);
+  }
+  if (options.wasmUrl) {
+    url.searchParams.set("jazz-wasm-url", options.wasmUrl);
+  }
   return url.href;
 }
 

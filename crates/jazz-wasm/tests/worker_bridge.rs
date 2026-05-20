@@ -6,13 +6,11 @@
 //!
 //! ## Synthetic Worker
 //!
-//! Each test builds a JS object exposing `postMessage` / `onmessage` and
-//! `unchecked_into::<web_sys::Worker>()`s it. The bridge can't tell a real
-//! Worker from a duck-typed one — it only calls those two members. The shim
-//! captures every outbound `postMessage` (which the bridge will be encoding
-//! as postcard `Uint8Array`s after Stage 1/2/3) and exposes a helper that
-//! synthesises a `MessageEvent`-shaped object and dispatches it through the
-//! bridge's onmessage handler.
+//! Each test builds a JS object exposing `postMessage` / `onmessage`. The
+//! bridge accepts that endpoint shape for both dedicated workers and
+//! broker-minted `MessagePort`s. The shim captures every outbound
+//! `postMessage` and exposes a helper that synthesises a `MessageEvent`-
+//! shaped object and dispatches it through the bridge's onmessage handler.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -25,7 +23,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
-use web_sys::Worker;
 
 use jazz_tools::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
 use jazz_tools::row_histories::BatchId;
@@ -82,8 +79,8 @@ impl FakeWorker {
         }
     }
 
-    fn worker(&self) -> Worker {
-        self.obj.clone().unchecked_into()
+    fn worker(&self) -> JsValue {
+        self.obj.clone()
     }
 
     fn emit_wire(&self, msg: &WorkerToMainWire) {
@@ -102,6 +99,79 @@ impl FakeWorker {
         } else {
             panic!("bridge has not installed an onmessage handler");
         }
+    }
+
+    fn posted_decoded(&self) -> Vec<MainToWorkerWire> {
+        self.posted
+            .borrow()
+            .iter()
+            .filter_map(|v| {
+                v.dyn_ref::<Uint8Array>()
+                    .and_then(|arr| postcard::from_bytes(&arr.to_vec()).ok())
+            })
+            .collect()
+    }
+
+    fn last_posted_decoded(&self) -> Option<MainToWorkerWire> {
+        self.posted_decoded().pop()
+    }
+}
+
+struct FakeMessagePort {
+    obj: JsValue,
+    posted: Rc<RefCell<Vec<JsValue>>>,
+    _post_message_closure: Closure<dyn FnMut(JsValue, JsValue)>,
+}
+
+impl FakeMessagePort {
+    fn new() -> Self {
+        let posted = Rc::new(RefCell::new(Vec::<JsValue>::new()));
+        let posted_clone = Rc::clone(&posted);
+        let post_message_closure =
+            Closure::<dyn FnMut(JsValue, JsValue)>::new(move |msg: JsValue, _transfer: JsValue| {
+                posted_clone.borrow_mut().push(msg);
+            });
+
+        let obj = Object::new();
+        Reflect::set(
+            &obj,
+            &"postMessage".into(),
+            post_message_closure.as_ref().unchecked_ref(),
+        )
+        .unwrap();
+        Reflect::set(&obj, &"onmessage".into(), &JsValue::NULL).unwrap();
+
+        Self {
+            obj: obj.into(),
+            posted,
+            _post_message_closure: post_message_closure,
+        }
+    }
+
+    fn endpoint(&self) -> JsValue {
+        self.obj.clone()
+    }
+
+    fn emit_wire(&self, msg: &WorkerToMainWire) {
+        let bytes = encode_worker_to_main(msg).expect("encode worker→main");
+        let arr = Uint8Array::from(bytes.as_slice());
+        self.emit_data(arr.into());
+    }
+
+    fn emit_data(&self, data: JsValue) {
+        let event = Object::new();
+        Reflect::set(&event, &"data".into(), &data).unwrap();
+        let onmessage = Reflect::get(&self.obj, &"onmessage".into()).unwrap();
+        if let Ok(f) = onmessage.dyn_into::<Function>() {
+            f.call1(&JsValue::NULL, &event.into())
+                .expect("dispatch fake port message");
+        } else {
+            panic!("bridge has not installed an onmessage handler");
+        }
+    }
+
+    fn posted(&self) -> Vec<JsValue> {
+        self.posted.borrow().clone()
     }
 
     fn posted_decoded(&self) -> Vec<MainToWorkerWire> {
@@ -192,6 +262,36 @@ async fn init_resolves_with_client_id() {
         bridge.get_worker_client_id().as_string().as_deref(),
         Some("client-42")
     );
+}
+
+#[wasm_bindgen_test]
+async fn init_resolves_with_message_port_like_endpoint() {
+    let port = FakeMessagePort::new();
+    let runtime = fresh_runtime();
+    let bridge =
+        jazz_wasm::WasmWorkerBridge::attach(port.endpoint(), &runtime, build_options(None))
+            .expect("attach");
+
+    let init_promise = bridge.init();
+    let posted = port.posted();
+    let init = posted.iter().find(|v| {
+        Reflect::get(v, &"type".into())
+            .ok()
+            .and_then(|t| t.as_string())
+            .as_deref()
+            == Some("init")
+    });
+    assert!(init.is_some(), "bridge did not post init JS object");
+
+    port.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "port-client".into(),
+    });
+
+    let result = JsFuture::from(init_promise).await.expect("init resolved");
+    let client_id = Reflect::get(&result, &"clientId".into())
+        .ok()
+        .and_then(|v| v.as_string());
+    assert_eq!(client_id.as_deref(), Some("port-client"));
 }
 
 #[wasm_bindgen_test]
@@ -304,51 +404,6 @@ fn update_auth_emits_postcard_binary() {
         }
         other => panic!("expected UpdateAuth, got {other:?}"),
     }
-}
-
-#[wasm_bindgen_test]
-fn peer_sync_fires_listener() {
-    let fw = FakeWorker::new();
-    let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
-        .expect("attach");
-
-    let captured = Rc::new(RefCell::new(Vec::<(String, u32, usize)>::new()));
-    let captured_clone = Rc::clone(&captured);
-    let on_peer = Closure::<dyn FnMut(JsValue)>::new(move |batch: JsValue| {
-        let peer_id = Reflect::get(&batch, &"peerId".into())
-            .ok()
-            .and_then(|v| v.as_string())
-            .unwrap_or_default();
-        let term = Reflect::get(&batch, &"term".into())
-            .ok()
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0) as u32;
-        let payload = Reflect::get(&batch, &"payload".into()).unwrap();
-        let arr: js_sys::Array = payload.dyn_into().unwrap();
-        captured_clone
-            .borrow_mut()
-            .push((peer_id, term, arr.length() as usize));
-    });
-    let listeners = Object::new();
-    Reflect::set(
-        &listeners,
-        &"onPeerSync".into(),
-        on_peer.as_ref().unchecked_ref(),
-    )
-    .unwrap();
-    bridge.set_listeners(listeners.into());
-
-    fw.emit_wire(&WorkerToMainWire::PeerSync {
-        peer_id: "tab-b".into(),
-        term: 7,
-        payloads: vec![ByteBuf::from(vec![1, 2, 3])],
-    });
-
-    let captured = captured.borrow();
-    assert_eq!(captured.len(), 1, "listener fired count");
-    assert_eq!(captured[0], ("tab-b".to_string(), 7, 1));
-    drop(on_peer);
 }
 
 #[wasm_bindgen_test]
@@ -499,71 +554,6 @@ async fn yield_once() {
         let _ = set_timeout.call2(&JsValue::NULL, &resolve, &JsValue::from_f64(0.0));
     });
     JsFuture::from(promise).await.expect("yield");
-}
-
-// =============================================================================
-// Wire-format trio for the peer-channel API
-// =============================================================================
-
-#[wasm_bindgen_test]
-fn peer_open_send_close_emit_postcard_binary() {
-    let fw = FakeWorker::new();
-    let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
-        .expect("attach");
-
-    bridge.open_peer("peer-α");
-    let last = fw.last_posted_decoded();
-    match last {
-        Some(MainToWorkerWire::PeerOpen { peer_id }) => {
-            assert_eq!(peer_id, "peer-α");
-        }
-        other => panic!("expected PeerOpen, got {other:?}"),
-    }
-
-    let payload_array = js_sys::Array::new();
-    payload_array.push(&Uint8Array::from(&[1u8, 2, 3][..]));
-    payload_array.push(&Uint8Array::from(&[4u8][..]));
-    bridge.send_peer_sync("peer-α", 5, payload_array);
-    let last = fw.last_posted_decoded();
-    match last {
-        Some(MainToWorkerWire::PeerSync {
-            peer_id,
-            term,
-            payloads,
-        }) => {
-            assert_eq!(peer_id, "peer-α");
-            assert_eq!(term, 5);
-            assert_eq!(payloads.len(), 2);
-            assert_eq!(&*payloads[0], &[1, 2, 3]);
-            assert_eq!(&*payloads[1], &[4]);
-        }
-        other => panic!("expected PeerSync, got {other:?}"),
-    }
-
-    bridge.close_peer("peer-α");
-    let last = fw.last_posted_decoded();
-    match last {
-        Some(MainToWorkerWire::PeerClose { peer_id }) => {
-            assert_eq!(peer_id, "peer-α");
-        }
-        other => panic!("expected PeerClose, got {other:?}"),
-    }
-}
-
-#[wasm_bindgen_test]
-fn send_peer_sync_drops_empty_payload() {
-    let fw = FakeWorker::new();
-    let runtime = fresh_runtime();
-    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
-        .expect("attach");
-    let posted_before = fw.posted.borrow().len();
-    bridge.send_peer_sync("p", 0, js_sys::Array::new());
-    assert_eq!(
-        fw.posted.borrow().len(),
-        posted_before,
-        "empty payload should not post"
-    );
 }
 
 #[wasm_bindgen_test]
@@ -1014,4 +1004,230 @@ async fn drop_after_shutdown_leaves_successor_bridge_intact() {
         posted_a_before_drop,
         "outbox traffic leaked to A's (shut-down) worker after B was attached"
     );
+}
+
+// =============================================================================
+// MessagePort endpoint parity
+//
+// Mirrors the FakeWorker-based tests above so the protocol surface — control
+// messages, mutation-error acknowledgement routing, shutdown handshake, and
+// init-gated outbox flushing — is exercised end-to-end against the
+// `onmessage` endpoint shape used by follower-tab `MessagePort`s.
+// =============================================================================
+
+#[wasm_bindgen_test]
+fn port_update_auth_emits_postcard_binary() {
+    let port = FakeMessagePort::new();
+    let runtime = fresh_runtime();
+    let bridge =
+        jazz_wasm::WasmWorkerBridge::attach(port.endpoint(), &runtime, build_options(None))
+            .expect("attach");
+
+    bridge.update_auth(Some("jwt-port".into()));
+
+    match port.last_posted_decoded() {
+        Some(MainToWorkerWire::UpdateAuth { jwt_token }) => {
+            assert_eq!(jwt_token.as_deref(), Some("jwt-port"));
+        }
+        other => panic!("expected UpdateAuth, got {other:?}"),
+    }
+}
+
+#[wasm_bindgen_test]
+fn port_lifecycle_hint_emits_postcard_binary() {
+    let port = FakeMessagePort::new();
+    let runtime = fresh_runtime();
+    let bridge =
+        jazz_wasm::WasmWorkerBridge::attach(port.endpoint(), &runtime, build_options(None))
+            .expect("attach");
+
+    bridge.send_lifecycle_hint("visibility-hidden");
+
+    match port.last_posted_decoded() {
+        Some(MainToWorkerWire::LifecycleHint { event, .. }) => {
+            assert!(matches!(
+                event,
+                jazz_wasm::worker_protocol::WorkerLifecycleEvent::VisibilityHidden
+            ));
+        }
+        other => panic!("expected LifecycleHint, got {other:?}"),
+    }
+}
+
+#[wasm_bindgen_test]
+fn port_runtime_mutation_error_emission_acknowledges_and_forwards_to_worker() {
+    let port = FakeMessagePort::new();
+    let runtime = fresh_runtime();
+    let _bridge =
+        jazz_wasm::WasmWorkerBridge::attach(port.endpoint(), &runtime, build_options(None))
+            .expect("attach");
+    let batch_id = "0000000000000000000000000000000a";
+
+    let seen = Rc::new(RefCell::new(false));
+    let seen_clone = Rc::clone(&seen);
+    let on_mutation_error = Closure::<dyn FnMut(JsValue)>::new(move |_event: JsValue| {
+        *seen_clone.borrow_mut() = true;
+    });
+    runtime.on_mutation_error(
+        on_mutation_error
+            .as_ref()
+            .unchecked_ref::<Function>()
+            .clone(),
+    );
+
+    runtime
+        .replay_batch_rejection(batch_id, "rejected", "server denied write")
+        .expect("replay rejected batch");
+    let posted_before = port.posted.borrow().len();
+
+    runtime.batched_tick();
+
+    assert!(
+        *seen.borrow(),
+        "mutation error callback should receive event"
+    );
+    let posted = port.posted_decoded();
+    assert!(
+        posted[posted_before..].iter().any(|wire| matches!(
+            wire,
+            MainToWorkerWire::AcknowledgeRejectedBatch { batch_id: posted_batch_id }
+                if posted_batch_id == batch_id
+        )),
+        "mutation error emission should acknowledge through the port bridge, got {posted:?}"
+    );
+    drop(on_mutation_error);
+}
+
+#[wasm_bindgen_test]
+fn port_disconnect_and_reconnect_upstream_emit_postcard_binary() {
+    let port = FakeMessagePort::new();
+    let runtime = fresh_runtime();
+    let bridge =
+        jazz_wasm::WasmWorkerBridge::attach(port.endpoint(), &runtime, build_options(None))
+            .expect("attach");
+
+    bridge.disconnect_upstream();
+    assert!(matches!(
+        port.last_posted_decoded(),
+        Some(MainToWorkerWire::DisconnectUpstream)
+    ));
+
+    bridge.reconnect_upstream();
+    assert!(matches!(
+        port.last_posted_decoded(),
+        Some(MainToWorkerWire::ReconnectUpstream)
+    ));
+}
+
+#[wasm_bindgen_test]
+async fn port_shutdown_resolves_on_ack() {
+    let port = FakeMessagePort::new();
+    let runtime = fresh_runtime();
+    let bridge =
+        jazz_wasm::WasmWorkerBridge::attach(port.endpoint(), &runtime, build_options(None))
+            .expect("attach");
+
+    let shutdown_promise = bridge.shutdown();
+    assert!(matches!(
+        port.last_posted_decoded(),
+        Some(MainToWorkerWire::Shutdown)
+    ));
+
+    port.emit_wire(&WorkerToMainWire::ShutdownOk);
+    JsFuture::from(shutdown_promise)
+        .await
+        .expect("shutdown ack on port");
+}
+
+#[wasm_bindgen_test]
+async fn port_pre_init_outbox_traffic_is_buffered_until_init_ok() {
+    let port = FakeMessagePort::new();
+    let runtime = fresh_runtime();
+    let bridge =
+        jazz_wasm::WasmWorkerBridge::attach(port.endpoint(), &runtime, build_options(None))
+            .expect("attach");
+
+    // Catalogue traffic from `add_server` accumulates in the outbox while the
+    // init gate is closed — and must not reach the port until `init-ok`.
+    yield_once().await;
+    let pre_init_binaries = port.posted_decoded();
+    assert!(
+        pre_init_binaries.is_empty(),
+        "pre-init binary posts on port: {pre_init_binaries:?}"
+    );
+
+    let init = bridge.init();
+    port.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "port-client".into(),
+    });
+    JsFuture::from(init).await.expect("init resolved");
+    yield_once().await;
+
+    let post_init_syncs: Vec<MainToWorkerWire> = port
+        .posted_decoded()
+        .into_iter()
+        .filter(|m| matches!(m, MainToWorkerWire::Sync { .. }))
+        .collect();
+    assert!(
+        !post_init_syncs.is_empty(),
+        "init-ok did not flush a binary Sync envelope on port endpoint; \
+         posted_decoded={:?}",
+        port.posted_decoded()
+    );
+}
+
+#[wasm_bindgen_test]
+async fn port_simulate_crash_resolves() {
+    let port = FakeMessagePort::new();
+    let runtime = fresh_runtime();
+    let bridge =
+        jazz_wasm::WasmWorkerBridge::attach(port.endpoint(), &runtime, build_options(None))
+            .expect("attach");
+
+    let init = bridge.init();
+    port.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "port-client".into(),
+    });
+    JsFuture::from(init).await.expect("init resolved");
+
+    let crash_promise = bridge.simulate_crash();
+    // The bridge posts a `SimulateCrash` envelope and reuses the shutdown
+    // resolver — `ShutdownOk` settles the returned Promise.
+    assert!(matches!(
+        port.last_posted_decoded(),
+        Some(MainToWorkerWire::SimulateCrash)
+    ));
+    port.emit_wire(&WorkerToMainWire::ShutdownOk);
+    JsFuture::from(crash_promise)
+        .await
+        .expect("simulate_crash ack on port");
+}
+
+#[wasm_bindgen_test]
+async fn port_upstream_disconnected_rearms_wait() {
+    let port = FakeMessagePort::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(
+        port.endpoint(),
+        &runtime,
+        build_options(Some("https://example.test")),
+    )
+    .expect("attach");
+
+    let init = bridge.init();
+    port.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "port-client".into(),
+    });
+    JsFuture::from(init).await.expect("init resolved");
+    port.emit_wire(&WorkerToMainWire::UpstreamConnected);
+
+    bridge
+        .wait_for_upstream_server_connection()
+        .await
+        .expect("connected resolves");
+
+    port.emit_wire(&WorkerToMainWire::UpstreamDisconnected);
+    let waiter = bridge.wait_for_upstream_server_connection();
+    port.emit_wire(&WorkerToMainWire::UpstreamConnected);
+    waiter.await.expect("re-arm resolves on port endpoint");
 }

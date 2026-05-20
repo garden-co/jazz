@@ -4,36 +4,6 @@ const { loadWasmModuleMock } = vi.hoisted(() => ({
   loadWasmModuleMock: vi.fn().mockResolvedValue({}) as any,
 }));
 
-const { FakeTabLeaderElection } = vi.hoisted(() => ({
-  FakeTabLeaderElection: class {
-    start(): void {}
-
-    stop(): void {}
-
-    snapshot() {
-      return {
-        role: "leader" as const,
-        tabId: "tab-alice",
-        leaderTabId: "tab-alice",
-        term: 1,
-      };
-    }
-
-    waitForInitialLeader(): Promise<{
-      role: "leader";
-      tabId: string;
-      leaderTabId: string;
-      term: number;
-    }> {
-      return Promise.resolve(this.snapshot());
-    }
-
-    onChange(): () => void {
-      return () => {};
-    }
-  },
-}));
-
 vi.mock("./client.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./client.js")>();
   return {
@@ -42,83 +12,164 @@ vi.mock("./client.js", async (importOriginal) => {
   };
 });
 
-vi.mock("./tab-leader-election.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./tab-leader-election.js")>();
-  return {
-    ...actual,
-    TabLeaderElection: FakeTabLeaderElection,
-  };
-});
-
 import { Db, type DbConfig } from "./db.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
+import { LeaderMigratedError } from "./worker-bridge.js";
 
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalLocation = globalThis.location;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;
+const originalSharedWorker = (globalThis as Record<string, unknown>).SharedWorker;
+const originalNavigator = (globalThis as Record<string, unknown>).navigator;
 
-async function createWorkerDb(config: DbConfig): Promise<Db> {
+class FakeMessagePort extends EventTarget {
+  readonly posted: unknown[] = [];
+
+  postMessage(message: unknown): void {
+    this.posted.push(message);
+  }
+
+  start(): void {}
+
+  close(): void {}
+}
+
+class FakeSharedWorker {
+  static readonly instances: FakeSharedWorker[] = [];
+
+  readonly port = new FakeMessagePort();
+
+  constructor(
+    readonly url: string | URL,
+    readonly options?: string | WorkerOptions,
+  ) {
+    FakeSharedWorker.instances.push(this);
+  }
+}
+
+class FakeWorker {
+  static readonly instances: FakeWorker[] = [];
+
+  readonly posted: unknown[] = [];
+  terminated = false;
+
+  constructor(
+    readonly url: string | URL,
+    readonly options?: WorkerOptions,
+  ) {
+    FakeWorker.instances.push(this);
+  }
+
+  postMessage(message: unknown): void {
+    this.posted.push(message);
+  }
+
+  addEventListener(): void {}
+  removeEventListener(): void {}
+
+  terminate(): void {
+    this.terminated = true;
+  }
+}
+
+/**
+ * Stub `navigator.locks` that grants the lock immediately. The supervisor's
+ * holdWhile callback runs in the same microtask flush, so by the time we
+ * await the next microtask the dedicated worker has been spawned and
+ * `state.endpoint` is set. The callback resolves only when the supervisor
+ * voluntarily steps down (i.e., on `db.shutdown()`), mirroring the real
+ * Web Locks contract.
+ */
+function installNavigatorLocksStub(): void {
+  Object.defineProperty(globalThis, "navigator", {
+    value: {
+      locks: {
+        async request(
+          _name: string,
+          _options: unknown,
+          callback: () => Promise<unknown>,
+        ): Promise<unknown> {
+          return await callback();
+        },
+      },
+      storage: undefined as
+        | undefined
+        | { getDirectory(): Promise<{ removeEntry: (n: string) => Promise<void> }> },
+    },
+    configurable: true,
+  });
+}
+
+function installOpfsStub(removedEntries: string[]): void {
+  const nav = (globalThis as { navigator: { storage?: unknown } }).navigator;
+  nav.storage = {
+    async getDirectory() {
+      return {
+        async removeEntry(name: string) {
+          removedEntries.push(name);
+        },
+      };
+    },
+  };
+}
+
+async function createSharedWorkerDb(config: DbConfig): Promise<Db> {
   const runtimeModule = new WasmRuntimeModule();
   await runtimeModule.load(config);
-  return await Db.createWithWorker(config, runtimeModule);
+  return await Db.createWithSharedWorker(config, runtimeModule);
 }
 
 afterEach(() => {
   loadWasmModuleMock.mockClear();
+  FakeSharedWorker.instances.length = 0;
+  FakeWorker.instances.length = 0;
 
   if (originalWindow === undefined) {
     delete (globalThis as Record<string, unknown>).window;
   } else {
     (globalThis as Record<string, unknown>).window = originalWindow;
   }
-
   if (originalLocation === undefined) {
     delete (globalThis as Record<string, unknown>).location;
   } else {
     (globalThis as Record<string, unknown>).location = originalLocation;
   }
-
   if (originalWorker === undefined) {
     delete (globalThis as Record<string, unknown>).Worker;
   } else {
     (globalThis as Record<string, unknown>).Worker = originalWorker;
   }
+  if (originalSharedWorker === undefined) {
+    delete (globalThis as Record<string, unknown>).SharedWorker;
+  } else {
+    (globalThis as Record<string, unknown>).SharedWorker = originalSharedWorker;
+  }
+  if (originalNavigator === undefined) {
+    delete (globalThis as Record<string, unknown>).navigator;
+  } else {
+    Object.defineProperty(globalThis, "navigator", {
+      value: originalNavigator,
+      configurable: true,
+    });
+  }
 });
 
-describe("Db worker runtime bootstrap", () => {
-  it("prefers explicit workerUrl and wasmUrl over baseUrl and fallback resolution", async () => {
-    const spawnedWorkerUrls: string[] = [];
-
-    class FakeWorker extends EventTarget {
-      constructor(url: string | URL, _options?: WorkerOptions) {
-        super();
-        spawnedWorkerUrls.push(String(url));
-        queueMicrotask(() => {
-          const event = new Event("message");
-          Object.defineProperty(event, "data", {
-            value: { type: "ready" },
-            configurable: true,
-          });
-          this.dispatchEvent(event);
-        });
-      }
-
-      postMessage(): void {}
-
-      terminate(): void {}
-    }
-
+describe("Db leader-tab runtime bootstrap", () => {
+  it("spawns the broker SharedWorker and the leader's dedicated runtime Worker with the configured URLs", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).location = {
       href: "http://localhost:3000/app/",
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
+    (globalThis as Record<string, unknown>).SharedWorker = FakeSharedWorker;
+    installNavigatorLocksStub();
 
-    const db = await createWorkerDb({
-      appId: "worker-bootstrap-explicit-urls",
-      driver: { type: "persistent", dbName: "worker-bootstrap-explicit-urls" },
+    const db = await createSharedWorkerDb({
+      appId: "leader-tab-bootstrap-explicit-urls",
+      driver: { type: "persistent", dbName: "leader-tab-bootstrap-explicit-urls" },
       runtimeSources: {
         baseUrl: "/ignored/",
+        sharedWorkerUrl: "/custom/jazz-shared-worker.js",
         workerUrl: "/custom/jazz-worker.js",
         wasmUrl: "/custom/jazz_wasm_bg.wasm",
       },
@@ -126,206 +177,194 @@ describe("Db worker runtime bootstrap", () => {
 
     await db.shutdown();
 
-    expect(spawnedWorkerUrls).toEqual([
-      "http://localhost:3000/custom/jazz-worker.js?jazz-wasm-url=http%3A%2F%2Flocalhost%3A3000%2Fcustom%2Fjazz_wasm_bg.wasm",
-    ]);
+    expect(FakeSharedWorker.instances).toHaveLength(1);
+    const broker = FakeSharedWorker.instances[0]!;
+    const brokerUrl = new URL(String(broker.url));
+    expect(brokerUrl.origin + brokerUrl.pathname).toBe(
+      "http://localhost:3000/custom/jazz-shared-worker.js",
+    );
+    expect(broker.options).toEqual({
+      type: "module",
+      name: "jazz:leader-tab-bootstrap-explicit-urls:leader-tab-bootstrap-explicit-urls",
+    });
+
+    expect(FakeWorker.instances).toHaveLength(1);
+    const runtimeWorker = FakeWorker.instances[0]!;
+    expect(String(runtimeWorker.url)).toBe("http://localhost:3000/custom/jazz-worker.js");
+    expect(runtimeWorker.options).toEqual({
+      type: "module",
+      name: "jazz-runtime:leader-tab-bootstrap-explicit-urls",
+    });
+    expect(runtimeWorker.terminated).toBe(true);
   });
 
-  it("derives worker and wasm URLs from runtimeSources.baseUrl when explicit URLs are omitted", async () => {
-    const spawnedWorkerUrls: string[] = [];
-
-    class FakeWorker extends EventTarget {
-      constructor(url: string | URL, _options?: WorkerOptions) {
-        super();
-        spawnedWorkerUrls.push(String(url));
-        queueMicrotask(() => {
-          const event = new Event("message");
-          Object.defineProperty(event, "data", {
-            value: { type: "ready" },
-            configurable: true,
-          });
-          this.dispatchEvent(event);
-        });
-      }
-
-      postMessage(): void {}
-
-      terminate(): void {}
-    }
+  it("tears down the leader's dedicated runtime Worker and deletes the OPFS namespace on deleteClientStorage", async () => {
+    const removedEntries: string[] = [];
 
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).location = {
       href: "http://localhost:3000/app/",
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
+    (globalThis as Record<string, unknown>).SharedWorker = FakeSharedWorker;
+    installNavigatorLocksStub();
+    installOpfsStub(removedEntries);
 
-    const db = await createWorkerDb({
-      appId: "worker-bootstrap-base-url",
-      driver: { type: "persistent", dbName: "worker-bootstrap-base-url" },
+    const db = await createSharedWorkerDb({
+      appId: "leader-tab-reset",
+      driver: { type: "persistent", dbName: "leader-tab-reset-db" },
       runtimeSources: {
-        baseUrl: "/assets/jazz/",
-      },
-    });
-
-    await db.shutdown();
-
-    expect(spawnedWorkerUrls).toEqual([
-      "http://localhost:3000/assets/jazz/worker/jazz-worker.js?jazz-wasm-url=http%3A%2F%2Flocalhost%3A3000%2Fassets%2Fjazz%2Fjazz_wasm_bg.wasm",
-    ]);
-  });
-
-  it("uses the static bundler-detected URL pattern when no runtimeSources are provided", async () => {
-    const spawnedWorkerUrls: string[] = [];
-
-    class FakeWorker extends EventTarget {
-      constructor(url: string | URL, _options?: WorkerOptions) {
-        super();
-        spawnedWorkerUrls.push(String(url));
-        queueMicrotask(() => {
-          const event = new Event("message");
-          Object.defineProperty(event, "data", {
-            value: { type: "ready" },
-            configurable: true,
-          });
-          this.dispatchEvent(event);
-        });
-      }
-
-      postMessage(): void {}
-
-      terminate(): void {}
-    }
-
-    (globalThis as Record<string, unknown>).window = {};
-    (globalThis as Record<string, unknown>).location = {
-      href: "http://localhost:3000/",
-    };
-    (globalThis as Record<string, unknown>).Worker = FakeWorker;
-
-    const db = await createWorkerDb({
-      appId: "worker-bootstrap-browser-assets",
-      driver: { type: "persistent", dbName: "worker-bootstrap-browser-assets" },
-    });
-
-    await db.shutdown();
-
-    expect(loadWasmModuleMock).toHaveBeenCalledTimes(1);
-    expect(spawnedWorkerUrls).toHaveLength(1);
-    expect(spawnedWorkerUrls[0]).toMatch(/worker\/jazz-worker\.js$/);
-  });
-
-  it("includes a fallbackWasmUrl in bridge options when no runtimeSources are provided", async () => {
-    class FakeWorker extends EventTarget {
-      constructor(_url: string | URL, _options?: WorkerOptions) {
-        super();
-        queueMicrotask(() => {
-          const event = new Event("message");
-          Object.defineProperty(event, "data", {
-            value: { type: "ready" },
-            configurable: true,
-          });
-          this.dispatchEvent(event);
-        });
-      }
-
-      postMessage(): void {}
-
-      terminate(): void {}
-    }
-
-    (globalThis as Record<string, unknown>).window = {};
-    (globalThis as Record<string, unknown>).location = {
-      href: "http://localhost:3000/",
-    };
-    (globalThis as Record<string, unknown>).Worker = FakeWorker;
-
-    const db = await createWorkerDb({
-      appId: "worker-bootstrap-fallback-wasm",
-      driver: { type: "persistent", dbName: "worker-bootstrap-fallback-wasm" },
-    });
-
-    const options = (db as any).buildWorkerBridgeOptions("{}");
-    await db.shutdown();
-
-    expect(options.fallbackWasmUrl).toMatch(/jazz_wasm_bg\.wasm$/);
-  });
-
-  it("passes telemetryCollectorUrl into worker bridge options", async () => {
-    class FakeWorker extends EventTarget {
-      constructor(_url: string | URL, _options?: WorkerOptions) {
-        super();
-        queueMicrotask(() => {
-          const event = new Event("message");
-          Object.defineProperty(event, "data", {
-            value: { type: "ready" },
-            configurable: true,
-          });
-          this.dispatchEvent(event);
-        });
-      }
-
-      postMessage(): void {}
-
-      terminate(): void {}
-    }
-
-    (globalThis as Record<string, unknown>).window = {};
-    (globalThis as Record<string, unknown>).location = {
-      href: "http://localhost:3000/",
-    };
-    (globalThis as Record<string, unknown>).Worker = FakeWorker;
-
-    const db = await createWorkerDb({
-      appId: "worker-bootstrap-telemetry",
-      driver: { type: "persistent", dbName: "worker-bootstrap-telemetry" },
-      telemetryCollectorUrl: "http://127.0.0.1:54418",
-    });
-
-    const options = (db as any).buildWorkerBridgeOptions("{}");
-    await db.shutdown();
-
-    expect(options.telemetryCollectorUrl).toBe("http://127.0.0.1:54418");
-  });
-
-  it("does not append a bootstrap wasm URL when runtimeSources provides in-memory wasmSource", async () => {
-    const spawnedWorkerUrls: string[] = [];
-
-    class FakeWorker extends EventTarget {
-      constructor(url: string | URL, _options?: WorkerOptions) {
-        super();
-        spawnedWorkerUrls.push(String(url));
-        queueMicrotask(() => {
-          const event = new Event("message");
-          Object.defineProperty(event, "data", {
-            value: { type: "ready" },
-            configurable: true,
-          });
-          this.dispatchEvent(event);
-        });
-      }
-
-      postMessage(): void {}
-
-      terminate(): void {}
-    }
-
-    (globalThis as Record<string, unknown>).window = {};
-    (globalThis as Record<string, unknown>).location = {
-      href: "http://localhost:3000/app/",
-    };
-    (globalThis as Record<string, unknown>).Worker = FakeWorker;
-
-    const db = await createWorkerDb({
-      appId: "worker-bootstrap-wasm-source",
-      driver: { type: "persistent", dbName: "worker-bootstrap-wasm-source" },
-      runtimeSources: {
-        workerUrl: "/custom/jazz-worker.js",
+        sharedWorkerUrl: "/custom/jazz-shared-worker.js",
         wasmSource: new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
       },
     });
 
-    await db.shutdown();
+    expect(FakeWorker.instances).toHaveLength(1);
+    const runtimeWorker = FakeWorker.instances[0]!;
 
-    expect(spawnedWorkerUrls).toEqual(["http://localhost:3000/custom/jazz-worker.js"]);
+    await db.deleteClientStorage();
+
+    expect(runtimeWorker.terminated).toBe(true);
+    expect(removedEntries).toEqual(["leader-tab-reset-db.opfsbtree"]);
+
+    await db.shutdown();
+  });
+
+  it("latches SharedWorker mode at construction so transient null endpoints don't downgrade clients", async () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/app/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+    (globalThis as Record<string, unknown>).SharedWorker = FakeSharedWorker;
+    installNavigatorLocksStub();
+
+    const db = await createSharedWorkerDb({
+      appId: "leader-tab-latch",
+      driver: { type: "persistent", dbName: "leader-tab-latch-db" },
+      runtimeSources: {
+        sharedWorkerUrl: "/custom/jazz-shared-worker.js",
+        wasmSource: new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
+      },
+    });
+
+    const internals = db as unknown as {
+      usesSharedWorker: boolean;
+      workerEndpoint: unknown;
+      onSupervisorStateChange: (state: { role: string; endpoint: unknown }) => void;
+    };
+
+    expect(internals.usesSharedWorker).toBe(true);
+    expect(internals.workerEndpoint).not.toBeNull();
+
+    // Simulate a leader handoff window: supervisor publishes endpoint=null.
+    internals.onSupervisorStateChange({ role: "none", endpoint: null });
+    expect(internals.workerEndpoint).toBeNull();
+
+    // The mode latch survives the transient null so `getClient` still
+    // builds worker-backed clients and skips its own `connectTransport`.
+    expect(internals.usesSharedWorker).toBe(true);
+
+    await db.shutdown();
+  });
+
+  it("deleteClientStorage is retryable after a prior failure (gates on usesSharedWorker, not the transient supervisor)", async () => {
+    const removedEntries: string[] = [];
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/app/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+    (globalThis as Record<string, unknown>).SharedWorker = FakeSharedWorker;
+    installNavigatorLocksStub();
+    installOpfsStub(removedEntries);
+
+    const db = await createSharedWorkerDb({
+      appId: "leader-tab-reset-retry",
+      driver: { type: "persistent", dbName: "leader-tab-reset-retry-db" },
+      runtimeSources: {
+        sharedWorkerUrl: "/custom/jazz-shared-worker.js",
+        wasmSource: new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
+      },
+    });
+
+    // Simulate the state after a prior `deleteClientStorage()` ran the
+    // broadcast + shutdown phase but then threw at the OPFS delete:
+    // `this.supervisor` is null (runShutdown nulled it) even though the
+    // namespace still exists and the caller wants to retry.
+    await db.shutdown();
+    const internals = db as unknown as {
+      supervisor: unknown;
+      usesSharedWorker: boolean;
+    };
+    expect(internals.supervisor).toBeNull();
+    expect(internals.usesSharedWorker).toBe(true);
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // With the old `!this.supervisor` guard this returned early with
+      // "is only available on browser SharedWorker-backed Db instances".
+      // With the stable `usesSharedWorker` guard, the retry proceeds and
+      // attempts the OPFS removal.
+      await db.deleteClientStorage();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(removedEntries).toContain("leader-tab-reset-retry-db.opfsbtree");
+  });
+
+  it("ensureQueryReady rejects with LeaderMigratedError when a handoff never produces a fresh endpoint", async () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/app/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+    (globalThis as Record<string, unknown>).SharedWorker = FakeSharedWorker;
+    installNavigatorLocksStub();
+
+    const db = await createSharedWorkerDb({
+      appId: "leader-tab-stuck-handoff",
+      driver: { type: "persistent", dbName: "leader-tab-stuck-handoff-db" },
+      runtimeSources: {
+        sharedWorkerUrl: "/custom/jazz-shared-worker.js",
+        wasmSource: new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
+      },
+    });
+
+    const internals = db as unknown as {
+      onSupervisorStateChange: (state: { role: string; endpoint: unknown }) => void;
+      ensureQueryReady: (options?: { tier?: string }) => Promise<void>;
+    };
+
+    // Push the supervisor into a stuck null-endpoint state (leader gone,
+    // no replacement publishing). `ensureQueryReady` should not silently
+    // succeed — it must wait for a fresh bridge and eventually surface a
+    // typed `LeaderMigratedError` if one never arrives.
+    internals.onSupervisorStateChange({ role: "none", endpoint: null });
+
+    vi.useFakeTimers();
+    let caught: unknown;
+    try {
+      // Pre-attach the catch so the rejection doesn't transit through
+      // node's unhandled-rejection bookkeeping before the test observes it.
+      const settled = internals.ensureQueryReady({ tier: "local" }).then(
+        () => undefined,
+        (error: unknown) => {
+          caught = error;
+        },
+      );
+      // Yield once so the inner subscribe registers before we advance.
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(caught).toBeInstanceOf(LeaderMigratedError);
+
+    await db.shutdown();
   });
 });

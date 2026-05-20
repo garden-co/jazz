@@ -65,19 +65,15 @@ declare module "jazz-wasm" {
   };
 
   export class WasmWorkerBridge {
-    static attach(worker: Worker, runtime: WasmRuntime, options: unknown): WasmWorkerBridge;
+    static attach(endpoint: unknown, runtime: WasmRuntime, options: unknown): WasmWorkerBridge;
     init(): Promise<{ clientId: string }>;
     updateAuth(jwtToken?: string | null): void;
     sendLifecycleHint(event: string): void;
-    openPeer(peerId: string): void;
-    sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void;
-    closePeer(peerId: string): void;
     setServerPayloadForwarder(
       callback:
         | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
         | null,
     ): void;
-    applyIncomingServerPayload(payload: Uint8Array): void;
     waitForUpstreamServerConnection(): Promise<void>;
     replayServerConnection(): void;
     disconnectUpstream(): void;
@@ -150,7 +146,7 @@ declare module "jazz-wasm" {
     onSyncMessageReceived(messageJson: string, seq?: number | null): void;
     /** Construct a Rust-owned `WasmWorkerBridge` attached to this runtime. Options
      * are parsed at attach time per spec; `init()` is parameter-less. */
-    createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
+    createWorkerBridge(endpoint: unknown, options: unknown): WasmWorkerBridge;
     addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
     batchedTick?(): void;

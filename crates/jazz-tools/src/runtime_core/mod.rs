@@ -427,6 +427,12 @@ fn should_recover_pending_mutation_error_events(schema_manager: &SchemaManager) 
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
+    ///
+    /// Client-tier runtimes recover unacknowledged rejected local batches as
+    /// pending `MutationErrorEvent`s so app-level handlers can still observe
+    /// rejections after restart. Edge-server runtimes skip that recovery:
+    /// they may store rejected fates for authoritative replay, but they are
+    /// not the UI-facing owner of client mutation-error notifications.
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
         let acknowledged_rejected_batches: HashSet<BatchId> = storage

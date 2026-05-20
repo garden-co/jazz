@@ -19,7 +19,6 @@ import {
   uniqueDbName,
   waitForCondition,
   waitForQuery,
-  waitForWorkerMessageType,
   withTimeout,
 } from "./support.js";
 import {
@@ -156,8 +155,38 @@ function summarizeWorkerMessage(
   }
 }
 
+/**
+ * Read the supervisor state from a leader-tab `Db`. Returns `null` if the
+ * supervisor has not been attached (non-persistent driver, pre-init, or post-
+ * shutdown).
+ */
+function supervisorState(
+  db: Db,
+): { role: "leader" | "follower" | "none"; endpoint: unknown } | null {
+  const anyDb = db as unknown as {
+    supervisor?: { state?: { role?: unknown; endpoint?: unknown } } | null;
+  };
+  const state = anyDb.supervisor?.state;
+  if (!state) return null;
+  const role = state.role === "leader" || state.role === "follower" ? state.role : "none";
+  return { role, endpoint: state.endpoint };
+}
+
+/**
+ * Return the leader tab's dedicated `Worker`, or `null` if `db` is not (or
+ * not yet) the leader. The supervisor's endpoint is the `Worker` while
+ * leader; for followers it's a `MessagePort` to the leader's worker, which
+ * can't be probed the same way.
+ */
+function getLeaderWorker(db: Db): Worker | null {
+  const state = supervisorState(db);
+  if (!state || state.role !== "leader") return null;
+  const endpoint = state.endpoint as Worker | null | undefined;
+  return endpoint ?? null;
+}
+
 function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
-  const worker = (db as unknown as { worker?: Worker | null }).worker;
+  const worker = getLeaderWorker(db);
   const startedAt = Date.now();
   const events: WorkerMessageDebugEvent[] = [];
 
@@ -195,46 +224,18 @@ function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
 
 function getDbWorkerDebugState(db: Db): Record<string, unknown> {
   const anyDb = db as unknown as {
-    tabRole?: unknown;
-    tabId?: unknown;
-    currentLeaderTabId?: unknown;
-    currentLeaderTerm?: unknown;
-    activeRemoteLeaderTabId?: unknown;
     primaryDbName?: unknown;
-    workerDbName?: unknown;
-    workerBridge?: {
-      state?: {
-        phase?: unknown;
-        workerClientId?: unknown;
-        expectsUpstreamServer?: unknown;
-        upstreamServerConnected?: unknown;
-        resolveUpstreamServerReady?: unknown;
-        serverPayloadForwarder?: unknown;
-        pendingSyncPayloadsForWorker?: unknown[];
-      };
-    } | null;
+    isShuttingDown?: unknown;
+    workerBridge?: unknown;
   };
-  const bridgeState = anyDb.workerBridge?.state;
+  const state = supervisorState(db);
 
   return {
-    tabRole: anyDb.tabRole,
-    tabId: anyDb.tabId,
-    currentLeaderTabId: anyDb.currentLeaderTabId,
-    currentLeaderTerm: anyDb.currentLeaderTerm,
-    activeRemoteLeaderTabId: anyDb.activeRemoteLeaderTabId,
+    role: state?.role ?? null,
+    hasEndpoint: Boolean(state?.endpoint),
     primaryDbName: anyDb.primaryDbName,
-    workerDbName: anyDb.workerDbName,
-    bridge: bridgeState
-      ? {
-          phase: bridgeState.phase,
-          workerClientId: bridgeState.workerClientId,
-          expectsUpstreamServer: bridgeState.expectsUpstreamServer,
-          upstreamServerConnected: bridgeState.upstreamServerConnected,
-          waitingForUpstreamServer: Boolean(bridgeState.resolveUpstreamServerReady),
-          hasServerPayloadForwarder: Boolean(bridgeState.serverPayloadForwarder),
-          pendingSyncPayloadsForWorker: bridgeState.pendingSyncPayloadsForWorker?.length ?? 0,
-        }
-      : null,
+    isShuttingDown: anyDb.isShuttingDown,
+    hasWorkerBridge: Boolean(anyDb.workerBridge),
   };
 }
 
@@ -349,11 +350,9 @@ describe("Worker Bridge with OPFS", () => {
   }
 
   function getTabRole(db: Db): "leader" | "follower" | null {
-    const role = (db as any).tabRole;
-    if (role === "leader" || role === "follower") {
-      return role;
-    }
-    return null;
+    const state = supervisorState(db);
+    if (!state) return null;
+    return state.role === "leader" || state.role === "follower" ? state.role : null;
   }
 
   async function waitForLeaderAndFollower(a: Db, b: Db): Promise<{ leader: Db; follower: Db }> {
@@ -531,8 +530,10 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    // @ts-expect-error - worker is private
-    const worker = db1.worker as Worker;
+    const worker = getLeaderWorker(db1);
+    if (!worker) {
+      throw new Error("Expected db1 to be the leader (single-tab test)");
+    }
     const originalPostMessage = worker.postMessage.bind(worker);
     worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
       const typed = message as { type?: string } | undefined;
@@ -584,8 +585,10 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    // @ts-expect-error - worker is private
-    const worker = db.worker as Worker;
+    const worker = getLeaderWorker(db);
+    if (!worker) {
+      throw new Error("Expected db to be the leader (single-tab test)");
+    }
     const originalPostMessage = worker.postMessage.bind(worker);
     worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
       const typed = message as { type?: string } | undefined;
@@ -738,11 +741,13 @@ describe("Worker Bridge with OPFS", () => {
     // (Real worker.terminate() doesn't reliably release OPFS exclusive
     // locks within the same page session — only a full page reload does.)
     await (db1 as any).ensureBridgeReady();
-    const worker = (db1 as any).worker as Worker;
+    const worker = getLeaderWorker(db1);
+    if (!worker) {
+      throw new Error("Expected db1 to be the leader (single-tab test)");
+    }
     await (db1 as any).workerBridge.simulateCrash();
     worker.terminate();
     // Null out dead worker bridge so Db shutdown only frees client-side resources.
-    (db1 as any).worker = null;
     (db1 as any).workerBridge = null;
     await db1.shutdown();
 
@@ -785,11 +790,12 @@ describe("Worker Bridge with OPFS", () => {
     expect(rows).toEqual([]);
   });
 
-  it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
+  it("deletes OPFS storage for the current namespace and renders the Db terminal", async () => {
+    const dbName = uniqueDbName("delete-storage");
     const db = track(
       await createDb({
         appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("delete-storage") },
+        driver: { type: "persistent", dbName },
       }),
     );
 
@@ -800,17 +806,24 @@ describe("Worker Bridge with OPFS", () => {
 
     await db.deleteClientStorage();
 
-    const afterDelete = await db.all(allTodos, { tier: "local" });
-    expect(afterDelete).toEqual([]);
+    // Terminal contract: the Db is fully shut down by `deleteClientStorage()`
+    // so the leader's dedicated worker releases its OPFS handles. Further
+    // client/bridge creation throws rather than silently falling back to a
+    // direct main-thread client.
+    expect(() => db.insert(todos, { title: "After delete", done: false })).toThrow(
+      /Db has been shut down/,
+    );
+    untrack(db);
 
-    const {
-      value: { id },
-    } = db.insert(todos, { title: "Fresh after delete", done: true });
-    const afterReinsert = await db.all(allTodos, { tier: "local" });
-    expect(afterReinsert).toHaveLength(1);
-    expect(afterReinsert[0].id).toBe(id);
-    expect(afterReinsert[0].title).toBe("Fresh after delete");
-    expect(afterReinsert[0].done).toBe(true);
+    // A fresh Db on the same namespace starts empty.
+    const reopened = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    const rows = await reopened.all(allTodos, { tier: "local" });
+    expect(rows).toEqual([]);
   });
 
   it("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
@@ -840,31 +853,54 @@ describe("Worker Bridge with OPFS", () => {
       "Leader and follower should both observe pre-wipe rows",
     );
 
+    // Follower-initiated wipe broadcasts `storage-reset-start` to the leader
+    // (and any other tab), so the leader's reset-channel listener tears its
+    // own Db down before we hit `removeBrowserStorageNamespace()`. Without
+    // this coordination the leader's dedicated worker would keep OPFS open
+    // and either lock the delete or race a recreated namespace.
     await follower.deleteClientStorage();
 
+    // Cross-tab shutdown: both leader and follower receive the reset and
+    // become terminal. Further client/bridge creation throws.
     await waitForCondition(
-      async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "local" });
-        const followerRows = await follower.all(allTodos, { tier: "local" });
-        return leaderRows.length === 0 && followerRows.length === 0;
-      },
+      async () => (leader as unknown as { isShuttingDown?: boolean }).isShuttingDown === true,
       12000,
-      "Follower-initiated storage wipe should clear both leader and follower namespaces",
+      "Leader should shut down in response to follower-initiated storage-reset-start",
     );
+    expect(() => follower.insert(todos, { title: "after wipe", done: false })).toThrow(
+      /Db has been shut down/,
+    );
+    expect(() => leader.insert(todos, { title: "after wipe", done: false })).toThrow(
+      /Db has been shut down/,
+    );
+    untrack(leader);
+    untrack(follower);
+
+    // Fresh Dbs on the same namespace must come up empty — proving the
+    // namespace was actually deleted, not just locked.
+    const dbANext = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const dbBNext = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const { leader: leaderNext } = await waitForLeaderAndFollower(dbANext, dbBNext);
+
+    const leaderRows = await leaderNext.all(allTodos, { tier: "local" });
+    expect(leaderRows).toEqual([]);
 
     const marker = `fresh-after-follower-wipe-${Date.now()}`;
-    await leader.insert(todos, { title: marker, done: false }).wait({ tier: "local" });
-
+    await leaderNext.insert(todos, { title: marker, done: false }).wait({ tier: "local" });
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "local" });
-        const followerRows = await follower.all(allTodos, { tier: "local" });
-        const leaderHas = leaderRows.some((row) => row.title === marker);
-        const followerHas = followerRows.some((row) => row.title === marker);
-        return leaderHas && followerHas;
+        const dbANextRows = await dbANext.all(allTodos, { tier: "local" });
+        const dbBNextRows = await dbBNext.all(allTodos, { tier: "local" });
+        return (
+          dbANextRows.some((r) => r.title === marker) && dbBNextRows.some((r) => r.title === marker)
+        );
       },
       12000,
-      "Both tabs should recover cleanly after follower-initiated storage wipe",
+      "Fresh tabs should converge after the wipe + recreation",
     );
   });
 
@@ -1077,20 +1113,10 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
     (fresh as unknown as { getClient(schema: WasmSchema): unknown }).getClient(app.wasmSchema);
-    await waitForCondition(
-      async () => Boolean((fresh as unknown as { worker?: Worker | null }).worker?.onmessage),
-      5000,
-      `fresh worker bridge should install its onmessage handler; diagnostics=${JSON.stringify({
-        tabRole: (fresh as unknown as { tabRole?: unknown }).tabRole,
-        workerExists: Boolean((fresh as unknown as { worker?: Worker | null }).worker),
-        workerOnMessage: Boolean(
-          (fresh as unknown as { worker?: Worker | null }).worker?.onmessage,
-        ),
-        bridge: Boolean((fresh as unknown as { workerBridge?: unknown }).workerBridge),
-        clientsType: typeof (fresh as unknown as { clients?: unknown }).clients,
-        clientKeys: Object.keys((fresh as unknown as { clients?: object }).clients ?? {}),
-      })}`,
-    );
+    // Wait for the worker bridge to finish init. The bridge wires its
+    // worker→main listener via `addEventListener`, so the `Worker.onmessage`
+    // slot stays null — poll bridge readiness, not that slot.
+    await (fresh as unknown as { ensureBridgeReady(): Promise<void> }).ensureBridgeReady();
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
       fresh.subscribeAll(
@@ -2476,9 +2502,9 @@ function decodeWorkerMessage(data: unknown): { type: string; [key: string]: unkn
 
 async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<DebugSchemaState> {
   await (db as any).ensureBridgeReady();
-  const worker = (db as any).worker as Worker | null;
+  const worker = getLeaderWorker(db);
   if (!worker) {
-    throw new Error("Expected worker instance to exist");
+    throw new Error("Expected leader-tab Db (supervisor.state.endpoint must be a Worker)");
   }
 
   return new Promise<DebugSchemaState>((resolve, reject) => {
@@ -2519,9 +2545,9 @@ async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<Debu
 
 async function seedWorkerLiveSchema(db: Db, schema: WasmSchema, timeoutMs = 5000): Promise<void> {
   await (db as any).ensureBridgeReady();
-  const worker = (db as any).worker as Worker | null;
+  const worker = getLeaderWorker(db);
   if (!worker) {
-    throw new Error("Expected worker instance to exist");
+    throw new Error("Expected leader-tab Db (supervisor.state.endpoint must be a Worker)");
   }
 
   const schemaJson = JSON.stringify(schema);

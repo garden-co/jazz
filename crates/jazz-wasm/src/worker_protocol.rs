@@ -91,17 +91,6 @@ pub enum MainToWorkerWire {
     Sync {
         payloads: Vec<ByteBuf>,
     },
-    PeerOpen {
-        peer_id: String,
-    },
-    PeerSync {
-        peer_id: String,
-        term: u32,
-        payloads: Vec<ByteBuf>,
-    },
-    PeerClose {
-        peer_id: String,
-    },
     LifecycleHint {
         event: WorkerLifecycleEvent,
         sent_at_ms: f64,
@@ -131,11 +120,6 @@ pub enum WorkerToMainWire {
     UpstreamDisconnected,
     Sync {
         payloads: Vec<SyncEntry>,
-    },
-    PeerSync {
-        peer_id: String,
-        term: u32,
-        payloads: Vec<ByteBuf>,
     },
     /// Encoded `LocalBatchRecord` storage rows for Rust-side main-runtime
     /// hydration.
@@ -470,17 +454,6 @@ mod tests {
         rt_main(&MainToWorkerWire::Sync {
             payloads: vec![ByteBuf::from(vec![1, 2, 3]), ByteBuf::from(vec![4, 5])],
         });
-        rt_main(&MainToWorkerWire::PeerOpen {
-            peer_id: "tab-a".into(),
-        });
-        rt_main(&MainToWorkerWire::PeerSync {
-            peer_id: "tab-b".into(),
-            term: 7,
-            payloads: vec![ByteBuf::from(vec![9, 8, 7])],
-        });
-        rt_main(&MainToWorkerWire::PeerClose {
-            peer_id: "tab-c".into(),
-        });
         rt_main(&MainToWorkerWire::LifecycleHint {
             event: WorkerLifecycleEvent::VisibilityHidden,
             sent_at_ms: 1_700_000_000_000.0,
@@ -522,11 +495,6 @@ mod tests {
                     sequence: 99,
                 },
             ],
-        });
-        rt_worker(&WorkerToMainWire::PeerSync {
-            peer_id: "p".into(),
-            term: 1,
-            payloads: vec![ByteBuf::from(vec![0xff])],
         });
         rt_worker(&WorkerToMainWire::LocalBatchRecordsSync {
             encoded_records: Vec::new(),
