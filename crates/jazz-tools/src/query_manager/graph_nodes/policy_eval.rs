@@ -26,6 +26,7 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
     schema_context: Option<&'a SchemaContext>,
     structural_exists_rel_scans: bool,
+    phase: &'a str,
 }
 
 impl<'a> PolicyContextEvaluator<'a> {
@@ -43,6 +44,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             settlement_eval_cache: None,
             schema_context: None,
             structural_exists_rel_scans: false,
+            phase: "unknown",
         }
     }
 
@@ -61,6 +63,11 @@ impl<'a> PolicyContextEvaluator<'a> {
 
     pub(crate) fn with_structural_exists_rel_scans(mut self, structural_scans: bool) -> Self {
         self.structural_exists_rel_scans = structural_scans;
+        self
+    }
+
+    pub(crate) fn with_phase(mut self, phase: &'a str) -> Self {
+        self.phase = phase;
         self
     }
 
@@ -89,13 +96,16 @@ impl<'a> PolicyContextEvaluator<'a> {
 
         crate::query_manager::policy_counters::increment(
             "row_access_eval",
-            format!("table={} op={:?} depth={}", table_name, operation, depth),
+            format!(
+                "phase={} table={} op={:?} depth={}",
+                self.phase, table_name, operation, depth
+            ),
         );
         crate::query_manager::policy_counters::increment(
             "auth_row_identity",
             format!(
-                "branch={} table={} id={} op={:?} depth={}",
-                self.branch, table_name, row.id, operation, depth
+                "phase={} branch={} table={} id={} op={:?} depth={}",
+                self.phase, self.branch, table_name, row.id, operation, depth
             ),
         );
         let local_policy = local_policy_override

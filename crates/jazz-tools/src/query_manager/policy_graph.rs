@@ -10,11 +10,11 @@ use crate::storage::Storage;
 use crate::schema_manager::SchemaContext;
 
 use super::graph::{GraphNode, QueryGraph, RelationCompileFeatures};
-use super::graph_nodes::NodeId;
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::index_scan::IndexScanNode;
 use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::policy_filter::{PolicyFilterNode, PolicyFilterOptions};
+use super::graph_nodes::{NodeId, RowNode};
 use super::index::ScanCondition;
 use super::policy::{Operation, PolicyExpr};
 use super::relation_ir::RelExpr;
@@ -373,6 +373,30 @@ impl PolicyGraph {
             &mut |id, hint| row_loader(id, hint),
         );
         true
+    }
+
+    pub(crate) fn output_tuples(&self) -> Vec<super::types::Tuple> {
+        match self
+            .graph
+            .nodes
+            .get(self.exists_node.0 as usize)
+            .map(|c| &c.node)
+        {
+            Some(GraphNode::ExistsOutput(node)) => node.current_tuples().iter().cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub(crate) fn output_descriptor(&self) -> Option<super::types::RowDescriptor> {
+        match self
+            .graph
+            .nodes
+            .get(self.exists_node.0 as usize)
+            .map(|c| &c.node)
+        {
+            Some(GraphNode::ExistsOutput(node)) => Some(node.output_descriptor().clone()),
+            _ => None,
+        }
     }
 
     /// Get result.

@@ -723,6 +723,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.schema_manager.current_schema()
     }
 
+    /// Get the current schema hash.
+    pub fn current_schema_hash(&self) -> crate::query_manager::types::SchemaHash {
+        self.schema_manager.current_hash()
+    }
+
     /// Get mutable access to the underlying SchemaManager.
     pub fn schema_manager_mut(&mut self) -> &mut SchemaManager {
         &mut self.schema_manager
