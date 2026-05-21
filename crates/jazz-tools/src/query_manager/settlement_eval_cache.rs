@@ -1,11 +1,13 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use ahash::AHashSet;
 
 use crate::object::ObjectId;
 
 use super::policy::Operation;
-use super::types::{TableName, Tuple};
+use super::types::{LoadedRow, SchemaHash, TableName, Tuple};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct RefAccessSubexprKey {
@@ -21,16 +23,28 @@ pub(crate) struct RelationSubexprKey {
     pub(crate) input_fingerprint: u64,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct AuthRowLoadKey {
+    pub(crate) branch: String,
+    pub(crate) auth_schema_hash: SchemaHash,
+    pub(crate) id: ObjectId,
+}
+
+pub(crate) type AuthRowLoadCache = Rc<RefCell<HashMap<AuthRowLoadKey, Option<LoadedRow>>>>;
+
 #[derive(Debug, Default)]
 pub(crate) struct SettlementEvalCache {
     ref_access: HashMap<RefAccessSubexprKey, bool>,
     relation_results: HashMap<RelationSubexprKey, AHashSet<Tuple>>,
+    auth_row_loads: AuthRowLoadCache,
 }
 
 impl SettlementEvalCache {
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.ref_access.is_empty() && self.relation_results.is_empty()
+        self.ref_access.is_empty()
+            && self.relation_results.is_empty()
+            && self.auth_row_loads.borrow().is_empty()
     }
 
     pub(crate) fn ref_access_get(&self, key: &RefAccessSubexprKey) -> Option<bool> {
@@ -51,6 +65,10 @@ impl SettlementEvalCache {
         value: AHashSet<Tuple>,
     ) {
         self.relation_results.insert(key, value);
+    }
+
+    pub(crate) fn auth_row_load_cache(&self) -> AuthRowLoadCache {
+        Rc::clone(&self.auth_row_loads)
     }
 }
 
