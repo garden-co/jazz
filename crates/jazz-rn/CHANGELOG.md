@@ -1,5 +1,11 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.50
+
+### Patch Changes
+
+- e49cf4c: Moves write error propagation fully into the Rust runtime
+
 ## 2.0.0-alpha.49
 
 ## 2.0.0-alpha.48

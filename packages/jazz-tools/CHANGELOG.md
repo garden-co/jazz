@@ -1,5 +1,28 @@
 # jazz-tools
 
+## 2.0.0-alpha.50
+
+### Patch Changes
+
+- 4fe985d: Fix the `jazz-tools` CLI silently exiting 0 without running any command when `dist/cli.js` is invoked through a pnpm symlink. `isMainModule()` now compares the realpaths of both `process.argv[1]` and `import.meta.url`, so the symlinked package path resolves and the CLI dispatches as expected.
+- f463ae9: Drop Node.js 20 support. Minimum is now Node.js 22.12 (Jod LTS). `engines.node` is set to `>=22.12` on `jazz-tools` and `create-jazz`; consumers on Node 20 will see an `EBADENGINE` warning (npm/pnpm) or a hard install failure (Yarn).
+- e00b73c: `Query.hopTo("relation")` now infers the destination table's row type instead of carrying the source table's type through. Consumers extracting the row type via `s.RowOf<>` (or any other consumer of the query builder's row type) now see the destination shape.
+- c599e10: Fix the MCP server crashing with `ERR_UNKNOWN_BUILTIN_MODULE` on Node.js < 22 (and non-Node runtimes). The text-search fallback used when `node:sqlite` is unavailable no longer transitively imports `node:sqlite`: the pure MDX parsing helpers now live in a sqlite-free module, so the fallback loads and serves docs instead of failing. The fallback also emits a loud deprecation warning, since Node.js < 22 is no longer supported.
+- e49cf4c: Moves write error propagation fully into the Rust runtime
+- 8546306: Added reactive local-first auth helpers for Svelte and Vue, matching `useLocalFirstAuth` in `jazz-tools/react`:
+  - **Svelte:** new `LocalFirstAuth` reactive class in `jazz-tools/svelte`. Exposes `secret`, `isLoading`, `login`, and `signOut`; the secret store is read inside `$effect`, so SvelteKit server renders never touch `localStorage`.
+  - **Vue:** new `useLocalFirstAuth()` composable in `jazz-tools/vue`. Returns `Ref<string | null>` and `Ref<boolean>` for the secret/loading state plus async `login`/`signOut`; gated on `typeof window` so SSR setup never touches `localStorage`.
+
+  In both frameworks `login`/`signOut` notify every live instance backed by the same store, and a `console.warn` surfaces secret-store failures that previously fell through silently. `BrowserAuthSecretStore` now also throws a clearer error when used outside a browser environment, with `localStorage` resolved lazily so server-side imports of the module-level singleton don't break.
+
+  Note for anyone copying the documented Svelte backup/restore snippets: their signatures changed to take a `LocalFirstAuth` instance (e.g. `createRecoveryPhraseRestore(auth)` returning a callback) so they can call `auth.login()` directly instead of `BrowserAuthSecretStore.saveSecret()` + `location.reload()`.
+
+- c5722fb: `jazzSvelteKit` now starts the managed Jazz dev server and populates `PUBLIC_JAZZ_APP_ID` / `PUBLIC_JAZZ_SERVER_URL` from an `enforce: "pre"` Vite `config` hook, before SvelteKit's `vite-plugin-sveltekit-setup` captures env into `$env/dynamic/public`. The previous approach set these in `configureServer` — after SvelteKit had already frozen its env — and recovered by triggering a fire-and-forget dev-server restart. On a freshly scaffolded starter the first paint reliably rendered with `PUBLIC_JAZZ_SERVER_URL` undefined, and recovery was race-dependent. The restart is removed entirely; the dynamically allocated server URL is now correct on the first request for both cold and warm starts, matching how the Next.js plugin awaits `runtime.initialize()` during config resolution. Plugin order in `vite.config.ts` is no longer load-bearing.
+- d86c537: Fix: reject stale transactional writes when the authority sees that a sealed transaction's staged row parents no longer match the current visible row frontier.
+- Updated dependencies [e49cf4c]
+  - jazz-wasm@2.0.0-alpha.50
+  - jazz-rn@2.0.0-alpha.50
+
 ## 2.0.0-alpha.49
 
 ### Patch Changes
