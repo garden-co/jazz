@@ -24,5 +24,11 @@ export { NodeShell, NodeIcon, NodeTitle, NodeSubtitle, NodeFooter, NodeAction } 
 export { useDiagramTraces, traceDuration } from "./traces";
 export type { DiagramTraces, TraceSpec } from "./traces";
 
-export { connectChain, loopRoundedBox, PATH_INSET, DEFAULT_CORNER_RADIUS } from "./geometry";
-export type { RouteDirection, RoutedEdge, Anchors, LoopSide } from "./geometry";
+export {
+  connectChain,
+  loopRoundedBox,
+  roundedPath,
+  PATH_INSET,
+  DEFAULT_CORNER_RADIUS,
+} from "./geometry";
+export type { Point, RouteDirection, RoutedEdge, Anchors, LoopSide } from "./geometry";
