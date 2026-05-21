@@ -9,9 +9,9 @@ import {
   Graph,
   type GraphNode,
   type GraphOverlayCtx,
+  PhoneChrome,
   useDiagramTraces,
 } from "./diagram";
-import { PhoneChrome } from "./diagram/phone-chrome";
 import {
   buildPath,
   CLIENT_ID,
