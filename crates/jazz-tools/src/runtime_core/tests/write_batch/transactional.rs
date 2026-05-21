@@ -12,6 +12,7 @@ fn rc_transactional_insert_stays_local_until_authority_receives_it() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -50,6 +51,36 @@ fn rc_transactional_insert_stays_local_until_authority_receives_it() {
 }
 
 #[test]
+fn rc_transactional_seal_persists_write_context_visibility() {
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "transaction-visibility-write-context-test",
+        Box::new(MemoryStorage::new()),
+    );
+    let write_context = transactional_write_context()
+        .with_visible_at(crate::batch_fate::TransactionVisibility::GlobalServer);
+
+    let (_, batch_id) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+    core.seal_batch(batch_id).unwrap();
+
+    let submission = core
+        .storage()
+        .load_sealed_batch_submission(batch_id)
+        .unwrap()
+        .expect("sealed transaction submission");
+    assert_eq!(
+        submission.visible_at,
+        crate::batch_fate::TransactionVisibility::GlobalServer
+    );
+}
+
+#[test]
 fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
     // alice stages one transactional row while disconnected
     //   reconnect alone is not enough
@@ -61,6 +92,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -129,6 +161,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -197,6 +230,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -269,6 +303,7 @@ fn rc_transactional_update_can_modify_row_inserted_earlier_in_same_batch() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -342,6 +377,7 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -408,6 +444,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -435,6 +472,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -510,6 +548,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -554,6 +593,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: crate::batch_fate::TransactionVisibility::Local,
         })
     );
 }
@@ -567,6 +607,7 @@ fn rc_wait_for_batch_resolves_transactional_accepted_settlement() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -613,6 +654,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -661,6 +703,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
         Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: crate::batch_fate::TransactionVisibility::Local,
         })
     );
 }
@@ -733,6 +776,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
         crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier,
+            ..
         } => {
             assert_eq!(settled_batch_id, batch_id);
             assert_eq!(confirmed_tier, DurabilityTier::Local);
@@ -749,6 +793,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
         Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier,
+            ..
         }) => {
             assert_eq!(settled_batch_id, batch_id);
             assert_eq!(confirmed_tier, DurabilityTier::Local);
@@ -772,6 +817,7 @@ fn rc_missing_batch_fate_retransmits_local_transactional_rows() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -885,6 +931,7 @@ fn rc_missing_batch_fate_retransmits_local_transactional_rows_without_row_locato
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -1066,6 +1113,7 @@ fn transactional_write_context() -> WriteContext {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     }
 }

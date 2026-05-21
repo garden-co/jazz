@@ -306,6 +306,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 

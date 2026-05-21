@@ -1,7 +1,7 @@
 use super::*;
 use crate::batch_fate::{
     BatchFate, BatchMode, LocalBatchMember, LocalBatchRecord, SealedBatchMember,
-    SealedBatchSubmission,
+    SealedBatchSubmission, TransactionVisibility,
 };
 use crate::object::BranchName;
 use crate::query_manager::types::SchemaHash;
@@ -92,6 +92,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(());
         };
         let mode = write_context.batch_mode();
+        let visible_at = write_context
+            .visible_at()
+            .unwrap_or_else(|| TransactionVisibility::legacy_default_for_batch_mode(mode));
         let Some(batch_id) = write_context.batch_id() else {
             return Ok(());
         };
@@ -100,6 +103,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if record.mode != mode {
                 return Err(RuntimeError::WriteError(format!(
                     "batch {batch_id:?} reused with conflicting modes"
+                )));
+            }
+            if record.visible_at != visible_at {
+                return Err(RuntimeError::WriteError(format!(
+                    "batch {batch_id:?} reused with conflicting visibility"
                 )));
             }
             if record.sealed {
@@ -115,14 +123,21 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .load_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
         else {
-            self.local_batch_record_cache
-                .insert(batch_id, LocalBatchRecord::new(batch_id, mode, false, None));
+            self.local_batch_record_cache.insert(
+                batch_id,
+                LocalBatchRecord::new_with_visibility(batch_id, mode, visible_at, false, None),
+            );
             return Ok(());
         };
 
         if record.mode != mode {
             return Err(RuntimeError::WriteError(format!(
                 "batch {batch_id:?} reused with conflicting modes"
+            )));
+        }
+        if record.visible_at != visible_at {
+            return Err(RuntimeError::WriteError(format!(
+                "batch {batch_id:?} reused with conflicting visibility"
             )));
         }
         if record.sealed {
@@ -140,6 +155,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         row_id: ObjectId,
         batch_id: BatchId,
         mode: BatchMode,
+        visible_at: TransactionVisibility,
     ) -> Result<(), RuntimeError> {
         let mut record = self
             .local_batch_record_cache
@@ -152,12 +168,21 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         RuntimeError::WriteError(format!("load local batch record: {err}"))
                     })
                     .map(|record| {
-                        record.unwrap_or_else(|| LocalBatchRecord::new(batch_id, mode, false, None))
+                        record.unwrap_or_else(|| {
+                            LocalBatchRecord::new_with_visibility(
+                                batch_id, mode, visible_at, false, None,
+                            )
+                        })
                     })
             })?;
         if record.mode != mode {
             return Err(RuntimeError::WriteError(format!(
                 "batch {batch_id:?} reused with conflicting modes"
+            )));
+        }
+        if record.visible_at != visible_at {
+            return Err(RuntimeError::WriteError(format!(
+                "batch {batch_id:?} reused with conflicting visibility"
             )));
         }
         for member in self.local_batch_members_for_row(row_id, batch_id)? {
@@ -315,9 +340,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         } else {
             Vec::new()
         };
-        Ok(SealedBatchSubmission::new(
+        Ok(SealedBatchSubmission::new_with_visibility(
             record.batch_id,
             record.mode,
+            record.visible_at,
             target_branch_name,
             members,
             captured_frontier,
@@ -418,7 +444,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(row_id, batch_id, batch_mode)?;
+        let visible_at = write_context
+            .and_then(WriteContext::visible_at)
+            .unwrap_or_else(|| TransactionVisibility::legacy_default_for_batch_mode(batch_mode));
+        self.track_local_batch(row_id, batch_id, batch_mode, visible_at)?;
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
             self.seal_batch(batch_id)?;
         }
@@ -444,7 +473,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode)?;
+        let visible_at = write_context
+            .and_then(WriteContext::visible_at)
+            .unwrap_or_else(|| TransactionVisibility::legacy_default_for_batch_mode(batch_mode));
+        self.track_local_batch(object_id, batch_id, batch_mode, visible_at)?;
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
             self.seal_batch(batch_id)?;
         }
@@ -471,7 +503,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode)?;
+        let visible_at = write_context
+            .and_then(WriteContext::visible_at)
+            .unwrap_or_else(|| TransactionVisibility::legacy_default_for_batch_mode(batch_mode));
+        self.track_local_batch(object_id, batch_id, batch_mode, visible_at)?;
 
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
             self.seal_batch(batch_id)?;
@@ -498,7 +533,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode)?;
+        let visible_at = write_context
+            .and_then(WriteContext::visible_at)
+            .unwrap_or_else(|| TransactionVisibility::legacy_default_for_batch_mode(batch_mode));
+        self.track_local_batch(object_id, batch_id, batch_mode, visible_at)?;
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
             self.seal_batch(batch_id)?;
         }
@@ -563,8 +601,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         submission: SealedBatchSubmission,
         fate: Option<BatchFate>,
     ) -> Result<Option<LocalBatchRecord>, RuntimeError> {
-        let mut record =
-            LocalBatchRecord::new(submission.batch_id, submission.mode, true, fate.clone());
+        let mut record = LocalBatchRecord::new_with_visibility(
+            submission.batch_id,
+            submission.mode,
+            submission.visible_at,
+            true,
+            fate.clone(),
+        );
         record.sealed_submission = Some(submission.clone());
 
         for sealed_member in submission.members {
@@ -600,9 +643,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub(crate) fn sealed_batch_still_needs_edge_reconciliation(fate: Option<&BatchFate>) -> bool {
         match fate {
             Some(BatchFate::Rejected { .. } | BatchFate::Missing { .. }) => false,
-            Some(BatchFate::DurableDirect { confirmed_tier, .. })
-            | Some(BatchFate::AcceptedTransaction { confirmed_tier, .. }) => {
+            Some(BatchFate::DurableDirect { confirmed_tier, .. }) => {
                 *confirmed_tier < DurabilityTier::EdgeServer
+            }
+            Some(BatchFate::AcceptedTransaction {
+                confirmed_tier,
+                visible_at,
+                ..
+            }) => {
+                *confirmed_tier < DurabilityTier::EdgeServer
+                    || !visible_at.is_satisfied_by(*confirmed_tier)
             }
             None => true,
         }

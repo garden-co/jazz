@@ -796,6 +796,7 @@ fn rc_add_server_requests_pending_batch_fate_reconciliation() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -845,6 +846,7 @@ fn rc_missing_batch_fate_retransmits_original_captured_frontier() {
         updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
