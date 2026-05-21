@@ -9,7 +9,9 @@ import {
   table,
 } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
+import { definePermissions } from "./permissions/index.js";
 import type { AddOp } from "./schema.js";
+import { defineApp, defineTable } from "./typed-app.js";
 
 describe("enum DSL invariants", () => {
   it("rejects empty variant list", () => {
@@ -256,6 +258,57 @@ describe("column merge strategy DSL", () => {
     expect(() => col.int().merge("counter").optional()).toThrow(
       "Counter merge strategy is only supported on non-nullable INTEGER columns.",
     );
+  });
+});
+
+describe("schema policy conversion", () => {
+  it("preserves BranchRef policy values when schema objects carry branch policies", () => {
+    resetCollectedState();
+    table("projects", {
+      title: col.string(),
+    });
+    table("branches", {
+      projectId: col.ref("projects"),
+    });
+    table("todos", {
+      projectId: col.ref("projects"),
+      title: col.string(),
+    });
+    const schema = getCollectedSchema();
+
+    const app = defineApp({
+      projects: defineTable({
+        title: col.string(),
+      }),
+      branches: defineTable({
+        projectId: col.ref("projects"),
+      }),
+      todos: defineTable({
+        projectId: col.ref("projects"),
+        title: col.string(),
+      }),
+    });
+    const permissions = definePermissions(app, ({ policy }) => {
+      policy.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+        branchPolicy.todos.allowRead.where({ projectId: $branch.projectId });
+      });
+    });
+
+    const todos = schema.tables.find((table) => table.name === "todos");
+    if (!todos) {
+      throw new Error("expected todos table");
+    }
+    todos.policies = permissions.todos;
+
+    expect(schemaToWasm(schema).todos?.policies?.for_branch?.branches?.select?.using).toEqual({
+      type: "Cmp",
+      column: "projectId",
+      op: "Eq",
+      value: {
+        type: "BranchRef",
+        column: "projectId",
+      },
+    });
   });
 });
 

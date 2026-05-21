@@ -29,6 +29,7 @@ struct LinearJoinInfo {
 struct RuntimeCorePlan {
     table: TableName,
     base_scope: String,
+    branches: Option<Vec<String>>,
     disjuncts: Vec<Conjunction>,
     joins: Vec<JoinSpec>,
     result_element_index: Option<usize>,
@@ -528,6 +529,7 @@ fn parse_projected_result_element_plan(
         RuntimeCorePlan {
             table: linear.base_table,
             base_scope: linear.scope_order[0].clone(),
+            branches: None,
             disjuncts: linear.disjuncts,
             joins: linear.joins.clone(),
             result_element_index: Some(index),
@@ -582,6 +584,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
             return Some(RuntimeCorePlan {
                 table: seed_info.base_table,
                 base_scope: seed_info.scope_order[0].clone(),
+                branches: None,
                 disjuncts: seed_info.disjuncts.clone(),
                 joins: Vec::new(),
                 result_element_index: None,
@@ -702,6 +705,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
     Some(RuntimeCorePlan {
         table,
         base_scope,
+        branches: None,
         disjuncts,
         joins: Vec::new(),
         result_element_index: None,
@@ -783,6 +787,13 @@ fn parse_gather_join_info(expr: &RelExpr) -> Option<GatherJoinInfo> {
 
 fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
     match core {
+        RelExpr::Branch { input, branches } => {
+            let mut plan = parse_runtime_core_plan(input)?;
+            if !branches.is_empty() {
+                plan.branches = Some(branches.clone());
+            }
+            Some(plan)
+        }
         RelExpr::Gather {
             seed,
             step,
@@ -815,6 +826,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             Some(RuntimeCorePlan {
                 table: linear.base_table,
                 base_scope: linear.scope_order[0].clone(),
+                branches: None,
                 disjuncts: linear.disjuncts,
                 joins: linear.joins,
                 result_element_index: None,
@@ -837,6 +849,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             Some(RuntimeCorePlan {
                 table: linear.base_table,
                 base_scope: linear.scope_order[0].clone(),
+                branches: None,
                 disjuncts: linear.disjuncts,
                 joins: linear.joins.clone(),
                 result_element_index,
@@ -854,6 +867,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             Some(RuntimeCorePlan {
                 table: linear.base_table,
                 base_scope: linear.scope_order[0].clone(),
+                branches: None,
                 disjuncts: linear.disjuncts,
                 joins: linear.joins,
                 result_element_index: None,
@@ -930,7 +944,7 @@ pub(crate) fn lower_relation_to_execution_plan(
     Some(ExecutionQueryPlan {
         table: core_plan.table,
         base_scope: core_plan.base_scope,
-        branches: branches.to_vec(),
+        branches: core_plan.branches.unwrap_or_else(|| branches.to_vec()),
         disjuncts: core_plan.disjuncts,
         joins: core_plan.joins,
         recursive: core_plan.recursive,
@@ -1002,6 +1016,33 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn lower_relation_to_execution_plan_uses_branch_wrapper_branches() {
+        let relation: RelExpr = serde_json::from_value(serde_json::json!({
+            "Branch": {
+                "input": {
+                    "TableScan": {
+                        "table": "todos"
+                    }
+                },
+                "branches": ["branch-a"]
+            }
+        }))
+        .expect("branch relation IR should deserialize");
+
+        let inherited_branches = vec!["main".to_string()];
+        let plan = lower_relation_to_execution_plan(
+            &relation,
+            &inherited_branches,
+            false,
+            Vec::new(),
+            None,
+        )
+        .expect("branch relation IR should lower");
+
+        assert_eq!(plan.branches, vec!["branch-a"]);
     }
 
     #[test]

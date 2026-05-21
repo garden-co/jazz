@@ -146,7 +146,7 @@ function normalizeWasmLiteral(value: unknown): WasmValue {
 }
 
 function normalizePolicyValueForWasm(value: PolicyValue): WasmPolicyValue {
-  if (value.type === "SessionRef") {
+  if (value.type === "SessionRef" || value.type === "BranchRef") {
     return value;
   }
   return {
@@ -224,6 +224,15 @@ function normalizeRelationPredicateForWasm(predicate: RelPredicateExpr): RelPred
 function normalizeRelationExprForWasm(expr: RelExpr): RelExpr {
   if ("TableScan" in expr) {
     return expr;
+  }
+
+  if ("Branch" in expr) {
+    return {
+      Branch: {
+        ...expr.Branch,
+        input: normalizeRelationExprForWasm(expr.Branch.input),
+      },
+    };
   }
 
   if ("Filter" in expr) {
@@ -407,7 +416,7 @@ function normalizeOperationPolicyForWasm(
   if (policy.with_check) {
     normalized.with_check = normalizePolicyExprForWasm(policy.with_check);
   }
-  return normalized;
+  return normalized.using || normalized.with_check ? normalized : undefined;
 }
 
 function validatePermissionTables(
@@ -423,6 +432,16 @@ function validatePermissionTables(
     throw new Error(
       `permissions.ts defines permissions for unknown table(s): ${unknownTables.join(", ")}.`,
     );
+  }
+
+  for (const [targetTable, tablePolicies] of Object.entries(compiledPermissions)) {
+    for (const backingTable of Object.keys(tablePolicies.for_branch ?? {})) {
+      if (!knownTables.has(backingTable)) {
+        throw new Error(
+          `Unknown branch backing table "${backingTable}" in permissions for table "${targetTable}".`,
+        );
+      }
+    }
   }
 }
 
@@ -492,13 +511,28 @@ export function normalizePermissionsForWasm(
 ): Record<string, WasmTablePolicies> {
   const normalized: Record<string, WasmTablePolicies> = {};
   for (const [tableName, tablePolicies] of Object.entries(compiledPermissions)) {
-    normalized[tableName] = {
-      select: normalizeOperationPolicyForWasm(tablePolicies.select),
-      insert: normalizeOperationPolicyForWasm(tablePolicies.insert),
-      update: normalizeOperationPolicyForWasm(tablePolicies.update),
-      delete: normalizeOperationPolicyForWasm(tablePolicies.delete),
-    };
+    normalized[tableName] = normalizeTablePoliciesForWasm(tablePolicies);
   }
+  return normalized;
+}
+
+function normalizeTablePoliciesForWasm(tablePolicies: TablePolicies): WasmTablePolicies {
+  const normalized: WasmTablePolicies = {
+    select: normalizeOperationPolicyForWasm(tablePolicies.select),
+    insert: normalizeOperationPolicyForWasm(tablePolicies.insert),
+    update: normalizeOperationPolicyForWasm(tablePolicies.update),
+    delete: normalizeOperationPolicyForWasm(tablePolicies.delete),
+  };
+
+  if (tablePolicies.for_branch) {
+    normalized.for_branch = Object.fromEntries(
+      Object.entries(tablePolicies.for_branch).map(([backingTable, branchPolicies]) => [
+        backingTable,
+        normalizeTablePoliciesForWasm(branchPolicies),
+      ]),
+    );
+  }
+
   return normalized;
 }
 

@@ -21,7 +21,9 @@ use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
     WriteTableCacheEntry,
 };
-use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id};
+use super::policy::{
+    BranchPolicyContext, ComplexClause, Operation, evaluate_simple_parts_with_row_id,
+};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
@@ -75,6 +77,14 @@ pub struct RowBranchDelete<'a> {
     pub id: ObjectId,
     pub old_data_for_policy: &'a [u8],
     pub old_provenance_for_policy: &'a RowProvenance,
+}
+
+#[derive(Clone, Copy)]
+enum WritePolicyClause {
+    Insert,
+    UpdateUsing,
+    UpdateCheck,
+    Delete,
 }
 
 impl QueryManager {
@@ -712,6 +722,21 @@ impl QueryManager {
                 };
                 if self.row_policy_mode.denies_missing_explicit_policy()
                     && !auth_table_schema.policies.has_explicit_update_policy()
+                    && self
+                        .evaluate_branch_scoped_write_policy_for_content(
+                            storage,
+                            id,
+                            branch,
+                            table_name,
+                            WritePolicyClause::UpdateUsing,
+                            old_data_for_policy,
+                            old_provenance_for_policy,
+                            descriptor,
+                            session,
+                            &auth_schema,
+                            &auth_context,
+                        )
+                        .is_none()
                 {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
@@ -719,7 +744,26 @@ impl QueryManager {
                     });
                 }
 
-                if let Some(policy) = auth_table_schema.policies.update_using_policy()
+                if let Some(allowed) = self.evaluate_branch_scoped_write_policy_for_content(
+                    storage,
+                    id,
+                    branch,
+                    table_name,
+                    WritePolicyClause::UpdateUsing,
+                    old_data_for_policy,
+                    old_provenance_for_policy,
+                    descriptor,
+                    session,
+                    &auth_schema,
+                    &auth_context,
+                ) {
+                    if !allowed {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Update,
+                        });
+                    }
+                } else if let Some(policy) = auth_table_schema.policies.update_using_policy()
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,
@@ -740,7 +784,26 @@ impl QueryManager {
                     });
                 }
 
-                if let Some(policy) = auth_table_schema.policies.update_check_policy()
+                if let Some(allowed) = self.evaluate_branch_scoped_write_policy_for_content(
+                    storage,
+                    id,
+                    branch,
+                    table_name,
+                    WritePolicyClause::UpdateCheck,
+                    &new_data,
+                    new_provenance,
+                    descriptor,
+                    session,
+                    &auth_schema,
+                    &auth_context,
+                ) {
+                    if !allowed {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Update,
+                        });
+                    }
+                } else if let Some(policy) = auth_table_schema.policies.update_check_policy()
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,
@@ -1069,27 +1132,43 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
-                let allowed = auth_schema
-                    .get(&table_name)
-                    .and_then(|table_schema| table_schema.policies.insert_policy())
-                    .map(|policy| {
-                        self.evaluate_current_authorization_policy_for_content(
-                            storage,
-                            object_id,
-                            branch,
-                            table_name,
-                            policy,
-                            &data,
-                            &provenance,
-                            session,
-                            Operation::Insert,
-                            &auth_schema,
-                            &auth_context,
-                        )
-                    })
+                let allowed = self
+                    .evaluate_branch_scoped_write_policy_for_content(
+                        storage,
+                        object_id,
+                        branch,
+                        table_name,
+                        WritePolicyClause::Insert,
+                        &data,
+                        &provenance,
+                        descriptor,
+                        session,
+                        &auth_schema,
+                        &auth_context,
+                    )
                     .unwrap_or_else(|| {
-                        !self.row_policy_mode.denies_missing_explicit_policy()
-                            && auth_schema.contains_key(&table_name)
+                        auth_schema
+                            .get(&table_name)
+                            .and_then(|table_schema| table_schema.policies.insert_policy())
+                            .map(|policy| {
+                                self.evaluate_current_authorization_policy_for_content(
+                                    storage,
+                                    object_id,
+                                    branch,
+                                    table_name,
+                                    policy,
+                                    &data,
+                                    &provenance,
+                                    session,
+                                    Operation::Insert,
+                                    &auth_schema,
+                                    &auth_context,
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                !self.row_policy_mode.denies_missing_explicit_policy()
+                                    && auth_schema.contains_key(&table_name)
+                            })
                     });
                 if !allowed {
                     return Err(QueryError::PolicyDenied {
@@ -1293,9 +1372,21 @@ impl QueryManager {
         std::sync::Arc<Schema>,
         std::sync::Arc<crate::schema_manager::SchemaContext>,
     )> {
-        self.local_subscription_uses_explicit_authorization(session)
-            .then(|| self.authorization_schema_for_branch(&BranchName::new(branch)))
-            .flatten()
+        session?;
+
+        let uses_branch_scoped_policy = ComposedBranchName::parse(&BranchName::new(branch))
+            .is_some_and(|composed| {
+                composed.user_branch != "main"
+                    && uuid::Uuid::parse_str(&composed.user_branch).is_ok()
+            });
+
+        if !uses_branch_scoped_policy
+            && !self.local_subscription_uses_explicit_authorization(session)
+        {
+            return None;
+        }
+
+        self.authorization_schema_for_branch(&BranchName::new(branch))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1329,8 +1420,146 @@ impl QueryManager {
                 source_branch_schema_map: &source_branch_schema_map,
                 operation,
                 settlement_eval_cache: None,
+                branch_context: None,
             },
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_branch_scoped_write_policy_for_content<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        branch: &str,
+        table_name: TableName,
+        clause: WritePolicyClause,
+        content: &[u8],
+        provenance: &RowProvenance,
+        _descriptor: &RowDescriptor,
+        session: &Session,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+    ) -> Option<bool> {
+        let branch_name = BranchName::new(branch);
+        let composed = ComposedBranchName::parse(&branch_name)?;
+        if composed.user_branch == "main" {
+            return None;
+        }
+        let branch_uuid = uuid::Uuid::parse_str(&composed.user_branch).ok()?;
+        let branch_object_id = ObjectId::from_uuid(branch_uuid);
+        let target_schema = auth_schema.get(&table_name)?;
+        if target_schema.policies.for_branch.is_empty() {
+            return Some(!self.row_policy_mode.denies_missing_explicit_policy());
+        }
+
+        let current_branch = ComposedBranchName::new(&composed.env, composed.schema_hash, "main")
+            .to_branch_name()
+            .as_str()
+            .to_string();
+        let source_branch_schema_map = self.branch_schema_map.clone();
+
+        for (backing_table, branch_policies) in &target_schema.policies.for_branch {
+            let Ok(Some(backing_row)) = storage.load_visible_region_row(
+                backing_table.as_str(),
+                &current_branch,
+                branch_object_id,
+            ) else {
+                continue;
+            };
+            if backing_row.is_hard_deleted() {
+                return Some(false);
+            }
+            let Some(backing_schema) = auth_schema.get(backing_table) else {
+                return Some(false);
+            };
+            let backing_provenance = backing_row.row_provenance();
+            let Some(transformed_backing_content) = self.transform_content_to_authorization_schema(
+                backing_table.as_str(),
+                &backing_row.data,
+                backing_row.batch_id,
+                BranchName::new(&current_branch),
+                &source_branch_schema_map,
+                auth_context,
+            ) else {
+                return Some(false);
+            };
+
+            if let Some(backing_select) = backing_schema.policies.select_policy() {
+                if !self.evaluate_authorization_policy(
+                    storage,
+                    AuthorizationPolicyRequest {
+                        object_id: branch_object_id,
+                        branch_name: BranchName::new(&current_branch),
+                        table_name: *backing_table,
+                        policy: backing_select,
+                        content: &backing_row.data,
+                        provenance: &backing_provenance,
+                        session,
+                        auth_schema,
+                        auth_context,
+                        source_branch_schema_map: &source_branch_schema_map,
+                        operation: Operation::Select,
+                        settlement_eval_cache: None,
+                        branch_context: None,
+                    },
+                ) {
+                    return Some(false);
+                }
+            } else if self.row_policy_mode.denies_missing_explicit_policy() {
+                return Some(false);
+            }
+
+            let policy = match clause {
+                WritePolicyClause::Insert => branch_policies.insert_policy(),
+                WritePolicyClause::UpdateUsing => branch_policies.update_using_policy(),
+                WritePolicyClause::UpdateCheck => branch_policies.update_check_policy(),
+                WritePolicyClause::Delete => branch_policies.effective_delete_using(),
+            };
+            let Some(policy) = policy else {
+                if matches!(
+                    clause,
+                    WritePolicyClause::UpdateUsing | WritePolicyClause::UpdateCheck
+                ) && branch_policies.has_explicit_update_policy()
+                {
+                    return Some(true);
+                }
+                return Some(!self.row_policy_mode.denies_missing_explicit_policy());
+            };
+
+            let branch_context = BranchPolicyContext {
+                table_name: backing_table,
+                row_id: branch_object_id,
+                descriptor: &backing_schema.columns,
+                content: &transformed_backing_content,
+                provenance: &backing_provenance,
+            };
+            return Some(self.evaluate_authorization_policy(
+                storage,
+                AuthorizationPolicyRequest {
+                    object_id,
+                    branch_name,
+                    table_name,
+                    policy,
+                    content,
+                    provenance,
+                    session,
+                    auth_schema,
+                    auth_context,
+                    source_branch_schema_map: &source_branch_schema_map,
+                    operation: match clause {
+                        WritePolicyClause::Insert => Operation::Insert,
+                        WritePolicyClause::UpdateUsing | WritePolicyClause::UpdateCheck => {
+                            Operation::Update
+                        }
+                        WritePolicyClause::Delete => Operation::Delete,
+                    },
+                    settlement_eval_cache: None,
+                    branch_context: Some(&branch_context),
+                },
+            ));
+        }
+
+        Some(false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1360,6 +1589,7 @@ impl QueryManager {
             branch,
             operation,
             Some(row_id),
+            None,
             depth,
             visited,
         )
@@ -1378,15 +1608,28 @@ impl QueryManager {
         branch: &str,
         operation: Operation,
         row_id: Option<ObjectId>,
+        branch_context: Option<&BranchPolicyContext<'_>>,
         depth: usize,
         visited: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
         }
-        let simple_result = evaluate_simple_parts_with_row_id(
-            policy, content, provenance, descriptor, session, row_id,
-        );
+        let simple_result = if let Some(branch_context) = branch_context {
+            crate::query_manager::policy::evaluate_simple_parts_with_branch_context(
+                policy,
+                content,
+                provenance,
+                descriptor,
+                session,
+                row_id,
+                branch_context,
+            )
+        } else {
+            evaluate_simple_parts_with_row_id(
+                policy, content, provenance, descriptor, session, row_id,
+            )
+        };
         if !simple_result.passed {
             return false;
         }
@@ -2022,6 +2265,21 @@ impl QueryManager {
                         .policies
                         .effective_delete_using()
                         .is_none()
+                    && self
+                        .evaluate_branch_scoped_write_policy_for_content(
+                            storage,
+                            id,
+                            branch,
+                            table_name,
+                            WritePolicyClause::Delete,
+                            old_data_for_policy,
+                            old_provenance_for_policy,
+                            descriptor,
+                            session,
+                            &auth_schema,
+                            &auth_context,
+                        )
+                        .is_none()
                 {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
@@ -2029,7 +2287,26 @@ impl QueryManager {
                     });
                 }
 
-                if let Some(policy) = auth_table_schema.policies.effective_delete_using()
+                if let Some(allowed) = self.evaluate_branch_scoped_write_policy_for_content(
+                    storage,
+                    id,
+                    branch,
+                    table_name,
+                    WritePolicyClause::Delete,
+                    old_data_for_policy,
+                    old_provenance_for_policy,
+                    descriptor,
+                    session,
+                    &auth_schema,
+                    &auth_context,
+                ) {
+                    if !allowed {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Delete,
+                        });
+                    }
+                } else if let Some(policy) = auth_table_schema.policies.effective_delete_using()
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,

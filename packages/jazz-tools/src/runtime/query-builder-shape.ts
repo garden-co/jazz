@@ -10,6 +10,7 @@ export interface BuiltRelation {
   table?: string;
   conditions?: BuiltCondition[];
   hops?: string[];
+  branches?: string[];
   gather?: BuiltGather;
   union?: {
     inputs: BuiltRelation[];
@@ -36,6 +37,7 @@ export interface NormalizedIncludeEntry {
   offset?: number;
   hops: string[];
   gather?: BuiltGather;
+  branches: string[];
 }
 
 export interface NormalizedIncludeSpec {
@@ -53,6 +55,8 @@ export interface NormalizedBuiltQuery {
   offset?: number;
   hops: string[];
   gather?: BuiltGather;
+  union?: BuiltRelation["union"];
+  branches: string[];
 }
 
 type BuiltQueryShape = {
@@ -66,6 +70,8 @@ type BuiltQueryShape = {
   offset?: unknown;
   hops?: unknown;
   gather?: unknown;
+  union?: unknown;
+  branches?: unknown;
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -143,6 +149,9 @@ function normalizeBuiltRelation(value: unknown): BuiltRelation {
     hops: Array.isArray(value.hops)
       ? value.hops.filter((hop): hop is string => typeof hop === "string")
       : [],
+    branches: Array.isArray(value.branches)
+      ? value.branches.filter((branch): branch is string => typeof branch === "string")
+      : [],
     gather: normalizeGather(value.gather),
   };
 
@@ -163,6 +172,7 @@ function createEmptyIncludeEntry(): NormalizedIncludeEntry {
     select: [],
     orderBy: [],
     hops: [],
+    branches: [],
   };
 }
 
@@ -202,6 +212,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       offset: normalized.offset,
       hops: normalized.hops,
       gather: normalized.gather,
+      branches: normalized.branches,
     };
   }
 
@@ -219,6 +230,9 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
         ? raw.hops.filter((hop): hop is string => typeof hop === "string")
         : [],
       gather: normalizeGather(raw.gather),
+      branches: Array.isArray(raw.branches)
+        ? raw.branches.filter((branch): branch is string => typeof branch === "string")
+        : [],
     };
   }
 
@@ -263,5 +277,14 @@ export function normalizeBuiltQuery(raw: unknown, fallbackTable: string): Normal
       ? value.hops.filter((hop): hop is string => typeof hop === "string")
       : [],
     gather: normalizeGather(value.gather),
+    union:
+      isPlainObject(value.union) && Array.isArray(value.union.inputs)
+        ? {
+            inputs: value.union.inputs.map((input) => normalizeBuiltRelation(input)),
+          }
+        : undefined,
+    branches: Array.isArray(value.branches)
+      ? value.branches.filter((branch): branch is string => typeof branch === "string")
+      : [],
   };
 }

@@ -5,356 +5,74 @@ import {
   relationToIr,
   type PermissionRelation,
 } from "./index.js";
+import { col } from "../dsl.js";
 import type { PolicyExpr } from "../schema.js";
 import {
   toLegacyPolicyExprWithRelForTest,
   toLegacyRelExprForTest,
 } from "../testing/relation-ir-test-helpers.js";
+import { defineApp, defineTable } from "../typed-app.js";
 
-interface Todo {
-  id: string;
-  ownerId: string;
-  archived: boolean;
-  done: boolean;
-  projectId?: string;
-}
+const app = defineApp({
+  projects: defineTable({
+    ownerId: col.string(),
+  }),
+  branches: defineTable({
+    projectId: col.ref("projects"),
+    ownerId: col.string(),
+    name: col.string(),
+  }),
+  todos: defineTable({
+    ownerId: col.string(),
+    archived: col.boolean(),
+    done: col.boolean(),
+    projectId: col.ref("projects").optional(),
+  }),
+  comments: defineTable({
+    projectId: col.ref("projects"),
+    body: col.string(),
+  }),
+  todoShares: defineTable({
+    todoId: col.ref("todos"),
+    userId: col.string(),
+    canRead: col.boolean(),
+  }),
+  teams: defineTable({
+    kind: col.string(),
+    identity_key: col.string().optional(),
+  }),
+  user_team_edges: defineTable({
+    user_id: col.string(),
+    team: col.ref("teams"),
+    administrator: col.boolean(),
+  }),
+  team_team_edges: defineTable({
+    child_team: col.ref("teams"),
+    parent_team: col.ref("teams"),
+    administrator: col.boolean(),
+  }),
+  resource_access_edges: defineTable({
+    team: col.ref("teams"),
+    resource: col.ref("todos"),
+    grant_role: col.string(),
+  }),
+});
 
-interface TodoWhere {
-  id?: string;
-  ownerId?: string;
-  archived?: boolean;
-  done?: boolean;
-  projectId?: string;
-  $createdBy?: string;
-  $updatedBy?: string;
-}
+type WhereInputFor<T> = T extends { where(input: infer W): unknown } ? W : never;
+type TodoWhere = WhereInputFor<typeof app.todos>;
 
-interface Project {
-  id: string;
-  ownerId: string;
-}
+const { wasmSchema: _omittedWasmSchema, ...appWithoutSchema } = app;
 
-interface ProjectWhere {
-  id?: string;
-  ownerId?: string;
-}
-
-interface TodoShare {
-  id: string;
-  todoId: string;
-  userId: string;
-  canRead: boolean;
-}
-
-interface TodoShareWhere {
-  id?: string;
-  todoId?: string;
-  userId?: string;
-  canRead?: boolean;
-}
-
-interface Profile {
-  id: string;
-}
-
-interface ProfileWhere {
-  id?: string;
-}
-
-interface Person {
-  id: string;
-  profileId?: string;
-}
-
-interface PersonWhere {
-  id?: string;
-  profileId?: string;
-}
-
-interface Friendship {
-  id: string;
-  personAId: string;
-  personBId: string;
-}
-
-interface FriendshipWhere {
-  id?: string;
-  personAId?: string;
-  personBId?: string;
-}
-
-interface Team {
-  id: string;
-  kind: string;
-  identity_key?: string;
-}
-
-interface TeamWhere {
-  id?: string;
-  kind?: string;
-  identity_key?: string;
-}
-
-interface UserTeamEdge {
-  id: string;
-  user_id: string;
-  team: string;
-  administrator: boolean;
-}
-
-interface UserTeamEdgeWhere {
-  id?: string;
-  user_id?: string;
-  team?: string;
-  administrator?: boolean;
-}
-
-interface TeamTeamEdge {
-  id: string;
-  child_team: string;
-  parent_team: string;
-  administrator: boolean;
-}
-
-interface TeamTeamEdgeWhere {
-  id?: string;
-  child_team?: string;
-  parent_team?: string;
-  administrator?: boolean;
-}
-
-interface ResourceAccessEdge {
-  id: string;
-  team: string;
-  resource: string;
-  grant_role: string;
-}
-
-interface ResourceAccessEdgeWhere {
-  id?: string;
-  team?: string;
-  resource?: string;
-  grant_role?: string;
-}
-
-class TodoQueryBuilder {
-  declare readonly _rowType: Todo;
-  where(_input: TodoWhere): TodoQueryBuilder {
-    return this;
-  }
-}
-
-class TodoShareQueryBuilder {
-  declare readonly _rowType: TodoShare;
-  where(_input: TodoShareWhere): TodoShareQueryBuilder {
-    return this;
-  }
-}
-
-class ProjectQueryBuilder {
-  declare readonly _rowType: Project;
-  where(_input: ProjectWhere): ProjectQueryBuilder {
-    return this;
-  }
-}
-
-class ProfileQueryBuilder {
-  declare readonly _rowType: Profile;
-  where(_input: ProfileWhere): ProfileQueryBuilder {
-    return this;
-  }
-}
-
-class PersonQueryBuilder {
-  declare readonly _rowType: Person;
-  where(_input: PersonWhere): PersonQueryBuilder {
-    return this;
-  }
-}
-
-class FriendshipQueryBuilder {
-  declare readonly _rowType: Friendship;
-  where(_input: FriendshipWhere): FriendshipQueryBuilder {
-    return this;
-  }
-}
-
-class TeamQueryBuilder {
-  declare readonly _rowType: Team;
-  where(_input: TeamWhere): TeamQueryBuilder {
-    return this;
-  }
-}
-
-class UserTeamEdgeQueryBuilder {
-  declare readonly _rowType: UserTeamEdge;
-  where(_input: UserTeamEdgeWhere): UserTeamEdgeQueryBuilder {
-    return this;
-  }
-}
-
-class TeamTeamEdgeQueryBuilder {
-  declare readonly _rowType: TeamTeamEdge;
-  where(_input: TeamTeamEdgeWhere): TeamTeamEdgeQueryBuilder {
-    return this;
-  }
-}
-
-class ResourceAccessEdgeQueryBuilder {
-  declare readonly _rowType: ResourceAccessEdge;
-  where(_input: ResourceAccessEdgeWhere): ResourceAccessEdgeQueryBuilder {
-    return this;
-  }
-}
-
-const app = {
-  todos: new TodoQueryBuilder(),
-  projects: new ProjectQueryBuilder(),
-  todoShares: new TodoShareQueryBuilder(),
-  teams: new TeamQueryBuilder(),
-  user_team_edges: new UserTeamEdgeQueryBuilder(),
-  team_team_edges: new TeamTeamEdgeQueryBuilder(),
-  resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
-  wasmSchema: {
-    todos: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-        { name: "archived", column_type: { type: "Boolean" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        {
-          name: "projectId",
-          column_type: { type: "Uuid" },
-          nullable: true,
-          references: "projects",
-        },
-      ],
-    },
-    projects: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-      ],
-    },
-    todoShares: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        {
-          name: "todoId",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "todos",
-        },
-        { name: "userId", column_type: { type: "Text" }, nullable: false },
-        { name: "canRead", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
-    teams: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        { name: "kind", column_type: { type: "Text" }, nullable: false },
-        { name: "identity_key", column_type: { type: "Text" }, nullable: true },
-      ],
-    },
-    user_team_edges: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        { name: "user_id", column_type: { type: "Text" }, nullable: false },
-        {
-          name: "team",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "teams",
-        },
-        { name: "administrator", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
-    team_team_edges: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        {
-          name: "child_team",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "teams",
-        },
-        {
-          name: "parent_team",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "teams",
-        },
-      ],
-    },
-    resource_access_edges: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        {
-          name: "team",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "teams",
-        },
-        {
-          name: "resource",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "todos",
-        },
-        { name: "grant_role", column_type: { type: "Text" }, nullable: false },
-      ],
-    },
-  },
-};
-
-const appWithoutSchema = {
-  todos: new TodoQueryBuilder(),
-  projects: new ProjectQueryBuilder(),
-  todoShares: new TodoShareQueryBuilder(),
-  teams: new TeamQueryBuilder(),
-  user_team_edges: new UserTeamEdgeQueryBuilder(),
-  team_team_edges: new TeamTeamEdgeQueryBuilder(),
-  resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
-};
-
-const socialApp = {
-  profiles: new ProfileQueryBuilder(),
-  people: new PersonQueryBuilder(),
-  friendships: new FriendshipQueryBuilder(),
-  wasmSchema: {
-    profiles: {
-      columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
-    },
-    people: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        {
-          name: "profileId",
-          column_type: { type: "Uuid" },
-          nullable: true,
-          references: "profiles",
-        },
-      ],
-    },
-    friendships: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        {
-          name: "personAId",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "people",
-        },
-        {
-          name: "personBId",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "people",
-        },
-      ],
-    },
-  },
-};
+const socialApp = defineApp({
+  profiles: defineTable({}),
+  people: defineTable({
+    profileId: col.ref("profiles").optional(),
+  }),
+  friendships: defineTable({
+    personAId: col.ref("people"),
+    personBId: col.ref("people"),
+  }),
+});
 
 const creatorCondition = {
   type: "Cmp",
@@ -428,6 +146,104 @@ describe("permissions DSL", () => {
         path: ["userId"],
       },
     });
+  });
+
+  it("compiles branch-scoped policies by backing table", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => {
+      policy.branches.allowRead.where({ ownerId: session.user_id });
+
+      policy.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+        branchPolicy.todos.allowRead.where({ projectId: $branch.projectId });
+        branchPolicy.todos.allowInsert.where({
+          projectId: $branch.projectId,
+          ownerId: session.user_id,
+        });
+        branchPolicy.comments.allowRead.where({ projectId: $branch.projectId });
+      });
+    });
+
+    const branchRead = compiled.branches?.select?.using;
+    expect(branchRead?.type).toBe("Cmp");
+    if (branchRead?.type !== "Cmp") {
+      throw new Error("expected branches.allowRead to compile to a comparison");
+    }
+    expect(branchRead.column).toBe("ownerId");
+    expect(branchRead.value.type).toBe("SessionRef");
+    if (branchRead.value.type !== "SessionRef") {
+      throw new Error("expected branches.allowRead to compare against session");
+    }
+    expect(branchRead.value.path).toEqual(["user_id"]);
+
+    const todoRead = compiled.todos?.for_branch?.branches?.select?.using;
+    expect(todoRead?.type).toBe("Cmp");
+    if (todoRead?.type !== "Cmp") {
+      throw new Error("expected branchPolicy.todos.allowRead to compile to a comparison");
+    }
+    expect(todoRead.column).toBe("projectId");
+    expect(todoRead.value.type).toBe("BranchRef");
+    if (todoRead.value.type !== "BranchRef") {
+      throw new Error("expected branchPolicy.todos.allowRead to compare against branch row");
+    }
+    expect(todoRead.value.column).toBe("projectId");
+
+    const todoInsert = compiled.todos?.for_branch?.branches?.insert?.with_check;
+    expect(todoInsert?.type).toBe("And");
+    if (todoInsert?.type !== "And") {
+      throw new Error("expected branchPolicy.todos.allowInsert to compile to a conjunction");
+    }
+    expect(todoInsert.exprs).toHaveLength(2);
+    const todoInsertValues = todoInsert.exprs
+      .filter((expr) => expr.type === "Cmp")
+      .map((expr) => expr.value.type)
+      .sort();
+    expect(todoInsertValues).toEqual(["BranchRef", "SessionRef"]);
+
+    const commentRead = compiled.comments?.for_branch?.branches?.select?.using;
+    expect(commentRead?.type).toBe("Cmp");
+    if (commentRead?.type !== "Cmp") {
+      throw new Error("expected branchPolicy.comments.allowRead to compile to a comparison");
+    }
+    expect(commentRead.value.type).toBe("BranchRef");
+    if (commentRead.value.type !== "BranchRef") {
+      throw new Error("expected branchPolicy.comments.allowRead to compare against branch row");
+    }
+    expect(commentRead.value.column).toBe("projectId");
+  });
+
+  it("lowers branch refs inside branch-scoped relation filters", () => {
+    const compiled = definePermissions(app, ({ policy }) => {
+      policy.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+        branchPolicy.todos.allowRead.where((todo) =>
+          policy.exists(
+            policy.projects.where({
+              id: todo.projectId,
+              ownerId: $branch.ownerId,
+            }),
+          ),
+        );
+      });
+    });
+
+    const readPolicy = compiled.todos?.for_branch?.branches?.select?.using;
+    expect(readPolicy?.type).toBe("ExistsRel");
+    if (readPolicy?.type !== "ExistsRel") {
+      throw new Error("expected branch-scoped relation filter to compile to ExistsRel");
+    }
+    expect(JSON.stringify(readPolicy.rel)).toContain("BranchRef");
+    expect(JSON.stringify(readPolicy.rel)).toContain("ownerId");
+  });
+
+  it("supports multiple backing tables for the same target table", () => {
+    const compiled = definePermissions(app, ({ policy }) => {
+      policy.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+        branchPolicy.todos.allowRead.where({ projectId: $branch.projectId });
+      });
+      policy.forBranch(policy.projects, ({ $branch, branchPolicy }) => {
+        branchPolicy.todos.allowRead.where({ projectId: $branch.id });
+      });
+    });
+
+    expect(Object.keys(compiled.todos?.for_branch ?? {}).sort()).toEqual(["branches", "projects"]);
   });
 
   it("compiles provenance magic column policies", () => {

@@ -59,6 +59,46 @@ fn effective_select_policy(
     })
 }
 
+fn is_branch_scoped_user_branch(branches: &[String]) -> bool {
+    let Some(branch) = branches.first() else {
+        return false;
+    };
+    if branches.len() != 1 {
+        return false;
+    }
+    let Some(composed) = ComposedBranchName::parse(&BranchName::new(branch)) else {
+        return false;
+    };
+    if composed.user_branch == "main" {
+        return false;
+    }
+    uuid::Uuid::parse_str(&composed.user_branch).is_ok()
+}
+
+fn effective_select_policy_for_branches(
+    table_schema: &crate::query_manager::types::TableSchema,
+    branches: &[String],
+    row_policy_mode: RowPolicyMode,
+) -> Option<PolicyExpr> {
+    if is_branch_scoped_user_branch(branches) {
+        let branch_policies: Vec<_> = table_schema
+            .policies
+            .for_branch
+            .values()
+            .filter_map(|policies| policies.select_policy().cloned())
+            .collect();
+        return match branch_policies.len() {
+            0 => row_policy_mode
+                .denies_missing_explicit_policy()
+                .then_some(PolicyExpr::False),
+            1 => branch_policies.into_iter().next(),
+            _ => Some(PolicyExpr::Or(branch_policies)),
+        };
+    }
+
+    effective_select_policy(table_schema, row_policy_mode)
+}
+
 fn natural_row_projection_element_index(
     input_tuple_descriptor: &TupleDescriptor,
     columns: &[ProjectColumn],
@@ -436,6 +476,27 @@ impl QueryGraph {
         features: RelationCompileFeatures,
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
+        if let RelExpr::Branch {
+            input,
+            branches: branch_scope,
+        } = relation
+        {
+            let effective_branches = if branch_scope.is_empty() {
+                branches
+            } else {
+                branch_scope.as_slice()
+            };
+            return Self::compile_relation_ir_with_schema_context_and_features(
+                input,
+                schema,
+                effective_branches,
+                session,
+                schema_context,
+                features,
+                row_policy_mode,
+            );
+        }
+
         if let RelExpr::Union { inputs } = relation {
             return Self::compile_relation_ir_union_with_schema_context_and_features(
                 inputs,
@@ -574,7 +635,8 @@ impl QueryGraph {
 
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.columns.clone();
-        let select_policy = effective_select_policy(table_schema, row_policy_mode);
+        let select_policy =
+            effective_select_policy_for_branches(table_schema, &branches, row_policy_mode);
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
 
@@ -1031,10 +1093,15 @@ impl QueryGraph {
             None => return None,
         };
 
-        // Build base query for subgraph, inheriting branches from outer query.
+        // Build base query for subgraph, using explicit subquery branches or inheriting outer branches.
         let mut base_builder = QueryBuilder::new(spec.table);
-        if !branches.is_empty() {
-            let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
+        let effective_branches = if spec.branches.is_empty() {
+            branches
+        } else {
+            &spec.branches
+        };
+        if !effective_branches.is_empty() {
+            let branch_refs: Vec<&str> = effective_branches.iter().map(String::as_str).collect();
             base_builder = base_builder.branches(&branch_refs);
         }
         for join_spec in &spec.joins {
@@ -1401,7 +1468,7 @@ impl QueryGraph {
             let mut left_id = base_mat_id;
             if let (Some(session), Some(policy)) = (
                 &session,
-                effective_select_policy(base_table_schema, row_policy_mode),
+                effective_select_policy_for_branches(base_table_schema, branches, row_policy_mode),
             ) {
                 let branch_for_policy = branches
                     .first()
@@ -1511,7 +1578,7 @@ impl QueryGraph {
             let mut right_input_id = right_mat_id;
             if let (Some(session), Some(policy)) = (
                 &session,
-                effective_select_policy(right_table_schema, row_policy_mode),
+                effective_select_policy_for_branches(right_table_schema, branches, row_policy_mode),
             ) {
                 let branch_for_policy = branches
                     .first()
@@ -1816,6 +1883,7 @@ fn ensure_relation_tables_exist(
             Ok(())
         }
         RelExpr::Filter { input, .. }
+        | RelExpr::Branch { input, .. }
         | RelExpr::Project { input, .. }
         | RelExpr::Distinct { input, .. }
         | RelExpr::OrderBy { input, .. }

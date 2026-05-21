@@ -496,6 +496,9 @@ pub struct ArraySubquerySpec {
     /// Optional requirement for whether the correlated result must exist.
     #[serde(default)]
     pub requirement: ArraySubqueryRequirement,
+    /// Branches to query for this array subquery. Empty means inherit outer query branches.
+    #[serde(default)]
+    pub branches: Vec<String>,
     /// Nested array subqueries (for recursive structures).
     pub nested_arrays: Vec<ArraySubquerySpec>,
 }
@@ -514,6 +517,7 @@ impl ArraySubquerySpec {
             order_by: Vec::new(),
             limit: None,
             requirement: ArraySubqueryRequirement::Optional,
+            branches: Vec::new(),
             nested_arrays: Vec::new(),
         }
     }
@@ -1091,6 +1095,7 @@ pub struct ArraySubqueryBuilder {
     order_by: Vec<(String, SortDirection)>,
     limit: Option<usize>,
     requirement: ArraySubqueryRequirement,
+    branches: Vec<String>,
     nested_arrays: Vec<ArraySubquerySpec>,
 }
 
@@ -1108,6 +1113,7 @@ impl ArraySubqueryBuilder {
             order_by: Vec::new(),
             limit: None,
             requirement: ArraySubqueryRequirement::Optional,
+            branches: Vec::new(),
             nested_arrays: Vec::new(),
         }
     }
@@ -1201,6 +1207,18 @@ impl ArraySubqueryBuilder {
         self
     }
 
+    /// Query a single branch for this array subquery.
+    pub fn branch(mut self, branch: impl Into<String>) -> Self {
+        self.branches = vec![branch.into()];
+        self
+    }
+
+    /// Query multiple branches for this array subquery.
+    pub fn branches(mut self, branches: &[&str]) -> Self {
+        self.branches = branches.iter().map(|branch| branch.to_string()).collect();
+        self
+    }
+
     /// Add a nested array subquery.
     ///
     /// # Example
@@ -1235,6 +1253,7 @@ impl ArraySubqueryBuilder {
             order_by: self.order_by,
             limit: self.limit,
             requirement: self.requirement,
+            branches: self.branches,
             nested_arrays: self.nested_arrays,
         }
     }
