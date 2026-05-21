@@ -159,6 +159,7 @@ fn provenance_magic_columns_capture_insert_update_and_system_authors() {
         updated_at: None,
         batch_mode: None,
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -322,6 +323,7 @@ fn provenance_magic_columns_allow_explicit_updated_at_override() {
         updated_at: Some(custom_updated_at),
         batch_mode: None,
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 
@@ -377,6 +379,7 @@ fn created_by_permissions_allow_creators_and_hide_system_rows() {
         updated_at: None,
         batch_mode: None,
         batch_id: None,
+        visible_at: None,
         target_branch_name: None,
     };
 

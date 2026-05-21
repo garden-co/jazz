@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::batch_fate::BatchMode;
+use crate::batch_fate::{BatchMode, TransactionVisibility};
 use crate::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::row_histories::BatchId;
 
@@ -182,6 +182,8 @@ pub struct WriteContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<BatchId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_at: Option<TransactionVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch_name: Option<String>,
 }
 
@@ -193,6 +195,7 @@ impl WriteContext {
             updated_at: None,
             batch_mode: None,
             batch_id: None,
+            visible_at: None,
             target_branch_name: None,
         }
     }
@@ -212,6 +215,11 @@ impl WriteContext {
         self
     }
 
+    pub fn with_visible_at(mut self, visible_at: TransactionVisibility) -> Self {
+        self.visible_at = Some(visible_at);
+        self
+    }
+
     pub fn with_target_branch_name(mut self, target_branch_name: impl Into<String>) -> Self {
         self.target_branch_name = Some(target_branch_name.into());
         self
@@ -227,6 +235,10 @@ impl WriteContext {
 
     pub fn batch_id(&self) -> Option<BatchId> {
         self.batch_id
+    }
+
+    pub fn visible_at(&self) -> Option<TransactionVisibility> {
+        self.visible_at
     }
 
     pub fn target_branch_name(&self) -> Option<&str> {
@@ -320,6 +332,7 @@ mod tests {
             updated_at: None,
             batch_mode: None,
             batch_id: None,
+            visible_at: None,
             target_branch_name: None,
         };
 
