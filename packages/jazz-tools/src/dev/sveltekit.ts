@@ -1,4 +1,9 @@
 import { join, resolve } from "node:path";
+import {
+  createDevServerMigrationCreateHandler,
+  DEV_SERVER_MIGRATION_CREATE_PATH,
+  devServerMigrationRunnerScript,
+} from "./dev-server.js";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { ManagedDevRuntime, type ManagedRuntime } from "./managed-runtime.js";
 import { resolveJazzWasmEntry } from "./vite.js";
@@ -156,6 +161,15 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       return ensureInitialised(config.server, root).then(() => merged);
     },
 
+    transformIndexHtml(html: string, ctx?: { server?: unknown }) {
+      if (!ctx?.server || options.server === false) return html;
+      const script = devServerMigrationRunnerScript();
+      if (html.includes("</head>")) {
+        return html.replace("</head>", `${script}</head>`);
+      }
+      return `${script}${html}`;
+    },
+
     async configureServer(viteServer: ViteDevServer): Promise<void> {
       viteServerRef = viteServer;
       if (viteServer.config.command !== "serve" || options.server === false) return;
@@ -182,6 +196,16 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         viteServer.config.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL =
           resolvedRuntime.telemetryCollectorUrl;
       }
+
+      viteServer.middlewares?.use(
+        DEV_SERVER_MIGRATION_CREATE_PATH,
+        createDevServerMigrationCreateHandler({
+          serverUrl: resolvedRuntime.serverUrl,
+          appId: resolvedRuntime.appId,
+          adminSecret: resolvedRuntime.adminSecret,
+          schemaDir: options.schemaDir ?? join(viteServer.config.root, "src", "lib"),
+        }),
+      );
     },
   };
 }
