@@ -303,6 +303,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     ) -> Result<SealedBatchSubmission, RuntimeError> {
         let (target_branch_name, members) = Self::sealed_batch_members_from_record(record)?;
         let captured_frontier = if record.mode == BatchMode::Transactional {
+            // Compatibility payload only. The authority ignores this frontier
+            // for validation now; transactional conflicts are detected from the
+            // staged rows' parent frontiers. Remove this capture when the sealed
+            // batch storage/wire format can break compatibility.
             self.storage
                 .capture_family_visible_frontier(target_branch_name)
                 .map_err(|err| {
