@@ -2457,6 +2457,9 @@ fn encode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         .captured_frontier
         .iter()
         .map(|member| {
+            // Legacy compatibility payload: persisted for old sealed batch rows
+            // but ignored by transaction validation. Drop this column in the
+            // next compat-breaking storage format refactor.
             let branch_ord = storage.resolve_or_alloc_branch_ord(member.branch_name)?;
             Ok(Value::Row {
                 id: None,
@@ -2599,6 +2602,8 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         }
     };
 
+    // Decode the legacy compatibility payload so old sealed submissions keep
+    // round-tripping. It has no transaction validation semantics anymore.
     let captured_frontier = match captured_frontier {
         Value::Array(elements) => elements
             .iter()

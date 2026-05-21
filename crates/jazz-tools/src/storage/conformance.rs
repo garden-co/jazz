@@ -948,6 +948,8 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(92)),
             row_digest: Digest32([9; 32]),
         }],
+        // Compatibility payload only: storage must preserve it until the next
+        // format break, but transaction validation no longer reads it.
         vec![CapturedFrontierMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(93)),
             branch_name: crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"),
