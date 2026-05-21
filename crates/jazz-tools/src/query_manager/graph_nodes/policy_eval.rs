@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 use crate::object::ObjectId;
 use crate::query_manager::policy::{
@@ -89,6 +90,13 @@ impl<'a> PolicyContextEvaluator<'a> {
         crate::query_manager::policy_counters::increment(
             "row_access_eval",
             format!("table={} op={:?} depth={}", table_name, operation, depth),
+        );
+        crate::query_manager::policy_counters::increment(
+            "auth_row_identity",
+            format!(
+                "branch={} table={} id={} op={:?} depth={}",
+                self.branch, table_name, row.id, operation, depth
+            ),
         );
         let local_policy = local_policy_override
             .cloned()
@@ -542,6 +550,15 @@ impl<'a> PolicyContextEvaluator<'a> {
                 Some(expr) => expr,
                 None => return false,
             };
+        let bound_rel_fingerprint = fingerprint_relation(&bound_rel);
+
+        crate::query_manager::policy_counters::increment(
+            "exists_rel_identity",
+            format!(
+                "branch={} table={} row={} depth={} structural={} rel={:016x}",
+                self.branch, table_name, row.id, depth, structural_scans, bound_rel_fingerprint
+            ),
+        );
 
         let current_table = TableName::new(table_name);
         let mut graph = match PolicyGraph::for_exists_rel(
@@ -570,6 +587,15 @@ impl<'a> PolicyContextEvaluator<'a> {
 
         graph.result()
     }
+}
+
+fn fingerprint_relation(rel: &RelExpr) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match postcard::to_allocvec(rel) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => format!("{rel:?}").hash(&mut hasher),
+    }
+    hasher.finish()
 }
 
 fn referencing_edge_matches_target(

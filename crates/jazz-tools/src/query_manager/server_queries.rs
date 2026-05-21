@@ -402,7 +402,19 @@ impl QueryManager {
         .with_settlement_eval_cache(settlement_eval_cache);
         let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
         let mut visited = HashSet::new();
-        let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
+        let mut row_loader = |related_id: ObjectId, table_hint: Option<TableName>| {
+            crate::query_manager::policy_counters::increment(
+                "auth_storage_load_identity",
+                format!(
+                    "branch={} table_hint={} id={}",
+                    branch_name.as_str(),
+                    table_hint
+                        .as_ref()
+                        .map(TableName::as_str)
+                        .unwrap_or("<unknown>"),
+                    related_id
+                ),
+            );
             self.load_row_for_authorization_context(
                 storage,
                 related_id,

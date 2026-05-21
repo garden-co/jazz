@@ -77,10 +77,11 @@ fn print_report(counters: &PolicyCounters) {
             continue;
         };
         eprintln!(
-            "[jazz-policy-counters] bucket={} total={} unique={}",
+            "[jazz-policy-counters] bucket={} total={} unique={} repeated={}",
             bucket_name,
             bucket.total,
-            bucket.keys.len()
+            bucket.keys.len(),
+            bucket.total.saturating_sub(bucket.keys.len() as u64)
         );
 
         let mut top = bucket.keys.iter().collect::<Vec<_>>();
