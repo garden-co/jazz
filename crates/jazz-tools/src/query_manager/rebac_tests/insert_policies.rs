@@ -220,6 +220,63 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
 }
 
 #[test]
+fn local_insert_allowed_by_current_permissions_true_policy_with_structural_write_schema() {
+    let mut authorization_schema = Schema::new();
+    let notes_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]);
+    authorization_schema.insert(
+        TableName::new("notes"),
+        TableSchema::with_policies(
+            notes_descriptor,
+            TablePolicies::new().with_insert(PolicyExpr::True),
+        ),
+    );
+    let structural_schema: Schema = authorization_schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut structural = table_schema.clone();
+            structural.policies = TablePolicies::default();
+            (*table_name, structural)
+        })
+        .collect();
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, structural_schema);
+    qm.set_authorization_schema(authorization_schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    qm.insert_with_session(
+        &mut storage,
+        "notes",
+        &[Value::Text("A note".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("explicit True insert policy from current permissions should allow local write");
+}
+
+#[test]
+fn local_insert_stays_optimistic_while_current_permissions_are_pending() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("notes"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]).into(),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    qm.require_authorization_schema();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    qm.insert_with_session(
+        &mut storage,
+        "notes",
+        &[Value::Text("A note".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("local writes should stay optimistic until the authorization schema is loaded");
+}
+
+#[test]
 fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
     let schema = rebac_test_schema();
     let schema_hash = SchemaHash::compute(&schema);
