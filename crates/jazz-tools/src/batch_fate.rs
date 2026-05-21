@@ -37,6 +37,64 @@ impl BatchMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransactionVisibility {
+    #[serde(rename = "immediate")]
+    #[default]
+    Immediate,
+    #[serde(rename = "local")]
+    Local,
+    #[serde(rename = "edge")]
+    EdgeServer,
+    #[serde(rename = "global")]
+    GlobalServer,
+}
+
+impl TransactionVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::Local => "local",
+            Self::EdgeServer => "edge",
+            Self::GlobalServer => "global",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "immediate" => Ok(Self::Immediate),
+            "local" => Ok(Self::Local),
+            "edge" => Ok(Self::EdgeServer),
+            "global" => Ok(Self::GlobalServer),
+            other => Err(format!("unknown transaction visibility '{other}'")),
+        }
+    }
+
+    pub fn from_confirmed_tier(tier: DurabilityTier) -> Self {
+        match tier {
+            DurabilityTier::Local => Self::Local,
+            DurabilityTier::EdgeServer => Self::EdgeServer,
+            DurabilityTier::GlobalServer => Self::GlobalServer,
+        }
+    }
+
+    pub fn legacy_default_for_batch_mode(mode: BatchMode) -> Self {
+        match mode {
+            BatchMode::Direct => Self::Immediate,
+            BatchMode::Transactional => Self::Local,
+        }
+    }
+
+    pub fn is_satisfied_by(self, confirmed_tier: DurabilityTier) -> bool {
+        match self {
+            Self::Immediate => true,
+            Self::Local => confirmed_tier >= DurabilityTier::Local,
+            Self::EdgeServer => confirmed_tier >= DurabilityTier::EdgeServer,
+            Self::GlobalServer => confirmed_tier >= DurabilityTier::GlobalServer,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalBatchMember {
     pub object_id: ObjectId,
@@ -63,6 +121,8 @@ pub enum BatchFate {
     AcceptedTransaction {
         batch_id: BatchId,
         confirmed_tier: DurabilityTier,
+        #[serde(default)]
+        visible_at: TransactionVisibility,
     },
 }
 
@@ -104,6 +164,7 @@ impl BatchFate {
                 Self::AcceptedTransaction {
                     batch_id,
                     confirmed_tier: existing_tier,
+                    visible_at,
                     ..
                 },
                 Self::AcceptedTransaction {
@@ -113,19 +174,21 @@ impl BatchFate {
             ) => Self::AcceptedTransaction {
                 batch_id: *batch_id,
                 confirmed_tier: (*existing_tier).max(*incoming_tier),
+                visible_at: *visible_at,
             },
             _ => incoming.clone(),
         }
     }
 
     pub fn encode_storage_row(&self) -> Result<Vec<u8>, String> {
-        let (kind, code, reason, confirmed_tier, visible_members) = match self {
+        let (kind, code, reason, confirmed_tier, visible_members, visible_at) = match self {
             Self::Missing { .. } => (
                 "missing",
                 Value::Null,
                 Value::Null,
                 Value::Null,
                 Value::Array(Vec::new()),
+                Value::Null,
             ),
             Self::Rejected { code, reason, .. } => (
                 "rejected",
@@ -133,6 +196,7 @@ impl BatchFate {
                 Value::Text(reason.clone()),
                 Value::Null,
                 Value::Array(Vec::new()),
+                Value::Null,
             ),
             Self::DurableDirect { confirmed_tier, .. } => (
                 "durable_direct",
@@ -140,13 +204,19 @@ impl BatchFate {
                 Value::Null,
                 Value::Text(durability_tier_to_str(*confirmed_tier).to_string()),
                 Value::Array(Vec::new()),
+                Value::Null,
             ),
-            Self::AcceptedTransaction { confirmed_tier, .. } => (
+            Self::AcceptedTransaction {
+                confirmed_tier,
+                visible_at,
+                ..
+            } => (
                 "accepted_transaction",
                 Value::Null,
                 Value::Null,
                 Value::Text(durability_tier_to_str(*confirmed_tier).to_string()),
                 Value::Array(Vec::new()),
+                Value::Text(visible_at.as_str().to_string()),
             ),
         };
 
@@ -159,6 +229,7 @@ impl BatchFate {
                 reason,
                 confirmed_tier,
                 visible_members,
+                visible_at,
             ],
         )
         .map_err(|err| format!("encode batch fate row: {err}"))
@@ -166,7 +237,23 @@ impl BatchFate {
 
     pub fn decode_storage_row(bytes: &[u8]) -> Result<Self, String> {
         let values = decode_row(batch_fate_storage_descriptor(), bytes)
-            .map_err(|err| format!("decode batch fate row: {err}"))?;
+            .map_err(|err| format!("decode batch fate row: {err}"));
+        match values {
+            Ok(values) => Self::decode_storage_values(values.as_slice(), false),
+            Err(new_error) => {
+                let legacy_values = decode_row(legacy_batch_fate_storage_descriptor(), bytes)
+                    .map_err(|legacy_error| {
+                        format!(
+                            "decode batch fate row: {new_error}; legacy decode also failed: {legacy_error}"
+                        )
+                    })?;
+                Self::decode_storage_values(legacy_values.as_slice(), true)
+            }
+        }
+    }
+
+    fn decode_storage_values(values: &[Value], legacy: bool) -> Result<Self, String> {
+        let visible_at_value;
         let [
             kind,
             batch_id,
@@ -174,9 +261,49 @@ impl BatchFate {
             reason,
             confirmed_tier,
             _legacy_visible_members,
-        ] = values.as_slice()
-        else {
-            return Err("unexpected batch fate shape".to_string());
+        ] = if legacy {
+            let [
+                kind,
+                batch_id,
+                code,
+                reason,
+                confirmed_tier,
+                legacy_visible_members,
+            ] = values
+            else {
+                return Err("unexpected legacy batch fate shape".to_string());
+            };
+            visible_at_value = None;
+            [
+                kind,
+                batch_id,
+                code,
+                reason,
+                confirmed_tier,
+                legacy_visible_members,
+            ]
+        } else {
+            let [
+                kind,
+                batch_id,
+                code,
+                reason,
+                confirmed_tier,
+                legacy_visible_members,
+                visible_at,
+            ] = values
+            else {
+                return Err("unexpected batch fate shape".to_string());
+            };
+            visible_at_value = Some(visible_at);
+            [
+                kind,
+                batch_id,
+                code,
+                reason,
+                confirmed_tier,
+                legacy_visible_members,
+            ]
         };
 
         let kind = match kind {
@@ -206,6 +333,19 @@ impl BatchFate {
                 confirmed_tier: decode_nullable_durability_tier(confirmed_tier)?.ok_or_else(
                     || "accepted transaction fate missing confirmed tier".to_string(),
                 )?,
+                visible_at: {
+                    let confirmed_tier = decode_nullable_durability_tier(confirmed_tier)?
+                        .ok_or_else(|| {
+                            "accepted transaction fate missing confirmed tier".to_string()
+                        })?;
+                    match visible_at_value {
+                        Some(value) => decode_nullable_transaction_visibility(value)?
+                            .unwrap_or_else(|| {
+                                TransactionVisibility::from_confirmed_tier(confirmed_tier)
+                            }),
+                        None => TransactionVisibility::from_confirmed_tier(confirmed_tier),
+                    }
+                },
             }),
             other => Err(format!("unknown batch fate kind '{other}'")),
         }
@@ -220,6 +360,8 @@ pub struct LocalBatchRecord {
     pub members: Vec<LocalBatchMember>,
     pub sealed_submission: Option<SealedBatchSubmission>,
     pub latest_fate: Option<BatchFate>,
+    #[serde(default)]
+    pub visible_at: TransactionVisibility,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +375,8 @@ pub struct SealedBatchSubmission {
     // against this family-wide frontier; row write conflicts are detected from
     // each staged row's parents. Remove this in the next storage-format break.
     pub captured_frontier: Vec<CapturedFrontierMember>,
+    #[serde(default)]
+    pub visible_at: TransactionVisibility,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,9 +402,26 @@ impl LocalBatchRecord {
         sealed: bool,
         latest_fate: Option<BatchFate>,
     ) -> Self {
+        Self::new_with_visibility(
+            batch_id,
+            mode,
+            TransactionVisibility::legacy_default_for_batch_mode(mode),
+            sealed,
+            latest_fate,
+        )
+    }
+
+    pub fn new_with_visibility(
+        batch_id: BatchId,
+        mode: BatchMode,
+        visible_at: TransactionVisibility,
+        sealed: bool,
+        latest_fate: Option<BatchFate>,
+    ) -> Self {
         Self {
             batch_id,
             mode,
+            visible_at,
             sealed,
             members: Vec::new(),
             sealed_submission: None,
@@ -347,17 +508,20 @@ impl LocalBatchRecord {
             (
                 Some(BatchFate::AcceptedTransaction {
                     confirmed_tier: current_tier,
+                    visible_at,
                     ..
                 }),
                 BatchFate::AcceptedTransaction {
                     batch_id,
                     confirmed_tier,
+                    ..
                 },
             ) => {
                 if confirmed_tier >= *current_tier {
                     self.latest_fate = Some(BatchFate::AcceptedTransaction {
                         batch_id,
                         confirmed_tier,
+                        visible_at: *visible_at,
                     });
                 }
             }
@@ -387,6 +551,7 @@ impl LocalBatchRecord {
         let values = vec![
             Value::BatchId(*self.batch_id.as_bytes()),
             Value::Text(self.mode.as_str().to_string()),
+            Value::Text(self.visible_at.as_str().to_string()),
             Value::Boolean(self.sealed),
             Value::Array(
                 self.members
@@ -411,7 +576,20 @@ impl LocalBatchRecord {
 
     pub fn decode_storage_row(bytes: &[u8]) -> Result<Self, String> {
         let values = decode_row(&storage_descriptor(), bytes)
-            .map_err(|err| format!("decode batch row: {err}"))?;
+            .map_err(|err| format!("decode batch row: {err}"));
+        let (values, legacy) = match values {
+            Ok(values) => (values, false),
+            Err(new_error) => {
+                let legacy_values =
+                    decode_row(&legacy_storage_descriptor(), bytes).map_err(|legacy_error| {
+                        format!(
+                            "decode batch row: {new_error}; legacy decode also failed: {legacy_error}"
+                        )
+                    })?;
+                (legacy_values, true)
+            }
+        };
+        let visible_at_value;
         let [
             batch_id,
             mode,
@@ -419,15 +597,60 @@ impl LocalBatchRecord {
             members,
             sealed_submission,
             latest_fate,
-        ] = values.as_slice()
-        else {
-            return Err("unexpected local batch record shape".to_string());
+        ] = if legacy {
+            let [
+                batch_id,
+                mode,
+                sealed,
+                members,
+                sealed_submission,
+                latest_fate,
+            ] = values.as_slice()
+            else {
+                return Err("unexpected legacy local batch record shape".to_string());
+            };
+            visible_at_value = None;
+            [
+                batch_id,
+                mode,
+                sealed,
+                members,
+                sealed_submission,
+                latest_fate,
+            ]
+        } else {
+            let [
+                batch_id,
+                mode,
+                visible_at,
+                sealed,
+                members,
+                sealed_submission,
+                latest_fate,
+            ] = values.as_slice()
+            else {
+                return Err("unexpected local batch record shape".to_string());
+            };
+            visible_at_value = Some(visible_at);
+            [
+                batch_id,
+                mode,
+                sealed,
+                members,
+                sealed_submission,
+                latest_fate,
+            ]
         };
 
         let batch_id = decode_batch_id_value(batch_id, "decode batch id")?;
         let mode = match mode {
             Value::Text(raw) => BatchMode::parse(raw)?,
             other => return Err(format!("expected batch mode text, got {other:?}")),
+        };
+        let visible_at = match visible_at_value {
+            Some(value) => decode_nullable_transaction_visibility(value)?
+                .unwrap_or_else(|| TransactionVisibility::legacy_default_for_batch_mode(mode)),
+            None => TransactionVisibility::legacy_default_for_batch_mode(mode),
         };
         let sealed = match sealed {
             Value::Boolean(value) => *value,
@@ -546,6 +769,7 @@ impl LocalBatchRecord {
         Ok(Self {
             batch_id,
             mode,
+            visible_at,
             sealed,
             members,
             sealed_submission,
@@ -555,9 +779,25 @@ impl LocalBatchRecord {
 }
 
 impl SealedBatchSubmission {
-    pub fn compute_batch_digest(members: &[SealedBatchMember]) -> Digest32 {
+    pub fn compute_legacy_batch_digest(members: &[SealedBatchMember]) -> Digest32 {
         let mut hasher = Hasher::new();
         hasher.update(b"sealed-batch-manifest-v1");
+        hasher.update(&(members.len() as u64).to_le_bytes());
+        for member in members {
+            hasher.update(member.object_id.uuid().as_bytes());
+            hasher.update(&member.row_digest.0);
+        }
+        Digest32(*hasher.finalize().as_bytes())
+    }
+
+    pub fn compute_batch_digest(
+        visible_at: TransactionVisibility,
+        members: &[SealedBatchMember],
+    ) -> Digest32 {
+        let mut hasher = Hasher::new();
+        hasher.update(b"sealed-batch-manifest-v2");
+        hasher.update(visible_at.as_str().as_bytes());
+        hasher.update(&[0]);
         hasher.update(&(members.len() as u64).to_le_bytes());
         for member in members {
             hasher.update(member.object_id.uuid().as_bytes());
@@ -570,6 +810,24 @@ impl SealedBatchSubmission {
         batch_id: BatchId,
         mode: BatchMode,
         target_branch_name: BranchName,
+        members: Vec<SealedBatchMember>,
+        captured_frontier: Vec<CapturedFrontierMember>,
+    ) -> Self {
+        Self::new_with_visibility(
+            batch_id,
+            mode,
+            TransactionVisibility::legacy_default_for_batch_mode(mode),
+            target_branch_name,
+            members,
+            captured_frontier,
+        )
+    }
+
+    pub fn new_with_visibility(
+        batch_id: BatchId,
+        mode: BatchMode,
+        visible_at: TransactionVisibility,
+        target_branch_name: BranchName,
         mut members: Vec<SealedBatchMember>,
         mut captured_frontier: Vec<CapturedFrontierMember>,
     ) -> Self {
@@ -581,7 +839,7 @@ impl SealedBatchSubmission {
                 .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
         });
         members.dedup();
-        let batch_digest = Self::compute_batch_digest(&members);
+        let batch_digest = Self::compute_batch_digest(visible_at, &members);
         // Preserve deterministic storage/wire round-trips for compatibility
         // payload that is no longer used for transaction validation.
         captured_frontier.sort_by(|left, right| {
@@ -596,6 +854,7 @@ impl SealedBatchSubmission {
         Self {
             batch_id,
             mode,
+            visible_at,
             target_branch_name,
             batch_digest,
             members,
@@ -607,6 +866,7 @@ impl SealedBatchSubmission {
         let values = vec![
             Value::Bytea(self.batch_id.as_bytes().to_vec()),
             Value::Text(self.mode.as_str().to_string()),
+            Value::Text(self.visible_at.as_str().to_string()),
             Value::Text(self.target_branch_name.as_str().to_string()),
             Value::Bytea(self.batch_digest.0.to_vec()),
             Value::Array(
@@ -641,7 +901,24 @@ impl SealedBatchSubmission {
 
     pub fn decode_storage_row(bytes: &[u8]) -> Result<Self, String> {
         let values = decode_row(&sealed_batch_submission_storage_descriptor(), bytes)
-            .map_err(|err| format!("decode sealed batch submission row: {err}"))?;
+            .map_err(|err| format!("decode sealed batch submission row: {err}"));
+        match values {
+            Ok(values) => Self::decode_storage_values(values.as_slice(), false),
+            Err(new_error) => {
+                let legacy_values =
+                    decode_row(&legacy_sealed_batch_submission_storage_descriptor(), bytes)
+                        .map_err(|legacy_error| {
+                            format!(
+                                "decode sealed batch submission row: {new_error}; legacy decode also failed: {legacy_error}"
+                            )
+                        })?;
+                Self::decode_storage_values(legacy_values.as_slice(), true)
+            }
+        }
+    }
+
+    fn decode_storage_values(values: &[Value], legacy: bool) -> Result<Self, String> {
+        let visible_at_value;
         let [
             batch_id,
             mode,
@@ -649,15 +926,60 @@ impl SealedBatchSubmission {
             batch_digest,
             members,
             captured_frontier,
-        ] = values.as_slice()
-        else {
-            return Err("unexpected sealed batch submission shape".to_string());
+        ] = if legacy {
+            let [
+                batch_id,
+                mode,
+                target_branch_name,
+                batch_digest,
+                members,
+                captured_frontier,
+            ] = values
+            else {
+                return Err("unexpected legacy sealed batch submission shape".to_string());
+            };
+            visible_at_value = None;
+            [
+                batch_id,
+                mode,
+                target_branch_name,
+                batch_digest,
+                members,
+                captured_frontier,
+            ]
+        } else {
+            let [
+                batch_id,
+                mode,
+                visible_at,
+                target_branch_name,
+                batch_digest,
+                members,
+                captured_frontier,
+            ] = values
+            else {
+                return Err("unexpected sealed batch submission shape".to_string());
+            };
+            visible_at_value = Some(visible_at);
+            [
+                batch_id,
+                mode,
+                target_branch_name,
+                batch_digest,
+                members,
+                captured_frontier,
+            ]
         };
 
         let batch_id = decode_batch_id_value(batch_id, "decode sealed batch submission batch id")?;
         let mode = match mode {
             Value::Text(raw) => BatchMode::parse(raw)?,
             other => return Err(format!("expected sealed batch mode text, got {other:?}")),
+        };
+        let visible_at = match visible_at_value {
+            Some(value) => decode_nullable_transaction_visibility(value)?
+                .unwrap_or(TransactionVisibility::Immediate),
+            None => TransactionVisibility::legacy_default_for_batch_mode(mode),
         };
         let target_branch_name = match target_branch_name {
             Value::Text(raw) => BranchName::new(raw),
@@ -765,19 +1087,22 @@ impl SealedBatchSubmission {
             other => return Err(format!("expected captured frontier array, got {other:?}")),
         };
 
-        let submission = Self::new(
+        let mut submission = Self::new_with_visibility(
             batch_id,
             mode,
+            visible_at,
             target_branch_name,
             members,
             captured_frontier,
         );
-        if submission.batch_digest != batch_digest {
+        let legacy_batch_digest = Self::compute_legacy_batch_digest(&submission.members);
+        if submission.batch_digest != batch_digest && legacy_batch_digest != batch_digest {
             return Err(format!(
                 "sealed batch submission batch digest mismatch: expected {batch_digest:?}, computed {:?}",
                 submission.batch_digest
             ));
         }
+        submission.batch_digest = batch_digest;
         Ok(submission)
     }
 }
@@ -831,7 +1156,59 @@ fn decode_nullable_durability_tier(value: &Value) -> Result<Option<DurabilityTie
     }
 }
 
+fn decode_nullable_transaction_visibility(
+    value: &Value,
+) -> Result<Option<TransactionVisibility>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(raw) => TransactionVisibility::parse(raw).map(Some),
+        other => Err(format!(
+            "expected transaction visibility text or null, got {other:?}"
+        )),
+    }
+}
+
 fn storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+        ColumnDescriptor::new(
+            "mode",
+            ColumnType::Enum {
+                variants: vec!["direct".to_string(), "transactional".to_string()],
+            },
+        ),
+        ColumnDescriptor::new(
+            "visible_at",
+            ColumnType::Enum {
+                variants: vec![
+                    "immediate".to_string(),
+                    "local".to_string(),
+                    "edge".to_string(),
+                    "global".to_string(),
+                ],
+            },
+        ),
+        ColumnDescriptor::new("sealed", ColumnType::Boolean),
+        ColumnDescriptor::new(
+            "members",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("table_name", ColumnType::Text),
+                        ColumnDescriptor::new("branch_name", ColumnType::Text),
+                        ColumnDescriptor::new("schema_hash", ColumnType::Bytea),
+                        ColumnDescriptor::new("row_digest", ColumnType::Bytea),
+                    ])),
+                }),
+            },
+        ),
+        ColumnDescriptor::new("sealed_submission", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("latest_fate", ColumnType::Bytea).nullable(),
+    ])
+}
+
+fn legacy_storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::BatchId),
         ColumnDescriptor::new(
@@ -861,6 +1238,49 @@ fn storage_descriptor() -> RowDescriptor {
 }
 
 fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+        ColumnDescriptor::new("mode", ColumnType::Text),
+        ColumnDescriptor::new(
+            "visible_at",
+            ColumnType::Enum {
+                variants: vec![
+                    "immediate".to_string(),
+                    "local".to_string(),
+                    "edge".to_string(),
+                    "global".to_string(),
+                ],
+            },
+        ),
+        ColumnDescriptor::new("target_branch_name", ColumnType::Text),
+        ColumnDescriptor::new("batch_digest", ColumnType::Bytea),
+        ColumnDescriptor::new(
+            "members",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("row_digest", ColumnType::Bytea),
+                    ])),
+                }),
+            },
+        ),
+        ColumnDescriptor::new(
+            "captured_frontier",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("branch_name", ColumnType::Text),
+                        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+                    ])),
+                }),
+            },
+        ),
+    ])
+}
+
+fn legacy_sealed_batch_submission_storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::BatchId),
         ColumnDescriptor::new("mode", ColumnType::Text),
@@ -932,6 +1352,62 @@ fn batch_fate_storage_descriptor() -> &'static RowDescriptor {
                     }),
                 },
             ),
+            ColumnDescriptor::new(
+                "visible_at",
+                ColumnType::Enum {
+                    variants: vec![
+                        "immediate".to_string(),
+                        "local".to_string(),
+                        "edge".to_string(),
+                        "global".to_string(),
+                    ],
+                },
+            )
+            .nullable(),
+        ])
+    })
+}
+
+fn legacy_batch_fate_storage_descriptor() -> &'static RowDescriptor {
+    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new(
+                "kind",
+                ColumnType::Enum {
+                    variants: vec![
+                        "missing".to_string(),
+                        "rejected".to_string(),
+                        "durable_direct".to_string(),
+                        "accepted_transaction".to_string(),
+                    ],
+                },
+            ),
+            ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+            ColumnDescriptor::new("code", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("reason", ColumnType::Text).nullable(),
+            ColumnDescriptor::new(
+                "confirmed_tier",
+                ColumnType::Enum {
+                    variants: vec![
+                        "local".to_string(),
+                        "edge".to_string(),
+                        "global".to_string(),
+                    ],
+                },
+            )
+            .nullable(),
+            ColumnDescriptor::new(
+                "visible_members",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Row {
+                        columns: Box::new(RowDescriptor::new(vec![
+                            ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                            ColumnDescriptor::new("branch_name", ColumnType::Text),
+                        ])),
+                    }),
+                },
+            ),
         ])
     })
 }
@@ -943,13 +1419,15 @@ mod tests {
     #[test]
     fn local_batch_record_storage_row_roundtrips() {
         let batch_id = BatchId::new();
-        let mut record = LocalBatchRecord::new(
+        let mut record = LocalBatchRecord::new_with_visibility(
             batch_id,
-            BatchMode::Direct,
+            BatchMode::Transactional,
+            TransactionVisibility::GlobalServer,
             true,
-            Some(BatchFate::DurableDirect {
+            Some(BatchFate::AcceptedTransaction {
                 batch_id,
-                confirmed_tier: DurabilityTier::Local,
+                confirmed_tier: DurabilityTier::EdgeServer,
+                visible_at: TransactionVisibility::GlobalServer,
             }),
         );
         record.upsert_member(LocalBatchMember {
@@ -964,6 +1442,27 @@ mod tests {
         let decoded = LocalBatchRecord::decode_storage_row(&bytes).expect("decode record");
 
         assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn local_batch_record_legacy_storage_row_defaults_visibility_from_mode() {
+        let batch_id = BatchId::new();
+        let bytes = encode_row(
+            &legacy_storage_descriptor(),
+            &[
+                Value::BatchId(*batch_id.as_bytes()),
+                Value::Text("transactional".to_string()),
+                Value::Boolean(false),
+                Value::Array(Vec::new()),
+                Value::Null,
+                Value::Null,
+            ],
+        )
+        .expect("encode legacy record");
+
+        let decoded = LocalBatchRecord::decode_storage_row(&bytes).expect("decode legacy record");
+
+        assert_eq!(decoded.visible_at, TransactionVisibility::Local);
     }
 
     #[test]
@@ -1065,10 +1564,12 @@ mod tests {
         let current = BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Local,
         };
         let incoming = BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
+            visible_at: TransactionVisibility::Local,
         };
 
         assert_eq!(
@@ -1076,6 +1577,50 @@ mod tests {
             BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier: DurabilityTier::GlobalServer,
+                visible_at: TransactionVisibility::Local,
+            }
+        );
+    }
+
+    #[test]
+    fn accepted_transaction_fate_storage_row_roundtrips_visible_at() {
+        let batch_id = BatchId::new();
+        let fate = BatchFate::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::EdgeServer,
+            visible_at: TransactionVisibility::GlobalServer,
+        };
+
+        let bytes = fate.encode_storage_row().expect("encode fate");
+        let decoded = BatchFate::decode_storage_row(&bytes).expect("decode fate");
+
+        assert_eq!(decoded, fate);
+    }
+
+    #[test]
+    fn accepted_transaction_legacy_storage_row_defaults_visible_at_to_confirmed_tier() {
+        let batch_id = BatchId::new();
+        let bytes = encode_row(
+            legacy_batch_fate_storage_descriptor(),
+            &[
+                Value::Text("accepted_transaction".to_string()),
+                Value::BatchId(*batch_id.as_bytes()),
+                Value::Null,
+                Value::Null,
+                Value::Text("edge".to_string()),
+                Value::Array(Vec::new()),
+            ],
+        )
+        .expect("encode legacy fate");
+
+        let decoded = BatchFate::decode_storage_row(&bytes).expect("decode legacy fate");
+
+        assert_eq!(
+            decoded,
+            BatchFate::AcceptedTransaction {
+                batch_id,
+                confirmed_tier: DurabilityTier::EdgeServer,
+                visible_at: TransactionVisibility::EdgeServer,
             }
         );
     }
@@ -1112,9 +1657,10 @@ mod tests {
         let batch_id = BatchId::new();
         let object_id = ObjectId::new();
         let row_digest = Digest32([7; 32]);
-        let submission = SealedBatchSubmission::new(
+        let submission = SealedBatchSubmission::new_with_visibility(
             batch_id,
             BatchMode::Direct,
+            TransactionVisibility::Immediate,
             BranchName::new("main"),
             vec![
                 SealedBatchMember {
@@ -1144,6 +1690,7 @@ mod tests {
             SealedBatchSubmission {
                 batch_id,
                 mode: BatchMode::Direct,
+                visible_at: TransactionVisibility::Immediate,
                 target_branch_name: BranchName::new("main"),
                 batch_digest: submission.batch_digest,
                 members: vec![SealedBatchMember {
@@ -1157,6 +1704,70 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn sealed_batch_submission_legacy_storage_row_defaults_transactional_visible_at_to_local() {
+        let batch_id = BatchId::new();
+        let object_id = ObjectId::from_uuid(uuid::Uuid::from_u128(701));
+        let row_digest = Digest32([7; 32]);
+        let members = vec![SealedBatchMember {
+            object_id,
+            row_digest,
+        }];
+        let legacy_digest = SealedBatchSubmission::compute_legacy_batch_digest(&members);
+        let bytes = encode_row(
+            &legacy_sealed_batch_submission_storage_descriptor(),
+            &[
+                Value::BatchId(*batch_id.as_bytes()),
+                Value::Text("transactional".to_string()),
+                Value::Text("main".to_string()),
+                Value::Bytea(legacy_digest.0.to_vec()),
+                Value::Array(vec![Value::Row {
+                    id: None,
+                    values: vec![
+                        Value::Bytea(object_id.uuid().as_bytes().to_vec()),
+                        Value::Bytea(row_digest.0.to_vec()),
+                    ],
+                }]),
+                Value::Array(Vec::new()),
+            ],
+        )
+        .expect("encode legacy sealed submission");
+
+        let decoded =
+            SealedBatchSubmission::decode_storage_row(&bytes).expect("decode legacy submission");
+
+        assert_eq!(decoded.visible_at, TransactionVisibility::Local);
+        assert_eq!(decoded.batch_digest, legacy_digest);
+    }
+
+    #[test]
+    fn sealed_batch_submission_digest_includes_visible_at() {
+        let batch_id = BatchId::new();
+        let object_id = ObjectId::from_uuid(uuid::Uuid::from_u128(702));
+        let members = vec![SealedBatchMember {
+            object_id,
+            row_digest: Digest32([7; 32]),
+        }];
+        let immediate = SealedBatchSubmission::new_with_visibility(
+            batch_id,
+            BatchMode::Transactional,
+            TransactionVisibility::Immediate,
+            BranchName::new("main"),
+            members.clone(),
+            Vec::new(),
+        );
+        let global = SealedBatchSubmission::new_with_visibility(
+            batch_id,
+            BatchMode::Transactional,
+            TransactionVisibility::GlobalServer,
+            BranchName::new("main"),
+            members,
+            Vec::new(),
+        );
+
+        assert_ne!(immediate.batch_digest, global.batch_digest);
     }
 
     #[test]

@@ -3056,6 +3056,7 @@ mod tests {
         let settlement = BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::EdgeServer,
+            visible_at: TransactionVisibility::Immediate,
         };
         record.apply_fate(settlement.clone());
 
