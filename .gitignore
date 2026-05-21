@@ -9,7 +9,7 @@ dist/
 # Build artifacts
 *.tsbuildinfo
 .svelte-kit/
-examples/nextjs-csr-ssr/next-env.d.ts
+**/next-env.d.ts
 
 # IDE
 .idea/
