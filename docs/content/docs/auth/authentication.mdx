@@ -76,7 +76,7 @@ If your provider doesn't provide a stable ID in `sub` by default, either configu
 or remint the token through your own JWT layer that rewrites `sub`.
 
 <Callout type="info">
-  Policies are enforced based on the `sub` claim, If you ever change what you use for `sub` in your
+  Policies are enforced based on the `sub` claim. If you ever change what you use for `sub` in your
   application, Jazz will consider this to be a different user, which may lead to unintended
   consequences when enforcing policies.
 </Callout>
