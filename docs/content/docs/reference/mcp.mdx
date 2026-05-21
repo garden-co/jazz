@@ -11,9 +11,9 @@ The docs served are always matched to the version of `jazz-tools` you install, s
 assistant is reading documentation for the exact API you have available. To use a different
 version's docs, specify a version tag instead (e.g. `pnpm dlx jazz-tools@2.0.0 mcp`).
 
-<Callout type="info">
-  Node 22.13 or later is recommended for the best search results. Earlier versions fall back to
-  basic keyword search.
+<Callout type="warn">
+  Node.js 22.12 or later is required. Older runtimes (and any runtime without `node:sqlite`) fall
+  back to a basic keyword search that is deprecated and will be removed in a future release.
 </Callout>
 
 ## Installation
