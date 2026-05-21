@@ -229,6 +229,9 @@ pub struct SealedBatchSubmission {
     pub target_branch_name: BranchName,
     pub batch_digest: Digest32,
     pub members: Vec<SealedBatchMember>,
+    // Compatibility payload only. Authorities no longer validate transactions
+    // against this family-wide frontier; row write conflicts are detected from
+    // each staged row's parents. Remove this in the next storage-format break.
     pub captured_frontier: Vec<CapturedFrontierMember>,
 }
 
@@ -240,6 +243,9 @@ pub struct SealedBatchMember {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapturedFrontierMember {
+    // See `SealedBatchSubmission::captured_frontier`: this is preserved only so
+    // older persisted submissions can round-trip until a compat-breaking format
+    // refactor removes the field.
     pub object_id: ObjectId,
     pub branch_name: BranchName,
     pub batch_id: BatchId,
@@ -576,6 +582,8 @@ impl SealedBatchSubmission {
         });
         members.dedup();
         let batch_digest = Self::compute_batch_digest(&members);
+        // Preserve deterministic storage/wire round-trips for compatibility
+        // payload that is no longer used for transaction validation.
         captured_frontier.sort_by(|left, right| {
             left.object_id
                 .uuid()
@@ -1099,6 +1107,8 @@ mod tests {
 
     #[test]
     fn sealed_batch_submission_storage_row_roundtrips() {
+        // `captured_frontier` is still round-tripped for storage compatibility,
+        // but it is intentionally inert for transaction validation.
         let batch_id = BatchId::new();
         let object_id = ObjectId::new();
         let row_digest = Digest32([7; 32]);

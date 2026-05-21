@@ -1137,6 +1137,9 @@ pub trait Storage {
         &self,
         target_branch_name: BranchName,
     ) -> Result<Vec<CapturedFrontierMember>, StorageError> {
+        // Compatibility helper for the legacy `captured_frontier` field on
+        // sealed submissions. This is no longer part of transaction conflict
+        // validation; remove it with the next storage-format break.
         let mut frontier = Vec::new();
         let visible_tables = scan_row_raw_table_headers_with_storage(self)?
             .into_iter()
