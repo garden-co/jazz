@@ -16,7 +16,7 @@ use crate::sync_manager::{
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
 use super::policy::{Operation, PolicyExpr};
 use super::session::Session;
-use super::settlement_eval_cache::{AuthRowLoadKey, SettlementEvalCache};
+use super::settlement_eval_cache::SettlementEvalCache;
 use super::types::{
     ComposedBranchName, LoadedRow, Row, Schema, SchemaHash, TableName, TableSchema,
 };
@@ -392,10 +392,6 @@ impl QueryManager {
             return false;
         };
 
-        let auth_row_load_cache = settlement_eval_cache
-            .as_ref()
-            .map(|cache| cache.auth_row_load_cache());
-
         let mut evaluator = PolicyContextEvaluator::new(
             auth_schema,
             session,
@@ -407,28 +403,6 @@ impl QueryManager {
         let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId, table_hint: Option<TableName>| {
-            let cache_key = auth_row_load_cache.as_ref().map(|_| AuthRowLoadKey {
-                branch: branch_name.as_str().to_string(),
-                auth_schema_hash: auth_context.current_hash,
-                id: related_id,
-            });
-            if let (Some(cache), Some(key)) = (&auth_row_load_cache, cache_key.as_ref())
-                && let Some(cached) = cache.borrow().get(key).cloned()
-            {
-                crate::query_manager::policy_counters::increment(
-                    "auth_storage_load_cache",
-                    format!(
-                        "hit branch={} table_hint={}",
-                        branch_name.as_str(),
-                        table_hint
-                            .as_ref()
-                            .map(TableName::as_str)
-                            .unwrap_or("<unknown>")
-                    ),
-                );
-                return cached;
-            }
-
             crate::query_manager::policy_counters::increment(
                 "auth_storage_load_identity",
                 format!(
@@ -441,28 +415,13 @@ impl QueryManager {
                     related_id
                 ),
             );
-            crate::query_manager::policy_counters::increment(
-                "auth_storage_load_cache",
-                format!(
-                    "miss branch={} table_hint={}",
-                    branch_name.as_str(),
-                    table_hint
-                        .as_ref()
-                        .map(TableName::as_str)
-                        .unwrap_or("<unknown>")
-                ),
-            );
-            let loaded = self.load_row_for_authorization_context(
+            self.load_row_for_authorization_context(
                 storage,
                 related_id,
                 branch_name,
                 source_branch_schema_map,
                 auth_context,
-            );
-            if let (Some(cache), Some(key)) = (&auth_row_load_cache, cache_key) {
-                cache.borrow_mut().insert(key, loaded.clone());
-            }
-            loaded
+            )
         };
 
         evaluator.evaluate_row_access(
