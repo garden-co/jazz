@@ -859,6 +859,9 @@ impl Storage for MemoryStorage {
         &self,
         target_branch_name: BranchName,
     ) -> Result<Vec<CapturedFrontierMember>, StorageError> {
+        // Compatibility helper for the legacy `captured_frontier` field on
+        // sealed submissions. This is no longer part of transaction conflict
+        // validation; remove it with the next storage-format break.
         let family_branches: BTreeSet<_> = self
             .row_histories
             .values()
@@ -2102,6 +2105,8 @@ mod tests {
 
     #[test]
     fn capture_family_visible_frontier_reads_synced_branches_without_branch_ords() {
+        // Compatibility coverage for the legacy captured frontier payload. The
+        // captured values are no longer consulted when validating transactions.
         use crate::row_histories::VisibleRowEntry;
 
         let mut storage = CountingCatalogueLoadsStorage::new();

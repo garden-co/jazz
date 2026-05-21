@@ -74,14 +74,6 @@ impl SyncManager {
         Ok(submission.target_branch_name)
     }
 
-    fn frontier_conflict_fate(&self, batch_id: crate::row_histories::BatchId) -> BatchFate {
-        BatchFate::Rejected {
-            batch_id,
-            code: "transaction_conflict".to_string(),
-            reason: "family-visible frontier changed since batch was sealed".to_string(),
-        }
-    }
-
     fn validate_batch_rows_target_branch(
         &self,
         submission: &SealedBatchSubmission,
@@ -138,25 +130,6 @@ impl SyncManager {
         }
 
         Ok(mode)
-    }
-
-    fn validate_captured_frontier<H: Storage>(
-        &self,
-        storage: &H,
-        submission: &SealedBatchSubmission,
-    ) -> Result<(), BatchFate> {
-        let current_frontier = storage
-            .capture_family_visible_frontier(submission.target_branch_name)
-            .map_err(|error| BatchFate::Rejected {
-                batch_id: submission.batch_id,
-                code: "invalid_batch_submission".to_string(),
-                reason: format!("failed to capture family-visible frontier: {error}"),
-            })?;
-        if current_frontier != submission.captured_frontier {
-            return Err(self.frontier_conflict_fate(submission.batch_id));
-        }
-
-        Ok(())
     }
 
     fn parent_frontier_conflict_fate(&self, batch_id: crate::row_histories::BatchId) -> BatchFate {
@@ -1061,17 +1034,6 @@ impl SyncManager {
             }
         };
         if mode == SealedBatchMode::Transactional
-            && let Err(rejection) = self.validate_captured_frontier(storage, &submission)
-        {
-            self.reject_sealed_transactional_batch(
-                storage,
-                Some(client_id),
-                rejection,
-                &batch_rows,
-            );
-            return;
-        }
-        if mode == SealedBatchMode::Transactional
             && let Err(rejection) =
                 self.validate_transactional_parent_frontiers(storage, &submission, &declared_rows)
         {
@@ -1145,13 +1107,6 @@ impl SyncManager {
                     continue;
                 }
             };
-            if mode == SealedBatchMode::Transactional
-                && let Err(rejection) = self.validate_captured_frontier(storage, &submission)
-            {
-                self.reject_sealed_transactional_batch(storage, None, rejection, &batch_rows);
-                recovered_any = true;
-                continue;
-            }
             if mode == SealedBatchMode::Transactional
                 && let Err(rejection) = self.validate_transactional_parent_frontiers(
                     storage,
