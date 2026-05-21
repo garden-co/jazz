@@ -12,6 +12,7 @@ use crate::query_manager::settlement_eval_cache::{RefAccessSubexprKey, Settlemen
 use crate::query_manager::types::{
     ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Value,
 };
+use crate::schema_manager::SchemaContext;
 use crate::storage::Storage;
 
 use super::super::encoding::{column_is_null, decode_column};
@@ -22,6 +23,7 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     branch: &'a str,
     row_policy_mode: RowPolicyMode,
     settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
+    schema_context: Option<&'a SchemaContext>,
     structural_exists_rel_scans: bool,
 }
 
@@ -38,6 +40,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             branch,
             row_policy_mode,
             settlement_eval_cache: None,
+            schema_context: None,
             structural_exists_rel_scans: false,
         }
     }
@@ -47,6 +50,11 @@ impl<'a> PolicyContextEvaluator<'a> {
         settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
     ) -> Self {
         self.settlement_eval_cache = settlement_eval_cache;
+        self
+    }
+
+    pub(crate) fn with_schema_context(mut self, schema_context: Option<&'a SchemaContext>) -> Self {
+        self.schema_context = schema_context;
         self
     }
 
@@ -494,6 +502,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.branch,
             operation,
             self.row_policy_mode,
+            self.schema_context,
         ) {
             Some(g) => g,
             None => return false,
@@ -543,6 +552,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.row_policy_mode,
             Some(&current_table),
             structural_scans,
+            self.schema_context,
         ) {
             Some(g) => g,
             None => return false,

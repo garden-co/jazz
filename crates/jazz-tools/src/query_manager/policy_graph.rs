@@ -3,7 +3,7 @@
 //! Creates minimal query graphs to evaluate policy conditions like USING and INHERITS.
 //! These graphs are throwaway - created, settled until complete, then discarded.
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 
 use crate::storage::Storage;
 
@@ -43,6 +43,7 @@ pub(crate) struct PolicyGraphBuildOptions<'a> {
     branch: &'a str,
     initial_depth: usize,
     row_policy_mode: RowPolicyMode,
+    schema_context: Option<&'a SchemaContext>,
 }
 
 impl<'a> PolicyGraphBuildOptions<'a> {
@@ -51,7 +52,18 @@ impl<'a> PolicyGraphBuildOptions<'a> {
             branch,
             initial_depth: 0,
             row_policy_mode,
+            schema_context: None,
         }
+    }
+}
+
+fn add_schema_context(
+    options: PolicyFilterOptions,
+    schema_context: Option<&SchemaContext>,
+) -> PolicyFilterOptions {
+    match schema_context {
+        Some(schema_context) => options.with_schema_context(schema_context),
+        None => options,
     }
 }
 
@@ -153,10 +165,13 @@ impl PolicyGraph {
             session.clone(),
             schema.clone(),
             table.as_str(),
-            PolicyFilterOptions::for_branch(options.branch)
-                .with_initial_depth(options.initial_depth)
-                .with_row_policy_mode(options.row_policy_mode)
-                .with_structural_exists_rel_scans(false),
+            add_schema_context(
+                PolicyFilterOptions::for_branch(options.branch)
+                    .with_initial_depth(options.initial_depth)
+                    .with_row_policy_mode(options.row_policy_mode)
+                    .with_structural_exists_rel_scans(false),
+                options.schema_context,
+            ),
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -180,6 +195,7 @@ impl PolicyGraph {
     /// Graph structure: IndexScan(All) → Materialize → PolicyFilter → ExistsOutput
     ///
     /// Returns None if the table is not in the schema.
+    #[allow(clippy::too_many_arguments)]
     pub fn for_exists(
         table: &TableName,
         condition: &PolicyExpr,
@@ -188,6 +204,7 @@ impl PolicyGraph {
         branch: &str,
         policy_operation: Operation,
         row_policy_mode: RowPolicyMode,
+        schema_context: Option<&SchemaContext>,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.columns.clone();
@@ -221,10 +238,13 @@ impl PolicyGraph {
             session.clone(),
             schema.clone(),
             table.as_str(),
-            PolicyFilterOptions::for_branch(branch)
-                .with_row_policy_mode(row_policy_mode)
-                .with_policy_operation(policy_operation)
-                .with_structural_exists_rel_scans(false),
+            add_schema_context(
+                PolicyFilterOptions::for_branch(branch)
+                    .with_row_policy_mode(row_policy_mode)
+                    .with_policy_operation(policy_operation)
+                    .with_structural_exists_rel_scans(false),
+                schema_context,
+            ),
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -247,6 +267,7 @@ impl PolicyGraph {
     ///
     /// Compiles relation IR through the shared query planner, then appends an
     /// ExistsOutput node over the compiled query output.
+    #[allow(clippy::too_many_arguments)]
     pub fn for_exists_rel(
         rel: &RelExpr,
         schema: &Schema,
@@ -255,6 +276,7 @@ impl PolicyGraph {
         row_policy_mode: RowPolicyMode,
         current_table: Option<&TableName>,
         structural_scans: bool,
+        schema_context: Option<&SchemaContext>,
     ) -> Option<Self> {
         let use_structural_rows = structural_scans
             || current_table
@@ -280,13 +302,23 @@ impl PolicyGraph {
             schema.clone()
         };
         let branches = vec![branch.to_string()];
-        let schema_context = SchemaContext::with_defaults(compile_schema.clone(), "main");
+        let fallback_context;
+        let schema_context = match schema_context {
+            Some(context) => context,
+            None => {
+                fallback_context = SchemaContext::with_branch_name(
+                    compile_schema.clone(),
+                    &BranchName::new(branch),
+                );
+                &fallback_context
+            }
+        };
         let mut graph = QueryGraph::compile_relation_ir_with_schema_context_and_features(
             rel,
             &compile_schema,
             &branches,
             session,
-            &schema_context,
+            schema_context,
             RelationCompileFeatures::default(),
             if use_structural_rows {
                 RowPolicyMode::PermissiveLocal
@@ -539,6 +571,7 @@ mod tests {
             RowPolicyMode::PermissiveLocal,
             None,
             false,
+            None,
         );
         assert!(graph.is_some(), "exists-rel graph should compile");
 
@@ -578,6 +611,7 @@ mod tests {
             RowPolicyMode::Enforcing,
             Some(&current_table),
             false,
+            None,
         )
         .expect("exists-rel graph");
 
@@ -614,6 +648,7 @@ mod tests {
             RowPolicyMode::Enforcing,
             Some(&current_table),
             false,
+            None,
         )
         .expect("exists-rel graph");
 
@@ -650,6 +685,7 @@ mod tests {
             RowPolicyMode::Enforcing,
             Some(&current_table),
             true,
+            None,
         )
         .expect("exists-rel graph");
 
@@ -777,6 +813,7 @@ mod tests {
             RowPolicyMode::Enforcing,
             Some(&current_table),
             false,
+            None,
         );
         assert!(
             graph.is_some(),

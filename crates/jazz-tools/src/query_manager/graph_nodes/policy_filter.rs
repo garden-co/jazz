@@ -19,6 +19,7 @@ use crate::query_manager::types::{
     LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple, TupleDelta,
     TupleElement,
 };
+use crate::schema_manager::SchemaContext;
 
 use crate::storage::Storage;
 
@@ -42,6 +43,7 @@ pub struct PolicyFilterNode {
     branch: String,
     row_policy_mode: RowPolicyMode,
     structural_exists_rel_scans: bool,
+    schema_context: Option<SchemaContext>,
     /// Initial recursion depth used for policy evaluation.
     initial_depth: usize,
     /// Current tuples that pass the policy.
@@ -64,6 +66,7 @@ pub(crate) struct PolicyFilterOptions {
     row_policy_mode: RowPolicyMode,
     policy_operation: Operation,
     structural_exists_rel_scans: bool,
+    schema_context: Option<SchemaContext>,
 }
 
 impl PolicyFilterOptions {
@@ -93,6 +96,11 @@ impl PolicyFilterOptions {
         self.structural_exists_rel_scans = structural_scans;
         self
     }
+
+    pub(crate) fn with_schema_context(mut self, schema_context: &SchemaContext) -> Self {
+        self.schema_context = Some(schema_context.clone());
+        self
+    }
 }
 
 impl Default for PolicyFilterOptions {
@@ -103,6 +111,7 @@ impl Default for PolicyFilterOptions {
             row_policy_mode: RowPolicyMode::PermissiveLocal,
             policy_operation: Operation::Select,
             structural_exists_rel_scans: true,
+            schema_context: None,
         }
     }
 }
@@ -228,6 +237,7 @@ impl PolicyFilterNode {
             branch: options.branch,
             row_policy_mode: options.row_policy_mode,
             structural_exists_rel_scans: options.structural_exists_rel_scans,
+            schema_context: options.schema_context,
             initial_depth: options.initial_depth,
             current_tuples: AHashSet::new(),
             input_tuples: AHashSet::new(),
@@ -383,6 +393,7 @@ impl PolicyFilterNode {
             &self.branch,
             self.row_policy_mode,
         )
+        .with_schema_context(self.schema_context.as_ref())
         .with_structural_exists_rel_scans(self.structural_exists_rel_scans);
         let mut visited_referencing = HashSet::new();
         evaluator.evaluate_row_access(

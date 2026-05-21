@@ -18,7 +18,7 @@ use super::super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::super::graph_nodes::magic_columns::{MagicColumnRequest, MagicColumnsNode};
 use super::super::graph_nodes::materialize::MaterializeNode;
 use super::super::graph_nodes::output::{OutputMode, OutputNode};
-use super::super::graph_nodes::policy_filter::PolicyFilterNode;
+use super::super::graph_nodes::policy_filter::{PolicyFilterNode, PolicyFilterOptions};
 use super::super::graph_nodes::project::ProjectNode;
 use super::super::graph_nodes::recursive_relation::{
     CorrelationSource, RecursiveHop, RecursiveRelationNode,
@@ -363,7 +363,7 @@ impl QueryGraph {
 
     /// Legacy compile sites default to querying `main` without schema fan-out.
     fn default_schema_context(schema: &Schema) -> SchemaContext {
-        SchemaContext::with_defaults(schema.clone(), "main")
+        SchemaContext::with_plain_branch(schema.clone(), "main")
     }
 
     /// Compile relation IR directly into a graph.
@@ -692,14 +692,15 @@ impl QueryGraph {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+            let policy_node = PolicyFilterNode::new_with_options(
                 current_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
-                branch_for_policy,
-                row_policy_mode,
+                PolicyFilterOptions::for_branch(branch_for_policy)
+                    .with_row_policy_mode(row_policy_mode)
+                    .with_schema_context(schema_context),
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -1407,14 +1408,15 @@ impl QueryGraph {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "main".to_string());
-                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+                let policy_node = PolicyFilterNode::new_with_options(
                     base_descriptor.clone(),
                     policy,
                     session.clone(),
                     schema.clone(),
                     plan.table.as_str(),
-                    branch_for_policy,
-                    row_policy_mode,
+                    PolicyFilterOptions::for_branch(branch_for_policy)
+                        .with_row_policy_mode(row_policy_mode)
+                        .with_schema_context(schema_context),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -1463,6 +1465,11 @@ impl QueryGraph {
 
             let right_table_schema = schema.get(&join_spec.table)?;
             let right_descriptor = right_table_schema.columns.clone();
+            let right_scan_plan = common_scoped_eq_scan_plan(
+                &plan.disjuncts,
+                join_spec.effective_name(),
+                right_table_schema,
+            );
 
             // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
             let mut right_scan_ids = Vec::new();
@@ -1475,18 +1482,18 @@ impl QueryGraph {
                 ) else {
                     continue;
                 };
-                let id_column = ColumnName::new("_id");
+                let scan_column = ColumnName::new(&right_scan_plan.column);
                 let right_scan = IndexScanNode::new_with_branch(
                     right_scan_table,
-                    id_column,
+                    scan_column,
                     *branch,
-                    ScanCondition::All,
+                    right_scan_plan.condition.clone(),
                     right_descriptor.clone(),
                 );
                 let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
                 graph
                     .index_scan_nodes
-                    .push((right_scan_id, right_scan_table, id_column));
+                    .push((right_scan_id, right_scan_table, scan_column));
                 right_scan_ids.push(right_scan_id);
             }
             let right_scan_output = if right_scan_ids.len() > 1 {
@@ -1517,14 +1524,15 @@ impl QueryGraph {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "main".to_string());
-                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+                let policy_node = PolicyFilterNode::new_with_options(
                     right_descriptor.clone(),
                     policy,
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
-                    branch_for_policy,
-                    row_policy_mode,
+                    PolicyFilterOptions::for_branch(branch_for_policy)
+                        .with_row_policy_mode(row_policy_mode)
+                        .with_schema_context(schema_context),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -2161,6 +2169,65 @@ fn index_scan_plan(
         column: selected.column.clone(),
         condition: selected.condition.clone(),
         fully_covers,
+    }
+}
+
+fn common_scoped_eq_scan_plan(
+    disjuncts: &[Conjunction],
+    scope: &str,
+    table_schema: &crate::query_manager::types::TableSchema,
+) -> IndexScanPlan {
+    let mut selected: Option<(String, Value)> = None;
+
+    for disjunct in disjuncts
+        .iter()
+        .filter(|disjunct| !disjunct.conditions.is_empty())
+    {
+        let Some((column, value)) = disjunct.conditions.iter().find_map(|condition| {
+            let Condition::Eq { value, .. } = condition else {
+                return None;
+            };
+            if condition.column_scope() != Some(scope) {
+                return None;
+            }
+            let column = condition.column();
+            if !table_schema.is_indexed_column(column) || value.is_null() {
+                return None;
+            }
+            Some((column.to_string(), value.clone()))
+        }) else {
+            return IndexScanPlan {
+                column: "_id".to_string(),
+                condition: ScanCondition::All,
+                fully_covers: false,
+            };
+        };
+
+        match &selected {
+            Some((selected_column, selected_value))
+                if selected_column == &column && selected_value == &value => {}
+            Some(_) => {
+                return IndexScanPlan {
+                    column: "_id".to_string(),
+                    condition: ScanCondition::All,
+                    fully_covers: false,
+                };
+            }
+            None => selected = Some((column, value)),
+        }
+    }
+
+    match selected {
+        Some((column, value)) => IndexScanPlan {
+            column,
+            condition: ScanCondition::Eq(value),
+            fully_covers: false,
+        },
+        None => IndexScanPlan {
+            column: "_id".to_string(),
+            condition: ScanCondition::All,
+            fully_covers: false,
+        },
     }
 }
 

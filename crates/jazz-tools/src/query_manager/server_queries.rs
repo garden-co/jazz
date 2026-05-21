@@ -398,6 +398,7 @@ impl QueryManager {
             branch_name.as_str(),
             self.row_policy_mode,
         )
+        .with_schema_context(Some(auth_context))
         .with_settlement_eval_cache(settlement_eval_cache);
         let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
         let mut visited = HashSet::new();
