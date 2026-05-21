@@ -165,21 +165,32 @@ export function Sequence({ eyebrow, description, participants, steps }: Sequence
               );
             }
             const rightward = to.cx > from.cx;
-            const tipX = to.cx + (rightward ? -1 : 1);
+            // Actor boxes are drawn last (so they sit above lifelines), which
+            // means a message at the same y as a creation step would normally
+            // have its tip swallowed by the new actor box. When the endpoint
+            // is being created at this step, land on the box edge instead of
+            // the lifeline centre.
+            const x1 =
+              from.createAtStep === i
+                ? from.cx + (rightward ? from.boxW / 2 : -from.boxW / 2)
+                : from.cx;
+            const x2 =
+              to.createAtStep === i ? to.cx + (rightward ? -to.boxW / 2 : to.boxW / 2) : to.cx;
+            const tipX = x2 + (rightward ? -1 : 1);
             const labelY = y - 12 - ((lines.length - 1) * LINE_H) / 2;
             return (
               <g key={`step-${i}`}>
                 <line
-                  x1={from.cx}
+                  x1={x1}
                   y1={y}
-                  x2={to.cx}
+                  x2={x2}
                   y2={y}
                   stroke={EDGE}
                   strokeWidth={1.5}
                   strokeDasharray={dashed ? "4 3" : undefined}
                 />
                 <Arrow x={tipX} y={y} dir={rightward ? "right" : "left"} />
-                <Lines x={(from.cx + to.cx) / 2} y={labelY} lines={lines} fill={MUTED} mask />
+                <Lines x={(x1 + x2) / 2} y={labelY} lines={lines} fill={MUTED} mask />
               </g>
             );
           })}
