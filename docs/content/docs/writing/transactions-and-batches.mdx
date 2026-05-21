@@ -1,0 +1,113 @@
+---
+title: Transactions & Batches
+description: "Grouping writes so they settle together: differences between transactions and batches, callback vs explicit forms, committing and durability."
+reviewedAt: "17f6af400"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+A single `insert`, `update`, or `delete` settles on its own. Group writes when several
+changes should become visible together and share one accept-or-reject fate. Batches and
+transactions both do this; they differ in _when_ the changes become visible.
+
+## When to use which
+
+| Use             | When                                                                                                     |
+| --------------- | -------------------------------------------------------------------------------------------------------- |
+| Single write    | The change stands alone. Returns an awaitable write handle.                                              |
+| **Batch**       | Immediately readable locally after committing. If rejected at a higher tier, the whole batch rolls back. |
+| **Transaction** | Readable only once accepted at a higher tier.                                                            |
+
+## Opening a transaction or batch
+
+### Callback
+
+Use a callback to create a group write in a single step with either `db.transaction(cb)` or `db.batch(cb)`. The group write commits when the callback returns and rolls back if it throws. You can use synchronous or async callbacks. Any value the callback returns is available on the result:
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-tx-callback-ts
+</include>
+
+`db.transaction(cb)` and `db.batch(cb)` return a write result carrying `.value` (the
+callback's return value), `.batchId`, and `.wait({ tier })`. The handle passed to the
+callback is scoped: it has no `commit()` or `rollback()`. A read-only callback commits
+nothing and still resolves with its `.value`.
+
+### Explicit form
+
+The **explicit form** gives you a handle you use to commit or roll back yourself. Useful when
+your writes span multiple call sites:
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-tx-explicit-ts
+</include>
+
+`beginTransaction()` and `beginBatch()` require explicit `commit()` or `rollback()`.
+
+<Accordions type="single">
+<Accordion id="transaction-per-test-isolation" title="Tip: transaction-per-test isolation">
+
+An explicit transaction is a tidy test-isolation primitive: open one in `beforeEach`,
+`rollback()` in `afterEach`, and each test's writes are discarded without touching the next.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-tx-test-fixture-ts
+</include>
+
+</Accordion>
+</Accordions>
+
+## Read isolation
+
+While a transaction or batch is open, its writes are _staged_, not yet committed. This
+produces a deliberate split in what different reads observe:
+
+- **Reads outside the transaction**&hairsp;—&hairsp;`db.all(...)`, `db.one(...)`&hairsp;—&hairsp;never observe
+  staged writes. They return only committed data until the transaction or batch commits.
+- **Batch-scoped reads**&hairsp;—&hairsp;`tx.all(...)`, `tx.one(...)` (and the same on a batch)&hairsp;—&hairsp;run
+  against all current committed data layered with the transaction's _own_ staged writes.
+
+The handle for batch-scoped reads is available either as an argument passed to the callback, or returned from the `beginBatch()` or `beginTransaction()` call.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-tx-isolation-ts
+</include>
+
+Concurrent group writes never observe each other's staged writes, even when they touch the same row.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-tx-concurrent-ts
+</include>
+
+## Committing & durability
+
+`commit()` returns a write handle with `.batchId` and `.wait({ tier })`. A batch becomes visible to indexed reads as soon as `commit()`
+returns, while a transaction becomes globally visible only once it's accepted.
+
+When connected to a sync server, await `result.wait({ tier })` before relying on the write being visible to reads elsewhere.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-tx-commit-visibility-ts
+</include>
+
+Staged writes live locally only until they are committed. A `rollback()` discards the staged
+writes entirely, and they are never synced.
+
+A rejected group write throws a `PersistedWriteRejectedError`. With a batch, all
+grouped writes are visible between the commit and the rejection; with a transaction, rejected
+writes never become visible.
+
+See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for `wait({ tier })`
+and `onMutationError`, and [Durability Tiers](/docs/reference/durability-tiers) for the full
+consistency model.
+
+## Atomic multi-table writes
+
+Use a transaction when changes across multiple tables must land together with no partially-visible state.
+
+Neither row below is visible to any other read until the transaction commits&hairsp;—&hairsp;there
+is no window where the todo exists without its project.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-tx-multitable-ts
+</include>

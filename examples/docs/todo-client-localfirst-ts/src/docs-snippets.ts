@@ -1,4 +1,4 @@
-import type { Db } from "jazz-tools";
+import type { Db, DbTransaction } from "jazz-tools";
 import { app } from "../schema.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
@@ -42,6 +42,10 @@ const urgent = openTodos.where({ title: { contains: "urgent" } });
 // #region reading-chained-query-ts
 const incompleteTodos = app.todos.where({ done: false }).orderBy("title", "asc").limit(50);
 // #endregion reading-chained-query-ts
+
+// The query objects above are illustrative snippet fragments not referenced
+// elsewhere; re-export them so they count as used.
+export { byNewest, byTitle, urgent, incompleteTodos };
 
 // #region reading-filters-ts
 export async function readTodosWithFilters(db: Db) {
@@ -285,3 +289,147 @@ export async function combinedQuery(db: Db) {
   return results;
 }
 // #endregion combining-ts
+
+// #region writing-tx-isolation-ts
+export async function transactionIsolation(db: Db) {
+  const tx = db.beginTransaction();
+  tx.insert(app.todos, { title: "Draft launch post", done: false });
+
+  // Using the tx handle here means we can read the staged write
+  const stagedInTx = await tx.all(app.todos.where({ done: false }));
+
+  // Using the db handle only shows us the committed state, so the new todo is still invisible.
+  const visibleOutside = await db.all(app.todos.where({ done: false }));
+
+  tx.commit();
+
+  // After commit the write is visible to ordinary reads too.
+  const visibleAfterCommit = await db.all(app.todos.where({ done: false }));
+
+  return { stagedInTx, visibleOutside, visibleAfterCommit };
+}
+// #endregion writing-tx-isolation-ts
+
+// #region writing-tx-concurrent-ts
+export async function concurrentTransactionIsolation(db: Db) {
+  const aliceTx = db.beginTransaction();
+  const bobTx = db.beginTransaction();
+
+  aliceTx.insert(app.todos, { title: "Alice draft", done: false });
+  bobTx.insert(app.todos, { title: "Bob draft", done: false });
+
+  // Open transactions never observe each other's staged writes —
+  // each list contains only that transaction's own draft.
+  const aliceSees = await aliceTx.all(app.todos.where({ done: false }));
+  const bobSees = await bobTx.all(app.todos.where({ done: false }));
+
+  aliceTx.rollback(); // staged write discarded — visible to no reader
+  bobTx.commit();
+
+  // Only Bob's committed draft is visible to indexed reads.
+  const visible = await db.all(app.todos.where({ done: false }));
+
+  return { aliceSees, bobSees, visible };
+}
+// #endregion writing-tx-concurrent-ts
+
+// #region writing-tx-commit-visibility-ts
+export async function directBatchCommitVisibility(db: Db) {
+  const batch = db.beginBatch();
+  batch.insert(app.todos, { title: "Grouped write", done: false });
+
+  // Staged writes are invisible to indexed reads while the batch is open.
+  const beforeCommit = await db.all(app.todos.where({ done: false }));
+
+  batch.commit();
+
+  // A direct batch is visible to indexed reads as soon as it commits —
+  // there is no authority round-trip. A transaction instead becomes
+  // globally visible only once the authority accepts it; when connected
+  // to a sync server, await result.wait({ tier }) before relying on that.
+  const afterCommit = await db.all(app.todos.where({ done: false }));
+
+  return { beforeCommit, afterCommit };
+}
+// #endregion writing-tx-commit-visibility-ts
+
+// #region writing-tx-callback-ts
+export async function markAllOpenToDosAsDone(db: Db) {
+  // The callback may be async. Return a value and it flows through
+  // the WriteResult. Throw and the whole transaction rolls back.
+  const result = await db.transaction(async (tx) => {
+    const open = await tx.all(app.todos.where({ done: false }));
+    for (const todo of open) {
+      tx.update(app.todos, todo.id, { done: true });
+    }
+    return open.length;
+  });
+
+  return { closedCount: result.value, batchId: result.batchId };
+}
+// #endregion writing-tx-callback-ts
+
+// #region writing-tx-explicit-ts
+export function importProjectPlan(db: Db, plan: { name: string; tasks: string[] }) {
+  const tx = db.beginTransaction();
+  try {
+    const projectId = stageProject(tx, plan.name);
+    for (const title of plan.tasks) {
+      stageTask(tx, projectId, title);
+    }
+    return tx.commit().batchId;
+  } catch (error) {
+    tx.rollback();
+    throw error;
+  }
+}
+
+function stageProject(tx: DbTransaction, name: string) {
+  return tx.insert(app.projects, { name }).id;
+}
+
+function stageTask(tx: DbTransaction, projectId: string, title: string) {
+  tx.insert(app.todos, { title, done: false, projectId });
+}
+// #endregion writing-tx-explicit-ts
+
+// #region writing-tx-multitable-ts
+export async function createProjectWithFirstTodo(db: Db) {
+  // Both rows settle together: neither the project nor its first todo
+  // is visible to other reads until the transaction commits.
+  const result = db.transaction((tx) => {
+    const project = tx.insert(app.projects, { name: "Launch" });
+    const todo = tx.insert(app.todos, {
+      title: "Write the brief",
+      done: false,
+      projectId: project.id,
+    });
+    return { projectId: project.id, todoId: todo.id };
+  });
+
+  await result.wait({ tier: "edge" });
+  return result.value;
+}
+// #endregion writing-tx-multitable-ts
+
+// #region writing-tx-test-fixture-ts
+// An explicit transaction doubles as a test-isolation primitive: open one
+// before each test, roll it back after, and a test's writes never reach the
+// next. Wire `open` into beforeEach and `discard` into afterEach.
+export function transactionTestFixture(db: Db) {
+  let tx: DbTransaction;
+
+  return {
+    open: () => {
+      tx = db.beginTransaction();
+    },
+    discard: () => {
+      tx.rollback(); // every staged write from this test is thrown away
+    },
+    addTask: () => {
+      const task = tx.insert(app.todos, { title: "Test task", done: false });
+      return task.title;
+    },
+  };
+}
+// #endregion writing-tx-test-fixture-ts
