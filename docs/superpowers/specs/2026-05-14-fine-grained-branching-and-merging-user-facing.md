@@ -1,7 +1,26 @@
 # Fine-Grained Branching And Merging User-Facing Spec
 
-This spec explains the user-facing shape of branches in Jazz. The technical design lives in
-[2026-05-14-fine-grained-branching-and-merging-design.md](2026-05-14-fine-grained-branching-and-merging-design.md).
+This spec explains the user-facing shape of branches in Jazz.
+
+## Implementation Scopes
+
+### Scope 1: Branch Creation APIs And Permissions
+
+Build branch creation APIs and the way apps define `forBranch` permissions on the current branching
+system. This scope does not change branch isolation. The detailed design lives in
+[2026-05-21-fine-grained-branching-scope-1-design.md](2026-05-21-fine-grained-branching-scope-1-design.md).
+
+### Scope 2: Branch Writes
+
+Build branch-scoped updates, inserts, and deletes.
+
+### Scope 3: Merge
+
+Build merge from a branch back to `main`.
+
+### Scope 4: Isolation
+
+TBD.
 
 ## What Branches Mean In Jazz
 
@@ -50,69 +69,76 @@ const { value: branch } = db.insert(app.branches, {
   ownerId: session.user_id,
 });
 
-const draft = db.branch(branch.id);
+const draft = db.createBranch(branch.id);
 ```
 
 Here `branch.id` is both the branch metadata row id and the branch id.
 
 The id does not have to come from a `branches` table. Any Jazz-created row id can identify a branch:
-`db.branch(project.id)`, `db.branch(document.id)`, and `db.branch(branch.id)` all use the same core
-API. The table that owns the id chooses which `forBranch(...)` rule can apply, leaving branch
-management and naming as app-level choices.
+`db.createBranch(project.id)`, `db.createBranch(document.id)`, and `db.createBranch(branch.id)` all
+use the same core API. The table that owns the id chooses which `forBranch(...)` rule can apply,
+leaving branch management and naming as app-level choices.
 
 ### Branch Permissions
 
 Branch access is deny-by-default. A table must declare which backing tables may act as branch
 anchors for that table.
 
-For `db.branch(branch.id)`, the backing row is the `branches` row with id `branch.id`.
+For `db.createBranch(branch.id)`, the backing row is the `branches` row with id `branch.id`.
 
 ```ts
 export default definePermissions(app, ({ policy, session }) => {
-  policy.todos.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
-    branchPolicy.allowRead.where({ projectId: $branch.projectId });
+  policy.branches.allowRead.where({ ownerId: session.user_id });
+  policy.branches.allowInsert.where({ ownerId: session.user_id });
 
-    branchPolicy.allowInsert.where({
+  policy.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+    branchPolicy.todos.allowRead.where({ projectId: $branch.projectId });
+
+    branchPolicy.todos.allowInsert.where({
       projectId: $branch.projectId,
       createdBy: session.user_id,
     });
 
-    branchPolicy.allowUpdate.where({ projectId: $branch.projectId });
-    branchPolicy.allowDelete.where({ projectId: $branch.projectId });
+    branchPolicy.todos.allowUpdate.where({ projectId: $branch.projectId });
+    branchPolicy.todos.allowDelete.where({ projectId: $branch.projectId });
   });
 });
 ```
 
 Inside the callback, `$branch` is the resolved backing row and `branchPolicy` is the branch-scoped
-policy for the table on the left, here `todos`.
+policy namespace for app tables.
 
 In this example:
 
 - creating a branch metadata row creates an object id that can be used as a branch id
 - Jazz resolves `branch.id` to the `branches` row
 - `$branch` is that resolved `branches` row
-- reading todos through `db.branch(branch.id)` requires the branch-scoped todo read rule to pass
-- writing todos through `db.branch(branch.id)` requires the matching branch-scoped todo write rule
-  to pass
-- diffing todos from `db.branch(branch.id)` requires the matching branch-scoped todo read rule
-- merging `db.branch(branch.id)` requires the matching branch-scoped rules for the source data and
-  normal write permission for the rows written to `main`
+- opening `db.createBranch(branch.id)` does not eagerly validate the branch id
+- the first read or write through that branch resolves the backing row and requires normal
+  `policy.branches.allowRead` to pass
+- reading todos through `db.createBranch(branch.id)` requires the branch-scoped todo read rule to
+  pass
+- writing todos through `db.createBranch(branch.id)` requires the matching branch-scoped todo write
+  rule to pass
+- diffing todos from `db.createBranch(branch.id)` requires the matching branch-scoped todo read rule
+- merging `db.createBranch(branch.id)` requires the matching branch-scoped rules for the source data
+  and normal write permission for the rows written to `main`
 
 Jazz does not infer that `todos.projectId` points at `$branch.projectId`. The policy says that
 explicitly.
 
-If `policy.todos.forBranch(policy.branches, ...)` is missing, todo reads and writes through that
-branch fail even if normal `policy.todos.allowRead` or `policy.todos.allowUpdate` rules exist.
+If `policy.forBranch(policy.branches, ...)` is missing, todo reads and writes through that branch
+fail even if normal `policy.todos.allowRead` or `policy.todos.allowUpdate` rules exist.
 
 One table may support more than one branch backing type by declaring multiple blocks:
 
 ```ts
-policy.todos.forBranch(policy.projects, ({ $branch, branchPolicy }) => {
-  branchPolicy.allowRead.where({ projectId: $branch.id });
+policy.forBranch(policy.projects, ({ $branch, branchPolicy }) => {
+  branchPolicy.todos.allowRead.where({ projectId: $branch.id });
 });
 
-policy.todos.forBranch(policy.workspaces, ({ $branch, branchPolicy }) => {
-  branchPolicy.allowRead.where({ workspaceId: $branch.id });
+policy.forBranch(policy.workspaces, ({ $branch, branchPolicy }) => {
+  branchPolicy.todos.allowRead.where({ workspaceId: $branch.id });
 });
 ```
 
@@ -124,10 +150,10 @@ or edit those rows directly. They are separate from branch access.
 
 ### Branch-Scoped Database View
 
-`db.branch(branchId)` returns a database view where reads and writes use that branch.
+`db.createBranch(branchId)` returns a database view where reads and writes use that branch.
 
 ```ts
-const draft = db.branch(branch.id);
+const draft = db.createBranch(branch.id);
 
 await draft.insert(app.todos, {
   projectId: branch.projectId,
@@ -146,12 +172,12 @@ Queries can select a branch directly.
 const rows = await db.all(app.todos.branch(branch.id).where({ projectId: branch.projectId }));
 ```
 
-Query-level branch selection uses the same overlay behavior as `db.branch(branchId)`.
+Query-level branch selection uses the same overlay behavior as `db.createBranch(branchId)`.
 
 If both are present, the query-level branch wins:
 
 ```ts
-const draft = db.branch(aliceBranch.id);
+const draft = db.createBranch(aliceBranch.id);
 
 const rows = await draft.all(
   app.todos.branch(bobBranch.id).where({ projectId: bobBranch.projectId }),
@@ -215,7 +241,7 @@ edit moved it out of the query filter.
 Merging writes branch changes back to `main`.
 
 ```ts
-await db.branch(branch.id).merge();
+await db.createBranch(branch.id).merge();
 ```
 
 Merge uses the same three inputs as diff:
