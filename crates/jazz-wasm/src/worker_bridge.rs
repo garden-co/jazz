@@ -64,9 +64,16 @@ fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
 fn local_batch_record_needs_fate_reconciliation(record: &LocalBatchRecord) -> bool {
     match record.latest_fate.as_ref() {
         None => true,
-        Some(BatchFate::DurableDirect { confirmed_tier, .. })
-        | Some(BatchFate::AcceptedTransaction { confirmed_tier, .. }) => {
+        Some(BatchFate::DurableDirect { confirmed_tier, .. }) => {
             *confirmed_tier < DurabilityTier::EdgeServer
+        }
+        Some(BatchFate::AcceptedTransaction {
+            confirmed_tier,
+            visible_at,
+            ..
+        }) => {
+            *confirmed_tier < DurabilityTier::EdgeServer
+                || !visible_at.is_satisfied_by(*confirmed_tier)
         }
         Some(BatchFate::Missing { .. } | BatchFate::Rejected { .. }) => false,
     }

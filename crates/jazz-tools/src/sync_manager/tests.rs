@@ -1,6 +1,7 @@
 use super::*;
 use crate::batch_fate::{
     BatchFate, CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission,
+    TransactionVisibility,
 };
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::query_manager::encoding::encode_row;
@@ -127,6 +128,7 @@ fn persist_visible_row_settlement(
         crate::row_histories::RowState::VisibleTransactional => BatchFate::AcceptedTransaction {
             batch_id: row.batch_id,
             confirmed_tier,
+            visible_at: TransactionVisibility::from_confirmed_tier(confirmed_tier),
         },
         crate::row_histories::RowState::StagingPending
         | crate::row_histories::RowState::Superseded

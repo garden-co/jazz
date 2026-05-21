@@ -98,6 +98,7 @@ fn server_replay_does_not_send_local_durability_ack_upstream() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
     let server_id = ServerId::new();
+    let client_id = ClientId::new();
     let row = row_with_batch_state(
         visible_row(ObjectId::new(), "main", Vec::new(), 1_000, b"alice"),
         BatchId::new(),
@@ -107,6 +108,7 @@ fn server_replay_does_not_send_local_durability_ack_upstream() {
 
     seed_users_schema(&mut io);
     add_server(&mut sm, &io, server_id);
+    add_client(&mut sm, &io, client_id);
     sm.take_outbox();
 
     sm.process_from_server(
@@ -409,6 +411,7 @@ fn initial_query_sync_replays_current_accepted_transaction_settlement() {
         } if *id == client_id && *fate == BatchFate::AcceptedTransaction {
             batch_id: row.batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Local,
         }
     )));
 }
@@ -455,6 +458,7 @@ fn batch_fate_needed_returns_current_accepted_transaction() {
         } if id == client_id && fate == BatchFate::AcceptedTransaction {
             batch_id: row.batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Local,
         }
     )));
 }
@@ -464,6 +468,7 @@ fn accepted_transaction_settlement_before_rows_materializes_when_row_arrives() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
     let server_id = ServerId::new();
+    let client_id = ClientId::new();
     let row_id = ObjectId::new();
     let batch_id = BatchId::new();
     let row = row_with_batch_state(
@@ -475,10 +480,12 @@ fn accepted_transaction_settlement_before_rows_materializes_when_row_arrives() {
     let settlement = BatchFate::AcceptedTransaction {
         batch_id,
         confirmed_tier: DurabilityTier::EdgeServer,
+        visible_at: TransactionVisibility::EdgeServer,
     };
 
     seed_users_schema(&mut io);
     add_server(&mut sm, &io, server_id);
+    add_client(&mut sm, &io, client_id);
     sm.take_outbox();
 
     sm.process_from_server(
@@ -519,6 +526,149 @@ fn accepted_transaction_settlement_before_rows_materializes_when_row_arrives() {
     );
     assert_eq!(visible.confirmed_tier, Some(DurabilityTier::EdgeServer));
     assert_eq!(visible.batch_id, batch_id);
+}
+
+#[test]
+fn accepted_transaction_waits_until_confirmed_tier_satisfies_visible_at() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let batch_id = BatchId::new();
+    let row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+
+    seed_users_schema(&mut io);
+    add_server(&mut sm, &io, server_id);
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::BatchFate {
+            fate: BatchFate::AcceptedTransaction {
+                batch_id,
+                confirmed_tier: DurabilityTier::EdgeServer,
+                visible_at: TransactionVisibility::GlobalServer,
+            },
+        },
+    );
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowBatchNeeded {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
+    );
+
+    assert_eq!(
+        io.load_visible_region_row("users", "main", row_id).unwrap(),
+        None,
+        "edge acceptance should not publish a globally-visible transaction"
+    );
+
+    sm.row_batch_interest
+        .entry(RowBatchKey::new(row_id, BranchName::new("main"), batch_id))
+        .or_default()
+        .insert(client_id);
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::BatchFate {
+            fate: BatchFate::AcceptedTransaction {
+                batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_at: TransactionVisibility::GlobalServer,
+            },
+        },
+    );
+
+    let visible = load_visible_row(&io, "users", row_id, "main");
+    assert_eq!(
+        visible.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(visible.confirmed_tier, Some(DurabilityTier::GlobalServer));
+}
+
+#[test]
+fn accepted_transaction_row_before_settlement_waits_until_visible_at_is_satisfied() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let batch_id = BatchId::new();
+    let row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+
+    seed_users_schema(&mut io);
+    add_server(&mut sm, &io, server_id);
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowBatchNeeded {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
+    );
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::BatchFate {
+            fate: BatchFate::AcceptedTransaction {
+                batch_id,
+                confirmed_tier: DurabilityTier::EdgeServer,
+                visible_at: TransactionVisibility::GlobalServer,
+            },
+        },
+    );
+
+    assert_eq!(
+        io.load_visible_region_row("users", "main", row_id).unwrap(),
+        None,
+        "row-first delivery should still wait for the required visibility tier"
+    );
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::BatchFate {
+            fate: BatchFate::AcceptedTransaction {
+                batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_at: TransactionVisibility::GlobalServer,
+            },
+        },
+    );
+
+    let visible = load_visible_row(&io, "users", row_id, "main");
+    assert_eq!(
+        visible.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(visible.confirmed_tier, Some(DurabilityTier::GlobalServer));
 }
 
 #[test]
@@ -803,6 +953,7 @@ fn seal_batch_accepts_all_staged_transactional_rows_as_one_settlement() {
     let BatchFate::AcceptedTransaction {
         batch_id: settled_batch_id,
         confirmed_tier,
+        ..
     } = settlement
     else {
         panic!("expected accepted transactional settlement, got {settlement:?}");
@@ -836,6 +987,7 @@ fn seal_batch_accepts_all_staged_transactional_rows_as_one_settlement() {
         } if *id == client_id && *returned == BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Local,
         }
     )));
 }
