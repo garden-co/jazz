@@ -176,6 +176,43 @@ describe("Db transactions", () => {
     expect(runtimeTransaction.commit).toHaveBeenCalled();
   });
 
+  it("passes transaction options at the end of typed db transaction APIs", () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-visible-at",
+      values: [
+        { type: "Text", value: "Visible later" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-visible-at",
+    } as Row;
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-visible-at"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
+      commit: vi.fn(() => makeWriteHandle("batch-visible-at").handle),
+      localBatchRecord: vi.fn((batchId = "batch-visible-at") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-visible-at")]),
+    };
+    const beginTransactionInternal = vi.fn(() => runtimeTransaction);
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal,
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    db.transaction(
+      (tx) => tx.insert(table, { title: "Visible later", done: false }),
+      { visibleAt: "global" },
+    );
+
+    expect(beginTransactionInternal).toHaveBeenCalledWith(undefined, undefined, {
+      visibleAt: "global",
+    });
+  });
+
   it("uses declared schemas for transaction writes without fetching runtime schema", () => {
     const table = todoTable();
     const runtimeRow: Row = {

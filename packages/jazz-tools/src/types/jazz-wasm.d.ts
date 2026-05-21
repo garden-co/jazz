@@ -1,4 +1,4 @@
-import type { MutationErrorEvent } from "../runtime/client.js";
+import type { BatchFate, MutationErrorEvent } from "../runtime/client.js";
 
 declare module "jazz-wasm" {
   type InsertValues = Record<string, unknown>;

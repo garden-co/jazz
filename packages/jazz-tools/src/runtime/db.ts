@@ -33,6 +33,7 @@ import {
   type QueryExecutionOptions,
   type QueryPropagation,
   type QueryVisibility,
+  type TransactionOptions,
   resolveEffectiveQueryExecutionOptions,
   runInBatch,
   Scoped,
@@ -1746,11 +1747,14 @@ export class Db {
    *
    * Prefer using {@link Db.transaction} when an explicit commit is not required.
    */
-  beginTransaction(): DbTransaction {
+  beginTransaction(options?: TransactionOptions): DbTransaction {
     const context = this.getRuntimeOperationContext();
     return new DbTransaction(
       (schema) => this.getClient(schema),
-      (client) => client.beginTransactionInternal(context?.session, context?.attribution),
+      (client) =>
+        options === undefined
+          ? client.beginTransactionInternal(context?.session, context?.attribution)
+          : client.beginTransactionInternal(context?.session, context?.attribution, options),
     );
   }
 
@@ -1763,12 +1767,17 @@ export class Db {
    */
   transaction<TResult>(
     callback: (tx: DbTransactionScope) => Promise<TResult>,
+    options?: TransactionOptions,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: DbTransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(
+    callback: (tx: DbTransactionScope) => TResult,
+    options?: TransactionOptions,
+  ): WriteResult<TResult>;
   transaction<TResult>(
     callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
+    options?: TransactionOptions,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const transaction = this.beginTransaction();
+    const transaction = this.beginTransaction(options);
     return runInBatch(
       transaction,
       callback,
