@@ -9,7 +9,7 @@ Architecture docs live in `specs/`. Status-quo specs describe what's built;
 ## Work style
 
 Testing: prefer black-boxed integration tests over unit tests or white-box tests.
-The tests should use the schema builder, the query builder and the permissions builder, not manually define them using JSON-like definitions.
+Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
 
 **Builds:** `pnpm build:core` (all the packages), `pnpm test` (everything), via turbo.
 
