@@ -126,7 +126,7 @@ ordering straightforward within a single device or process.
 
 ### Merge strategies
 
-By default, Jazz adopts a last-writer-wins strategy to resolve concurrent edits. This means that if
+By default, Jazz adopts a per-column last-writer-wins strategy to resolve concurrent edits. This means that if
 two clients update the same row simultaneously, the one with the later timestamp overwrites the earlier one.
 
 This is a sensible default, but can cause some unexpected behaviour with certain types of data. For example,
