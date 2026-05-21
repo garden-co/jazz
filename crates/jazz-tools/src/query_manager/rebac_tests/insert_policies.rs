@@ -255,7 +255,7 @@ fn local_insert_allowed_by_current_permissions_true_policy_with_structural_write
 }
 
 #[test]
-fn local_insert_stays_optimistic_while_current_permissions_are_pending() {
+fn local_insert_denied_while_current_permissions_are_pending() {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("notes"),
@@ -267,13 +267,40 @@ fn local_insert_stays_optimistic_while_current_permissions_are_pending() {
     qm.require_authorization_schema();
     let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
+    let err = qm
+        .insert_with_session(
+            &mut storage,
+            "notes",
+            &[Value::Text("A note".into())],
+            Some(&Session::new("alice")),
+        )
+        .expect_err("local writes should fail closed until the authorization schema is loaded");
+
+    assert_eq!(
+        err,
+        QueryError::PolicyDenied {
+            table: TableName::new("notes"),
+            operation: Operation::Insert,
+        }
+    );
+
+    let mut authorization_schema = Schema::new();
+    authorization_schema.insert(
+        TableName::new("notes"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]),
+            TablePolicies::new().with_insert(PolicyExpr::True),
+        ),
+    );
+    qm.set_authorization_schema(authorization_schema);
+
     qm.insert_with_session(
         &mut storage,
         "notes",
         &[Value::Text("A note".into())],
         Some(&Session::new("alice")),
     )
-    .expect("local writes should stay optimistic until the authorization schema is loaded");
+    .expect("local insert should use the current permissions once they are loaded");
 }
 
 #[test]

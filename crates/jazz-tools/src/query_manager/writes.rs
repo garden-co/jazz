@@ -1097,20 +1097,14 @@ impl QueryManager {
                     });
                 }
             } else {
-                let authorization_schema_pending =
-                    self.authorization_schema_required && self.authorization_schema.is_none();
-                if !authorization_schema_pending
-                    && self.row_policy_mode.denies_missing_explicit_policy()
-                    && insert_policy.is_none()
+                if self.row_policy_mode.denies_missing_explicit_policy() && insert_policy.is_none()
                 {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Insert,
                     });
                 }
-                if let Some(policy) = insert_policy
-                    && !authorization_schema_pending
-                {
+                if let Some(policy) = insert_policy {
                     let mut visited = HashSet::new();
                     if !self.evaluate_policy_for_content_with_context_for_row(
                         storage,
