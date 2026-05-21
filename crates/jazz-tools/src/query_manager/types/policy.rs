@@ -1,5 +1,6 @@
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RowPolicyMode {
@@ -62,6 +63,7 @@ pub struct TablePolicies {
     pub insert: OperationPolicy,
     pub update: OperationPolicy,
     pub delete: OperationPolicy,
+    pub for_branch: HashMap<TableName, TablePolicies>,
 }
 
 impl TablePolicies {
@@ -113,6 +115,10 @@ impl TablePolicies {
             || self.update.using.is_some()
             || self.update.with_check.is_some()
             || self.delete.using.is_some()
+            || self
+                .for_branch
+                .values()
+                .any(TablePolicies::has_any_explicit_policy)
     }
 
     pub fn select_policy(&self) -> Option<&PolicyExpr> {

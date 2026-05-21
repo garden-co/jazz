@@ -331,6 +331,7 @@ function toArraySubqueries(
         order_by: orderBy,
         limit: spec.limit ?? null,
         ...(requirement ? { requirement } : {}),
+        ...(spec.branches.length > 0 ? { branches: spec.branches } : {}),
         nested_arrays: nestedArrays,
       });
     } else {
@@ -346,6 +347,7 @@ function toArraySubqueries(
         select_columns: selectColumns,
         order_by: orderBy,
         limit: spec.limit ?? null,
+        ...(spec.branches.length > 0 ? { branches: spec.branches } : {}),
         nested_arrays: nestedArrays,
       });
     }
@@ -698,6 +700,15 @@ function translateBuiltRelationToRelExpr(
   expr = lowerHopsToRelExpr(expr, outputTable, hops, relations, schema);
   outputTable = resolveHopsOutputTable(outputTable, hops, relations);
 
+  if (relation.branches && relation.branches.length > 0) {
+    expr = {
+      Branch: {
+        input: expr,
+        branches: relation.branches,
+      },
+    };
+  }
+
   return { expr, outputTable };
 }
 
@@ -723,7 +734,23 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
   let relation: RelExpr;
   let relationTable: string;
 
-  if (builder.gather?.seed) {
+  if (builder.union) {
+    const translated = translateBuiltRelationToRelExpr(
+      {
+        union: builder.union,
+      },
+      relations,
+      schema,
+    );
+    relation = translated.expr;
+    relationTable = translated.outputTable;
+    relation = applyFilter(
+      relation,
+      conditionsToRelPredicate(builder.conditions, schema, relationTable, relationTable),
+    );
+    relation = lowerHopsToRelExpr(relation, relationTable, hops, relations, schema);
+    relationTable = resolveHopsOutputTable(relationTable, hops, relations);
+  } else if (builder.gather?.seed) {
     const seed = translateBuiltRelationToRelExpr(builder.gather.seed, relations, schema);
     relation = gatherToRelExpr(builder.gather, seed.outputTable, seed.expr, relations, schema);
     relationTable = seed.outputTable;
@@ -810,6 +837,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const projectedColumns = visibleSelectColumns(selectColumns, includeProjectionColumns);
   const query = {
     table: builder.table,
+    ...(builder.branches.length > 0 ? { branches: builder.branches } : {}),
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
       hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: builder.requireIncludes,

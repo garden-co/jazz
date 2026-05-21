@@ -7,6 +7,7 @@ import type {
   ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,
+  OperationPolicy as DslOperationPolicy,
   PolicyExpr as DslPolicyExpr,
   PolicyLiteralValue as DslPolicyLiteralValue,
   PolicyValue as DslPolicyValue,
@@ -99,6 +100,9 @@ function columnMergeStrategyToWasm(
 function clonePolicyValue(value: DslPolicyValue): PolicyValue {
   if (value.type === "SessionRef") {
     return { type: "SessionRef", path: [...value.path] };
+  }
+  if (value.type === "BranchRef") {
+    return { type: "BranchRef", column: value.column };
   }
   return { type: "Literal", value: literalToWasmValue(value.value) };
 }
@@ -199,9 +203,7 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
   }
 }
 
-function cloneOperationPolicy(
-  policy: DslTablePolicies[keyof DslTablePolicies],
-): TablePolicies["select"] {
+function cloneOperationPolicy(policy?: DslOperationPolicy): TablePolicies["select"] {
   const out: TablePolicies["select"] = {};
   if (!policy) {
     return out;
@@ -216,12 +218,23 @@ function cloneOperationPolicy(
 }
 
 function clonePolicies(policies: DslTablePolicies): TablePolicies {
-  return {
+  const cloned: TablePolicies = {
     select: cloneOperationPolicy(policies.select),
     insert: cloneOperationPolicy(policies.insert),
     update: cloneOperationPolicy(policies.update),
     delete: cloneOperationPolicy(policies.delete),
   };
+
+  if (policies.for_branch) {
+    cloned.for_branch = Object.fromEntries(
+      Object.entries(policies.for_branch).map(([branchTable, branchPolicies]) => [
+        branchTable,
+        clonePolicies(branchPolicies),
+      ]),
+    );
+  }
+
+  return cloned;
 }
 
 /**

@@ -285,6 +285,238 @@ fn transactional_insert_uses_frozen_target_branch_schema() {
 }
 
 #[test]
+fn transactional_insert_accepts_target_branch_in_current_schema_family() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("email", ColumnType::Text),
+        )
+        .build();
+
+    let schema_hash = SchemaHash::compute(&schema);
+    let mut manager =
+        SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+    let mut storage = MemoryStorage::new();
+
+    let branch_id = ObjectId::new();
+    let target_branch = format!("dev-{}-{}", schema_hash.short(), branch_id);
+    let current_branch = manager.branch_name().as_str().to_string();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+        .with_target_branch_name(target_branch.clone());
+
+    let inserted = manager
+        .insert(
+            &mut storage,
+            "users",
+            HashMap::from([
+                ("id".to_string(), Value::Uuid(ObjectId::new())),
+                (
+                    "email".to_string(),
+                    Value::Text("alice@example.com".to_string()),
+                ),
+            ]),
+            None,
+            Some(&write_context),
+        )
+        .expect("target branch in the current schema family should be accepted");
+
+    let target_rows = execute_query_with_local_overlay(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users")
+            .branch(target_branch.clone())
+            .build(),
+        inserted.row_id,
+        &target_branch,
+        inserted.batch_id,
+    );
+    assert_eq!(target_rows.len(), 1);
+
+    let current_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users").branch(current_branch).build(),
+    );
+    assert!(
+        current_rows.is_empty(),
+        "insert should stay on the selected branch rather than writing to main"
+    );
+}
+
+#[test]
+fn same_schema_target_branch_writes_find_rows_on_target_user_branch() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("email", ColumnType::Text),
+        )
+        .build();
+
+    let schema_hash = SchemaHash::compute(&schema);
+    let mut manager =
+        SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+    let mut storage = MemoryStorage::new();
+
+    let target_user_branch = ObjectId::new().to_string();
+    let target_branch = format!("dev-{}-{}", schema_hash.short(), target_user_branch);
+    let write_context = WriteContext::default().with_target_branch_name(target_branch.clone());
+    let table = manager
+        .context()
+        .current_schema
+        .get(&TableName::new("users"))
+        .unwrap()
+        .clone();
+
+    let update_id = ObjectId::new();
+    let update_data = encode_row(
+        &table.columns,
+        &[
+            Value::Uuid(update_id),
+            Value::Text("before@example.com".to_string()),
+        ],
+    )
+    .unwrap();
+    ingest_remote_row(
+        manager.query_manager_mut(),
+        &mut storage,
+        "users",
+        schema_hash,
+        update_id,
+        &target_branch,
+        update_data,
+        1_000,
+    );
+    manager.process(&mut storage);
+
+    let update_batch_id = manager
+        .update(
+            &mut storage,
+            update_id,
+            &[(
+                "email".to_string(),
+                Value::Text("after@example.com".to_string()),
+            )],
+            Some(&write_context),
+        )
+        .expect("update should find target-branch row in same schema family");
+
+    let update_rows = execute_query_with_local_overlay(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users")
+            .branch(target_branch.clone())
+            .filter_eq("id", Value::Uuid(update_id))
+            .build(),
+        update_id,
+        &target_branch,
+        update_batch_id,
+    );
+    assert_eq!(update_rows.len(), 1);
+    assert!(
+        update_rows[0]
+            .1
+            .iter()
+            .any(|value| value == &Value::Text("after@example.com".to_string()))
+    );
+
+    let upsert_id = ObjectId::new();
+    let upsert_data = encode_row(
+        &table.columns,
+        &[
+            Value::Uuid(upsert_id),
+            Value::Text("upsert-before@example.com".to_string()),
+        ],
+    )
+    .unwrap();
+    ingest_remote_row(
+        manager.query_manager_mut(),
+        &mut storage,
+        "users",
+        schema_hash,
+        upsert_id,
+        &target_branch,
+        upsert_data,
+        2_000,
+    );
+    manager.process(&mut storage);
+
+    let upsert_batch_id = manager
+        .upsert(
+            &mut storage,
+            "users",
+            upsert_id,
+            HashMap::from([(
+                "email".to_string(),
+                Value::Text("upsert-after@example.com".to_string()),
+            )]),
+            Some(&write_context),
+        )
+        .expect("upsert should update target-branch row instead of inserting");
+
+    let upsert_rows = execute_query_with_local_overlay(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users")
+            .branch(target_branch.clone())
+            .filter_eq("id", Value::Uuid(upsert_id))
+            .build(),
+        upsert_id,
+        &target_branch,
+        upsert_batch_id,
+    );
+    assert_eq!(upsert_rows.len(), 1);
+    assert!(
+        upsert_rows[0]
+            .1
+            .iter()
+            .any(|value| value == &Value::Text("upsert-after@example.com".to_string()))
+    );
+
+    let delete_id = ObjectId::new();
+    let delete_data = encode_row(
+        &table.columns,
+        &[
+            Value::Uuid(delete_id),
+            Value::Text("delete@example.com".to_string()),
+        ],
+    )
+    .unwrap();
+    ingest_remote_row(
+        manager.query_manager_mut(),
+        &mut storage,
+        "users",
+        schema_hash,
+        delete_id,
+        &target_branch,
+        delete_data,
+        3_000,
+    );
+    manager.process(&mut storage);
+
+    manager
+        .delete(&mut storage, delete_id, Some(&write_context))
+        .expect("delete should find target-branch row in same schema family");
+
+    let delete_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users")
+            .branch(target_branch)
+            .filter_eq("id", Value::Uuid(delete_id))
+            .build(),
+    );
+    assert!(
+        delete_rows
+            .iter()
+            .all(|(row_id, _values)| *row_id != delete_id),
+        "deleted row should not remain visible on target branch"
+    );
+}
+
+#[test]
 fn transactional_insert_rejects_target_branch_outside_current_family() {
     let schema = SchemaBuilder::new()
         .table(

@@ -1,173 +1,36 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
+import { col } from "../dsl.js";
+import { defineApp, defineTable } from "../typed-app.js";
 import { createSessionContext, definePermissions } from "./index.js";
 
-interface Todo {
-  id: string;
-  ownerId: string;
-  done: boolean;
-  projectId?: string;
-}
-
-interface TodoWhere {
-  id?: string;
-  ownerId?: string;
-  done?: boolean;
-  projectId?: string;
-}
-
-interface Project {
-  id: string;
-  ownerId: string;
-}
-
-interface ProjectWhere {
-  id?: string;
-  ownerId?: string;
-}
-
-interface Team {
-  id: string;
-  kind: string;
-  identity_key?: string;
-}
-
-interface TeamWhere {
-  id?: string;
-  kind?: string;
-  identity_key?: string;
-}
-
-interface TeamEdge {
-  id: string;
-  child_team: string;
-  parent_team: string;
-}
-
-interface TeamEdgeWhere {
-  id?: string;
-  child_team?: string;
-  parent_team?: string;
-}
-
-interface ResourceGrant {
-  id: string;
-  team: string;
-  resource: string;
-  grant_role: string;
-}
-
-interface ResourceGrantWhere {
-  id?: string;
-  team?: string;
-  resource?: string;
-  grant_role?: string;
-}
-
-class TodoQueryBuilder {
-  declare readonly _rowType: Todo;
-  where(_input: TodoWhere): TodoQueryBuilder {
-    return this;
-  }
-}
-
-class ProjectQueryBuilder {
-  declare readonly _rowType: Project;
-  where(_input: ProjectWhere): ProjectQueryBuilder {
-    return this;
-  }
-}
-
-class TeamQueryBuilder {
-  declare readonly _rowType: Team;
-  where(_input: TeamWhere): TeamQueryBuilder {
-    return this;
-  }
-}
-
-class TeamEdgeQueryBuilder {
-  declare readonly _rowType: TeamEdge;
-  where(_input: TeamEdgeWhere): TeamEdgeQueryBuilder {
-    return this;
-  }
-}
-
-class ResourceGrantQueryBuilder {
-  declare readonly _rowType: ResourceGrant;
-  where(_input: ResourceGrantWhere): ResourceGrantQueryBuilder {
-    return this;
-  }
-}
-
-const app = {
-  todos: new TodoQueryBuilder(),
-  projects: new ProjectQueryBuilder(),
-  teams: new TeamQueryBuilder(),
-  team_team_edges: new TeamEdgeQueryBuilder(),
-  resource_access_edges: new ResourceGrantQueryBuilder(),
-  wasmSchema: {
-    todos: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        {
-          name: "projectId",
-          column_type: { type: "Uuid" },
-          nullable: true,
-          references: "projects",
-        },
-      ],
-    },
-    projects: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-      ],
-    },
-    teams: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        { name: "kind", column_type: { type: "Text" }, nullable: false },
-        { name: "identity_key", column_type: { type: "Text" }, nullable: true },
-      ],
-    },
-    team_team_edges: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        {
-          name: "child_team",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "teams",
-        },
-        {
-          name: "parent_team",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "teams",
-        },
-      ],
-    },
-    resource_access_edges: {
-      columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
-        {
-          name: "team",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "teams",
-        },
-        {
-          name: "resource",
-          column_type: { type: "Uuid" },
-          nullable: false,
-          references: "todos",
-        },
-        { name: "grant_role", column_type: { type: "Text" }, nullable: false },
-      ],
-    },
-  },
-} as const;
+const app = defineApp({
+  projects: defineTable({
+    ownerId: col.string(),
+  }),
+  branches: defineTable({
+    projectId: col.ref("projects"),
+    ownerId: col.string(),
+    name: col.string(),
+  }),
+  todos: defineTable({
+    ownerId: col.string(),
+    done: col.boolean(),
+    projectId: col.ref("projects").optional(),
+  }),
+  teams: defineTable({
+    kind: col.string(),
+    identity_key: col.string().optional(),
+  }),
+  team_team_edges: defineTable({
+    child_team: col.ref("teams"),
+    parent_team: col.ref("teams"),
+  }),
+  resource_access_edges: defineTable({
+    team: col.ref("teams"),
+    resource: col.ref("todos"),
+    grant_role: col.string(),
+  }),
+});
 
 describe("permissions type inference", () => {
   it("infers row callback and where key types", () => {
@@ -232,6 +95,32 @@ describe("permissions type inference", () => {
       policy.todos.allowUpdate.always(),
       policy.todos.allowDelete.always(),
     ]);
+  });
+
+  it("infers forBranch backing row and branch policy table types", () => {
+    definePermissions(app, ({ policy, session }) => {
+      policy.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+        expectTypeOf($branch.id).toMatchTypeOf<unknown>();
+        expectTypeOf($branch.projectId).toMatchTypeOf<unknown>();
+
+        branchPolicy.todos.allowRead.where({ projectId: $branch.projectId });
+        branchPolicy.todos.allowInsert.where({
+          projectId: $branch.projectId,
+          ownerId: session.user_id,
+        });
+
+        if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+          // @ts-expect-error backing row exposes only known branch columns
+          branchPolicy.todos.allowRead.where({ projectId: $branch.missingColumn });
+
+          // @ts-expect-error branchPolicy exposes only app tables
+          branchPolicy.missingTable.allowRead.where({});
+
+          // @ts-expect-error invalid target table where key is still rejected
+          branchPolicy.todos.allowRead.where({ missingColumn: $branch.projectId });
+        }
+      });
+    });
   });
 
   it("rejects invalid table/column usage at compile time where possible", () => {

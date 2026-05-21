@@ -6,18 +6,19 @@
 use ahash::AHashSet;
 use std::collections::HashSet;
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::column_is_null;
 use crate::query_manager::graph_nodes::policy_eval::{
     PolicyContextEvaluator, collect_policy_dependency_tables,
 };
 use crate::query_manager::policy::{
-    Operation, PolicyExpr, evaluate_expr_recursive, normalize_recursive_max_depth,
+    BranchPolicyContext, Operation, PolicyExpr, evaluate_expr_recursive,
+    normalize_recursive_max_depth,
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple, TupleDelta,
-    TupleElement,
+    ComposedBranchName, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple,
+    TupleDelta, TupleElement,
 };
 
 use crate::storage::Storage;
@@ -208,8 +209,40 @@ impl PolicyFilterNode {
         options: PolicyFilterOptions,
     ) -> Self {
         let table_name = table_name.into();
-        let inherits_tables = collect_policy_dependency_tables(&policy, &descriptor);
-        let has_inherits = !inherits_tables.is_empty();
+        let branch = options.branch;
+        let mut inherits_tables = collect_policy_dependency_tables(&policy, &descriptor);
+        let branch_scoped = ComposedBranchName::parse(&BranchName::new(&branch))
+            .is_some_and(|composed| composed.user_branch != "main");
+        let target_table = TableName::new(&table_name);
+        let has_branch_policy = branch_scoped
+            && schema
+                .get(&target_table)
+                .is_some_and(|table_schema| !table_schema.policies.for_branch.is_empty());
+        if has_branch_policy && let Some(table_schema) = schema.get(&target_table) {
+            for (backing_table, branch_policies) in &table_schema.policies.for_branch {
+                let branch_policy = match options.policy_operation {
+                    Operation::Select => branch_policies.select_policy(),
+                    Operation::Insert => branch_policies.insert_policy(),
+                    Operation::Update => branch_policies.update_using_policy(),
+                    Operation::Delete => branch_policies.effective_delete_using(),
+                };
+                if let Some(branch_policy) = branch_policy {
+                    inherits_tables
+                        .extend(collect_policy_dependency_tables(branch_policy, &descriptor));
+                }
+                inherits_tables.insert(backing_table.as_str().to_string());
+                if let Some(backing_schema) = schema.get(backing_table)
+                    && let Some(backing_select) = backing_schema.policies.select_policy()
+                {
+                    inherits_tables.extend(collect_policy_dependency_tables(
+                        backing_select,
+                        &backing_schema.columns,
+                    ));
+                }
+            }
+        }
+        let has_inherits =
+            has_branch_policy || !inherits_tables.is_empty() || policy_contains_branch_ref(&policy);
         Self {
             descriptor,
             policy,
@@ -217,7 +250,7 @@ impl PolicyFilterNode {
             session,
             schema,
             table_name,
-            branch: options.branch,
+            branch,
             row_policy_mode: options.row_policy_mode,
             initial_depth: options.initial_depth,
             current_tuples: AHashSet::new(),
@@ -368,6 +401,10 @@ impl PolicyFilterNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
+        if let Some(result) = self.evaluate_branch_scoped_with_context(row, io, row_loader) {
+            return result;
+        }
+
         let mut evaluator = PolicyContextEvaluator::new(
             &self.schema,
             &self.session,
@@ -386,6 +423,134 @@ impl PolicyFilterNode {
             self.initial_depth,
             &mut visited_referencing,
         )
+    }
+
+    fn evaluate_branch_scoped_with_context(
+        &self,
+        row: &Row,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    ) -> Option<bool> {
+        let branch_name = BranchName::new(&self.branch);
+        let composed = ComposedBranchName::parse(&branch_name)?;
+        if composed.user_branch == "main" {
+            return None;
+        }
+        let target_table = TableName::new(&self.table_name);
+        let target_schema = self.schema.get(&target_table)?;
+
+        if target_schema.policies.for_branch.is_empty() {
+            return Some(!self.row_policy_mode.denies_missing_explicit_policy());
+        }
+
+        let Ok(branch_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
+            return Some(false);
+        };
+        let branch_object_id = ObjectId::from_uuid(branch_uuid);
+        let current_branch = ComposedBranchName::new(&composed.env, composed.schema_hash, "main")
+            .to_branch_name()
+            .as_str()
+            .to_string();
+
+        for (backing_table, branch_policies) in &target_schema.policies.for_branch {
+            let Ok(Some(backing_row)) = io.load_visible_region_row(
+                backing_table.as_str(),
+                &current_branch,
+                branch_object_id,
+            ) else {
+                continue;
+            };
+            if backing_row.is_hard_deleted() {
+                return Some(false);
+            }
+
+            let Some(backing_schema) = self.schema.get(backing_table) else {
+                return Some(false);
+            };
+            let backing_loaded = LoadedRow::new(
+                backing_row.data.clone(),
+                backing_row.row_provenance(),
+                [(
+                    branch_object_id,
+                    BranchName::new(backing_row.branch.as_str()),
+                )]
+                .into_iter()
+                .collect(),
+                backing_row.batch_id,
+            );
+            let backing_policy = backing_schema.policies.select_policy();
+            let backing_allowed = if let Some(policy) = backing_policy {
+                let backing_row_for_policy = Row::new(
+                    branch_object_id,
+                    backing_loaded.data.clone(),
+                    backing_loaded.batch_id,
+                    backing_loaded.row_provenance.clone(),
+                );
+                let mut evaluator = PolicyContextEvaluator::new(
+                    &self.schema,
+                    &self.session,
+                    &current_branch,
+                    self.row_policy_mode,
+                );
+                let mut visited_referencing = HashSet::new();
+                evaluator.evaluate_row_access(
+                    Operation::Select,
+                    &backing_row_for_policy,
+                    &backing_schema.columns,
+                    backing_table.as_str(),
+                    Some(policy),
+                    io,
+                    row_loader,
+                    0,
+                    &mut visited_referencing,
+                )
+            } else {
+                !self.row_policy_mode.denies_missing_explicit_policy()
+            };
+            if !backing_allowed {
+                return Some(false);
+            }
+
+            let policy = match self.policy_operation {
+                Operation::Select => branch_policies.select_policy(),
+                Operation::Insert => branch_policies.insert_policy(),
+                Operation::Update => branch_policies.update_using_policy(),
+                Operation::Delete => branch_policies.effective_delete_using(),
+            };
+            let Some(policy) = policy else {
+                return Some(!self.row_policy_mode.denies_missing_explicit_policy());
+            };
+
+            let backing_provenance = backing_row.row_provenance();
+            let branch_context = BranchPolicyContext {
+                table_name: backing_table,
+                row_id: branch_object_id,
+                descriptor: &backing_schema.columns,
+                content: &backing_row.data,
+                provenance: &backing_provenance,
+            };
+            let mut evaluator = PolicyContextEvaluator::new(
+                &self.schema,
+                &self.session,
+                &self.branch,
+                self.row_policy_mode,
+            )
+            .with_branch_context(&branch_context);
+            let mut visited_referencing = HashSet::new();
+            return Some(evaluator.evaluate_row_access(
+                self.policy_operation,
+                row,
+                &self.descriptor,
+                &self.table_name,
+                Some(policy),
+                io,
+                row_loader,
+                self.initial_depth,
+                &mut visited_referencing,
+            ));
+        }
+
+        Some(false)
     }
 
     /// Evaluate the policy expression against a row.
@@ -470,6 +635,84 @@ impl PolicyFilterNode {
         // The graph settlement loop should use process_with_context() for PolicyFilters
         // that have INHERITS clauses.
         false
+    }
+}
+
+fn policy_contains_branch_ref(expr: &PolicyExpr) -> bool {
+    match expr {
+        PolicyExpr::Cmp {
+            value: crate::query_manager::policy::PolicyValue::BranchRef(_),
+            ..
+        }
+        | PolicyExpr::Contains {
+            value: crate::query_manager::policy::PolicyValue::BranchRef(_),
+            ..
+        } => true,
+        PolicyExpr::InList { values, .. } => values.iter().any(|value| {
+            matches!(
+                value,
+                crate::query_manager::policy::PolicyValue::BranchRef(_)
+            )
+        }),
+        PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {
+            exprs.iter().any(policy_contains_branch_ref)
+        }
+        PolicyExpr::Not(inner) => policy_contains_branch_ref(inner),
+        PolicyExpr::Exists { condition, .. } => policy_contains_branch_ref(condition),
+        PolicyExpr::ExistsRel { rel } => relation_contains_branch_ref(rel),
+        _ => false,
+    }
+}
+
+fn relation_value_contains_branch_ref(value: &crate::query_manager::relation_ir::ValueRef) -> bool {
+    matches!(
+        value,
+        crate::query_manager::relation_ir::ValueRef::BranchRef(_)
+    )
+}
+
+fn relation_predicate_contains_branch_ref(
+    predicate: &crate::query_manager::relation_ir::PredicateExpr,
+) -> bool {
+    use crate::query_manager::relation_ir::PredicateExpr;
+
+    match predicate {
+        PredicateExpr::Cmp { right, .. } | PredicateExpr::Contains { right, .. } => {
+            relation_value_contains_branch_ref(right)
+        }
+        PredicateExpr::In { values, .. } => values.iter().any(relation_value_contains_branch_ref),
+        PredicateExpr::And(exprs) | PredicateExpr::Or(exprs) => {
+            exprs.iter().any(relation_predicate_contains_branch_ref)
+        }
+        PredicateExpr::Not(inner) => relation_predicate_contains_branch_ref(inner),
+        PredicateExpr::IsNull { .. }
+        | PredicateExpr::IsNotNull { .. }
+        | PredicateExpr::True
+        | PredicateExpr::False => false,
+    }
+}
+
+fn relation_contains_branch_ref(rel: &crate::query_manager::relation_ir::RelExpr) -> bool {
+    use crate::query_manager::relation_ir::RelExpr;
+
+    match rel {
+        RelExpr::Filter { input, predicate } => {
+            relation_contains_branch_ref(input) || relation_predicate_contains_branch_ref(predicate)
+        }
+        RelExpr::Union { inputs } => inputs.iter().any(relation_contains_branch_ref),
+        RelExpr::Join { left, right, .. } => {
+            relation_contains_branch_ref(left) || relation_contains_branch_ref(right)
+        }
+        RelExpr::Project { input, .. }
+        | RelExpr::Branch { input, .. }
+        | RelExpr::Distinct { input, .. }
+        | RelExpr::OrderBy { input, .. }
+        | RelExpr::Offset { input, .. }
+        | RelExpr::Limit { input, .. } => relation_contains_branch_ref(input),
+        RelExpr::Gather { seed, step, .. } => {
+            relation_contains_branch_ref(seed) || relation_contains_branch_ref(step)
+        }
+        RelExpr::TableScan { .. } => false,
     }
 }
 
@@ -588,8 +831,12 @@ mod tests {
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
     use crate::query_manager::relation_ir::RelExpr;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName, Value};
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, ComposedBranchName, SchemaHash, TableName, TablePolicies,
+        TableSchema, Value,
+    };
     use serde_json::json;
+    use std::collections::HashMap;
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
@@ -858,6 +1105,57 @@ mod tests {
 
         assert!(node.has_inherits());
         assert!(node.inherits_tables().contains("memberships"));
+    }
+
+    #[test]
+    fn branch_policy_filter_registers_backing_select_dependency_tables() {
+        let mut doc_policies = TablePolicies::default();
+        doc_policies.for_branch = HashMap::from([(
+            TableName::new("branches"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("documents"),
+            TableSchema::with_policies(test_descriptor(), doc_policies),
+        );
+        schema.insert(
+            TableName::new("branches"),
+            TableSchema::builder("branches")
+                .column("owner_id", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::Exists {
+                    table: "branch_access".into(),
+                    condition: Box::new(PolicyExpr::True),
+                }))
+                .build(),
+        );
+        schema.insert(
+            TableName::new("branch_access"),
+            TableSchema::builder("branch_access")
+                .column("owner_id", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
+                .build(),
+        );
+        let branch = ComposedBranchName::new(
+            "dev",
+            SchemaHash::compute(&schema),
+            &ObjectId::new().to_string(),
+        )
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+        let node = PolicyFilterNode::new_with_options(
+            test_descriptor(),
+            PolicyExpr::True,
+            Session::new("user1"),
+            schema,
+            "documents",
+            PolicyFilterOptions::for_branch(branch).with_row_policy_mode(RowPolicyMode::Enforcing),
+        );
+
+        assert!(node.inherits_tables().contains("branches"));
+        assert!(node.inherits_tables().contains("branch_access"));
     }
 
     #[test]

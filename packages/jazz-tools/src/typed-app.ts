@@ -756,6 +756,7 @@ type BuiltRelation = {
   table?: string;
   conditions?: BuiltCondition[];
   hops?: string[];
+  branches?: string[];
   gather?: BuiltGather;
   union?: {
     inputs: BuiltRelation[];
@@ -779,6 +780,7 @@ function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
     ...(relation.table ? { table: relation.table } : {}),
     ...(relation.conditions ? { conditions: relation.conditions.map(cloneBuiltCondition) } : {}),
     ...(relation.hops ? { hops: [...relation.hops] } : {}),
+    ...(relation.branches ? { branches: [...relation.branches] } : {}),
     ...(relation.gather ? { gather: cloneBuiltGather(relation.gather) } : {}),
     ...(relation.union
       ? {
@@ -821,6 +823,7 @@ export class TypedTableQueryBuilder<
   private _hops: string[] = [];
   private _gatherVal?: BuiltGather;
   private _unionVal?: BuiltRelation;
+  private _branches: string[] = [];
   _columnTransforms?: ColumnTransformMap;
 
   constructor(
@@ -884,6 +887,12 @@ export class TypedTableQueryBuilder<
   offset(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._offsetVal = n;
+    return clone;
+  }
+
+  branch(branchId: string): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    const clone = this._clone<TInclude, TSelection, TRequired>();
+    clone._branches = [branchId];
     return clone;
   }
 
@@ -1010,6 +1019,7 @@ export class TypedTableQueryBuilder<
       offset: this._offsetVal,
       hops: this._hops,
       gather: this._gatherVal,
+      ...(this._branches.length > 0 ? { branches: this._branches } : {}),
       ...(this._unionVal ? { union: cloneBuiltRelation(this._unionVal).union } : {}),
     });
   }
@@ -1038,6 +1048,7 @@ export class TypedTableQueryBuilder<
     clone._hops = [...this._hops];
     clone._gatherVal = this._gatherVal ? cloneBuiltGather(this._gatherVal) : undefined;
     clone._unionVal = this._unionVal ? cloneBuiltRelation(this._unionVal) : undefined;
+    clone._branches = [...this._branches];
     return clone;
   }
 
@@ -1066,6 +1077,7 @@ export class TypedTableQueryBuilder<
       table: this._table,
       conditions: this._conditions.map(cloneBuiltCondition),
       hops: [...this._hops],
+      ...(this._branches.length > 0 ? { branches: [...this._branches] } : {}),
       ...(this._gatherVal ? { gather: cloneBuiltGather(this._gatherVal) } : {}),
     };
   }
@@ -1100,6 +1112,7 @@ export interface Query<
   ): Query<TTable, TInclude, TSelection, TSchema>;
   limit(n: number): Query<TTable, TInclude, TSelection, TSchema>;
   offset(n: number): Query<TTable, TInclude, TSelection, TSchema>;
+  branch(branchId: string): Query<TTable, TInclude, TSelection, TSchema>;
   hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
     relation: TRelation,
   ): Query<
@@ -1137,6 +1150,7 @@ export interface RequiredQuery<
   ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
   limit(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
   offset(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
+  branch(branchId: string): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
   hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
     relation: TRelation,
   ): RequiredQuery<
@@ -1395,9 +1409,10 @@ function createAppForTables(
 
       const first = relations[0]!;
       const builder = new TypedTableQueryBuilder(first._table, wasmSchema);
+      const inputs = relations.map((relation) => relation._serializeRelation() as BuiltRelation);
       (builder as any)._unionVal = {
         union: {
-          inputs: relations.map((relation) => relation._serializeRelation() as BuiltRelation),
+          inputs,
         },
       };
       return builder;

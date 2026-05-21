@@ -43,6 +43,7 @@ pub enum RowIdRef {
 pub enum ValueRef {
     Literal(Value),
     SessionRef(Vec<String>),
+    BranchRef(String),
     OuterColumn(ColumnRef),
     FrontierColumn(ColumnRef),
     RowId(RowIdRef),
@@ -143,6 +144,10 @@ pub enum RelExpr {
     TableScan {
         table: TableName,
     },
+    Branch {
+        input: Box<RelExpr>,
+        branches: Vec<String>,
+    },
     Filter {
         input: Box<RelExpr>,
         predicate: PredicateExpr,
@@ -225,6 +230,10 @@ pub fn normalize_gather_depth(requested: Option<usize>) -> Result<usize, Relatio
 pub fn canonicalize_rel_expr(expr: RelExpr) -> Result<RelExpr, RelationIrError> {
     match expr {
         RelExpr::TableScan { .. } => Ok(expr),
+        RelExpr::Branch { input, branches } => Ok(RelExpr::Branch {
+            input: Box::new(canonicalize_rel_expr(*input)?),
+            branches,
+        }),
         RelExpr::Filter { input, predicate } => Ok(RelExpr::Filter {
             input: Box::new(canonicalize_rel_expr(*input)?),
             predicate: canonicalize_predicate(predicate),
