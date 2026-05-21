@@ -223,6 +223,77 @@ Offline transactions stay staged/pending until the required authority fate arriv
 
 The key implementation principle: `visible_at` is transaction metadata, not row state. Rows remain staged or visible; transaction/fate metadata decides when staged rows are allowed to become visible.
 
+## Ordered Implementation Tasks
+
+1. [ ] Add failing storage/codec tests for the new transaction visibility metadata:
+   - `SealedBatchSubmission` round-trips `visible_at`
+   - `BatchFate::AcceptedTransaction` round-trips `visible_at`
+   - old accepted-transaction records decode with the chosen compatibility default
+   - old sealed submissions decode with the chosen compatibility default
+
+2. [ ] Add the Rust `TransactionVisibility` type near transaction fate/submission code, including parsing, storage encoding helpers, serde support, and comparison helpers against `DurabilityTier`.
+
+3. [ ] Extend `SealedBatchSubmission` with `visible_at`, including storage encoding/decoding, conformance tests, and old-record defaults.
+
+4. [ ] Bind `visible_at` into `SealedBatchSubmission::compute_batch_digest`.
+
+5. [ ] Extend `BatchFate::AcceptedTransaction` with `visible_at`, including merge behavior, storage encoding/decoding, conformance tests, and old-record defaults.
+
+6. [ ] Add validation for mismatches between a sealed submission's `visible_at` and the matching accepted fate's `visible_at`.
+
+7. [ ] Update sync protocol serialization/deserialization so:
+   - `SyncPayload::SealBatch` carries `visible_at` through the sealed submission
+   - `SyncPayload::BatchFate` carries `visible_at` for `AcceptedTransaction`
+   - `BatchFateNeeded` responses include `visible_at`
+   - fate-only delivery is sufficient for peers that never received the sealed submission
+
+8. [ ] Update WASM/NAPI bindings, React Native adapter types, and TypeScript `BatchFate` serialization for the new `visible_at` / `visibleAt` field.
+
+9. [ ] Update sealed-submission retention so lower-tier acceptance does not delete the submission while later global reconciliation is still required.
+
+10. [ ] Change the row publication reducer so staged transaction rows become ordinary-read visible only when:
+
+```text
+visible_at == immediate
+or confirmed_tier >= visible_at
+```
+
+11. [ ] Keep lower-tier accepted fates durable and replayable without publishing rows when they do not satisfy `visible_at`.
+
+12. [ ] Add sync-ordering tests where fate arrives before row data and where row data arrives before fate.
+
+13. [ ] Add restart/reconnect tests proving `visible_at` survives persistence and still controls row publication after replay.
+
+14. [ ] Add failing end-to-end row-visibility tests for:
+    - `visibleAt: "immediate"` publishes after in-memory runtime acceptance
+    - `visibleAt: "local"` waits for local durable acceptance
+    - `visibleAt: "edge"` waits for edge acceptance
+    - `visibleAt: "global"` waits for global acceptance
+    - edge acceptance of a global-visible transaction does not publish rows
+    - offline global-visible transactions remain staged
+
+15. [ ] Add one default resolver for transaction visibility:
+    - explicit `visibleAt` wins
+    - remote/global authority defaults to `global`
+    - durable local authority without remote authority defaults to `local`
+    - no durable authority defaults to `immediate`
+
+16. [ ] Map existing direct writes/direct batches internally to transaction writes with `visibleAt: "immediate"`.
+
+17. [ ] Add the TypeScript `TransactionVisibleAt` type and public `TransactionOptions` type.
+
+18. [ ] Thread `visibleAt` through the public transaction APIs:
+    - `db.transaction(callback, options?)`
+    - `db.beginTransaction(options?)`
+    - runtime/client transaction creation
+    - internal batch/write context
+
+19. [ ] Add user-facing API tests for explicit `visibleAt` and default resolution:
+    - no remote authority but durable local authority defaults to local visibility
+    - no remote authority and no durable local authority defaults to immediate visibility
+
+20. [ ] Update status-quo docs and this spec with any final names chosen during implementation.
+
 ## Compatibility/Deprecation
 
 ### First Compatibility Window
