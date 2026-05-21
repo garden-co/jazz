@@ -98,6 +98,16 @@ describe("layoutSequence", () => {
     expect(actors.C.lifeTop).toBe(203);
   });
 
+  it("exposes createAtStep so the renderer can land messages on the box edge", () => {
+    // Without this the renderer can't tell that a message at stepY[2] is the
+    // creation of C, so its arrowhead ends up centred on C's lifeline — hidden
+    // behind the C box (drawn last). The fix lives in the renderer, but it
+    // needs the layout to surface the step index.
+    expect(actors.A.createAtStep).toBeUndefined();
+    expect(actors.B.createAtStep).toBeUndefined();
+    expect(actors.C.createAtStep).toBe(2);
+  });
+
   it("computes a canvas sized to bound notes/labels, not just columns", () => {
     expect(width).toBe(363); // participant span widened + offset so the note can't clip
     expect(height).toBe(282);

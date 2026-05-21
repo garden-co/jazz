@@ -20,6 +20,11 @@ export type Actor = {
   boxH: number;
   boxY: number;
   lifeTop: number;
+  // The step at which this actor's box drops in (undefined for actors that
+  // sit in the header row). The renderer needs this to land a creation
+  // message on the box edge — without it the arrowhead would aim at the
+  // lifeline centre and disappear behind the actor box.
+  createAtStep?: number;
 };
 
 export type SequenceLayout = {
@@ -142,6 +147,7 @@ export function layoutSequence(participants: Participant[], steps: SequenceStep[
       boxH: BOX_H,
       boxY: created ? rowY - BOX_H / 2 : HEADER_TOP,
       lifeTop: created ? rowY + BOX_H / 2 : headerBottom,
+      createAtStep: created ? (p.createAtStep as number) : undefined,
     };
   });
 
