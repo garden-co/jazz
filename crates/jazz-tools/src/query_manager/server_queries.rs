@@ -1791,7 +1791,14 @@ impl QueryManager {
                 if scope_changed {
                     let scope_install_started_at = Instant::now();
                     let scope_len = scope.len();
-                    let scope_rows = graph.sync_scope_rows();
+                    let mut scope_rows = graph.sync_scope_rows();
+                    scope_rows.retain(|(_, branch), _| {
+                        branch_schema_map
+                            .get(branch.as_str())
+                            .copied()
+                            .unwrap_or(subscription_context.current_hash)
+                            == subscription_context.current_hash
+                    });
                     self.sync_manager
                         .set_client_query_scope_with_rows_and_storage(
                             storage_ref,
@@ -2060,7 +2067,14 @@ impl QueryManager {
                     let owned_scope = new_scope.into_owned();
                     let scope_install_started_at = Instant::now();
                     let scope_len = owned_scope.len();
-                    let scope_rows = sub.graph.sync_scope_rows();
+                    let mut scope_rows = sub.graph.sync_scope_rows();
+                    scope_rows.retain(|(_, branch), _| {
+                        branch_schema_map
+                            .get(branch.as_str())
+                            .copied()
+                            .unwrap_or(sub.schema_context.current_hash)
+                            == sub.schema_context.current_hash
+                    });
                     self.sync_manager
                         .set_client_query_scope_with_rows_and_storage(
                             storage,
