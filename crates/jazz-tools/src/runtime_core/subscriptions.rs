@@ -65,40 +65,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             },
         );
         self.subscription_reverse.insert(query_sub_id, handle);
-    }
-
-    fn execute_subscription_without_tick(
-        &mut self,
-        handle: SubscriptionHandle,
-        callback: SubscriptionCallback,
-    ) -> Result<(), RuntimeError> {
-        let Some(pending) = self.pending_subscriptions.remove(&handle) else {
-            return Ok(());
-        };
-
-        let _span = debug_span!(
-            "execute_subscription",
-            handle = handle.0,
-            table = pending.query.table.as_str(),
-            ?pending.durability.tier,
-            local_updates = ?pending.durability.local_updates
-        )
-        .entered();
-
-        let query_sub_id = self.subscribe_query(
-            pending.query,
-            pending.session,
-            pending.durability,
-            pending.propagation,
-        )?;
-
-        debug!(
-            handle = handle.0,
-            sub_id = query_sub_id.0,
-            "subscription executed"
-        );
-        self.activate_subscription(handle, query_sub_id, callback);
-        Ok(())
+        self.immediate_tick();
     }
 
     // =========================================================================
@@ -266,21 +233,32 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         handle: SubscriptionHandle,
         callback: SubscriptionCallback,
     ) -> Result<(), RuntimeError> {
-        self.execute_subscription_without_tick(handle, callback)?;
-        self.immediate_tick();
-        Ok(())
-    }
+        let Some(pending) = self.pending_subscriptions.remove(&handle) else {
+            return Ok(());
+        };
 
-    /// Execute several pending subscriptions and run one tick after all are
-    /// registered, so bursty app startup subscriptions share the same manager pass.
-    pub fn execute_subscriptions(
-        &mut self,
-        subscriptions: Vec<(SubscriptionHandle, SubscriptionCallback)>,
-    ) -> Result<(), RuntimeError> {
-        for (handle, callback) in subscriptions {
-            self.execute_subscription_without_tick(handle, callback)?;
-        }
-        self.immediate_tick();
+        let _span = debug_span!(
+            "execute_subscription",
+            handle = handle.0,
+            table = pending.query.table.as_str(),
+            ?pending.durability.tier,
+            local_updates = ?pending.durability.local_updates
+        )
+        .entered();
+
+        let query_sub_id = self.subscribe_query(
+            pending.query,
+            pending.session,
+            pending.durability,
+            pending.propagation,
+        )?;
+
+        debug!(
+            handle = handle.0,
+            sub_id = query_sub_id.0,
+            "subscription executed"
+        );
+        self.activate_subscription(handle, query_sub_id, callback);
         Ok(())
     }
 
