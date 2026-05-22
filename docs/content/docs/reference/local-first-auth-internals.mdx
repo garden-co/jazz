@@ -80,19 +80,27 @@ a specific sign-up flow:
 The provider's endpoint verifies the proof token the same way any Jazz server verifies a
 local-first JWT, then records the proven Jazz user ID against the newly created provider account.
 
-<Mermaid chart={`
-sequenceDiagram
-    participant Client
-    participant Provider as Provider server
-
-    Note over Client: User starts with local-first auth
-    Client->>Client: db.getLocalFirstIdentityProof()
-    Client->>Provider: Sign up (email + proofToken)
-    Provider->>Provider: Verify proof, create user with same Jazz ID
-    Provider-->>Client: Session + JWT
-    Note over Client: Same Jazz ID, now with a provider account
-
-`} />
+<Sequence
+  eyebrow="Local-first sign-up"
+  description="Converting a local-first identity into a provider account."
+  participants={[
+    { id: "client", label: "Client" },
+    { id: "provider", label: "Provider server" },
+  ]}
+  steps={[
+    { kind: "note", over: "client", text: "User starts with local-first auth" },
+    { kind: "message", from: "client", to: "client", text: "db.getLocalFirstIdentityProof()" },
+    { kind: "message", from: "client", to: "provider", text: "Sign up (email + proofToken)" },
+    {
+      kind: "message",
+      from: "provider",
+      to: "provider",
+      text: "Verify proof, create user with same Jazz ID",
+    },
+    { kind: "message", from: "provider", to: "client", text: "Session + JWT", line: "dashed" },
+    { kind: "note", over: "client", text: "Same Jazz ID, now with a provider account" },
+  ]}
+/>
 
 See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth) for the
 practical, BetterAuth-specific flow.
