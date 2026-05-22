@@ -782,6 +782,47 @@ impl QueryManager {
 
         let mut parent_authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
         let mut child_fk_cache: HashMap<(ObjectId, BranchName), Option<ObjectId>> = HashMap::new();
+        for tuple in graph.sync_scope_tuples() {
+            let Some(child_row) = tuple.to_single_row() else {
+                continue;
+            };
+            let Some(child_branch) = tuple
+                .provenance()
+                .iter()
+                .find_map(|(id, branch)| (*id == child_row.id).then_some(*branch))
+            else {
+                continue;
+            };
+            if let Ok(Value::Uuid(parent_id)) = decode_column(
+                &plan.child_schema.columns,
+                &child_row.data,
+                plan.fk_column_index,
+            ) {
+                child_fk_cache.insert((child_row.id, child_branch), Some(parent_id));
+                parent_authorization_cache.insert((parent_id, child_branch), false);
+            }
+        }
+
+        if let Some(authorized_parent_keys) = self
+            .authorized_ids_via_correlated_relation_set_for_candidates_if_available(
+                storage,
+                settlement_eval_cache,
+                plan.parent_table,
+                parent_authorization_cache.keys().copied().collect(),
+                auth_schema,
+                auth_context,
+                source_branch_schema_map,
+                session,
+                phase,
+            )
+        {
+            for (parent_key, authorized) in &mut parent_authorization_cache {
+                *authorized = authorized_parent_keys.contains(parent_key);
+            }
+        } else {
+            parent_authorization_cache.clear();
+        }
+
         let mut used_set_plan = false;
 
         let authorized_scope_tuples = graph.filtered_sync_scope_tuples(|tuple| {
@@ -813,9 +854,9 @@ impl QueryManager {
             };
 
             used_set_plan = true;
-            *parent_authorization_cache
-                .entry((parent_id, child_branch))
-                .or_insert_with(|| {
+            match parent_authorization_cache.get(&(parent_id, child_branch)) {
+                Some(authorized) => *authorized,
+                None => {
                     crate::query_manager::policy_counters::increment(
                         "authorized_parent_set_eval",
                         format!(
@@ -836,7 +877,8 @@ impl QueryManager {
                         source_branch_schema_map,
                         "authorized_parent_set",
                     )
-                })
+                }
+            }
         });
 
         if !used_set_plan {
@@ -873,6 +915,136 @@ impl QueryManager {
                 .flat_map(|tuple| tuple.provenance().clone().into_iter())
                 .collect(),
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorized_ids_via_correlated_relation_set_for_candidates_if_available(
+        &mut self,
+        storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
+        table: TableName,
+        candidate_keys: HashSet<(ObjectId, BranchName)>,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+        phase: &'static str,
+    ) -> Option<HashSet<(ObjectId, BranchName)>> {
+        let started_at = Instant::now();
+        let session = session?;
+        if candidate_keys.is_empty() {
+            return Some(HashSet::new());
+        }
+
+        let branches = candidate_keys
+            .iter()
+            .map(|(_, branch)| *branch)
+            .collect::<HashSet<_>>();
+        if branches.len() != 1 {
+            return None;
+        }
+        let branch_name = *branches.iter().next()?;
+        let branch = branch_name.as_str();
+
+        let table_schema = auth_schema.get(&table)?;
+        let select_policy = table_schema.policies.select_policy()?;
+        let plans = Self::correlated_relation_set_plans(select_policy);
+        if plans.is_empty()
+            || plans
+                .iter()
+                .any(|plan| plan.outer_column != plans[0].outer_column)
+            || plans[0].outer_column.column != "id"
+        {
+            return None;
+        }
+
+        let candidate_ids = candidate_keys
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<HashSet<_>>();
+        let mut authorized_keys = HashSet::new();
+
+        for plan in &plans {
+            let empty_outer_descriptor = RowDescriptor::new(Vec::new());
+            let bound_rel =
+                bind_relation_refs(&plan.rel, &[], &empty_outer_descriptor, session, None)?;
+            let mut policy_graph = PolicyGraph::for_exists_rel(
+                &bound_rel,
+                auth_schema,
+                branch,
+                Some(session.clone()),
+                self.row_policy_mode,
+                Some(&table),
+                true,
+                Some(Arc::new(auth_context.clone())),
+            )?;
+            let mut row_loader = |related_id: ObjectId, table_hint: Option<TableName>| {
+                crate::query_manager::policy_counters::increment(
+                    "auth_storage_load_identity",
+                    format!(
+                        "branch={} table_hint={} id={}",
+                        branch,
+                        table_hint
+                            .as_ref()
+                            .map(TableName::as_str)
+                            .unwrap_or("<unknown>"),
+                        related_id
+                    ),
+                );
+                self.load_row_for_authorization_context(
+                    storage,
+                    related_id,
+                    branch_name,
+                    source_branch_schema_map,
+                    auth_context,
+                )
+            };
+            for _ in 0..100 {
+                if policy_graph.settle_with_settlement_eval_cache(
+                    storage,
+                    Some(settlement_eval_cache),
+                    &mut row_loader,
+                ) {
+                    break;
+                }
+            }
+
+            let output_tuple_descriptor = policy_graph.output_tuple_descriptor().clone();
+            for tuple in policy_graph.output_tuples() {
+                if let Some(Value::Uuid(id)) = Self::decode_column_ref_from_tuple(
+                    &tuple,
+                    &output_tuple_descriptor,
+                    &plan.relation_column,
+                ) && candidate_ids.contains(&id)
+                {
+                    authorized_keys.insert((id, branch_name));
+                }
+            }
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "authorized_correlated_candidate_set_scope",
+            format!(
+                "phase={} table={} candidates={} authorized={}",
+                phase,
+                table.as_str(),
+                candidate_keys.len(),
+                authorized_keys.len()
+            ),
+        );
+        crate::query_manager::policy_counters::observe_duration(
+            "authorized_correlated_candidate_set_duration",
+            format!(
+                "phase={} table={} candidates={} authorized={}",
+                phase,
+                table.as_str(),
+                candidate_keys.len(),
+                authorized_keys.len()
+            ),
+            started_at.elapsed(),
+        );
+
+        Some(authorized_keys)
     }
 
     fn authorized_parent_set_plan<'a>(
@@ -1619,13 +1791,23 @@ impl QueryManager {
                 if scope_changed {
                     let scope_install_started_at = Instant::now();
                     let scope_len = scope.len();
-                    self.sync_manager.set_client_query_scope_with_storage(
-                        storage_ref,
-                        sub.client_id,
-                        sub.query_id,
-                        scope.clone(),
-                        session_for_policy.clone(),
-                    );
+                    let mut scope_rows = graph.sync_scope_rows();
+                    scope_rows.retain(|(_, branch), _| {
+                        branch_schema_map
+                            .get(branch.as_str())
+                            .copied()
+                            .unwrap_or(subscription_context.current_hash)
+                            == subscription_context.current_hash
+                    });
+                    self.sync_manager
+                        .set_client_query_scope_with_rows_and_storage(
+                            storage_ref,
+                            sub.client_id,
+                            sub.query_id,
+                            scope.clone(),
+                            &scope_rows,
+                            session_for_policy.clone(),
+                        );
                     crate::query_manager::policy_counters::observe_duration(
                         "set_client_query_scope_duration",
                         format!(
@@ -1885,13 +2067,23 @@ impl QueryManager {
                     let owned_scope = new_scope.into_owned();
                     let scope_install_started_at = Instant::now();
                     let scope_len = owned_scope.len();
-                    self.sync_manager.set_client_query_scope_with_storage(
-                        storage,
-                        client_id,
-                        query_id,
-                        owned_scope.clone(),
-                        sub.session.clone(),
-                    );
+                    let mut scope_rows = sub.graph.sync_scope_rows();
+                    scope_rows.retain(|(_, branch), _| {
+                        branch_schema_map
+                            .get(branch.as_str())
+                            .copied()
+                            .unwrap_or(sub.schema_context.current_hash)
+                            == sub.schema_context.current_hash
+                    });
+                    self.sync_manager
+                        .set_client_query_scope_with_rows_and_storage(
+                            storage,
+                            client_id,
+                            query_id,
+                            owned_scope.clone(),
+                            &scope_rows,
+                            sub.session.clone(),
+                        );
                     crate::query_manager::policy_counters::observe_duration(
                         "set_client_query_scope_duration",
                         format!(

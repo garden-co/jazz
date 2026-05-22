@@ -6,15 +6,19 @@
 //!
 //! Shared types live here; both submodules add `impl QueryGraph` blocks against them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use bitvec::prelude::*;
 use smallvec::SmallVec;
 
+use crate::metadata::RowProvenance;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::ArraySubquerySpec;
-use crate::query_manager::types::{Row, RowDelta, RowDescriptor, TableName, Tuple, TupleDelta};
+use crate::query_manager::types::{
+    Row, RowBytes, RowDelta, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
+};
+use crate::row_histories::BatchId;
 
 use super::graph_nodes::NodeId;
 use super::graph_nodes::alias::AliasNode;
@@ -126,6 +130,16 @@ pub(crate) struct RelationCompileFeatures {
     pub include_deleted: bool,
     pub array_subqueries: Vec<ArraySubquerySpec>,
     pub select_columns: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopeRow {
+    pub table: TableName,
+    pub branch: BranchName,
+    pub id: ObjectId,
+    pub data: RowBytes,
+    pub batch_id: BatchId,
+    pub provenance: RowProvenance,
 }
 
 impl QueryGraph {
@@ -268,6 +282,63 @@ impl QueryGraph {
             .collect()
     }
 
+    pub fn scope_rows_for_tuples(
+        &self,
+        tuples: &[Tuple],
+    ) -> HashMap<(ObjectId, BranchName), ScopeRow> {
+        let mut rows = HashMap::new();
+
+        for tuple in tuples {
+            for (element_index, element) in tuple.iter().enumerate() {
+                let Some(tuple_element_descriptor) = self.table_descriptors.get(element_index)
+                else {
+                    continue;
+                };
+                let Some(tuple_descriptor_element) =
+                    self.output_tuple_descriptor().element(element_index)
+                else {
+                    continue;
+                };
+                if tuple_element_descriptor != &tuple_descriptor_element.descriptor {
+                    continue;
+                }
+                let Some((id, branch)) = tuple
+                    .provenance()
+                    .iter()
+                    .find(|(object_id, _)| *object_id == element.id())
+                    .copied()
+                else {
+                    continue;
+                };
+                let Some(row) = element.to_row() else {
+                    continue;
+                };
+                rows.entry((id, branch)).or_insert_with(|| ScopeRow {
+                    table: tuple_descriptor_element.table,
+                    branch,
+                    id,
+                    data: row.data,
+                    batch_id: row.batch_id,
+                    provenance: row.provenance,
+                });
+            }
+        }
+
+        rows
+    }
+
+    pub fn sync_scope_rows(&self) -> HashMap<(ObjectId, BranchName), ScopeRow> {
+        self.scope_rows_for_tuples(&self.sync_scope_tuples())
+    }
+
+    pub fn filtered_sync_scope_rows(
+        &self,
+        mut tuple_is_visible: impl FnMut(&Tuple) -> bool,
+    ) -> HashMap<(ObjectId, BranchName), ScopeRow> {
+        let tuples = self.filtered_sync_scope_tuples(|tuple| tuple_is_visible(tuple));
+        self.scope_rows_for_tuples(&tuples)
+    }
+
     fn scope_from_tuples(&self, tuples: &[Tuple]) -> HashSet<(ObjectId, BranchName)> {
         tuples
             .iter()
@@ -279,6 +350,13 @@ impl QueryGraph {
         match self.get_node(self.output_node) {
             Some(GraphNode::Output(node)) => Some(node.sync_scope()),
             _ => None,
+        }
+    }
+
+    fn output_tuple_descriptor(&self) -> &TupleDescriptor {
+        match self.get_node(self.output_node) {
+            Some(GraphNode::Output(node)) => node.output_tuple_descriptor(),
+            _ => panic!("query graph output node is not an Output node"),
         }
     }
 
