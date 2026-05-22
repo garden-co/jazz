@@ -398,10 +398,10 @@ describe("Db transactions", () => {
   });
 
   it("throws when committing a db batch before any actions", () => {
-    const beginBatchInternal = vi.fn();
+    const beginTransactionInternal = vi.fn();
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatchInternal,
+      beginTransactionInternal,
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -409,9 +409,9 @@ describe("Db transactions", () => {
     const batch = db.beginBatch();
 
     expect(() => batch.commit()).toThrow(
-      "DbDirectBatch.commit() requires at least one table operation first",
+      "DbTransaction.commit() requires at least one table operation first",
     );
-    expect(beginBatchInternal).not.toHaveBeenCalled();
+    expect(beginTransactionInternal).not.toHaveBeenCalled();
   });
 
   it("rejects db batch rollback after commit", () => {
@@ -442,7 +442,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatchInternal: vi.fn(() => runtimeBatch),
+      beginTransactionInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     };
     const db = createDbFromClient(
@@ -482,7 +482,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatchInternal: vi.fn(() => runtimeBatch),
+      beginTransactionInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -518,12 +518,12 @@ describe("Db transactions", () => {
     };
     const primaryClient = {
       getSchema: () => new Map(Object.entries(primaryTable._schema)),
-      beginBatchInternal: vi.fn(() => runtimeBatch),
+      beginTransactionInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const secondaryClient = {
       getSchema: () => new Map(Object.entries(secondaryTable._schema)),
-      beginBatchInternal: vi.fn(),
+      beginTransactionInternal: vi.fn(),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new MultiClientDb(

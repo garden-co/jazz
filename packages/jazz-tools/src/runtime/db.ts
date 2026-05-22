@@ -1792,11 +1792,7 @@ export class Db {
    * Prefer using {@link Db.batch} when an explicit commit is not required.
    */
   beginBatch(): DbDirectBatch {
-    const context = this.getRuntimeOperationContext();
-    return new DbDirectBatch(
-      (schema) => this.getClient(schema),
-      (client) => client.beginBatchInternal(context?.session, context?.attribution),
-    );
+    return this.beginTransaction({ visibility: "immediate" });
   }
 
   /**
@@ -1813,12 +1809,9 @@ export class Db {
   batch<TResult>(
     callback: (batch: DbBatchScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginBatch();
-    return runInBatch(
-      batch,
-      callback,
-      () => getDbBatchHandleBinding(batch, "result", "DbDirectBatch").client,
-    );
+    return this.transaction(callback, { visibility: "immediate" }) as unknown as
+      | WriteResult<TResult>
+      | Promise<WriteResult<Awaited<TResult>>>;
   }
 
   /**
