@@ -278,6 +278,23 @@ describe("db transaction reads browser integration", () => {
       });
     });
   });
+
+  it("concurrent transactions cannot modify the same data", async () => {
+    const { value: base } = db.insert(todos, { title: "Shared", done: false });
+
+    const aliceTx = db.beginTransaction();
+    const bobTx = db.beginTransaction();
+
+    aliceTx.update(todos, base.id, { title: "Alice's title" });
+    bobTx.update(todos, base.id, { title: "Bob's title" });
+
+    await aliceTx.commit().wait({ tier: "local" });
+    await expect(bobTx.commit().wait({ tier: "local" })).rejects.toThrow(
+      "(transaction_conflict): row visible parent changed since transaction write was staged",
+    );
+
+    expect((await db.one<Todo>(makeTodoQuery()))?.title).toEqual("Alice's title");
+  });
 });
 
 describe("db batch reads browser integration", () => {

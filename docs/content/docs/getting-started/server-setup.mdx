@@ -31,8 +31,11 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 | `--allow-local-first-auth`          | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                  | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
 | `--backend-secret <BACKEND_SECRET>` | Enable backend session impersonation                                                                                                     | `JAZZ_BACKEND_SECRET`         | unset                     |
 | `--admin-secret <ADMIN_SECRET>`     | Required for `deploy`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
+| `--upstream-url <UPSTREAM_URL>`     | Run as an edge server connected to the upstream core server. Requires `--peer-secret` and `--admin-secret`.                              | `JAZZ_UPSTREAM_URL`           | unset                     |
+| `--peer-secret <PEER_SECRET>`       | Shared server-to-server secret for edge sync. Required when `--upstream-url` is set.                                                     | `JAZZ_PEER_SECRET`            | unset                     |
 
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
+Edge mode is enabled by `--upstream-url`; when set, provide both `--peer-secret` and `--admin-secret` (or `JAZZ_PEER_SECRET` and `JAZZ_ADMIN_SECRET`).
 
 There is no separate Jazz server CLI flag for cookie-based auth. The sync server validates bearer
 JWTs, local-first bearer JWTs, or backend impersonation headers. If your app uses an HttpOnly cookie,

@@ -150,7 +150,7 @@ async fn opfs_persistence_across_reopen() {
         insert_todo(&runtime, "Task 2", true);
         insert_todo(&runtime, "Task 3", false);
 
-        runtime.flush();
+        runtime.flush().unwrap();
     }
 
     // Phase 2: Reopen and verify data persisted

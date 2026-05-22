@@ -537,6 +537,7 @@ impl PolicyExpr {
 use std::collections::HashSet;
 
 use crate::object::ObjectId;
+use uuid::Uuid;
 
 use super::types::{Schema, TableName};
 
@@ -974,8 +975,18 @@ fn evaluate_cmp_with_row_id(
     let Some(right) = resolve_policy_value(value, session) else {
         return false;
     };
+    let right = normalize_cmp_value_for_decoded_column(&left, right);
 
     compare_values(&left, op, &right)
+}
+
+fn normalize_cmp_value_for_decoded_column(left: &Value, right: Value) -> Value {
+    match (left, right) {
+        (Value::Uuid(_), Value::Text(raw)) => Uuid::parse_str(&raw)
+            .map(|uuid| Value::Uuid(ObjectId::from_uuid(uuid)))
+            .unwrap_or(Value::Text(raw)),
+        (_, right) => right,
+    }
 }
 
 pub fn evaluate_cmp(
@@ -2508,6 +2519,34 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_session_user_id_matches_text_and_uuid_owner_columns() {
+        let user_uuid = uuid::Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+        let user_id = user_uuid.to_string();
+        let session = Session::new(&user_id);
+        let expr = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+
+        let text_descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("owner_id", ColumnType::Text)]);
+        let text_content = encode_row(&text_descriptor, &[Value::Text(user_id.clone())]).unwrap();
+        assert!(
+            evaluate_policy_expr(&expr, &text_content, &text_descriptor, &session),
+            "text owner policies should still compare against session.user_id as text"
+        );
+
+        let uuid_descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("owner_id", ColumnType::Uuid)]);
+        let uuid_content = encode_row(
+            &uuid_descriptor,
+            &[Value::Uuid(ObjectId::from_uuid(user_uuid))],
+        )
+        .unwrap();
+        assert!(
+            evaluate_policy_expr(&expr, &uuid_content, &uuid_descriptor, &session),
+            "UUID/ref owner policies should normalize session.user_id for scalar comparisons"
+        );
     }
 
     fn nullable_descriptor() -> RowDescriptor {

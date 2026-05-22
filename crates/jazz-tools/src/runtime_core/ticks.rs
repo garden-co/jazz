@@ -581,6 +581,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.schema_manager.process(&mut self.storage);
         }
 
+        if self.transport_catalogue_state_hash_dirty {
+            self.refresh_transport_catalogue_state_hash();
+        }
+
         // 3. Collect subscription updates
         let subscription_updates = self.schema_manager.query_manager_mut().take_updates();
         let subscription_failures = self
@@ -741,8 +745,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
         if self.storage_write_pending_flush {
             let _span = tracing::debug_span!("flush_wal").entered();
-            self.storage.flush_wal();
-            self.clear_storage_write_pending_flush();
+            if let Err(error) = self.flush_wal_barrier() {
+                tracing::error!(%error, "storage WAL flush failed");
+                if self.should_schedule_storage_flush_retry() {
+                    self.scheduler.schedule_batched_tick();
+                }
+            }
         }
     }
 
@@ -758,13 +766,39 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         let mut unsent = Vec::new();
         for msg in outbox {
-            if let Some((ref tracer, ref name)) = self.sync_tracer {
-                tracer.record_outgoing(name, &msg.destination, &msg.payload);
-            }
+            let peer_kind = msg.destination.peer_kind();
+            let peer_id = msg.destination.peer_uuid();
+            let payload = msg.payload.variant_name();
+            let _send_span = debug_span!(
+                "sync.send",
+                peer_kind = peer_kind,
+                peer_id = %peer_id,
+                payload = payload,
+                payload_json = %serde_json::to_string(&msg.payload).unwrap_or_default(),
+                tier = self.tier_label,
+            )
+            .entered();
+
             let handled_by_transport = self
                 .transport
                 .as_ref()
                 .is_some_and(|handle| matches!(msg.destination, crate::sync_manager::Destination::Server(server_id) if server_id == handle.server_id));
+            if handled_by_transport
+                && matches!(msg.payload, SyncPayload::CatalogueEntryUpdated { .. })
+            {
+                if let Some(handle) = self.transport.as_ref() {
+                    tracing::debug!(
+                        server_id = %handle.server_id,
+                        "dropping catalogue publish for transport; catalogue publication uses HTTP admin forwarding"
+                    );
+                }
+                continue;
+            }
+
+            if let Some((ref tracer, ref name)) = self.sync_tracer {
+                tracer.record_outgoing(name, &msg.destination, &msg.payload);
+            }
+
             if handled_by_transport {
                 if let Some(handle) = self.transport.as_ref() {
                     handle.send_outbox(msg);
@@ -805,14 +839,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     if let Some(next_sync_seq) = next_sync_seq {
                         self.set_next_expected_server_sequence(server_id, next_sync_seq);
                     }
-                    let can_publish_catalogue = self
-                        .transport
-                        .as_ref()
-                        .is_some_and(|handle| handle.can_publish_catalogue());
                     self.add_server_with_catalogue_state_hash_and_permission(
                         server_id,
                         catalogue_state_hash.as_deref(),
-                        can_publish_catalogue,
+                        false,
                     );
                 }
                 crate::transport_manager::TransportInbound::Sync { entry, sequence } => {
@@ -927,7 +957,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     /// Park a sync message for processing in next batched_tick.
     pub fn park_sync_message(&mut self, message: InboxEntry) {
-        trace!(source = ?message.source, payload = message.payload.variant_name(), "parking sync message");
+        let _recv_span = debug_span!(
+            "sync.recv",
+            peer_kind = message.source.peer_kind(),
+            peer_id = %message.source.peer_uuid(),
+            payload = message.payload.variant_name(),
+            payload_json = %serde_json::to_string(&message.payload).unwrap_or_default(),
+            tier = self.tier_label,
+        )
+        .entered();
         if let Some((ref tracer, ref name)) = self.sync_tracer {
             tracer.record_incoming(&message.source, name, &message.payload);
         }
@@ -939,6 +977,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn park_sync_message_with_sequence(&mut self, message: InboxEntry, sequence: u64) {
         match message.source {
             crate::sync_manager::Source::Server(server_id) => {
+                let _recv_span = debug_span!(
+                    "sync.recv",
+                    peer_kind = "server",
+                    peer_id = %server_id,
+                    payload = message.payload.variant_name(),
+                    payload_json = %serde_json::to_string(&message.payload).unwrap_or_default(),
+                    sequence = sequence,
+                    tier = self.tier_label,
+                )
+                .entered();
                 let next_expected = self
                     .next_expected_server_seq
                     .entry(server_id)
@@ -1047,14 +1095,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 next_sync_seq,
             } => {
                 self.remove_server(server_id);
-                let can_publish_catalogue = self
-                    .transport
-                    .as_ref()
-                    .is_some_and(|handle| handle.can_publish_catalogue());
                 self.add_server_with_catalogue_state_hash_and_permission(
                     server_id,
                     catalogue_state_hash.as_deref(),
-                    can_publish_catalogue,
+                    false,
                 );
                 if let Some(seq) = next_sync_seq {
                     self.set_next_expected_server_sequence(server_id, seq);

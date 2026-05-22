@@ -78,6 +78,18 @@ struct SchemaHashesHttpResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PublishMigrationHttpResponse {
+    from_hash: String,
+    to_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaConnectivityHttpResponse {
+    connected: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StoredSchemaHttpResponse {
     schema: jazz_tools::Schema,
 }
@@ -230,6 +242,134 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
         .await
         .expect("decode edge permissions head");
     assert_eq!(edge_head.head, core_head.head);
+
+    edge.shutdown().await;
+    core.shutdown().await;
+}
+
+// Test topology:
+//
+//   admin HTTP client
+//          |
+//          | publish migration over HTTP
+//          v
+//   edge TestingServer
+//          |
+//          | forwards POST /admin/migrations after local admin-secret validation
+//          v
+//   core TestingServer
+//
+// The assertions verify that the migration is installed by the real core and
+// becomes observable both directly on core and through the edge.
+#[tokio::test]
+async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_edge() {
+    let app_id = TestingServer::default_app_id();
+    let core = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret("cluster-peer-secret")
+        .start()
+        .await;
+    let edge = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_peer_secret("cluster-peer-secret")
+        .with_upstream_url(core.base_url())
+        .start()
+        .await;
+    let v1_schema = schema_v1();
+    let v2_schema = schema_v2();
+    let v1_hash = SchemaHash::compute(&v1_schema).to_string();
+    let v2_hash = SchemaHash::compute(&v2_schema).to_string();
+    let client = reqwest::Client::new();
+
+    for schema in [&v1_schema, &v2_schema] {
+        let publish_schema_response = client
+            .post(format!("{}/apps/{app_id}/admin/schemas", core.base_url()))
+            .header("X-Jazz-Admin-Secret", core.admin_secret())
+            .json(&json!({ "schema": schema }))
+            .send()
+            .await
+            .expect("publish schema to core");
+        assert_eq!(publish_schema_response.status(), StatusCode::CREATED);
+    }
+
+    let publish_migration_response = client
+        .post(format!(
+            "{}/apps/{app_id}/admin/migrations",
+            edge.base_url()
+        ))
+        .header("X-Jazz-Admin-Secret", edge.admin_secret())
+        .json(&json!({
+            "fromHash": v1_hash,
+            "toHash": v2_hash,
+            "forward": [{
+                "table": "users",
+                "operations": [{
+                    "type": "introduce",
+                    "column": "email",
+                    "column_type": { "type": "Text" },
+                    "value": { "type": "Null" }
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .expect("publish migration through edge");
+    let publish_migration_status = publish_migration_response.status();
+    if publish_migration_status != StatusCode::CREATED {
+        let body = publish_migration_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable response body>".to_string());
+        panic!("migration publish through edge failed: {publish_migration_status} {body}");
+    }
+    let published_migration: PublishMigrationHttpResponse = publish_migration_response
+        .json()
+        .await
+        .expect("decode edge migration publish response");
+    assert_eq!(published_migration.from_hash, v1_hash);
+    assert_eq!(published_migration.to_hash, v2_hash);
+
+    let core_connectivity_response = client
+        .get(format!(
+            "{}/apps/{app_id}/admin/schema-connectivity?fromHash={}&toHash={}",
+            core.base_url(),
+            published_migration.from_hash,
+            published_migration.to_hash
+        ))
+        .header("X-Jazz-Admin-Secret", core.admin_secret())
+        .send()
+        .await
+        .expect("fetch schema connectivity from core");
+    assert_eq!(core_connectivity_response.status(), StatusCode::OK);
+    let core_connectivity: SchemaConnectivityHttpResponse = core_connectivity_response
+        .json()
+        .await
+        .expect("decode core schema connectivity response");
+    assert!(
+        core_connectivity.connected,
+        "core should know the migration published through edge"
+    );
+
+    let edge_connectivity_response = client
+        .get(format!(
+            "{}/apps/{app_id}/admin/schema-connectivity?fromHash={}&toHash={}",
+            edge.base_url(),
+            published_migration.from_hash,
+            published_migration.to_hash
+        ))
+        .header("X-Jazz-Admin-Secret", edge.admin_secret())
+        .send()
+        .await
+        .expect("fetch schema connectivity through edge");
+    assert_eq!(edge_connectivity_response.status(), StatusCode::OK);
+    let edge_connectivity: SchemaConnectivityHttpResponse = edge_connectivity_response
+        .json()
+        .await
+        .expect("decode edge schema connectivity response");
+    assert!(
+        edge_connectivity.connected,
+        "edge reads should reflect core migration catalogue state"
+    );
 
     edge.shutdown().await;
     core.shutdown().await;

@@ -27,54 +27,19 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
 
   </Tab>
   <Tab value="Vue">
-    ```vue title="App.vue"
-    <script setup lang="ts">
-    import { createJazzClient, JazzProvider } from "jazz-tools/vue";
-    import { BrowserAuthSecretStore } from "jazz-tools";
-    import TodoList from "./TodoList.vue";
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/AuthLocalfirst.vue
+    </include>
 
-    const secret = await BrowserAuthSecretStore.getOrCreateSecret();
-
-    const client = await createJazzClient({
-      appId: "<your-app-id>",
-      secret,
-    });
-    </script>
-
-    <template>
-      <JazzProvider :client="client">
-        <h1>Todos</h1>
-        <TodoList />
-      </JazzProvider>
-    </template>
-    ```
+    `useLocalFirstAuth()` from `jazz-tools/vue` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
   </Tab>
   <Tab value="Svelte">
-    ```svelte title="App.svelte"
-    <script lang="ts">
-      import {
-        createJazzClient,
-        JazzSvelteProvider,
-        BrowserAuthSecretStore,
-      } from 'jazz-tools/svelte';
-      import TodoList from './TodoList.svelte';
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthLocalfirst.svelte#auth-localfirst-svelte
+    </include>
 
-      const client = BrowserAuthSecretStore.getOrCreateSecret().then(
-        (secret) => createJazzClient({ appId: '<your-app-id>', secret })
-      );
-    </script>
-
-    <JazzSvelteProvider {client}>
-      {#snippet children()}
-        <h1>Todos</h1>
-        <TodoList />
-      {/snippet}
-      {#snippet fallback()}
-        <p>Loading...</p>
-      {/snippet}
-    </JazzSvelteProvider>
-    ```
+    `LocalFirstAuth` from `jazz-tools/svelte` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
   </Tab>
   <Tab value="Expo">
@@ -268,7 +233,7 @@ All plugins accept the same base options:
 | `server`      | `true` (default) starts an embedded local server. `false` disables the plugin. A URL string connects to an existing server. An object configures the embedded server (see below). |
 | `schemaDir`   | Directory containing `schema.ts` and `permissions.ts`. Defaults to the project root, or `src/lib/` for SvelteKit.                                                                 |
 | `appId`       | Override the app ID. Defaults to the value in `.env`, otherwise a generated UUID persisted on first run.                                                                          |
-| `adminSecret` | Required when `server` is a URL. Ignored for the embedded server (a random secret is generated).                                                                                  |
+| `adminSecret` | Required when `server` is a URL. For the embedded server, used as its admin secret unless `server.adminSecret` is set; otherwise a random secret is generated.                    |
 
 When `server` is an object, the embedded server accepts: `port` (default: random), `appId`, `adminSecret`, `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, and `jwksUrl`. See [Server Setup](/docs/getting-started/server-setup) for the full semantics.
 
@@ -286,7 +251,7 @@ jazzPlugin({
 
 ### What auto-pushes
 
-On startup and on every change to `schema.ts` or `permissions.ts`, the plugin publishes the current structural schema and permissions bundle to the server. Structural schema push works without an admin secret in development, so a bare `schema.ts` edit is enough to see clients pick up the new shape. Permission pushes use the server's admin secret (generated for the embedded server, supplied by you for a remote server).
+On startup and on every change to `schema.ts` or `permissions.ts`, the plugin publishes the current structural schema and permissions bundle to the server. Structural schema push works without an admin secret in development, so a bare `schema.ts` edit is enough to see clients pick up the new shape. Permission pushes use the resolved server admin secret (from `server.adminSecret`, root `adminSecret`, or a generated embedded-server secret).
 
 <Callout type="warn">
   Auto-push covers the development loop. For production — or any change that needs a schema migration — run `pnpm dlx jazz-tools@alpha deploy <appId>` to publish the migration, the new schema, and the current permissions in one step. See [Migrations](/docs/schemas/migrations).

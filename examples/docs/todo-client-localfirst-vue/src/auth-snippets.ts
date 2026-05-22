@@ -1,30 +1,24 @@
-import { ref, onMounted } from "vue";
-import { BrowserAuthSecretStore } from "jazz-tools";
+import { computed } from "vue";
+import { useLocalFirstAuth } from "jazz-tools/vue";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
 
 // #region auth-localfirst-vue-backup
 export function useRecoveryPhraseBackup() {
-  const isLoading = ref(true);
-  const recoveryPhrase = ref<string | null>(null);
-
-  onMounted(async () => {
-    const secret = await BrowserAuthSecretStore.loadSecret();
-    recoveryPhrase.value = secret ? RecoveryPhrase.fromSecret(secret) : null;
-    isLoading.value = false;
-  });
-
+  const { secret, isLoading } = useLocalFirstAuth();
+  const recoveryPhrase = computed(() =>
+    secret.value ? RecoveryPhrase.fromSecret(secret.value) : null,
+  );
   return { isLoading, recoveryPhrase };
 }
 // #endregion auth-localfirst-vue-backup
 
 // #region auth-localfirst-vue-restore
 export function useRecoveryPhraseRestore() {
+  const { login } = useLocalFirstAuth();
   return async (userInput: string) => {
     const restoredSecret = RecoveryPhrase.toSecret(userInput);
-    await BrowserAuthSecretStore.saveSecret(restoredSecret);
-    // Reload so the mounted JazzProvider picks up the restored secret.
-    location.reload();
+    await login(restoredSecret);
   };
 }
 // #endregion auth-localfirst-vue-restore
@@ -38,20 +32,20 @@ const passkeyBackup = new BrowserPasskeyBackup({
 });
 
 export function usePasskeyBackup() {
+  const { secret } = useLocalFirstAuth();
   return async (displayName: string) => {
-    const secret = await BrowserAuthSecretStore.loadSecret();
-    if (!secret) throw new Error("No local secret to back up yet");
-    await passkeyBackup.backup(secret, displayName);
+    if (!secret.value) throw new Error("No local secret to back up yet");
+    await passkeyBackup.backup(secret.value, displayName);
   };
 }
 // #endregion auth-localfirst-vue-passkey-backup
 
 // #region auth-localfirst-vue-passkey-restore
 export function usePasskeyRestore() {
+  const { login } = useLocalFirstAuth();
   return async () => {
     const restoredSecret = await passkeyBackup.restore();
-    await BrowserAuthSecretStore.saveSecret(restoredSecret);
-    location.reload();
+    await login(restoredSecret);
   };
 }
 // #endregion auth-localfirst-vue-passkey-restore

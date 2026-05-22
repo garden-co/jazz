@@ -8,6 +8,7 @@ use crate::query_manager::policy::{
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
 use crate::query_manager::session::Session;
+use crate::query_manager::settlement_eval_cache::{RefAccessSubexprKey, SettlementEvalCache};
 use crate::query_manager::types::{
     ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Value,
 };
@@ -20,6 +21,7 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     session: &'a Session,
     branch: &'a str,
     row_policy_mode: RowPolicyMode,
+    settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
 }
 
 impl<'a> PolicyContextEvaluator<'a> {
@@ -34,12 +36,21 @@ impl<'a> PolicyContextEvaluator<'a> {
             session,
             branch,
             row_policy_mode,
+            settlement_eval_cache: None,
         }
+    }
+
+    pub(crate) fn with_settlement_eval_cache(
+        mut self,
+        settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
+    ) -> Self {
+        self.settlement_eval_cache = settlement_eval_cache;
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn evaluate_row_access(
-        &self,
+        &mut self,
         operation: Operation,
         row: &Row,
         descriptor: &RowDescriptor,
@@ -60,12 +71,18 @@ impl<'a> PolicyContextEvaluator<'a> {
             return false;
         }
 
-        let local_allow = local_policy_override
-            .or_else(|| self.policy_for_operation(table, operation))
-            .map(|policy| {
+        crate::query_manager::policy_counters::increment(
+            "row_access_eval",
+            format!("table={} op={:?} depth={}", table_name, operation, depth),
+        );
+        let local_policy = local_policy_override
+            .cloned()
+            .or_else(|| self.policy_for_operation(table, operation).cloned());
+        let local_allow = match local_policy {
+            Some(policy) => {
                 let mut visited_inherits = HashSet::new();
                 self.evaluate_expr_with_context(
-                    policy,
+                    &policy,
                     operation,
                     row,
                     descriptor,
@@ -76,15 +93,16 @@ impl<'a> PolicyContextEvaluator<'a> {
                     &mut visited_inherits,
                     visited_referencing,
                 )
-            })
-            .unwrap_or(!self.row_policy_mode.denies_missing_explicit_policy());
+            }
+            None => !self.row_policy_mode.denies_missing_explicit_policy(),
+        };
 
         visited_referencing.remove(&(table, row.id, operation));
         local_allow
     }
 
     fn policy_for_operation(
-        &self,
+        &mut self,
         table_name: TableName,
         operation: Operation,
     ) -> Option<&PolicyExpr> {
@@ -99,7 +117,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_inherits_referencing_with_context(
-        &self,
+        &mut self,
         operation: Operation,
         source_table: &str,
         via_column: &str,
@@ -185,7 +203,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_expr_with_context(
-        &self,
+        &mut self,
         expr: &PolicyExpr,
         operation: Operation,
         row: &Row,
@@ -303,7 +321,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_inherits_with_context(
-        &self,
+        &mut self,
         operation: Operation,
         via_column: &str,
         max_depth: Option<usize>,
@@ -343,6 +361,36 @@ impl<'a> PolicyContextEvaluator<'a> {
             _ => return false,
         };
 
+        let cache_key = if depth == 0 && visited.is_empty() {
+            Some(RefAccessSubexprKey {
+                branch: self.branch.to_string(),
+                table: *parent_table,
+                id: parent_id,
+                operation,
+            })
+        } else {
+            None
+        };
+
+        if let Some(cache_key) = &cache_key {
+            if let Some(result) = self
+                .settlement_eval_cache
+                .as_ref()
+                .and_then(|cache| cache.ref_access_get(cache_key))
+            {
+                crate::query_manager::policy_counters::increment(
+                    "ref_access_subexpr_cache",
+                    format!("hit table={} op={:?}", cache_key.table.as_str(), operation),
+                );
+                return result;
+            }
+
+            crate::query_manager::policy_counters::increment(
+                "ref_access_subexpr_cache",
+                format!("miss table={} op={:?}", cache_key.table.as_str(), operation),
+            );
+        }
+
         if visited.contains(&parent_id) {
             return false;
         }
@@ -377,7 +425,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             parent_row.batch_id,
             parent_row.row_provenance,
         );
-        self.evaluate_expr_with_context(
+        let result = self.evaluate_expr_with_context(
             parent_policy,
             operation,
             &parent_row,
@@ -388,12 +436,18 @@ impl<'a> PolicyContextEvaluator<'a> {
             depth + 1,
             visited,
             visited_referencing,
-        )
+        );
+        if let Some(cache_key) = cache_key
+            && let Some(cache) = self.settlement_eval_cache.as_mut()
+        {
+            cache.ref_access_insert(cache_key, result);
+        }
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_exists_with_context(
-        &self,
+        &mut self,
         table: &str,
         condition: &PolicyExpr,
         operation: Operation,
@@ -428,7 +482,11 @@ impl<'a> PolicyContextEvaluator<'a> {
         };
 
         for _ in 0..100 {
-            if graph.settle(io, row_loader) {
+            if graph.settle_with_settlement_eval_cache(
+                io,
+                self.settlement_eval_cache.as_deref_mut(),
+                row_loader,
+            ) {
                 break;
             }
         }
@@ -438,7 +496,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_exists_rel_with_context(
-        &self,
+        &mut self,
         rel: &RelExpr,
         structural_scans: bool,
         row: &Row,
@@ -473,7 +531,11 @@ impl<'a> PolicyContextEvaluator<'a> {
         };
 
         for _ in 0..100 {
-            if graph.settle(io, row_loader) {
+            if graph.settle_with_settlement_eval_cache(
+                io,
+                self.settlement_eval_cache.as_deref_mut(),
+                row_loader,
+            ) {
                 break;
             }
         }

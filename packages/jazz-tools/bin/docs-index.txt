@@ -121,7 +121,26 @@ the same principal:
   Recreate `Db` or `JazzProvider` when the authenticated user changes.
 
 If you change the `config` passed to `JazzProvider`, Jazz recreates the client. That is the
-recommended path for login, logout, and any principal change.
+recommended path for login, logout, and any principal change. See
+[Lifecycle](/docs/auth/lifecycle) for logout, storage reset, and local-first identity storage.
+
+### Cookie-based auth
+
+Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active.
+
+```ts
+const db = await createDb({
+  appId: "my-app",
+  serverUrl: "https://sync.example.com",
+  cookieSession: {
+    user_id: "user_123",
+    claims: { role: "member" },
+    authMode: "external",
+  },
+});
+```
+
+You must choose between `cookieSession` and `secret`/`jwtToken`. If the same user is signed in, but their session changes (e.g. new claims, refreshed cookie), call `db.updateCookieSession(nextSession)`. To sign in, sign out, or authenticate as a different user, recreate `Db` or `JazzProvider` with a new config.
 
 ### Reacting to expiry and unauthenticated responses
 
@@ -216,7 +235,7 @@ When the server receives a request, it tries each auth method in priority order 
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
-On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` or `jwtPublicKey` on the backend context to verify external JWTs there too, but not both.
+On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` or `jwtPublicKey` on the backend context to verify external JWTs there too, but not both. Cookie-based app auth is resolved by your app server, not by the Jazz CLI server; once you have a Jazz session from a cookie, use `context.forSession(session)`.
 
 ### Upgrading to external auth
 
@@ -227,53 +246,245 @@ Users on local-first auth can sign up with an external provider and keep the sam
 - [Sessions](/docs/auth/sessions)&hairsp;—&hairsp;read the current user and scope queries to their identity
 - [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;define row-level access policies
 
+===PAGE:auth/lifecycle===
+TITLE:Lifecycle
+DESCRIPTION:"Client auth lifecycle: local-first identity storage, sign-in and sign-out, storage reset, and upgrading to external auth."
+
+Jazz clients have two pieces of local state that are easy to confuse:
+
+- **Identity secret**&hairsp;—&hairsp;the local-first auth secret. In browser apps this is usually stored
+  by `BrowserAuthSecretStore` in `localStorage`; in Expo it is stored by `ExpoAuthSecretStore` in
+  secure storage.
+- **Database storage**&hairsp;—&hairsp;the local relational database. Browser persistent clients store this
+  in OPFS; React Native uses native storage; memory drivers keep it only for the life of the process.
+
+Clearing one does not automatically clear the other. That separation is intentional: a development
+storage reset should not silently destroy a user's identity, and signing out of an auth provider
+should not necessarily delete offline data.
+
+## Local-first identity storage
+
+Local-first auth derives the user's Jazz identity from a 32-byte secret. The same secret always
+produces the same Jazz user ID, so preserving the secret preserves identity across app restarts.
+
+```ts
+const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+
+const db = await createDb({
+  appId: "my-app",
+  secret,
+});
+```
+
+`useLocalFirstAuth()` wraps this storage for React and Expo apps. Its `signOut()` method clears the
+stored secret, which means the next login without a restored secret creates a different Jazz
+identity.
+
+  The local-first secret is the user's identity. If it is lost, rows owned only by that identity may
+  become inaccessible unless the user restores the same secret from a recovery passphrase, passkey
+  backup, or linked external account. The secret should be protected carefully: anyone with the
+  secret can authenticate as the user.
+
+Use [Local-first auth](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret) to add
+recovery before shipping flows that clear or replace a local-first secret.
+
+## Switching users
+
+Recreate the
+client with a new auth config whenever the active principal changes:
+
+```tsx
+
+```
+
+For the same external user, `db.updateAuthToken(freshJwt)` is fine for refreshing an expiring
+bearer token. Do not use `db.updateAuthToken(null)` to sign out or switch users on a live `Db`. For cookie-based auth, `db.updateCookieSession(nextSession)` updates the mirrored
+session for the same user while the HttpOnly cookie remains the transport credential.
+
+## Logout
+
+Use `db.logout()` when you are done with a `Db` instance during logout or switching users. It
+shuts down subscriptions, workers, and cached runtime clients. Your auth provider is still
+responsible for clearing its own token or cookie, and your app should recreate `Db` or
+`JazzProvider` with the next auth config.
+
+```ts
+await db.logout();
+```
+
+In browser persistent mode, pass `wipeData: true` to also clear the local OPFS database namespace
+before shutdown:
+
+```ts
+await db.logout({ wipeData: true });
+```
+
+`wipeData` clears the local database for this browser storage namespace. It does not clear
+local-first auth secrets from `localStorage`, Expo secure storage, or your external provider's
+cookies/tokens.
+
+## Storage reset
+
+For development tools that only need to clear browser database storage without treating it as
+logout, call:
+
+```ts
+await db.deleteClientStorage();
+```
+
+This API is only available for browser worker-backed persistent storage. It clears OPFS database
+files and coordinates across tabs, but intentionally leaves local-first auth secrets alone.
+
+Need a console-only reset while debugging? See [How do I reset browser storage?](/docs/faq#reset-browser-storage).
+
+## Upgrading to external auth
+
+Users can start with local-first auth and later sign up with an external provider while keeping the
+same Jazz identity. The upgrade flow is:
+
+1. Start the app with a local-first `secret`.
+2. Before sign-up, call `db.getLocalFirstIdentityProof(...)` to prove ownership of that identity.
+3. Verify that proof on your server.
+4. Create or link the external account so its future JWTs use the same Jazz user ID as `sub`.
+5. Recreate `Db` or `JazzProvider` with `jwtToken` or `cookieSession` for the linked external account.
+
+After the external account is linked, keep the local-first secret backed up until you are confident
+the external provider can recover the same Jazz user ID. See
+[Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth) for the full
+proof-token flow.
+
+## Related APIs
+
+| API                               | Use it for                                                       |
+| --------------------------------- | ---------------------------------------------------------------- |
+| `BrowserAuthSecretStore`          | Browser local-first secret storage                               |
+| `ExpoAuthSecretStore`             | Expo secure local-first secret storage                           |
+| `useLocalFirstAuth()`             | React/Expo hook for loading, replacing, and clearing the secret  |
+| `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                   |
+| `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal |
+| `db.logout()`                     | Shutting down a client during logout or principal switch         |
+| `db.logout({ wipeData: true })`   | Logout plus browser OPFS database wipe                           |
+| `db.deleteClientStorage()`        | Development-only browser OPFS storage reset                      |
+
 ===PAGE:auth/local-first-auth===
 TITLE:Local-first auth
 DESCRIPTION:"Authenticate users without a server using self-signed tokens, and optionally upgrade to an external provider while preserving identity."
 
-Local-first auth lets users start using your app immediately — no sign-up, no server round-trip. Jazz generates a stable identity from a secret stored on the device. Without a recovery mechanism, that identity lives only on the device — if the secret is lost, it's gone. Linking to an external provider at sign-up is one way to make the identity durable and recoverable.
+Local-first auth lets users start using your app immediately without signing up. Jazz generates a secret on the client, derives a stable account ID from it, and uses self-signed tokens to prove the user owns that account. The secret itself effectively _is_ the account.
 
-| Mode          | Identity source         | Server needed? | Best for                                               |
-| ------------- | ----------------------- | -------------- | ------------------------------------------------------ |
-| `local-first` | Secret stored on device | No             | Production offline-first apps, try-before-signup flows |
-| `external`    | JWT from auth provider  | Yes            | Production apps with real user accounts                |
+This secret (and therefore the account) lives wherever the user uses the app. To log in from other devices, the user needs to use the same secret.
+
+| Mode          | Identity source        | Server needed? | Best for                                               |
+| ------------- | ---------------------- | -------------- | ------------------------------------------------------ |
+| `local-first` | Keypair held by client | No             | Production offline-first apps, try-before-signup flows |
+| `external`    | JWT from auth provider | Yes            | Production apps with real user accounts                |
+
+## When to use local-first auth
+
+If you want users to be able to start immediately, local-first ([client setup](#client-setup)) is a great option, but any user who clears site data (intentionally or otherwise) loses their account.
+
+You can add a [recovery passphrase](#recovery-passphrase) or [passkey backup](#passkey-backup) which allows users to more easily log in on multiple devices or recover their accounts if they delete them. However, these are often less familiar and can add UX friction.
+
+A good middle ground is starting users on local-first so they can play around immediately, but let them upgrade to a managed account when they want to, for example using Better Auth (see [signing up with BetterAuth](#signing-up-with-betterauth)).
+
+If you don't want a try-before-signup flow at all, skip local-first entirely and use [external auth](/docs/auth/authentication) from day one.
+
+You can also combine modes: let local-first users read and experiment, but require an upgrade before any sensitive action — see [Permissions by auth mode](#permissions-by-auth-mode).
 
 ## Client setup
 
-Use `useLocalFirstAuth()` to manage the user's secret. On first load it generates a new identity; on subsequent loads it reuses the stored one. It also exposes `login` and `signOut` for switching or clearing the local identity.
+Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret in the browser (or equivalent on native) so subsequent loads reuse the same account.
 
-```tsx
+    ```tsx
 
-function App() {
   const { secret, isLoading } = useLocalFirstAuth();
 
-  if (isLoading || !secret) return <p>Loading…</p>;
+  if (isLoading || !secret) return null;
 
   return (
 
   );
 }
 ```
+    `useLocalFirstAuth()` also exposes `login` and `signOut` for switching or clearing accounts.
 
-  The secret is the user's identity. If it's lost (e.g. `localStorage` cleared), the identity is
-  gone and any data owned by that user becomes inaccessible unless you restore it from a recovery
-  passphrase, a passkey backup, or an external provider you linked earlier.
+    ```vue
+<script setup lang="ts">
+
+const client = ref | null>(null);
+
+onMounted(async () => {
+  const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+  client.value = createJazzClient({
+    appId: "my-app",
+    secret,
+  });
+});
+</script>
+
+<template>
+
+    <slot />
+
+</template>
+
+```
+
+    ```svelte
+
+<script lang="ts">
+  import { BrowserAuthSecretStore, createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+  import type { Snippet } from 'svelte';
+
+  let { children }: { children: Snippet } = $props();
+
+  const client = BrowserAuthSecretStore.getOrCreateSecret().then((secret) =>
+    createJazzClient({ appId: 'my-app', secret }),
+  );
+</script>
+
+  {@render children()}
+
+```
+
+    ```ts
+
+  const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
+
+  return createDb({
+    appId: "my-app",
+    secret,
+  });
+}
+```
+
+  Lose the secret and you lose the account. If it's cleared (e.g. `localStorage` wiped), the account
+  and any data owned by it become inaccessible unless the user restores from a recovery passphrase,
+  a passkey backup, or an external provider they linked earlier.
+
+For how the secret relates to local database storage, logout, and user switching, see
+[Auth Lifecycle](/docs/auth/lifecycle).
 
 ## Backing up and restoring the secret
 
 You can keep local-first auth fully serverless and still make it recoverable. Jazz ships two backup
-helpers for the same 32-byte secret:
+helpers:
 
-| Method                      | Platforms     | Best for                                       | Trade-offs                                           |
-| --------------------------- | ------------- | ---------------------------------------------- | ---------------------------------------------------- |
-| `jazz-tools/passphrase`     | Browser, Expo | Manual backup users can carry anywhere         | User must safely store a 24-word recovery passphrase |
-| `jazz-tools/passkey-backup` | Browser only  | Fast recovery on devices that support passkeys | Requires WebAuthn and a stable relying-party ID      |
+| Method                      | Platforms     | Best for                                       | Trade-offs                                                                                      |
+| --------------------------- | ------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `jazz-tools/passphrase`     | Browser, Expo | Manual backup users can carry anywhere         | User must securely store a 24-word recovery passphrase, and UI has to convey the weight of this |
+| `jazz-tools/passkey-backup` | Browser only  | Fast recovery on devices that support passkeys | Passkey sync is platform-bounded                                                                |
 
 ### Recovery passphrase
 
-`jazz-tools/passphrase` converts the local-first secret into a 24-word English recovery
-passphrase. Restoring that passphrase produces the exact same secret, so the user keeps the same
-Jazz identity.
+`jazz-tools/passphrase` encodes the secret as a 24-word English passphrase, similar to
+a crypto-wallet seed phrase. Decoding the passphrase produces the exact same secret, so the user
+keeps the same Jazz account.
+
+  The 24 words are just the secret encoded differently, not a password layered over it. There's no
+  hashing, no key-wrapping, no challenge-response: whoever sees the passphrase can sign in as the
+  user. This poses a difficult UX challenge: the phrase is too long for most people to remember, and
+  the risk of insecure storage is high.
 
     ```tsx
 
@@ -289,17 +500,47 @@ Jazz identity.
 }
 ```
 
-    ```tsx
+    ```ts
 
-  isLoading: boolean;
-  recoveryPhrase: string | null;
-} {
-  const { secret, isLoading } = useLocalFirstAuth();
+  const isLoading = ref(true);
+  const recoveryPhrase = ref<string | null>(null);
+
+  onMounted(async () => {
+    const secret = await BrowserAuthSecretStore.loadSecret();
+    recoveryPhrase.value = secret ? RecoveryPhrase.fromSecret(secret) : null;
+    isLoading.value = false;
+  });
+
+  return { isLoading, recoveryPhrase };
+}
+```
+
+    ```ts
+
+  let isLoading = $state(true);
+  let recoveryPhrase = $state<string | null>(null);
+
+  onMount(async () => {
+    const secret = await BrowserAuthSecretStore.loadSecret();
+    recoveryPhrase = secret ? RecoveryPhrase.fromSecret(secret) : null;
+    isLoading = false;
+  });
 
   return {
-    isLoading,
-    recoveryPhrase: secret ? RecoveryPhrase.fromSecret(secret) : null,
+    get isLoading() {
+      return isLoading;
+    },
+    get recoveryPhrase() {
+      return recoveryPhrase;
+    },
   };
+}
+```
+
+    ```ts
+
+  const secret = await BrowserAuthSecretStore.loadSecret();
+  return secret ? RecoveryPhrase.fromSecret(secret) : null;
 }
 ```
 
@@ -317,33 +558,71 @@ local-first auth flow:
 }
 ```
 
-    ```tsx
-
-  const { login } = useLocalFirstAuth();
+    ```ts
 
   return async (userInput: string) => {
     const restoredSecret = RecoveryPhrase.toSecret(userInput);
-    await login(restoredSecret);
+    await BrowserAuthSecretStore.saveSecret(restoredSecret);
+    // Reload so the mounted JazzProvider picks up the restored secret.
+    location.reload();
   };
 }
 ```
 
-The parser accepts upper-case input and extra whitespace. Invalid input throws
+    ```ts
+
+  const restoredSecret = RecoveryPhrase.toSecret(userInput);
+  await BrowserAuthSecretStore.saveSecret(restoredSecret);
+  // Reload so the mounted JazzSvelteProvider picks up the restored secret.
+  location.reload();
+}
+```
+
+    ```ts
+
+  const restoredSecret = RecoveryPhrase.toSecret(userInput);
+  await BrowserAuthSecretStore.saveSecret(restoredSecret);
+  // Reload so the live Jazz client picks up the restored secret.
+  location.reload();
+}
+```
+
+The parser is case-insensitive and tolerant of extra whitespace between words. Invalid input throws
 `RecoveryPhraseError` with codes like `invalid-length`, `invalid-word`, and
 `invalid-checksum`.
 
-  In React and Expo, prefer `useLocalFirstAuth()` for backup and restore so the mounted
-  `JazzProvider` updates immediately. The lower-level `BrowserAuthSecretStore` and
-  `ExpoAuthSecretStore` APIs are still useful outside React-based UIs.
+  In React and Expo, `useLocalFirstAuth().login()` updates the mounted `JazzProvider` immediately.
+  Other frameworks use `BrowserAuthSecretStore.saveSecret()` directly, which doesn't notify the live
+  client — the snippets above reload the page so the new secret is picked up on the next load.
 
 ### Passkey backup
 
-For browser apps, `jazz-tools/passkey-backup` stores the same secret in a resident WebAuthn
-credential. That gives users passkey-style recovery without adding a server-side auth provider.
+A passkey is a credential stored and synced by the user's browser or platform (via the WebAuthn
+browser API), typically unlocked with biometrics. `jazz-tools/passkey-backup` uses this as an
+encrypted at-rest store for the secret: the secret is held inside a resident WebAuthn
+credential and released after a user verification prompt. This is not a full WebAuthn
+authentication flow&hairsp;—&hairsp;Jazz is not challenging the key, just using the passkey as a vault for the
+seed.
+
+Passkey availability depends on where the user's passkey provider works. OS-native stores
+(iCloud Keychain, Google Password Manager) have platform boundaries that are not always visible
+to users. For example, a passkey created on Safari/macOS may not be available on Chrome/Windows unless the
+user is using a third-party passkey manager (1Password, Bitwarden, Dashlane etc.) that spans
+both. WebAuthn's cross-device flow (QR from laptop to phone) can bridge a session but requires
+the original device, so it doesn't help after a loss.
+
+  Treat passkey backup as one option among several. Pair it with a recovery passphrase or a linked
+  provider account so the user doesn't get locked out.
 
 Create the passkey from the current local-first secret:
 
-```tsx
+    ```tsx
+const passkeyBackup = new BrowserPasskeyBackup({
+  appName: "My App",
+  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
+  // which scopes passkeys per preview-deploy URL.
+  appHostname: "myapp.com",
+});
 
   isLoading: boolean;
   backupWithPasskey: (displayName: string) => Promise<void>;
@@ -363,10 +642,53 @@ Create the passkey from the current local-first secret:
 }
 ```
 
-Restore from the passkey by reading the secret back and passing it to `login(...)` from
-`useLocalFirstAuth()`:
+    ```ts
+const passkeyBackup = new BrowserPasskeyBackup({
+  appName: "My App",
+  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
+  // which scopes passkeys per preview-deploy URL.
+  appHostname: "myapp.com",
+});
 
-```tsx
+  return async (displayName: string) => {
+    const secret = await BrowserAuthSecretStore.loadSecret();
+    if (!secret) throw new Error("No local secret to back up yet");
+    await passkeyBackup.backup(secret, displayName);
+  };
+}
+```
+
+    ```ts
+const passkeyBackup = new BrowserPasskeyBackup({
+  appName: "My App",
+  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
+  // which scopes passkeys per preview-deploy URL.
+  appHostname: "myapp.com",
+});
+
+  const secret = await BrowserAuthSecretStore.loadSecret();
+  if (!secret) throw new Error("No local secret to back up yet");
+  await passkeyBackup.backup(secret, displayName);
+}
+```
+
+    ```ts
+const passkeyBackup = new BrowserPasskeyBackup({
+  appName: "My App",
+  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
+  // which scopes passkeys per preview-deploy URL.
+  appHostname: "myapp.com",
+});
+
+  const secret = await BrowserAuthSecretStore.loadSecret();
+  if (!secret) throw new Error("No local secret to back up yet");
+  await passkeyBackup.backup(secret, displayName);
+}
+```
+
+Restore by reading the secret back from the passkey:
+
+    ```tsx
 
   const { login } = useLocalFirstAuth();
 
@@ -377,9 +699,39 @@ Restore from the passkey by reading the secret back and passing it to `login(...
 }
 ```
 
-Use a stable `appHostname` everywhere you want passkey recovery to work. It becomes the WebAuthn
-relying-party ID, so changing it creates a different passkey namespace. `backup(secret,
-displayName)` also needs a user-visible name for the platform passkey sheet.
+    ```ts
+
+  return async () => {
+    const restoredSecret = await passkeyBackup.restore();
+    await BrowserAuthSecretStore.saveSecret(restoredSecret);
+    location.reload();
+  };
+}
+```
+
+    ```ts
+
+  const restoredSecret = await passkeyBackup.restore();
+  await BrowserAuthSecretStore.saveSecret(restoredSecret);
+  location.reload();
+}
+```
+
+    ```ts
+
+  const restoredSecret = await passkeyBackup.restore();
+  await BrowserAuthSecretStore.saveSecret(restoredSecret);
+  location.reload();
+}
+```
+
+  Passkey backup is currently browser-only. Mobile platform support is planned.
+
+- `appHostname` becomes the WebAuthn relying-party ID which is the namespace passkeys are scoped to.
+  If you change it, all existing passkeys will stop working.
+
+- The `displayName` argument to `backup(secret,
+displayName)` is the user-visible name shown in the platform passkey sheet.
 
 Handle `PasskeyBackupError` in your UI to surface cases like unsupported browsers, no saved
 credential, or missing user verification. Keep a recovery passphrase or external sign-in as a
@@ -387,29 +739,23 @@ fallback if the user might lose access to their passkey provider.
 
 ## Server configuration
 
-Local-first auth is enabled by default in development. In production, enable it explicitly:
+Local-first auth is enabled by default in the cloud, and in local dev mode. For self-hosted production setups, enable it explicitly:
 
 ```bash
 pnpm dlx jazz-tools@alpha server  --allow-local-first-auth
 ```
 
-No JWKS endpoint is needed — the token is self-contained and the server can verify it on its own.
+No JWKS endpoint is needed: the token is self-contained and the server can verify it on its own.
 
 ## Signing up with BetterAuth
 
-Users can try your app before creating an account. When they sign up later through BetterAuth, all the data they created carries over — same account, nothing lost.
+Users can try your app before creating an account. When they sign up later through BetterAuth, all the data they created carries over: same Jazz account, now with an email (or OAuth identity) attached.
 
->Client: db.getLocalFirstIdentityProof()
-    Client->>BetterAuth: Sign up (email + proofToken)
-    BetterAuth->>BetterAuth: Verify proof, create user with same ID
-    BetterAuth-->>Client: Session + JWT
-    Note over Client: Same user ID, now with an account
-
-`} />
+The client generates a short-lived proof that it owns the current Jazz account and hands it to BetterAuth alongside the sign-up credentials. BetterAuth verifies the proof, records the Jazz account ID against the new user, and issues JWTs that keep pointing to the same ID. For the reasoning and sequence diagram, see [Upgrading to a provider account](/docs/reference/local-first-auth-internals#upgrading-to-a-provider-account).
 
 ### Generating the proof token
 
-Before calling your sign-up endpoint, the client generates a short-lived proof that it owns the current Jazz identity:
+Before calling your sign-up endpoint, the client generates a short-lived proof that it owns the current Jazz account:
 
 ```tsx
 function SignUpButton() {
@@ -442,7 +788,7 @@ function SignUpButton() {
 }
 ```
 
-The `audience` should match what the server expects when verifying. The `ttlSeconds` keeps the window short — 60 seconds is enough for a sign-up round-trip.
+`audience` is application-defined; the string only needs to match what the server passes when verifying. `ttlSeconds` keeps the window short — 60 seconds is usually enough for a sign-up round-trip.
 
 ### Verifying on sign-up
 
@@ -587,7 +933,9 @@ The BetterAuth example above uses a framework-specific middleware hook. With any
 3. Stores the proven Jazz user ID linked to the new user account
 4. Issues JWTs with `sub: jazzId`
 
-```ts title="server.ts"
+Sketched in pseudo-Express (`db.users.create` and `issueJwt` stand in for whatever your stack provides):
+
+```ts title="Illustrative — not a runnable example"
 
 // POST /signup
 app.post("/signup", async (req, res) => {
@@ -612,31 +960,15 @@ app.post("/signup", async (req, res) => {
 
 The `audience` string on the client and server must match. `jazz-napi` normalizes it internally, so any consistent string works.
 
-Jazz uses the JWT `sub` claim as `session.user_id`. If your provider keeps `sub` fixed to its own user ID, add a `/link-jazz-identity` endpoint that stores the Jazz ID and mint the JWT with `sub: <jazzId>` yourself — either via a custom `getSubject` hook on your provider or by issuing the JWT directly.
-
-## Under the hood
-
-Local-first auth uses Ed25519 cryptography to derive a stable identity from a secret:
-
-1. A 32-byte **seed** is hashed with SHA-512 to produce an Ed25519 **signing key**.
-2. The corresponding **public key** (32 bytes) is extracted.
-3. A deterministic **user ID** is derived from the public key using UUIDv5 (namespace `jazz-auth-key-v1`).
-4. The client mints a **self-signed JWT** with:
-   - `alg: "EdDSA"` — Ed25519 signature
-   - `iss: "urn:jazz:local-first"` — identifies the token as local-first
-   - `sub: <user_id>` — the derived user ID
-   - `jazz_pub_key: <base64url>` — the embedded public key
-   - `aud: <app_id>` — scoped to the app
-
-The server verifies the signature using the embedded public key, re-derives the user ID, and confirms it matches `sub`. No external key store is involved — the token is fully self-contained.
-
-Same seed always produces the same user ID, across devices and time.
+Jazz reads the JWT `sub` claim verbatim as `session.user_id` — no custom-claim fallback — so your provider needs to emit the Jazz ID as `sub`. If it doesn't let you override `sub` (e.g. it pins it to its own user ID), you'll need to mint the JWT yourself rather than using the provider's issuer.
 
 ## Next steps
 
+- [Lifecycle](/docs/auth/lifecycle) — local-first storage, logout, and upgrading auth
 - [Sessions](/docs/auth/sessions) — read the current user and scope queries to their identity
 - [Permissions](/docs/auth/permissions) — define row-level access policies
-- [Auth provider integration](/docs/recipes/auth-provider-integration) — set up BetterAuth or WorkOS as your JWT provider
+- [Auth provider integration](/docs/recipes/auth/auth-provider-integration) — set up BetterAuth or WorkOS as your JWT provider
+- [Local-first auth internals](/docs/reference/local-first-auth-internals) — token format, verification, and design rationale
 
 ===PAGE:auth/permissions===
 TITLE:Permissions
@@ -941,6 +1273,96 @@ s.definePermissions(exampleApp, ({ policy, anyOf, isCreator }) => {
 For more dynamic sharing or ownership models, prefer explicit tables and relations rather than
 encoding extra meaning into authorship alone.
 
+## Testing permissions
+
+Jazz provides utilities to test permissions in isolation without testing your whole app's logic.
+
+The `createPolicyTestApp` helper from `jazz-tools/testing` starts an isolated local Jazz server, publishes your app schema
+and compiled permissions, and gives you session-scoped database clients for assertions.
+
+```typescript title="permissions.test.ts"
+
+let testApp: PolicyTestApp;
+
+beforeEach(async () => {
+  testApp = await createPolicyTestApp(app, permissions, expect);
+});
+
+afterEach(async () => {
+  await testApp.shutdown();
+});
+
+describe("todo permissions", () => {
+  it("allows owners to update their own todos", () => {
+    const todo = testApp.seed((db) => {
+      const { value } = db.insert(app.todos, {
+        title: "Buy milk",
+        ownerId: "alice",
+      });
+      return value;
+    });
+
+    const alice = testApp.as({
+      user_id: "alice",
+      claims: {},
+      authMode: "local-first",
+    });
+    const bob = testApp.as({
+      user_id: "bob",
+      claims: {},
+      authMode: "local-first",
+    });
+
+    alice.expectAllowed((db) =>
+      db.update(app.todos, todo.id, {
+        title: "Buy oat milk",
+      }),
+    );
+
+    bob.expectDenied((db) =>
+      db.update(app.todos, todo.id, {
+        title: "Buy orange juice",
+      }),
+    );
+  });
+});
+```
+
+`createPolicyTestApp` takes the app created with `defineApp(...)`, the
+permissions object created with `definePermissions(...)`, and your test runner's `expect` function.
+
+The returned `PolicyTestApp` provides:
+
+- `testApp.seed(fn)` — run setup writes as an admin, bypassing policy checks
+- `testApp.as(session)` — create a `TestDb` client scoped to a specific session
+- `testDb.expectAllowed(fn)` — assert that a write does not throw a policy error
+- `testDb.expectDenied(fn)` — assert that a write is rejected by a policy
+- `testApp.shutdown()` — stop the local client and server
+
+For read policies, assert on returned rows directly. Denied reads are filtered out rather than
+throwing.
+
+```typescript
+const bob = testApp.as({
+  user_id: "bob",
+  claims: {},
+  authMode: "local-first",
+});
+
+await expect(bob.all(app.todos.where({ id: privateTodo.id }))).resolves.toEqual([]);
+```
+
+If your policies depend on JWT claims, put those values in `session.claims` using the same claim
+names your policy reads.
+
+```typescript
+const invitedUser = testApp.as({
+  user_id: "bob",
+  claims: { join_code: "invite-123" },
+  authMode: "local-first",
+});
+```
+
 ===PAGE:auth/sessions===
 TITLE:Sessions
 DESCRIPTION:Reading the current session and scoping queries and inserts to the logged-in user.
@@ -1183,7 +1605,7 @@ All [reads](/docs/reading/queries) and [writes](/docs/writing/writing-data) thro
 
 When your schema changes, Jazz creates a new branch with a different schema hash (e.g. `prod-a1b2c3d4-main` for v1 and `prod-e5f6g7h8-main` for v2). At the storage level, data from different schema versions is kept separate.
 
-At query time, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [migrations](/docs/schemas/migrations) to adapt older data to your current schema automatically.
+At query time, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [migrations](/docs/schemas/migrations) to adapt older data to your current schema automatically. See the [schemas, lenses and branches diagram](/docs/schemas/migrations#schemas-lenses-and-branches) for how schema versions, lenses and per-hash branches fit together.
 
 ## Environments and user branches are fully isolated
 
@@ -1454,7 +1876,7 @@ window.__jazz.listLiveStorageNamespaces();
 await window.__jazz.clearStorage("my-app::alice");
 ```
 
-If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API.
+If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API. See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset) for how this differs from logout and local-first identity storage.
 
 - Browser persistent storage only.
 - If exactly one live namespace exists, `clearStorage()` uses it automatically.
@@ -1517,7 +1939,7 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
 
     const secret = await BrowserAuthSecretStore.getOrCreateSecret();
 
-    const client = createJazzClient({
+    const client = await createJazzClient({
       appId: "<your-app-id>",
       secret,
     });
@@ -1539,24 +1961,19 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
       } from 'jazz-tools/svelte';
       import TodoList from './TodoList.svelte';
 
-      let client = $state | null>(null);
-
-      BrowserAuthSecretStore.getOrCreateSecret().then((secret) => {
-        client = createJazzClient({ appId: '<your-app-id>', secret });
-      });
+      const client = BrowserAuthSecretStore.getOrCreateSecret().then(
+        (secret) => createJazzClient({ appId: '<your-app-id>', secret })
+      );
     </script>
 
-    {#if client}
+      {#snippet children()}
+        <h1>Todos</h1>
 
-        {#snippet children()}
-          <h1>Todos</h1>
+      {/snippet}
+      {#snippet fallback()}
+        <p>Loading...</p>
+      {/snippet}
 
-        {/snippet}
-        {#snippet fallback()}
-          <p>Loading...</p>
-        {/snippet}
-
-    {/if}
     ```
 
     ```tsx
@@ -1581,8 +1998,6 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
 
   return createDb({
     appId: "my-app",
-    env: "dev",
-    userBranch: "main",
     secret,
   });
 }
@@ -1603,9 +2018,33 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 
 For React Native and Expo clients, make sure `serverUrl` points to a host your runtime can reach. For example, the Android emulator often needs `10.0.2.2` instead of `localhost`.
 
+Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active. You must choose between `cookieSession` and `secret`/`jwtToken`. Call `db.updateCookieSession(nextSession)` for cookie-backed session changes or recreate `JazzProvider` / `Db` on sign-in and sign-out.
+
 ### Storage driver
 
 Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. This option requires you to set a `serverUrl` since nothing is saved locally.
+
+#### Browser storage eviction
+
+`{ type: "persistent" }` writes to the [Origin Private File System (OPFS)](https://developer.mozilla.org/docs/Web/API/File_System_API/Origin_private_file_system). By default browsers treat this as **best-effort** storage&hairsp;—&hairsp;under disk pressure, or after long inactivity, the browser can clear it without warning. For a local-first app that means a returning user can find their identity (the local-first secret) and any data owned only by that user wiped.
+
+The trade-offs are:
+
+- **Best-effort (default).** No prompt, no friction. Acceptable when the server holds a copy of every row the user cares about, or when the app gracefully reseeds from sync. Anything that exists only on this device is at risk.
+- **Persistent.** Storage is only cleared by an explicit user action (clearing site data, uninstalling). Required for true offline-first apps and for any data that doesn't round-trip through a server. Browsers gate this behind [`navigator.storage.persist()`](https://developer.mozilla.org/docs/Web/API/StorageManager/persist), which may show a prompt or grant silently based on engagement heuristics.
+
+To request persistent storage, call it once after the user has signed in or interacted enough that a prompt makes sense:
+
+```ts
+if (navigator.storage?.persist) {
+  const granted = await navigator.storage.persist();
+  if (!granted) {
+    // Fall back: rely on sync, warn the user, or retry later.
+  }
+}
+```
+
+Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret) flow so the local-first secret can be recovered if storage is ever cleared.
 
 ## Dev plugins
 
@@ -1653,9 +2092,7 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     import { defineConfig } from "vite";
 
     export default defineConfig({
-      // jazzSvelteKit must come before sveltekit so it populates
-      // process.env before SvelteKit captures $env/dynamic/public.
-      plugins: [jazzSvelteKit(), sveltekit()],
+      plugins: [sveltekit(), jazzSvelteKit()],
     });
     ```
 
@@ -1682,6 +2119,10 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
 
     Injects `EXPO_PUBLIC_JAZZ_APP_ID` and `EXPO_PUBLIC_JAZZ_SERVER_URL` via `expoConfig.extra`. Skipped automatically when `NODE_ENV=production`.
 
+    Expo and React Native apps still need the runtime polyfills from the quickstart. Import
+    `jazz-tools/expo/polyfills` as the first line of your app entry point before any other Jazz
+    import.
+
 On first run the plugin generates an app ID, persists it to `.env`, and starts a local Jazz server under `node_modules/.cache/jazz-dev-server/`. Every subsequent run reuses both.
 
 ### Env var names
@@ -1706,9 +2147,9 @@ All plugins accept the same base options:
 | `server`      | `true` (default) starts an embedded local server. `false` disables the plugin. A URL string connects to an existing server. An object configures the embedded server (see below). |
 | `schemaDir`   | Directory containing `schema.ts` and `permissions.ts`. Defaults to the project root, or `src/lib/` for SvelteKit.                                                                 |
 | `appId`       | Override the app ID. Defaults to the value in `.env`, otherwise a generated UUID persisted on first run.                                                                          |
-| `adminSecret` | Required when `server` is a URL. Ignored for the embedded server (a random secret is generated).                                                                                  |
+| `adminSecret` | Required when `server` is a URL. For the embedded server, used as its admin secret unless `server.adminSecret` is set; otherwise a random secret is generated.                    |
 
-When `server` is an object, the embedded server accepts: `port` (default: random), `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, `jwksUrl`, and the catalogue authority forwarding fields. See [Server Setup](/docs/getting-started/server-setup) for the full semantics.
+When `server` is an object, the embedded server accepts: `port` (default: random), `appId`, `adminSecret`, `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, and `jwksUrl`. See [Server Setup](/docs/getting-started/server-setup) for the full semantics.
 
 ### Connecting to an existing server
 
@@ -1724,7 +2165,7 @@ jazzPlugin({
 
 ### What auto-pushes
 
-On startup and on every change to `schema.ts` or `permissions.ts`, the plugin publishes the current structural schema and permissions bundle to the server. Structural schema push works without an admin secret in development, so a bare `schema.ts` edit is enough to see clients pick up the new shape. Permission pushes use the server's admin secret (generated for the embedded server, supplied by you for a remote server).
+On startup and on every change to `schema.ts` or `permissions.ts`, the plugin publishes the current structural schema and permissions bundle to the server. Structural schema push works without an admin secret in development, so a bare `schema.ts` edit is enough to see clients pick up the new shape. Permission pushes use the resolved server admin secret (from `server.adminSecret`, root `adminSecret`, or a generated embedded-server secret).
 
   Auto-push covers the development loop. For production — or any change that needs a schema migration — run `pnpm dlx jazz-tools@alpha deploy <appId>` to publish the migration, the new schema, and the current permissions in one step. See [Migrations](/docs/schemas/migrations).
 
@@ -1874,8 +2315,17 @@ npx jazz-tools@alpha server "$JAZZ_APP_ID" \
 | `--allow-local-first-auth`          | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                  | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
 | `--backend-secret ` | Enable backend session impersonation                                                                                                     | `JAZZ_BACKEND_SECRET`         | unset                     |
 | `--admin-secret `     | Required for `deploy`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
+| `--upstream-url `     | Run as an edge server connected to the upstream core server. Requires `--peer-secret` and `--admin-secret`.                              | `JAZZ_UPSTREAM_URL`           | unset                     |
+| `--peer-secret `       | Shared server-to-server secret for edge sync. Required when `--upstream-url` is set.                                                     | `JAZZ_PEER_SECRET`            | unset                     |
 
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
+Edge mode is enabled by `--upstream-url`; when set, provide both `--peer-secret` and `--admin-secret` (or `JAZZ_PEER_SECRET` and `JAZZ_ADMIN_SECRET`).
+
+There is no separate Jazz server CLI flag for cookie-based auth. The sync server validates bearer
+JWTs, local-first bearer JWTs, or backend impersonation headers. If your app uses an HttpOnly cookie,
+resolve that cookie in your own app server and either exchange it for a bearer JWT before creating
+the Jazz client, or pass a mirrored `cookieSession` to the browser client while the cookie remains
+the transport credential.
 
 ## Backend context setup
 
@@ -1929,6 +2379,10 @@ In TypeScript backends, create the context once with both `app` and `permissions
 
 `forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work. Configure `jwksUrl` or `jwtPublicKey` on `createJazzContext(...)` if those bearer tokens come from an external IdP, but do not set both at once. Without either one, backend `forRequest()` only accepts Jazz self-signed tokens; set `allowLocalFirstAuth: false` to disable those too.
 
+For cookie-based auth on your own backend, resolve the cookie with your framework or auth provider
+first, then call `context.forSession(session)` once you have a Jazz `Session`. `forRequest(...)`
+does not parse application cookies by itself.
+
   For embedded or local-only runtime setups where your backend is not connected to a server, use
   `context.db()` to get an unscoped, unauthenticated handle. This allows read/write access to the
   database directly, without permissions being evaluated.
@@ -1967,105 +2421,6 @@ pub async fn list_todos_for_request(
     Ok(rows.len())
 }
 ```
-
-===PAGE:guides/better-auth-adapter===
-TITLE:Better Auth Adapter
-DESCRIPTION:Use Better Auth with Jazz as the database adapter.
-
-The Jazz Better Auth adapter lets Better Auth store its tables in Jazz. For general Better Auth setup (route handlers, client, plugins), see the [Better Auth documentation](https://www.better-auth.com/docs).
-
-## Schema Workflow
-
-Better Auth tables live in a generated `schema-better-auth/` module that your app schema spreads into its own table map. This keeps Better Auth's tables in the same Jazz app as your own data, so a single backend context handles both.
-
-```bash
-# Generate the Better Auth schema module into schema-better-auth/
-npx @better-auth/cli@latest generate \
-  --config ./src/lib/auth.ts \
-  --output ./schema-better-auth/schema.ts
-
-# Validate the generated schema source alongside your own
-pnpm dlx jazz-tools@alpha validate
-```
-
-Import the generated tables in your app's `schema.ts` and merge them into the app definition:
-
-```ts title="schema.ts"
-
-const schema = {
-  ...betterauthSchema,
-  messages: s.table({
-    author_name: s.string(),
-    chat_id: s.string(),
-    text: s.string(),
-    sent_at: s.timestamp(),
-  }),
-  // ...your own tables
-};
-
-type AppSchema = s.Schema<typeof schema>;
-
-```
-
-The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses `context.asBackend()`, which authenticates with `backendSecret` and bypasses permission checks entirely.
-
-## Database Adapter
-
-Create a server-side [Jazz context](/docs/getting-started/server-setup#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app` — not at the generated module directly — so Better Auth and your own tables share a single Jazz app.
-
-```ts title="src/lib/auth.ts"
-
-const jazzContext = createJazzContext({
-  appId: process.env.APP_ID!,
-  driver: { type: "memory" },
-  serverUrl: process.env.SYNC_SERVER_URL!,
-  env: process.env.NODE_ENV === "production" ? "prod" : "dev",
-  userBranch: "main",
-  backendSecret: process.env.BACKEND_SECRET!,
-});
-
-  database: jazzAdapter({
-    db: () => jazzContext.asBackend(app),
-    schema: app.wasmSchema,
-  }),
-  // ...your Better Auth config
-});
-```
-
-| Option      | Description                                                                                            |
-| ----------- | ------------------------------------------------------------------------------------------------------ |
-| `db`        | A function returning a `Db` handle via `context.asBackend(app)`. Use the merged app, not `authSchema`. |
-| `schema`    | Typically `app.wasmSchema` from your merged schema. A raw `s.App` is also accepted.                    |
-| `debugLogs` | Better Auth adapter debug logging controls.                                                            |
-| `usePlural` | Whether Better Auth model names should use plural table names.                                         |
-| `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                      |
-
-  The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
-  `experimental.joins`.
-
-### Publishing to a sync server
-
-Because Better Auth tables are merged into your app schema, they ride on the same deploy as everything else — no separate push for `schema-better-auth/`. Publish schema, permissions, and migrations through the normal workflow:
-
-```bash
-pnpm dlx jazz-tools@alpha deploy <appId>
-```
-
-See [Migrations](/docs/schemas/migrations) for the full deploy flow and how schema changes produce migration edges.
-
-## Compatibility
-
-The adapter is currently aligned with Better Auth `1.5.5`.
-
-| Plugin/Feature        | Compatibility |
-| --------------------- | :-----------: |
-| Email & Password auth |      ✅       |
-| Social Provider auth  |      ✅       |
-| Email OTP             |      ✅       |
-
-  This section reflects the adapter behavior currently covered by this repo's Better Auth
-  integration and tests. If you add plugins that introduce extra tables or custom schema fields,
-  regenerate `schema-better-auth/schema.ts` and re-run the Jazz schema workflow.
 
 ===PAGE:index===
 TITLE:Overview
@@ -2163,6 +2518,8 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     pnpm add -D @babel/plugin-transform-flow-strip-types
     ```
 
+    `jazz-rn` is mandatory in Expo / React Native environments and must be installed alongside `jazz-tools`.
+
     Create `index.js` at the project root, and set `"main": "./index.js"` in your `package.json`. Import polyfills as the very first line, before any other code:
 
     ```js title="index.js"
@@ -2172,9 +2529,12 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     registerRootComponent(App);
     ```
 
-    Delete the existing `babel.config.js` and replace it with `babel.config.cjs`:
+    Keep this import first in the app entry point. It installs the React Native `fetch`, stream, and
+    related web API shims Jazz needs before the RN runtime is loaded.
 
-    ```js title="babel.config.cjs"
+    Update `babel.config.js` to enable the `import.meta` transform and strip Flow types:
+
+    ```js title="babel.config.js"
     module.exports = function (api) {
       api.cache(true);
       return {
@@ -2186,22 +2546,26 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     };
     ```
 
-    ```js title="metro.config.js"
+    Replace `metro.config.js` with `metro.config.mjs` so Metro can top-level `await` the Jazz dev server (it injects `EXPO_PUBLIC_JAZZ_*` env vars that Metro inlines into your bundle):
+
+    ```js title="metro.config.mjs"
     import path from "node:path";
     import { fileURLToPath } from "node:url";
     import { createRequire } from "node:module";
+    import { withJazz } from "jazz-tools/dev/expo";
 
     const require = createRequire(import.meta.url);
     const { getDefaultConfig } = require("expo/metro-config");
 
-    const __filename = fileURLToPath(import.meta.url);
-    const projectRoot = path.dirname(__filename);
+    const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
     const config = getDefaultConfig(projectRoot);
 
-    config.transformer = config.transformer || {};
-    config.transformer.extendsBabelConfigPath = path.resolve(projectRoot, "babel.config.cjs");
+    // pnpm uses symlinks for hoisted packages
     config.resolver.unstable_enableSymlinks = true;
+
+    // Start the Jazz dev server and inject EXPO_PUBLIC_JAZZ_* env vars for Metro to inline.
+    await withJazz({}, { schemaDir: projectRoot });
 
     export default config;
     ```
@@ -3421,6 +3785,18 @@ const todos = useAll(app.todos);
   tier](#read-durability). Local storage reads are effectively instant and resolve to `[]` if no
   data exists yet.
 
+### Fine-grained updates
+
+Vue's `useAll` and Svelte's `QuerySubscription` reconcile new query results into the existing reactive array in place rather than swapping the reference. When an upstream change touches a single row, only that row's affected fields write into the reactive proxy, so `$effect` (Svelte) and `watch` / template bindings (Vue) only re-fire for components that depend on the fields that actually changed.
+
+In practice this means:
+
+- Adding, removing, or reordering rows updates the array structure only — untouched row objects keep their identity, so `{#each items as item (item.id)}` and `` keyed renders are stable.
+- Editing a single field on one row writes only that field — sibling rows do not re-render, and per-row components that read other fields stay quiet.
+- Vue's `useAll` returns a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
+
+React's `useAll` follows React's own re-render model and returns a fresh array each tick; the granularity benefit there comes from React's diffing, not from in-place reconciliation.
+
 ### Conditional queries
 
 Pass `undefined` instead of a query to skip evaluation. This is useful when building dynamic queries.
@@ -3568,7 +3944,454 @@ const filtered = useAll(query);
 }
 ```
 
-===PAGE:recipes/auth-provider-integration===
+===PAGE:recipes/access-control/group-permissions===
+TITLE:"Group permissions"
+DESCRIPTION:Model a workspace with role-based access control using a members table and existence-based permissions.
+
+This recipe shows how to build a workspace where users have different levels of access depending on their role. The same pattern applies to any group-like concept&hairsp;—&hairsp;teams, projects, channels, organisations.
+
+## Roles at a glance
+
+| Role          | Read | Create | Edit own | Edit any | Manage members |
+| ------------- | ---- | ------ | -------- | -------- | -------------- |
+| `reader`      | ✓    |        |          |          |                |
+| `contributor` | ✓    | ✓      | ✓        |          |                |
+| `writer`      | ✓    | ✓      | ✓        | ✓        |                |
+| `admin`       | ✓    | ✓      | ✓        | ✓        | ✓              |
+
+## Schema
+
+Three tables: the workspace itself, a members join table that records each user's role, and the documents that belong to the workspace.
+
+```ts
+const schema = {
+  workspaces: s.table({
+    name: s.string(),
+  }),
+  workspaceMembers: s.table({
+    workspaceId: s.ref("workspaces"),
+    user_id: s.string(),
+    role: s.enum(["reader", "writer", "contributor", "admin"]),
+  }),
+  documents: s.table({
+    title: s.string(),
+    content: s.string(),
+    workspaceId: s.ref("workspaces"),
+  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+
+```
+
+## Permissions
+
+```ts
+type Role = "reader" | "writer" | "contributor" | "admin";
+
+s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
+  // Re-usable helpers to improve readability
+  const isMember = (workspaceId: string) =>
+    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user_id });
+
+  const hasRole = (workspaceId: string, role: Role) =>
+    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user_id, role });
+
+  const isAdmin = (workspaceId: string) => hasRole(workspaceId, "admin");
+
+  // --- documents ---
+
+  policy.documents.allowRead.where((doc) => isMember(doc.workspaceId));
+
+  policy.documents.allowInsert.where((doc) =>
+    anyOf([
+      hasRole(doc.workspaceId, "writer"),
+      hasRole(doc.workspaceId, "contributor"),
+      hasRole(doc.workspaceId, "admin"),
+    ]),
+  );
+
+  // Writers and admins can edit any document; contributors can only edit their own
+  policy.documents.allowUpdate.where((doc) =>
+    anyOf([
+      hasRole(doc.workspaceId, "writer"),
+      hasRole(doc.workspaceId, "admin"),
+      allOf([{ $createdBy: session.user_id }, hasRole(doc.workspaceId, "contributor")]),
+    ]),
+  );
+
+  // Writers and admins can delete any document; contributors can delete their own
+  policy.documents.allowDelete.where((doc) =>
+    anyOf([
+      hasRole(doc.workspaceId, "writer"),
+      isAdmin(doc.workspaceId),
+      allOf([{ $createdBy: session.user_id }, hasRole(doc.workspaceId, "contributor")]),
+    ]),
+  );
+
+  // --- workspaces ---
+
+  policy.workspaces.allowRead.where((workspace) => isMember(workspace.id));
+  policy.workspaces.allowInsert.always();
+  policy.workspaces.allowUpdate.where((workspace) => isAdmin(workspace.id));
+  policy.workspaces.allowDelete.where((workspace) => isAdmin(workspace.id));
+
+  // --- workspaceMembers ---
+
+  policy.workspaceMembers.allowRead.where((member) => isMember(member.workspaceId));
+
+  // Admins can add members; workspace creators can bootstrap themselves as the first admin
+  policy.workspaceMembers.allowInsert.where((member) =>
+    anyOf([
+      isAdmin(member.workspaceId),
+      allOf([
+        { user_id: session.user_id, role: "admin" },
+        policy.workspaces.exists.where({ id: member.workspaceId, $createdBy: session.user_id }),
+      ]),
+    ]),
+  );
+
+  policy.workspaceMembers.allowUpdate.where((member) => isAdmin(member.workspaceId));
+
+  // Admins can remove any member; members can leave on their own
+  policy.workspaceMembers.allowDelete.where((member) =>
+    anyOf([isAdmin(member.workspaceId), { user_id: session.user_id }]),
+  );
+});
+```
+
+- **Contributor** edit access uses `allOf` to require both `$createdBy: session.user_id` (the row belongs to this user) and a matching contributor membership. Writers and admins bypass the creator check entirely.
+- **Bootstrap insert**: the second branch of `allowInsert` lets the workspace creator add themselves as the first admin&hairsp;—&hairsp;otherwise `isAdmin` would block everyone, since there are no members yet.
+- **Leave on your own**: members can delete their own membership row regardless of role. Admins can remove anyone.
+
+See [Permissions](/docs/auth/permissions) for more on `exists.where`, `anyOf`, `allOf`, and `$createdBy`.
+
+## Creating a workspace
+
+```ts
+
+  const workspace = db.insert(app.workspaces, { name });
+  // Add the creator as admin immediately so they can manage the workspace
+  db.insert(app.workspaceMembers, {
+    workspaceId: workspace.id,
+    user_id: creatorId,
+    role: "admin",
+  });
+  return workspace;
+}
+```
+
+## Managing members
+
+### Adding a member
+
+```ts
+
+  db: ReturnType<typeof useDb>,
+  workspaceId: string,
+  userId: string,
+  role: "reader" | "writer" | "contributor" | "admin",
+) {
+  db.insert(app.workspaceMembers, { workspaceId, user_id: userId, role });
+}
+```
+
+### Listing members
+
+```tsx
+
+  const members = useAll(app.workspaceMembers.where({ workspaceId }));
+
+  if (!members) return <p>Loading…</p>;
+
+  return (
+    <ul>
+      {members.map((member) => (
+        <li key={member.id}>
+          {member.user_id} — {member.role}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+### Changing a member's role
+
+```ts
+
+  db: ReturnType<typeof useDb>,
+  memberId: string,
+  newRole: "reader" | "contributor" | "writer" | "admin",
+) {
+  db.update(app.workspaceMembers, memberId, { role: newRole });
+}
+```
+
+### Removing a member
+
+```ts
+
+  db: ReturnType<typeof useDb>,
+  workspaceId: string,
+  userId: string,
+) {
+  const member = await db.one(app.workspaceMembers.where({ workspaceId, user_id: userId }));
+  if (member) db.delete(app.workspaceMembers, member.id);
+}
+```
+
+## Querying documents
+
+```tsx
+
+  const docs = useAll(app.documents.where({ workspaceId }));
+
+  if (!docs) return <p>Loading…</p>;
+
+  return (
+    <ul>
+      {docs.map((doc) => (
+        <li key={doc.id}>{doc.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+===PAGE:recipes/access-control/shared-access===
+TITLE:"Shared access between users"
+DESCRIPTION:Grant other users access to your data using a shares table and existence-based permissions.
+
+After [user-owned data](/docs/recipes/access-control/user-owned-data), the next pattern you're likely to need is sharing. This recipe shows how to let one user grant another access to specific rows using a shares table.
+
+## Schema
+
+Add a `todoShares` table that records which user has access to which todo.
+
+```ts
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+  todoShares: s.table({
+    todoId: s.ref("todos"),
+    user_id: s.string(),
+    can_edit: s.boolean(),
+  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+
+```
+
+## Permissions
+
+The creator can do everything. Share recipients get read access, and optionally edit access via `can_edit`.
+
+```ts
+s.definePermissions(app, ({ policy, anyOf, session }) => {
+  policy.todos.allowRead.where((todo) =>
+    anyOf([
+      { $createdBy: session.user_id },
+      policy.todoShares.exists.where({
+        todoId: todo.id,
+        user_id: session.user_id,
+      }),
+    ]),
+  );
+
+  policy.todos.allowInsert.always();
+
+  policy.todos.allowUpdate.where((todo) =>
+    anyOf([
+      { $createdBy: session.user_id },
+      policy.todoShares.exists.where({
+        todoId: todo.id,
+        user_id: session.user_id,
+        can_edit: true,
+      }),
+    ]),
+  );
+
+  policy.todos.allowDelete.where({ $createdBy: session.user_id });
+
+  // Only the todo creator can manage shares
+  policy.todoShares.allowInsert.where((share) =>
+    policy.todos.exists.where({
+      id: share.todoId,
+      $createdBy: session.user_id,
+    }),
+  );
+  policy.todoShares.allowRead.where({ user_id: session.user_id });
+  policy.todoShares.allowDelete.where((share) =>
+    policy.todos.exists.where({
+      id: share.todoId,
+      $createdBy: session.user_id,
+    }),
+  );
+});
+```
+
+See [Permissions](/docs/auth/permissions) for more on `exists.where`, `anyOf`, and `allOf`.
+
+## Granting access
+
+To share a todo, insert a row into `todoShares`.
+
+```ts
+
+  db.insert(app.todoShares, {
+    todoId,
+    user_id: recipientUserId,
+    can_edit: false,
+  });
+}
+```
+
+## Querying shared items
+
+```tsx
+
+  const session = useSession();
+  const shares = useAll(
+    app.todoShares.where({ user_id: session!.user_id }).include({ todo: true }),
+  );
+
+  if (!shares) return <p>Loading…</p>;
+
+  return (
+    <ul>
+      {shares.map((share) => (
+        <li key={share.id}>
+          {share.todo.title}
+          {share.can_edit ? " (can edit)" : " (read-only)"}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+## Revoking access
+
+Delete the share row to revoke access. The server will stop syncing the todo to the former recipient.
+
+```ts
+
+  db.delete(app.todoShares, shareId);
+}
+```
+
+===PAGE:recipes/access-control/user-owned-data===
+TITLE:"User-owned data"
+DESCRIPTION:"End-to-end walkthrough of the most common Jazz pattern: data that belongs to the user who created it."
+
+This recipe covers building an app where users own their own data and no-one else can see it, covering schema, permissions, querying, and inserting.
+
+## Schema
+
+There's no need to add an explicit owner column needed&hairsp;—&hairsp;Jazz tracks who created each row automatically via `$createdBy`.
+
+```ts
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+
+```
+
+See [Defining tables](/docs/schemas/defining-tables) for the full schema DSL.
+
+## Permissions
+
+Match `$createdBy` to the `session.user_id` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can declare insert explicitly with `.always()`.
+
+```ts
+s.definePermissions(app, ({ policy, session }) => {
+  policy.todos.allowRead.where({ $createdBy: session.user_id });
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.where({ $createdBy: session.user_id });
+  policy.todos.allowDelete.where({ $createdBy: session.user_id });
+});
+```
+
+These rules are enforced on the server. See [Permissions](/docs/auth/permissions) for combinators, `allowedTo`, and more complex options.
+
+## Querying
+
+The table's permissions already scope results to the current user, so queries don't need a separate owner filter.
+
+```tsx
+
+  const todos = useAll(app.todos.where({ done: false }));
+
+  if (!todos) return <p>Loading…</p>;
+
+  return (
+    <ul>
+      {todos.map((todo) => (
+        <li key={todo.id}>{todo.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+See [Queries](/docs/reading/queries) for subscriptions, one-shot queries, and durability tiers.
+
+## Inserting
+
+`$createdBy` is set automatically on insert, so we don't need to set an owner.
+
+```tsx
+
+  const db = useDb();
+
+  function handleAdd(title: string) {
+    db.insert(app.todos, { title, done: false });
+  }
+
+  return <button onClick={() => handleAdd("Buy milk")}>Add</button>;
+}
+```
+
+Use `db.insert(...).wait({ tier: "..." })` if you need confirmation that the write reached a specific [durability tier](/docs/reference/durability-tiers).
+
+If ownership can be transferred after creation, use an explicit `owner_id` column instead of `$createdBy`.
+
+```ts
+const schemaExplicit = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    owner_id: s.string(),
+  }),
+};
+
+type ExplicitAppSchema = s.Schema<typeof schemaExplicit>;
+
+```
+
+```ts
+s.definePermissions(explicitApp, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner_id: session.user_id });
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.whereOld({ owner_id: session.user_id });
+  policy.todos.allowDelete.where({ owner_id: session.user_id });
+});
+```
+
+`allowUpdate.whereOld(...)` checks the row before the update, so the current owner can rewrite `owner_id` to transfer the row. Using `.where(...)` instead would also enforce the condition on the post-update row and block transfers. See [Permissions](/docs/auth/permissions) for `whereOld`/`whereNew` semantics.
+
+`allowInsert.always()` lets any user insert a row with any `owner_id`, including someone else's. That's the right default if you want users to be able to assign rows to others on creation; otherwise, narrow it to `.where({ owner_id: session.user_id })` so clients can only create rows they own.
+
+===PAGE:recipes/auth/auth-provider-integration===
 TITLE:"Auth provider integration"
 DESCRIPTION:Connect an external auth provider to Jazz with JWT validation, with examples for Better Auth and WorkOS.
 
@@ -3742,7 +4565,106 @@ Jazz uses the JWT `sub` claim as `session.user_id`. If your provider keeps `sub`
 
 Full working examples: [Better Auth chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-workos-chat).
 
-===PAGE:recipes/nested-data===
+===PAGE:recipes/auth/better-auth-adapter===
+TITLE:Better Auth Adapter
+DESCRIPTION:Use Better Auth with Jazz as the database adapter.
+
+The Jazz Better Auth adapter lets Better Auth store its tables in Jazz. For general Better Auth setup (route handlers, client, plugins), see the [Better Auth documentation](https://www.better-auth.com/docs).
+
+## Schema Workflow
+
+Better Auth tables live in a generated `schema-better-auth/` module that your app schema spreads into its own table map. This keeps Better Auth's tables in the same Jazz app as your own data, so a single backend context handles both.
+
+```bash
+# Generate the Better Auth schema module into schema-better-auth/
+npx @better-auth/cli@latest generate \
+  --config ./src/lib/auth.ts \
+  --output ./schema-better-auth/schema.ts
+
+# Validate the generated schema source alongside your own
+pnpm dlx jazz-tools@alpha validate
+```
+
+Import the generated tables in your app's `schema.ts` and merge them into the app definition:
+
+```ts title="schema.ts"
+
+const schema = {
+  ...betterauthSchema,
+  messages: s.table({
+    author_name: s.string(),
+    chat_id: s.string(),
+    text: s.string(),
+    sent_at: s.timestamp(),
+  }),
+  // ...your own tables
+};
+
+type AppSchema = s.Schema<typeof schema>;
+
+```
+
+The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses `context.asBackend()`, which authenticates with `backendSecret` and bypasses permission checks entirely.
+
+## Database Adapter
+
+Create a server-side [Jazz context](/docs/getting-started/server-setup#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app` — not at the generated module directly — so Better Auth and your own tables share a single Jazz app.
+
+```ts title="src/lib/auth.ts"
+
+const jazzContext = createJazzContext({
+  appId: process.env.APP_ID!,
+  driver: { type: "memory" },
+  serverUrl: process.env.SYNC_SERVER_URL!,
+  env: process.env.NODE_ENV === "production" ? "prod" : "dev",
+  userBranch: "main",
+  backendSecret: process.env.BACKEND_SECRET!,
+});
+
+  database: jazzAdapter({
+    db: () => jazzContext.asBackend(app),
+    schema: app.wasmSchema,
+  }),
+  // ...your Better Auth config
+});
+```
+
+| Option      | Description                                                                                            |
+| ----------- | ------------------------------------------------------------------------------------------------------ |
+| `db`        | A function returning a `Db` handle via `context.asBackend(app)`. Use the merged app, not `authSchema`. |
+| `schema`    | Typically `app.wasmSchema` from your merged schema. A raw `s.App` is also accepted.                    |
+| `debugLogs` | Better Auth adapter debug logging controls.                                                            |
+| `usePlural` | Whether Better Auth model names should use plural table names.                                         |
+| `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                      |
+
+  The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
+  `experimental.joins`.
+
+### Publishing to a sync server
+
+Because Better Auth tables are merged into your app schema, they ride on the same deploy as everything else — no separate push for `schema-better-auth/`. Publish schema, permissions, and migrations through the normal workflow:
+
+```bash
+pnpm dlx jazz-tools@alpha deploy <appId>
+```
+
+See [Migrations](/docs/schemas/migrations) for the full deploy flow and how schema changes produce migration edges.
+
+## Compatibility
+
+The adapter is currently aligned with Better Auth `1.5.5`.
+
+| Plugin/Feature        | Compatibility |
+| --------------------- | :-----------: |
+| Email & Password auth |      ✅       |
+| Social Provider auth  |      ✅       |
+| Email OTP             |      ✅       |
+
+  This section reflects the adapter behavior currently covered by this repo's Better Auth
+  integration and tests. If you add plugins that introduce extra tables or custom schema fields,
+  regenerate `schema-better-auth/schema.ts` and re-run the Jazz schema workflow.
+
+===PAGE:recipes/data-patterns/nested-data===
 TITLE:"Nested data with permission inheritance"
 DESCRIPTION:Model a project/task/comment hierarchy with inherited permissions, queries, and multi-level inserts.
 
@@ -3852,7 +4774,7 @@ Insert from the top down&hairsp;—&hairsp;create the project first, then tasks 
 
 Each insert executes locally and syncs in the background. Because permissions inherit downward, anyone who can access the project automatically gets access to its tasks and comments.
 
-===PAGE:recipes/real-time-collaborative-list===
+===PAGE:recipes/data-patterns/real-time-collaborative-list===
 TITLE:"Real-time collaborative list"
 DESCRIPTION:Multiple users subscribing to the same data and seeing each other's changes in real-time.
 
@@ -3964,240 +4886,6 @@ When two users edit the same row concurrently, Jazz uses last-writer-wins (LWW) 
 
 For most applications this is the right default. See [How sync works](/docs/concepts/how-sync-works) for more detail.
 
-===PAGE:recipes/shared-access===
-TITLE:"Shared access between users"
-DESCRIPTION:Grant other users access to your data using a shares table and existence-based permissions.
-
-After [user-owned data](/docs/recipes/user-owned-data), the next pattern you're likely to need is sharing. This recipe shows how to let one user grant another access to specific rows using a shares table.
-
-## Schema
-
-Add a `todoShares` table that records which user has access to which todo.
-
-```ts
-const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
-  todoShares: s.table({
-    todoId: s.ref("todos"),
-    user_id: s.string(),
-    can_edit: s.boolean(),
-  }),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-
-```
-
-## Permissions
-
-The creator can do everything. Share recipients get read access, and optionally edit access via `can_edit`.
-
-```ts
-s.definePermissions(app, ({ policy, anyOf, session }) => {
-  policy.todos.allowRead.where((todo) =>
-    anyOf([
-      { $createdBy: session.user_id },
-      policy.todoShares.exists.where({
-        todoId: todo.id,
-        user_id: session.user_id,
-      }),
-    ]),
-  );
-
-  policy.todos.allowInsert.always();
-
-  policy.todos.allowUpdate.where((todo) =>
-    anyOf([
-      { $createdBy: session.user_id },
-      policy.todoShares.exists.where({
-        todoId: todo.id,
-        user_id: session.user_id,
-        can_edit: true,
-      }),
-    ]),
-  );
-
-  policy.todos.allowDelete.where({ $createdBy: session.user_id });
-
-  // Only the todo creator can manage shares
-  policy.todoShares.allowInsert.where((share) =>
-    policy.todos.exists.where({
-      id: share.todoId,
-      $createdBy: session.user_id,
-    }),
-  );
-  policy.todoShares.allowRead.where({ user_id: session.user_id });
-  policy.todoShares.allowDelete.where((share) =>
-    policy.todos.exists.where({
-      id: share.todoId,
-      $createdBy: session.user_id,
-    }),
-  );
-});
-```
-
-See [Permissions](/docs/auth/permissions) for more on `exists.where`, `anyOf`, and `allOf`.
-
-## Granting access
-
-To share a todo, insert a row into `todoShares`.
-
-```ts
-
-  db.insert(app.todoShares, {
-    todoId,
-    user_id: recipientUserId,
-    can_edit: false,
-  });
-}
-```
-
-## Querying shared items
-
-```tsx
-
-  const session = useSession();
-  const shares = useAll(
-    app.todoShares.where({ user_id: session!.user_id }).include({ todo: true }),
-  );
-
-  if (!shares) return <p>Loading…</p>;
-
-  return (
-    <ul>
-      {shares.map((share) => (
-        <li key={share.id}>
-          {share.todo.title}
-          {share.can_edit ? " (can edit)" : " (read-only)"}
-        </li>
-      ))}
-    </ul>
-  );
-}
-```
-
-## Revoking access
-
-Delete the share row to revoke access. The server will stop syncing the todo to the former recipient.
-
-```ts
-
-  db.delete(app.todoShares, shareId);
-}
-```
-
-===PAGE:recipes/user-owned-data===
-TITLE:"User-owned data"
-DESCRIPTION:"End-to-end walkthrough of the most common Jazz pattern: data that belongs to the user who created it."
-
-This recipe covers building an app where users own their own data and no-one else can see it, covering schema, permissions, querying, and inserting.
-
-## Schema
-
-There's no need to add an explicit owner column needed&hairsp;—&hairsp;Jazz tracks who created each row automatically via `$createdBy`.
-
-```ts
-const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-
-```
-
-See [Defining tables](/docs/schemas/defining-tables) for the full schema DSL.
-
-## Permissions
-
-Match `$createdBy` to the `session.user_id` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can declare insert explicitly with `.always()`.
-
-```ts
-s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ $createdBy: session.user_id });
-  policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ $createdBy: session.user_id });
-  policy.todos.allowDelete.where({ $createdBy: session.user_id });
-});
-```
-
-These rules are enforced on the server. See [Permissions](/docs/auth/permissions) for combinators, `allowedTo`, and more complex options.
-
-## Querying
-
-The table's permissions already scope results to the current user, so queries don't need a separate owner filter.
-
-```tsx
-
-  const todos = useAll(app.todos.where({ done: false }));
-
-  if (!todos) return <p>Loading…</p>;
-
-  return (
-    <ul>
-      {todos.map((todo) => (
-        <li key={todo.id}>{todo.title}</li>
-      ))}
-    </ul>
-  );
-}
-```
-
-See [Queries](/docs/reading/queries) for subscriptions, one-shot queries, and durability tiers.
-
-## Inserting
-
-`$createdBy` is set automatically on insert, so we don't need to set an owner.
-
-```tsx
-
-  const db = useDb();
-
-  function handleAdd(title: string) {
-    db.insert(app.todos, { title, done: false });
-  }
-
-  return <button onClick={() => handleAdd("Buy milk")}>Add</button>;
-}
-```
-
-Use `db.insert(...).wait({ tier: "..." })` if you need confirmation that the write reached a specific [durability tier](/docs/reference/durability-tiers).
-
-If ownership can be transferred after creation, use an explicit `owner_id` column instead of `$createdBy`.
-
-```ts
-const schemaExplicit = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    owner_id: s.string(),
-  }),
-};
-
-type ExplicitAppSchema = s.Schema<typeof schemaExplicit>;
-
-```
-
-```ts
-s.definePermissions(explicitApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user_id });
-  policy.todos.allowInsert.where({ owner_id: session.user_id });
-  policy.todos.allowUpdate.where({ owner_id: session.user_id });
-  policy.todos.allowDelete.where({ owner_id: session.user_id });
-});
-```
-
-===PAGE:reference/column-types===
-TITLE:Column Types
-DESCRIPTION:Every column type available in the TypeScript DSL and its SQL equivalent.
-
-Any column can be made nullable by chaining `.optional()`. For binary data like images and file uploads, use the [Files & Blobs](/docs/writing/files-and-blobs) pattern rather than `s.bytes()` directly.
-
 ===PAGE:reference/durability-tiers===
 TITLE:Durability Tiers
 DESCRIPTION:"API reference for read and write durability tiers: the options that control how far data must propagate before an operation confirms."
@@ -4279,6 +4967,64 @@ For most queries and subscriptions, omitting a tier is the right choice: Jazz de
   guarantees a globally-consistent initial snapshot, but later incremental updates from other
   clients may arrive through edge tiers before being globally available **even if the durability of
   the write is set to 'global'**.
+
+===PAGE:reference/examples===
+TITLE:Examples
+DESCRIPTION:What each example app in the Jazz monorepo uniquely demonstrates.
+
+The `examples/` folder in the Jazz monorepo contains runnable apps that each
+highlight a different facet of Jazz&hairsp;—&hairsp;auth strategies, runtimes,
+framework bindings, server-side usage, or a specific product pattern. Use this
+table to jump straight to the example that covers the technique you need.
+
+If you just want a bare-bones skeleton to build on, the [`starters/`](https://github.com/garden-co/jazz/tree/main/starters) folder ships minimal templates for Next.js, React, and SvelteKit, each in `localfirst`, `betterauth`, and `hybrid` flavours. You can also scaffold a new app from one of these templates with:
+
+```bash
+npm create jazz
+```
+
+Reach for the `examples/` apps below when you want to see a specific pattern worked through end-to-end.
+
+## At a glance
+
+| Example                                                                                                             | Stack                      | Uniquely demonstrates                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [auth-betterauth-chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat)                   | Next.js + Better Auth      | Better Auth tables stored in Jazz via `jazz-tools/better-auth-adapter`; Better Auth's `jwt` plugin issues the ES256 tokens and JWKS that the sync server verifies; demonstrates exposing user attributes (e.g. the `admin` plugin's `role`) as JWT claims that drive Jazz authorization |
+| [auth-simple-chat](https://github.com/garden-co/jazz/tree/main/examples/auth-simple-chat)                           | React + Vite + Express     | Bring-your-own JWT auth server: local Express issuing ES256 tokens, JWKS verified by the sync server, `session.claims.role` driving UI gating                                                                                                                                           |
+| [auth-workos-chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat)                           | React + Vite + WorkOS      | Hosted OAuth/SSO with no local auth server&hairsp;—&hairsp;sync server points at the WorkOS JWKS, `getAccessToken()` is passed straight to `JazzProvider`                                                                                                                               |
+| [chat-react](https://github.com/garden-co/jazz/tree/main/examples/chat-react)                                       | React + Vite               | Public vs private rooms with invite links via ephemeral `session.claims.join_code`; emoji reactions; collaborative drawing canvases; chunked file attachments                                                                                                                           |
+| [cloudflare-worker-runtime-ts](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts)   | Cloudflare Workers         | Booting Jazz inside Workers by passing a precompiled `WebAssembly.Module` via `runtimeSources.wasmModule`&hairsp;—&hairsp;no browser asset URLs                                                                                                                                         |
+| [file-upload-react](https://github.com/garden-co/jazz/tree/main/examples/file-upload-react)                         | React + Vite               | Uploading and rendering images using the `files` / `file_parts` chunked-binary pattern                                                                                                                                                                                                  |
+| [moon-lander-react](https://github.com/garden-co/jazz/tree/main/examples/moon-lander-react)                         | React + Vite               | Multiplayer game state&hairsp;—&hairsp;player positions, fuel deposits, inventory, and chat&hairsp;—&hairsp;synced through Jazz with no custom networking code                                                                                                                          |
+| [nextjs-csr-ssr](https://github.com/garden-co/jazz/tree/main/examples/nextjs-csr-ssr)                               | Next.js (App Router)       | The canonical SSR/RSC story: a Server Component reading via `jazz-tools/backend` alongside a Client Component using `jazz-tools/react` hooks, wired by `withJazz`                                                                                                                       |
+| [todo-client-localfirst-expo](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo)     | Expo (React Native)        | The React Native / Expo bindings end-to-end, with native Fjall storage and `ExpoAuthSecretStore` (backed by `expo-secure-store`) for local-first identity                                                                                                                               |
+| [todo-client-localfirst-react](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-react)   | React + Vite               | Fully client-side React app with local-first (anonymous, locally generated secret) auth; `useAll` with composable `where()`, `useDb` writes, OPFS persistence, `attachDevTools`                                                                                                         |
+| [todo-client-localfirst-svelte](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-svelte) | Svelte 5 + Vite            | The Svelte bindings: `JazzSvelteProvider`, `QuerySubscription` live queries, `getDb` writes                                                                                                                                                                                             |
+| [todo-client-localfirst-ts](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-ts)         | Vanilla TypeScript + Vite  | The low-level client API with no framework bindings: `createDb`, `db.subscribeAll`, `db.onAuthChanged`, `BrowserAuthSecretStore`                                                                                                                                                        |
+| [todo-server-rs](https://github.com/garden-co/jazz/tree/main/examples/todo-server-rs)                               | Rust (axum) + `jazz-tools` | Using Jazz directly from Rust as the embedded database for an axum REST + SSE service&hairsp;—&hairsp;no browser, no WASM, no Node bindings                                                                                                                                             |
+| [todo-server-ts](https://github.com/garden-co/jazz/tree/main/examples/todo-server-ts)                               | Node + Express             | Jazz as a server-side backend via `jazz-tools/backend` and NAPI Fjall storage; `context.forSession(userId)` for per-user policy; SSE live snapshots; `wait({ tier })` durability                                                                                                        |
+| [wequencer](https://github.com/garden-co/jazz/tree/main/examples/wequencer)                                         | React + Vite + Tone.js     | Clock-synchronised collaborative playback&hairsp;—&hairsp;`ClockSync` aligns peers to server epoch time, BPM nudged on drift; instrument samples stored as Jazz `files`                                                                                                                 |
+| [world-tour](https://github.com/garden-co/jazz/tree/main/examples/world-tour)                                       | Vue + Vite + MapLibre GL   | The Vue bindings end-to-end in a non-trivial app (tour management with maps)                                                                                                                                                                                                            |
+
+## How the examples group together
+
+- **The `todo-client-localfirst-*` family** (`-react`, `-svelte`, `-ts`, `-expo`)
+  all implement the same schema and feature set, so the diff between them is the
+  framework binding. They cover the local-first baseline: anonymous identity,
+  reactive queries, synchronous writes, OPFS persistence, optional server sync.
+  See also [Framework Patterns](/docs/reference/framework-patterns).
+- **The `auth-*-chat` family** (`auth-betterauth-chat`, `auth-simple-chat`,
+  `auth-workos-chat`) all implement a role-gated chat against three different
+  JWT-issuing auth setups, so the diff between them is the auth integration.
+- **The server-side examples** (`todo-server-ts`, `todo-server-rs`,
+  `nextjs-csr-ssr`, `cloudflare-worker-runtime-ts`) show Jazz used as the
+  database from a server runtime &mdash; Node, Rust, Next.js App Router, and
+  Cloudflare Workers respectively.
+- **The product-shaped examples** (`chat-react`, `moon-lander-react`,
+  `wequencer`, `world-tour`, `file-upload-react`) are full apps that lean on
+  Jazz for a specific real-world pattern: real-time chat with invites and
+  canvases, multiplayer game state, clock-synchronised collaborative playback,
+  Vue + maps, and chunked binary uploads.
 
 ===PAGE:reference/framework-patterns===
 TITLE:Framework Patterns
@@ -4410,6 +5156,8 @@ const todos = useAll(app.todos.where({ done: false }));
 
 The `?? []` guard handles the `undefined` (not yet connected) case. See
 [Reading Data: The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for patterns that depend on this signal.
+
+In Vue and Svelte, the binding reconciles updates into the existing reactive array in place, so only fields that actually changed trigger re-renders. See [Fine-grained updates](/docs/reading/queries#fine-grained-updates) for the full behaviour.
 
 ## Accessing the database for writes
 
@@ -4793,6 +5541,97 @@ questions. A query's first callback is held until `QuerySettled` reaches the req
   That means `tier: "global"` gives you a globally settled first snapshot, not globally gated
   delivery forever after.
 
+===PAGE:reference/local-first-auth-internals===
+TITLE:Local-first auth internals
+DESCRIPTION:"How local-first auth derives a stable account from a secret, how the self-signed JWT is structured, and how the server verifies it without an external key store."
+
+This page explains how [local-first auth](/docs/auth/local-first-auth) works under the hood. You do
+not need any of this to use it. Read this if you are debugging, building a custom client, or
+reasoning about what the design actually guarantees.
+
+## The core idea
+
+An account, in local-first auth, is a secret: a single 32-byte seed.
+
+There is no registry mapping "user X → public key Y" sitting on a server somewhere. The seed
+deterministically produces a keypair, and the user ID is a deterministic function of the resulting
+public key, so holding the secret is the same thing as being the account: it lets you regenerate
+the keypair on demand and self-certify as that identity. Signing in is reconstructing the keypair
+from the stored secret; signing up is generating a new one.
+
+This is why the design doesn't need a server-side user registry: the public key embedded in a token, paired with its signature, is everything the server needs to confirm the claimed account. Verification reuses the JWT-checking path the server already runs for external-auth tokens — only the source of the signing key differs (embedded in the token for local-first, fetched from a JWKS endpoint for external auth).
+
+## Identity derivation
+
+The account is built from a single 32-byte secret the client stores locally.
+
+1. The 32-byte **seed** is hashed with SHA-512 to produce an Ed25519 **signing key**.
+2. The corresponding **public key** (32 bytes) is extracted from the signing key.
+3. A deterministic **user ID** is derived from the public key using UUIDv5 with the namespace
+   `jazz-auth-key-v1`.
+
+Every step is deterministic, so the same seed always produces the same user ID, on any device, at
+any time. Backing up the seed is backing up the identity.
+
+## The self-signed JWT
+
+When the client talks to a server, it mints a JWT and signs it with the Ed25519 key derived above.
+The key claims are:
+
+| Claim          | Value                    | Purpose                                              |
+| -------------- | ------------------------ | ---------------------------------------------------- |
+| `alg`          | `"EdDSA"`                | Ed25519 signature algorithm                          |
+| `iss`          | `"urn:jazz:local-first"` | Marks the token as local-first (not provider-issued) |
+| `sub`          | User ID (UUIDv5)         | The claimed account ID                               |
+| `jazz_pub_key` | Public key (base64url)   | Embedded so the server can verify without a lookup   |
+| `aud`          | App ID                   | Scopes the token to a specific app                   |
+
+The public key travels inside the JWT and the whole JWT is signed with the matching private key, so the server doesn't need a separate key-distribution step or a shared secret with the client.
+
+## Server verification
+
+When the server receives a local-first JWT (as identified by the `iss` field), it:
+
+1. Reads `jazz_pub_key` from the token
+2. Uses it to verify the signature
+3. Recomputes the UUIDv5 from that public key (same namespace, same algorithm)
+4. Confirms the recomputed ID matches `sub`
+
+A token where `sub` and `jazz_pub_key` disagree is rejected outright, because either would require
+forging the other. A token where the signature does not verify is rejected because the holder did
+not prove possession of the private key.
+
+## Upgrading to a provider account
+
+When a local-first account upgrades to a real account via an external provider (BetterAuth,
+WorkOS, etc.), the user should keep the same Jazz account ID so their existing data carries over
+unchanged. This works because the account ID is a deterministic function of the keypair: if the
+client can prove (to the provider) that it holds the key behind account ID X, the provider can
+safely record X as the Jazz ID of the new user. Any JWT the provider issues afterwards uses X as
+its subject, and the user's existing data is already owned by X.
+
+The proof takes the form of a **proof token** — a short-lived JWT signed by the same key the
+client uses for self-signed auth. Structurally it is the same as a local-first JWT, but scoped to
+a specific sign-up flow:
+
+- `aud` is an application-defined string like `"my-app-signup"` (the client and server must agree).
+- `exp` is short — 60 seconds is usually enough for a sign-up round-trip.
+- `sub` and `jazz_pub_key` still pin the token to a specific account.
+
+The provider's endpoint verifies the proof token the same way any Jazz server verifies a
+local-first JWT, then records the proven Jazz user ID against the newly created provider account.
+
+>Client: db.getLocalFirstIdentityProof()
+    Client->>Provider: Sign up (email + proofToken)
+    Provider->>Provider: Verify proof, create user with same Jazz ID
+    Provider-->>Client: Session + JWT
+    Note over Client: Same Jazz ID, now with a provider account
+
+`} />
+
+See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth) for the
+practical, BetterAuth-specific flow.
+
 ===PAGE:reference/mcp===
 TITLE:MCP Server
 DESCRIPTION:Give your AI assistant direct access to Jazz documentation via the Model Context Protocol.
@@ -5060,6 +5899,59 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
 
 For reactive framework bindings (`useAll` in React/Vue, `QuerySubscription` in Svelte), see [Framework Patterns](/docs/reference/framework-patterns#query-subscriptions).
 
+===PAGE:schemas/column-types===
+TITLE:Column Types
+DESCRIPTION:Every column type available in the TypeScript DSL and its SQL equivalent.
+
+Any column can be made nullable by chaining `.optional()`. For binary data like images and file uploads, use the [Files & Blobs](/docs/writing/files-and-blobs) pattern rather than `s.bytes()` directly.
+
+## Transformed Columns
+
+> **Experimental:** Transformed columns are an early TypeScript API and may change before the stable release.
+
+Any normal column definer can be transformed with `.transform({ from, to })`. The database still stores the column using the underlying SQL type, while the TypeScript API exposes the transformed type on rows, inserts, and updates.
+
+Use `from` to convert stored values into the value your app reads. Use `to` to convert app values back into the stored column value before inserts and updates.
+
+```ts
+
+type Priority = "low" | "medium" | "high";
+
+const schema = {
+  tasks: s.table({
+    title: s.string(),
+    priority: s.int().transform({
+      from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
+      to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
+    }),
+  }),
+};
+```
+
+With this schema, `priority` is stored as an `INTEGER`, but TypeScript treats it as `Priority` when reading and writing rows:
+
+```ts
+db.insert(app.tasks, {
+  title: "Write launch notes",
+  priority: "high",
+});
+
+db.update(app.tasks, task.id, {
+  priority: "medium",
+});
+
+const task = await db.one(app.tasks.where({ id: task.id }));
+task?.priority; // "low" | "medium" | "high"
+```
+
+Filters still use the stored column value, because arbitrary transforms cannot be translated into SQL predicates:
+
+```ts
+await db.all(app.tasks.where({ priority: { gte: 8 } }));
+```
+
+Transforms are TypeScript-client behavior. They do not change the generated SQL schema, migrations, permissions, indexes, or values stored on disk.
+
 ===PAGE:schemas/defining-tables===
 TITLE:Defining Tables
 DESCRIPTION:Define tables and relationships in schema.ts using the TypeScript DSL.
@@ -5106,7 +5998,7 @@ Tables are defined in `schema.ts` using the Jazz DSL. Each `s.table(...)` call r
 
 When you change your schema on a shared app, create and push a migration. See [Migrations](/docs/schemas/migrations) for details.
 
-If you need to clear local browser data after a schema change, see [How do I reset browser storage?](/docs/faq#reset-browser-storage).
+If you need to clear local browser data after a schema change, see [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
 
 ## Exporting the app
 
@@ -5130,6 +6022,94 @@ Extract precise TypeScript types from any table handle:
 | `s.InsertOf<typeof app.todos>` | The insert shape (no `id`, respects optionals and defaults) |
 | `s.WhereOf<typeof app.todos>`  | The `where(...)` input shape for that table                 |
 
+## Very Large Schemas
+
+For most apps, `s.defineApp(schema)` is the right export: it gives you one typed table handle for
+each table in the schema, and Jazz uses the same schema for runtime validation, migrations, query
+planning, and TypeScript inference.
+
+Very large apps can hit a different tradeoff. The runtime schema may need to contain hundreds of
+tables, while a given feature area only works with a much smaller subset. Because typed relations
+and reverse relations are derived from the app schema, asking TypeScript to understand the whole
+graph can make editor and build performance worse than the code you are writing actually needs.
+
+Use `s.defineSliceableApp(schema)` when you want one complete runtime schema but smaller typed app
+surfaces:
+
+```ts title="schema.ts"
+
+const schema = {
+  accounts: s.table({
+    name: s.string(),
+  }),
+  workspaces: s.table({
+    name: s.string(),
+    accountId: s.ref("accounts"),
+  }),
+  catalog_items: s.table({
+    title: s.string(),
+    workspaceId: s.ref("workspaces"),
+  }),
+  orders: s.table({
+    number: s.string(),
+    catalogItemId: s.ref("catalog_items"),
+    buyerId: s.ref("users"),
+  }),
+  shipments: s.table({
+    trackingCode: s.string(),
+    orderId: s.ref("orders"),
+  }),
+  users: s.table({
+    name: s.string(),
+  }),
+  support_tickets: s.table({
+    workspaceId: s.ref("workspaces"),
+    requesterId: s.ref("users"),
+  }),
+};
+
+const sliceableApp = s.defineSliceableApp(schema);
+
+  "accounts",
+  "workspaces",
+  "catalog_items",
+  "orders",
+  "shipments",
+);
+
+```
+
+Each slice returns a normal typed `App` surface for only the selected tables:
+
+```ts
+await db.all(commerceApp.orders.include({ catalogItem: true }));
+await db.all(commerceApp.catalog_items.include({ ordersViaCatalogItem: true }));
+```
+
+Refs to tables inside the slice become typed relations and includes. Refs to tables outside the slice
+remain valid scalar ID columns:
+
+```ts
+type Order = s.RowOf<typeof commerceApp.orders>;
+// Order["catalogItemId"] is string, and commerceApp.orders.include({ catalogItem: true }) is typed.
+// Order["buyerId"] is string, but there is no typed `buyer` include unless `users` is in the slice.
+```
+
+Reverse relations are also derived only from the current slice. In the example above,
+`commerceApp.catalog_items` has `ordersViaCatalogItem`, while `supportApp.workspaces` has
+`support_ticketsViaWorkspace`.
+
+All slices share the complete runtime schema:
+
+```ts
+commerceApp.wasmSchema === sliceableApp.wasmSchema;
+supportApp.wasmSchema === sliceableApp.wasmSchema;
+```
+
+That means schema hashing, migrations, permissions, runtime validation, query planning, inserts,
+updates, and row transforms still see the full schema. The slice only limits the TypeScript app
+graph you ask the compiler to expand.
+
 ===PAGE:schemas/migrations===
 TITLE:Migrations
 DESCRIPTION:Structural schema evolution workflow and reviewed migration edges.
@@ -5138,7 +6118,23 @@ If you are trying to get your first app running, you can skip this page and retu
 
 ## Why Jazz migrations are different
 
-Traditional migration systems run a linear sequence and require peers to converge before older versions stop writing. Jazz migrations are applied at read/write time, so mixed-version clients can keep operating while data is translated between schema versions.
+Most migration systems are one-way: rewrite every row to the new shape, then cut over. That assumes you can stop the world long enough to upgrade&hairsp;—&hairsp;which doesn't hold when your clients are local-first, frequently offline, and updating their app on their own schedule.
+
+Jazz keeps every schema version addressable by hash and translates rows between them on read and write. Clients on different versions stay interoperable, and nothing on disk is rewritten when you ship a new schema.
+
+## Schemas, lenses and branches
+
+Every unique version of your `schema.ts` has a hash which can be used to refer to it. When creating migrations, you describe the changes required to move between two schema versions. This is known as a 'lens'. Fetching all intermediate lenses allows clients with any published schema version to read data created with any other published schema version.
+
+Storage is partitioned by schema hash: rows written under a given schema live in
+that schema's own branch (`env-{hash}-userBranch`) and stay there unchanged.
+Non-adjacent reads compose lenses in sequence to bridge multiple schema versions.
+
+In practice, this lets you:
+
+- Ship a schema change without waiting for every user to update their app.
+- Roll out platform-by-platform (mobile, desktop, web) on independent cadences.
+- Accept writes from clients that have been offline since before the new schema landed.
 
 ## Workflow
 
@@ -5151,8 +6147,9 @@ Traditional migration systems run a linear sequence and require peers to converg
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to ensure policies
-   are valid before they are deployed. `deploy` does not run these checks.
+3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to surface
+   any policy diagnostics without publishing. `deploy` runs the same checks; `validate` is most
+   useful as a fast pre-publish sanity check or in CI.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
@@ -5175,24 +6172,28 @@ Traditional migration systems run a linear sequence and require peers to converg
    pnpm dlx jazz-tools@alpha deploy <appId>
    ```
 
-   `deploy` publishes the current schema if the server does not already know it, checks whether the
-   previous permissions schema is connected to the new one on the server, pushes the local migration
-   if needed, and then publishes the current permissions.
+   `deploy` walks through the publish pipeline in one go:
+   1. Publishes the current schema if the server does not already have it.
+   2. If your previous `permissions.ts` was tied to an older schema hash, asks the server whether
+      it already has a migration path between the two hashes. If not, pushes the local migration
+      file that closes the gap (and fails with a helpful message if you haven't created one yet).
+   3. Publishes the current permissions, attached to the current schema hash.
 
-Permission-only changes in `permissions.ts` do not need migrations, but they do still require
+Permission-only changes in `permissions.ts` don't need a migration but still need to be deployed:
 `pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
 
-## Generated stub
+## The migration file
 
-Under the hood, each migration produces a **lens**&hairsp;—&hairsp;a bidirectional transformation
-between two schema versions. The forward direction applies the migration; the backward direction is
-generated automatically so older clients can still read data written under the new schema. The
-generated stub contains the structural diff as declarative operations.
+The generated stub describes the diff as declarative operations which carry enough information to run in either direction. That
+is how older clients can still read data written under a newer schema: the same operations replay
+in reverse.
 
   If the diff contains ambiguities (e.g. a column was removed and a same-typed column was added,
   which could be a rename), the generated lens is marked as a **draft**. Draft lenses will fail at
   startup if they are in the path to a live schema. You need to review the draft lens and resolve
   the ambiguity before publishing.
+
+### Generated stub
 
 Here's a generated stub for adding a `description` column:
 
@@ -5228,7 +6229,7 @@ Here's a generated stub for adding a `description` column:
 
 ```
 
-## Customising defaults
+### Customising defaults
 
 Review generated defaults before you publish. For example, you might replace a nullable default with a domain-specific value:
 
@@ -5266,7 +6267,7 @@ Review generated defaults before you publish. For example, you might replace a n
 
 ```
 
-## Backwards defaults
+### Backwards defaults
 
 When a newer schema drops a column that older clients still expect, define a backwards default so the lens can supply a value for those clients:
 
@@ -5310,13 +6311,13 @@ When a newer schema drops a column that older clients still expect, define a bac
 ## Migrating historical schemas
 
 Jazz does not require you to create a migration for every schema change. You can just use the app and create new data.
-Existing data will still be available, but you will not be able to read it until you create a migration.
+Existing data will still be stored in the database, but you will not be able to read it until you create a migration.
 
 This is particularly useful when you are iterating on a feature that is not yet ready to be released.
 
 The Jazz server will detect when there are rows that are not reachable from the current schema. It will log a warning and suggest you create a migration.
 
-In order to do so, you'll need to **create the migration using explicit to/from schema hashes**:
+To do so, you'll need to **create the migration using explicit to/from schema hashes**:
 
 ```bash
 pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
@@ -5370,7 +6371,7 @@ schema hashes from a server, pass `<appId>` as the leading positional argument.
 ## Next steps
 
 - [Defining Tables](/docs/schemas/defining-tables)&hairsp;—&hairsp;table and column definitions
-- [Column Types](/docs/reference/column-types)&hairsp;—&hairsp;full list of available column types
+- [Column Types](/docs/schemas/column-types)&hairsp;—&hairsp;full list of available column types
 
 ===PAGE:writing/files-and-blobs===
 TITLE:Files & Blobs
@@ -5812,6 +6813,25 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 }
 ```
 
+### Upsert with a known ID
+
+Use `upsert(...)` when your app already knows the row ID and wants to create that row if it does
+not exist, or update it if it does. Like `insert`, `update`, and `delete`, it applies locally first
+and returns a write handle that can be awaited for durability.
+
+```ts
+const write = db.upsert(
+  app.todos,
+  {
+    title: "Imported task",
+    done: false,
+  },
+  { id: importedTodoId },
+);
+
+await write.wait({ tier: "edge" });
+```
+
 ### Partial updates and nullable fields
 
 `update(...)` only modifies the keys you pass.
@@ -5886,7 +6906,7 @@ pub async fn write_todo_with_default_durability(
 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including read durability, data flow between tiers, and consistency semantics.
 
-Need to clear local data during development? See [How do I reset browser storage?](/docs/faq#reset-browser-storage)
+Need to clear local data during development? See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
 
 `wait({ tier })` resolves when the batch reaches the requested durability tier. If the batch is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
 
@@ -5933,10 +6953,7 @@ console.log(result.batchId);
 The changes made as part of the transaction are scoped to it, and will only be
 globally visible once it's committed and accepted by the authority.
 
-`DbTransaction` can read its own staged state through `all(...)` and `one(...)` before commit.
-
-You can also use batches when you want to group several ordinary writes under one batch id, but still want them
-to be locally visible immediately:
+You can also use batches when you want to group several ordinary writes and commit them together:
 
 ```ts
 const result = db.batch((batch) => {
@@ -5947,8 +6964,10 @@ await result.wait({ tier: "edge" });
 console.log(result.batchId);
 ```
 
+Transactions and batches can read its own local writes through `all(...)` and `one(...)` before commit.
+
 When using `transaction` and `batch`, changes are automatically committed once the callback finishes running and,
-in the case of transactions, if an error is thrown inside the callback, the whole transaction will be rolled back.
+if an error is thrown inside the callback, the open transaction or batch is rolled back instead of committed.
 
 Alternatively, you can use `beginTransaction` and `beginBatch` to get a transaction or batch object, respectively.
 This can be useful when making writes across multiple contexts. In this case however, you need to commit or rollback

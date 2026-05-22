@@ -155,6 +155,9 @@ pub enum WorkerToMainWire {
         reason: String,
     },
     ShutdownOk,
+    ShutdownFailed {
+        message: String,
+    },
     /// `DebugSchemaState` serialised as JSON.
     DebugSchemaStateOk {
         state_json: String,
@@ -345,6 +348,13 @@ pub fn encode_worker_to_main_js(value: JsValue) -> Result<Uint8Array, JsError> {
                 .unwrap_or_default();
             WorkerToMainWire::Error { message }
         }
+        "shutdown-failed" => {
+            let message = Reflect::get(&value, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
+            WorkerToMainWire::ShutdownFailed { message }
+        }
         "debug-schema-state-ok" => {
             let state_value =
                 Reflect::get(&value, &JsValue::from_str("state")).unwrap_or(JsValue::UNDEFINED);
@@ -423,6 +433,10 @@ pub fn decode_worker_to_main_js(bytes: &Uint8Array) -> Result<JsValue, JsError> 
     match wire {
         WorkerToMainWire::Error { message } => {
             set("type", &JsValue::from_str("error"))?;
+            set("message", &JsValue::from_str(&message))?;
+        }
+        WorkerToMainWire::ShutdownFailed { message } => {
+            set("type", &JsValue::from_str("shutdown-failed"))?;
             set("message", &JsValue::from_str(&message))?;
         }
         WorkerToMainWire::DebugSchemaStateOk { state_json } => {
@@ -543,6 +557,9 @@ mod tests {
             reason: "expired".into(),
         });
         rt_worker(&WorkerToMainWire::ShutdownOk);
+        rt_worker(&WorkerToMainWire::ShutdownFailed {
+            message: "flush failed".into(),
+        });
         rt_worker(&WorkerToMainWire::DebugSchemaStateOk {
             state_json: "{}".into(),
         });

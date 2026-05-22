@@ -17,6 +17,7 @@ use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscrip
 use super::policy::{ComplexClause, Operation, PolicyExpr};
 use super::policy_graph::{PolicyGraph, PolicyGraphBuildOptions};
 use super::session::Session;
+use super::settlement_eval_cache::SettlementEvalCache;
 use super::types::{
     ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName, TableSchema,
     Value,
@@ -63,6 +64,7 @@ pub(crate) struct AuthorizationPolicyRequest<'a> {
     pub(crate) auth_context: &'a crate::schema_manager::SchemaContext,
     pub(crate) source_branch_schema_map: &'a std::collections::HashMap<String, SchemaHash>,
     pub(crate) operation: Operation,
+    pub(crate) settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
 }
 
 struct UpdatePermissionRequest<'a> {
@@ -375,6 +377,7 @@ impl QueryManager {
             auth_context,
             source_branch_schema_map,
             operation,
+            settlement_eval_cache,
         } = request;
 
         let Some(table_schema) = auth_schema.get(&table_name) else {
@@ -391,12 +394,13 @@ impl QueryManager {
             return false;
         };
 
-        let evaluator = PolicyContextEvaluator::new(
+        let mut evaluator = PolicyContextEvaluator::new(
             auth_schema,
             session,
             branch_name.as_str(),
             self.row_policy_mode,
-        );
+        )
+        .with_settlement_eval_cache(settlement_eval_cache);
         let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
@@ -426,6 +430,7 @@ impl QueryManager {
     pub(super) fn provenance_row_matches_current_select_policy(
         &mut self,
         storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
         object_id: ObjectId,
         branch_name: BranchName,
         session: Option<&Session>,
@@ -477,6 +482,7 @@ impl QueryManager {
                 auth_context,
                 source_branch_schema_map,
                 operation: Operation::Select,
+                settlement_eval_cache: Some(settlement_eval_cache),
             },
         )
     }
@@ -484,6 +490,7 @@ impl QueryManager {
     fn authorized_tuples_from_graph_result(
         &mut self,
         storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
@@ -527,6 +534,7 @@ impl QueryManager {
                                 .or_insert_with(|| {
                                     self.provenance_row_matches_current_select_policy(
                                         storage,
+                                        settlement_eval_cache,
                                         object_id,
                                         branch_name,
                                         session,
@@ -542,9 +550,10 @@ impl QueryManager {
         )
     }
 
-    pub(super) fn authorized_tuples_from_graph(
+    pub(super) fn authorized_tuples_from_graph_with_cache(
         &mut self,
         storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
@@ -552,6 +561,7 @@ impl QueryManager {
     ) -> Vec<super::types::Tuple> {
         match self.authorized_tuples_from_graph_result(
             storage,
+            settlement_eval_cache,
             graph,
             schema_context,
             source_branch_schema_map,
@@ -565,6 +575,7 @@ impl QueryManager {
     fn authorized_scope_from_graph_if_available(
         &mut self,
         storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
@@ -600,6 +611,7 @@ impl QueryManager {
                         .or_insert_with(|| {
                             self.provenance_row_matches_current_select_policy(
                                 storage,
+                                settlement_eval_cache,
                                 object_id,
                                 branch_name,
                                 session,
@@ -977,8 +989,10 @@ impl QueryManager {
                     result_scope
                 })
             } else {
+                let mut settlement_eval_cache = SettlementEvalCache::default();
                 self.authorized_scope_from_graph_if_available(
                     storage_ref,
+                    &mut settlement_eval_cache,
                     &graph,
                     &subscription_context,
                     &branch_schema_map,
@@ -1143,6 +1157,37 @@ impl QueryManager {
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let had_dirty_graph = sub.graph.has_dirty_nodes();
 
+            if sub.settled_once && !had_dirty_graph && !sub.needs_recompile {
+                let settled_tier = self
+                    .sync_manager
+                    .max_local_durability_tier()
+                    .unwrap_or(DurabilityTier::Local);
+                if Self::should_emit_query_settled_to_downstream(
+                    sub.required_tier,
+                    settled_tier,
+                    &mut sub.sent_below_required_settled,
+                    &mut sub.last_emitted_settled_tier,
+                    false,
+                ) {
+                    tracing::trace!(
+                        %client_id,
+                        query_id = query_id.0,
+                        tier = ?settled_tier,
+                        scope_len = sub.last_scope.len(),
+                        "jazz trace server subscription settled from clean cached scope"
+                    );
+                    self.sync_manager.emit_query_settled(
+                        client_id,
+                        query_id,
+                        settled_tier,
+                        &sub.last_scope,
+                    );
+                }
+
+                self.server_subscriptions.insert((client_id, query_id), sub);
+                continue;
+            }
+
             // Row loader for this subscription
             let new_scope: Option<Cow<'_, HashSet<(ObjectId, BranchName)>>> = {
                 {
@@ -1196,8 +1241,10 @@ impl QueryManager {
                         Some(Cow::Owned(sub.graph.sync_scope_object_ids()))
                     }
                 } else {
+                    let mut settlement_eval_cache = SettlementEvalCache::default();
                     self.authorized_scope_from_graph_if_available(
                         storage,
+                        &mut settlement_eval_cache,
                         &sub.graph,
                         &sub.schema_context,
                         &branch_schema_map,
@@ -1620,6 +1667,7 @@ impl QueryManager {
                 auth_context: &auth_context,
                 source_branch_schema_map: &source_branch_schema_map,
                 operation: check.operation,
+                settlement_eval_cache: None,
             },
         ) {
             let reason = format!(
@@ -1748,6 +1796,7 @@ impl QueryManager {
                     auth_context,
                     source_branch_schema_map: &source_branch_schema_map,
                     operation: Operation::Update,
+                    settlement_eval_cache: None,
                 },
             ) {
                 let reason = format!(
@@ -1799,6 +1848,7 @@ impl QueryManager {
                     auth_context,
                     source_branch_schema_map: &source_branch_schema_map,
                     operation: Operation::Update,
+                    settlement_eval_cache: None,
                 },
             ) {
                 let reason = format!(

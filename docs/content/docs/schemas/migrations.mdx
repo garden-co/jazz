@@ -1,7 +1,7 @@
 ---
 title: Migrations
 description: Structural schema evolution workflow and reviewed migration edges.
-reviewedAt: "c799b8dfd"
+reviewedAt: "2e983ef11"
 ---
 
 <Callout type="info" title="You can skip this first">
@@ -139,6 +139,14 @@ pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHa
 
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
 server and saves a snapshot in `migrations/snapshots/`.
+
+## Inspecting the local schema hash
+
+`pnpm dlx jazz-tools@alpha schema hash` prints the hash of the local `schema.ts` without contacting a server or writing a snapshot, giving you a simple way to compare your local schema against what's deployed.
+
+```bash
+pnpm dlx jazz-tools@alpha schema hash
+```
 
 ## Exporting the compiled schema
 

@@ -1137,6 +1137,9 @@ pub trait Storage {
         &self,
         target_branch_name: BranchName,
     ) -> Result<Vec<CapturedFrontierMember>, StorageError> {
+        // Compatibility helper for the legacy `captured_frontier` field on
+        // sealed submissions. This is no longer part of transaction conflict
+        // validation; remove it with the next storage-format break.
         let mut frontier = Vec::new();
         let visible_tables = scan_row_raw_table_headers_with_storage(self)?
             .into_iter()
@@ -1611,10 +1614,14 @@ pub trait Storage {
     }
 
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
-    fn flush(&self) {}
+    fn flush(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 
     /// Flush only the WAL buffer (not the snapshot). No-op for storage without WAL.
-    fn flush_wal(&self) {}
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 
     /// Close and release storage resources (e.g. file locks). No-op by default.
     fn close(&self) -> Result<(), StorageError> {
@@ -2156,12 +2163,12 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).index_scan_all(table, column, branch)
     }
 
-    fn flush(&self) {
-        (**self).flush();
+    fn flush(&self) -> Result<(), StorageError> {
+        (**self).flush()
     }
 
-    fn flush_wal(&self) {
-        (**self).flush_wal();
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        (**self).flush_wal()
     }
 
     fn close(&self) -> Result<(), StorageError> {

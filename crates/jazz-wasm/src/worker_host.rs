@@ -653,10 +653,15 @@ fn process_main_message(msg: MainToWorkerMessage) {
         },
         MainToWorkerWire::DebugSeedLiveSchema { schema_json } => match runtime.as_ref() {
             Some(rt) => match rt.debug_seed_live_schema(&schema_json) {
-                Ok(()) => {
-                    rt.flush_wal();
-                    post_to_main(&WorkerToMainWire::DebugSeedLiveSchemaOk);
-                }
+                Ok(()) => match rt.flush_wal() {
+                    Ok(()) => post_to_main(&WorkerToMainWire::DebugSeedLiveSchemaOk),
+                    Err(err) => post_to_main(&WorkerToMainWire::Error {
+                        message: format!(
+                            "debug-seed-live-schema flush failed: {}",
+                            js_error_message(&err)
+                        ),
+                    }),
+                },
                 Err(err) => post_to_main(&WorkerToMainWire::Error {
                     message: format!(
                         "debug-seed-live-schema failed: {}",
@@ -705,7 +710,11 @@ fn handle_lifecycle_hint(event: WorkerLifecycleEvent, runtime: Option<&Rc<WasmRu
         | WorkerLifecycleEvent::Pagehide
         | WorkerLifecycleEvent::Freeze => {
             if let Some(rt) = runtime {
-                rt.flush_wal();
+                if let Err(err) = rt.flush_wal() {
+                    post_to_main(&WorkerToMainWire::Error {
+                        message: format!("lifecycle WAL flush failed: {}", js_error_message(&err)),
+                    });
+                }
             }
         }
         _ => {}
@@ -746,12 +755,14 @@ fn update_auth(jwt: Option<String>, runtime: Option<&Rc<WasmRuntime>>) {
     }
 }
 
-fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
+fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
     HOST.with(|cell| {
         if let Some(h) = cell.borrow_mut().as_mut() {
             h.state = HostState::ShuttingDown;
         }
     });
+
+    let mut shutdown_failure = None;
 
     if let Some(rt) = runtime {
         // Drain any parked main/peer sync messages so their writes reach
@@ -767,7 +778,14 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
         // the same effect on storage; the distinction is preserved in case
         // a future storage backend introduces a separate snapshot path.
         rt.batched_tick();
-        rt.flush_wal();
+        if let Err(err) = rt.flush_wal() {
+            let message = format!("shutdown flush failed: {}", js_error_message(&err));
+            if simulate_crash {
+                post_to_main(&WorkerToMainWire::Error { message });
+            } else {
+                shutdown_failure = Some(message);
+            }
+        }
         rt.install_noop_sync_sender();
         // (No forwarder on worker side — `install_noop_sync_sender` below
         // replaces the active sender wholesale, so any future outbox emission
@@ -789,7 +807,11 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
         g.main_client_id = None;
     });
 
-    post_to_main(&WorkerToMainWire::ShutdownOk);
+    if let Some(message) = shutdown_failure {
+        post_to_main(&WorkerToMainWire::ShutdownFailed { message });
+    } else {
+        post_to_main(&WorkerToMainWire::ShutdownOk);
+    }
     global.close();
     HOST.with(|cell| *cell.borrow_mut() = None);
 }

@@ -74,14 +74,6 @@ impl SyncManager {
         Ok(submission.target_branch_name)
     }
 
-    fn frontier_conflict_fate(&self, batch_id: crate::row_histories::BatchId) -> BatchFate {
-        BatchFate::Rejected {
-            batch_id,
-            code: "transaction_conflict".to_string(),
-            reason: "family-visible frontier changed since batch was sealed".to_string(),
-        }
-    }
-
     fn validate_batch_rows_target_branch(
         &self,
         submission: &SealedBatchSubmission,
@@ -140,20 +132,47 @@ impl SyncManager {
         Ok(mode)
     }
 
-    fn validate_captured_frontier<H: Storage>(
+    fn parent_frontier_conflict_fate(&self, batch_id: crate::row_histories::BatchId) -> BatchFate {
+        BatchFate::Rejected {
+            batch_id,
+            code: "transaction_conflict".to_string(),
+            reason: "row visible parent changed since transaction write was staged".to_string(),
+        }
+    }
+
+    fn normalize_frontier(
+        mut frontier: Vec<crate::row_histories::BatchId>,
+    ) -> Vec<crate::row_histories::BatchId> {
+        frontier.sort();
+        frontier.dedup();
+        frontier
+    }
+
+    fn validate_transactional_parent_frontiers<H: Storage>(
         &self,
         storage: &H,
         submission: &SealedBatchSubmission,
+        declared_rows: &[(String, StoredRowBatch)],
     ) -> Result<(), BatchFate> {
-        let current_frontier = storage
-            .capture_family_visible_frontier(submission.target_branch_name)
-            .map_err(|error| BatchFate::Rejected {
-                batch_id: submission.batch_id,
-                code: "invalid_batch_submission".to_string(),
-                reason: format!("failed to capture family-visible frontier: {error}"),
-            })?;
-        if current_frontier != submission.captured_frontier {
-            return Err(self.frontier_conflict_fate(submission.batch_id));
+        for (table, row) in declared_rows {
+            let expected_frontier = Self::normalize_frontier(row.parents.iter().copied().collect());
+            let current_frontier = storage
+                .load_visible_region_frontier(
+                    table,
+                    submission.target_branch_name.as_str(),
+                    row.row_id,
+                )
+                .map_err(|error| BatchFate::Rejected {
+                    batch_id: submission.batch_id,
+                    code: "invalid_batch_submission".to_string(),
+                    reason: format!("failed to load row visible parent frontier: {error}"),
+                })?
+                .map(Self::normalize_frontier)
+                .unwrap_or_default();
+
+            if current_frontier != expected_frontier {
+                return Err(self.parent_frontier_conflict_fate(submission.batch_id));
+            }
         }
 
         Ok(())
@@ -1015,7 +1034,8 @@ impl SyncManager {
             }
         };
         if mode == SealedBatchMode::Transactional
-            && let Err(rejection) = self.validate_captured_frontier(storage, &submission)
+            && let Err(rejection) =
+                self.validate_transactional_parent_frontiers(storage, &submission, &declared_rows)
         {
             self.reject_sealed_transactional_batch(
                 storage,
@@ -1088,7 +1108,11 @@ impl SyncManager {
                 }
             };
             if mode == SealedBatchMode::Transactional
-                && let Err(rejection) = self.validate_captured_frontier(storage, &submission)
+                && let Err(rejection) = self.validate_transactional_parent_frontiers(
+                    storage,
+                    &submission,
+                    &declared_rows,
+                )
             {
                 self.reject_sealed_transactional_batch(storage, None, rejection, &batch_rows);
                 recovered_any = true;
@@ -1287,15 +1311,7 @@ impl SyncManager {
                 let object_id = entry.object_id;
                 let branch_name = BranchName::new("main");
                 match client.role {
-                    ClientRole::Peer | ClientRole::Admin => {
-                        self.apply_payload_from_client(
-                            storage,
-                            client_id,
-                            payload,
-                            AuthoritativeFateRecording::Skip,
-                        );
-                    }
-                    ClientRole::Backend => {
+                    ClientRole::Peer | ClientRole::Backend => {
                         self.outbox.push(OutboxEntry {
                             destination: Destination::Client(client_id),
                             payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
@@ -1303,6 +1319,14 @@ impl SyncManager {
                                 branch_name,
                             }),
                         });
+                    }
+                    ClientRole::Admin => {
+                        self.apply_payload_from_client(
+                            storage,
+                            client_id,
+                            payload,
+                            AuthoritativeFateRecording::Skip,
+                        );
                     }
                     ClientRole::User => {
                         let Some(_session) = &client.session else {
@@ -1341,7 +1365,25 @@ impl SyncManager {
                 let object_id = row.row_id;
                 let branch_name = BranchName::new(&row.branch);
                 match client.role {
-                    ClientRole::Peer | ClientRole::Admin => {
+                    ClientRole::Peer => {
+                        if payload.is_catalogue() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        }
+                        self.apply_payload_from_client(
+                            storage,
+                            client_id,
+                            payload,
+                            AuthoritativeFateRecording::Skip,
+                        );
+                    }
+                    ClientRole::Admin => {
                         self.apply_payload_from_client(
                             storage,
                             client_id,

@@ -352,17 +352,25 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         )
         .expect("bob reader subscription should be created");
 
-    pump_server_with_three_clients(
+    sync_server_with_clients(
         &mut server,
-        &mut writer,
-        writer_server_id,
-        writer_client_id,
-        &mut alice_reader,
-        alice_reader_server_id,
-        alice_reader_client_id,
-        &mut bob_reader,
-        bob_reader_server_id,
-        bob_reader_client_id,
+        &mut [
+            ClientForServer {
+                core: &mut writer,
+                server_id: writer_server_id,
+                client_id: writer_client_id,
+            },
+            ClientForServer {
+                core: &mut alice_reader,
+                server_id: alice_reader_server_id,
+                client_id: alice_reader_client_id,
+            },
+            ClientForServer {
+                core: &mut bob_reader,
+                server_id: bob_reader_server_id,
+                client_id: bob_reader_client_id,
+            },
+        ],
     );
 
     assert_eq!(
@@ -398,17 +406,25 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         )
         .expect("alice insert should succeed through the public client API");
 
-    let server_outputs_after_write = pump_server_with_three_clients(
+    let server_outputs_after_write = sync_server_with_clients(
         &mut server,
-        &mut writer,
-        writer_server_id,
-        writer_client_id,
-        &mut alice_reader,
-        alice_reader_server_id,
-        alice_reader_client_id,
-        &mut bob_reader,
-        bob_reader_server_id,
-        bob_reader_client_id,
+        &mut [
+            ClientForServer {
+                core: &mut writer,
+                server_id: writer_server_id,
+                client_id: writer_client_id,
+            },
+            ClientForServer {
+                core: &mut alice_reader,
+                server_id: alice_reader_server_id,
+                client_id: alice_reader_client_id,
+            },
+            ClientForServer {
+                core: &mut bob_reader,
+                server_id: bob_reader_server_id,
+                client_id: bob_reader_client_id,
+            },
+        ],
     );
 
     let server_results = execute_runtime_query(
@@ -498,17 +514,25 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         "fresh bob full query should wait for Local settlement instead of resolving from local empty state"
     );
 
-    let server_outputs_after_fresh_bob_query = pump_server_with_three_clients(
+    let server_outputs_after_fresh_bob_query = sync_server_with_clients(
         &mut server,
-        &mut writer,
-        writer_server_id,
-        writer_client_id,
-        &mut alice_reader,
-        alice_reader_server_id,
-        alice_reader_client_id,
-        &mut bob_reader,
-        bob_reader_server_id,
-        bob_reader_client_id,
+        &mut [
+            ClientForServer {
+                core: &mut writer,
+                server_id: writer_server_id,
+                client_id: writer_client_id,
+            },
+            ClientForServer {
+                core: &mut alice_reader,
+                server_id: alice_reader_server_id,
+                client_id: alice_reader_client_id,
+            },
+            ClientForServer {
+                core: &mut bob_reader,
+                server_id: bob_reader_server_id,
+                client_id: bob_reader_client_id,
+            },
+        ],
     );
     assert!(
         !outbox_has_object_update_for_client(

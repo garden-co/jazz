@@ -949,6 +949,7 @@ impl QueryManager {
     ///
     /// Returns an `InsertResult` that can be polled to check durability.
     /// Index updates happen immediately (creating sentinels if needed).
+    #[cfg(test)]
     pub fn insert<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -963,6 +964,7 @@ impl QueryManager {
     /// If the table has an INSERT WITH CHECK policy and a session is provided,
     /// the policy is evaluated against the new row values. If the policy
     /// denies the insert, `PolicyDenied` is returned.
+    #[cfg(test)]
     pub fn insert_with_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -972,16 +974,10 @@ impl QueryManager {
     ) -> Result<InsertResult, QueryError> {
         let _span = tracing::debug_span!("QM::insert", table).entered();
         let current_branch = self.current_branch().as_str().to_string();
-        self.insert_on_branch_with_write_context_and_id(
-            storage,
-            table,
-            &current_branch,
-            values,
-            None,
-            write_context,
-        )
+        self.insert_on_branch(storage, table, &current_branch, values, write_context)
     }
 
+    #[cfg(test)]
     pub fn insert_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -996,42 +992,13 @@ impl QueryManager {
     /// Insert a new row into a table on a specific branch.
     ///
     /// Used by SchemaManager for schema-aware inserts.
+    #[cfg(test)]
     pub fn insert_on_branch<H: Storage>(
         &mut self,
         storage: &mut H,
         table: &str,
         branch: &str,
         values: &[Value],
-    ) -> Result<InsertResult, QueryError> {
-        self.insert_on_branch_with_write_context(storage, table, branch, values, None)
-    }
-
-    /// Insert a new row on a specific branch with session-based policy checking.
-    pub fn insert_on_branch_with_write_context<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        branch: &str,
-        values: &[Value],
-        write_context: Option<&WriteContext>,
-    ) -> Result<InsertResult, QueryError> {
-        self.insert_on_branch_with_write_context_and_id(
-            storage,
-            table,
-            branch,
-            values,
-            None,
-            write_context,
-        )
-    }
-
-    pub fn insert_on_branch_with_write_context_and_id<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        branch: &str,
-        values: &[Value],
-        external_object_id: Option<ObjectId>,
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
         let write_schema = self.schema.clone();
@@ -1040,31 +1007,10 @@ impl QueryManager {
             table,
             branch,
             values,
-            external_object_id,
+            None,
             write_schema.as_ref(),
             write_context,
             true,
-        )
-    }
-
-    pub fn insert_on_branch_with_schema_and_write_context<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        branch: &str,
-        values: &[Value],
-        write_schema: &Schema,
-        write_context: Option<&WriteContext>,
-    ) -> Result<InsertResult, QueryError> {
-        self.insert_on_branch_with_schema_and_write_context_and_id(
-            storage,
-            table,
-            branch,
-            values,
-            None,
-            write_schema,
-            write_context,
-            false,
         )
     }
 
@@ -1247,18 +1193,6 @@ impl QueryManager {
         })
     }
 
-    pub fn insert_on_branch_with_session<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        branch: &str,
-        values: &[Value],
-        session: Option<&Session>,
-    ) -> Result<InsertResult, QueryError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.insert_on_branch_with_write_context(storage, table, branch, values, owned.as_ref())
-    }
-
     fn validate_json_for_values(
         &self,
         descriptor: &RowDescriptor,
@@ -1394,6 +1328,7 @@ impl QueryManager {
                 auth_context,
                 source_branch_schema_map: &source_branch_schema_map,
                 operation,
+                settlement_eval_cache: None,
             },
         )
     }
@@ -1782,6 +1717,7 @@ impl QueryManager {
     }
 
     /// Update a row.
+    #[cfg(test)]
     pub fn update<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1796,6 +1732,7 @@ impl QueryManager {
     /// If the table has policies and a session is provided:
     /// - USING policy is checked against the old row (if exists)
     /// - WITH CHECK policy is checked against the new values
+    #[cfg(test)]
     pub fn update_with_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1834,6 +1771,7 @@ impl QueryManager {
         )
     }
 
+    #[cfg(test)]
     pub fn update_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1850,22 +1788,6 @@ impl QueryManager {
     /// Used for schema-aware copy-on-write updates where the row currently
     /// lives on an older schema branch and must be written onto the current
     /// branch without creating a new object id.
-    pub fn write_existing_row_on_branch_with_write_context<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        write: RowBranchWrite<'_>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<BatchId, QueryError> {
-        let write_schema = self.schema.clone();
-        self.write_existing_row_on_branch_with_schema_and_write_context(
-            storage,
-            write,
-            write_schema.as_ref(),
-            write_context,
-            false,
-        )
-    }
-
     pub fn write_existing_row_on_branch_with_schema_and_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1971,21 +1893,12 @@ impl QueryManager {
         Ok(batch_id)
     }
 
-    pub fn write_existing_row_on_branch_with_session<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        write: RowBranchWrite<'_>,
-        session: Option<&Session>,
-    ) -> Result<BatchId, QueryError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.write_existing_row_on_branch_with_write_context(storage, write, owned.as_ref())
-    }
-
     /// Soft delete a row.
     ///
     /// Creates a commit with the same content as the previous tip, plus `delete: soft` metadata.
     /// This preserves the row data for queries with `include_deleted`.
     /// Removes from `_id` and all column indices, adds to `_id_deleted` index.
+    #[cfg(test)]
     pub fn delete<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1998,6 +1911,7 @@ impl QueryManager {
     ///
     /// Checks DELETE USING policy against the existing row before allowing deletion.
     /// Falls back to UPDATE's USING policy if no DELETE policy is defined.
+    #[cfg(test)]
     pub fn delete_with_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -2035,6 +1949,7 @@ impl QueryManager {
         )
     }
 
+    #[cfg(test)]
     pub fn delete_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -2043,22 +1958,6 @@ impl QueryManager {
     ) -> Result<DeleteHandle, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.delete_with_write_context(storage, id, owned.as_ref())
-    }
-
-    pub fn delete_existing_row_on_branch_with_write_context<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        delete: RowBranchDelete<'_>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<DeleteHandle, QueryError> {
-        let write_schema = self.schema.clone();
-        self.delete_existing_row_on_branch_with_schema_and_write_context(
-            storage,
-            delete,
-            write_schema.as_ref(),
-            write_context,
-            false,
-        )
     }
 
     pub fn delete_existing_row_on_branch_with_schema_and_write_context<H: Storage>(
@@ -2239,16 +2138,6 @@ impl QueryManager {
             row_id: id,
             batch_id: delete_batch_id,
         })
-    }
-
-    pub fn delete_existing_row_on_branch_with_session<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        delete: RowBranchDelete<'_>,
-        session: Option<&Session>,
-    ) -> Result<DeleteHandle, QueryError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.delete_existing_row_on_branch_with_write_context(storage, delete, owned.as_ref())
     }
 
     /// Undelete a soft-deleted row.

@@ -349,7 +349,7 @@ async fn sqlite_server_storage() {
     restart_preserves_data().await;
     catalogue_entries_survive_restart().await;
     sealed_batch_acceptance_recovers_after_restart().await;
-    sealed_batch_frontier_conflict_rejects_after_restart().await;
+    sealed_batch_unrelated_frontier_change_accepts_after_restart().await;
 }
 
 /// Alice creates 200 todos. Bob connects fresh and must see all 200 with
@@ -1119,7 +1119,7 @@ async fn sealed_batch_acceptance_recovers_after_restart() {
     let (batch_id, row_id) = {
         let mut storage = SqliteStorage::open(&db_path).expect("open sqlite storage");
         let seeded = seed_sqlite_sealed_batch_acceptance(&mut storage, &schema);
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().expect("close seeded sqlite storage");
         seeded
     };
@@ -1162,14 +1162,14 @@ async fn sealed_batch_acceptance_recovers_after_restart() {
     reopened.close().expect("close reopened sqlite storage");
 }
 
-async fn sealed_batch_frontier_conflict_rejects_after_restart() {
+async fn sealed_batch_unrelated_frontier_change_accepts_after_restart() {
     let data_dir = TempDir::new().expect("temp data dir");
     let db_path = data_dir.path().join("jazz.sqlite");
     let schema = todos_schema();
     let (batch_id, target_branch, staged_row_id, _existing_row_id) = {
         let mut storage = SqliteStorage::open(&db_path).expect("open sqlite storage");
         let seeded = seed_sqlite_sealed_batch_frontier_conflict(&mut storage, &schema);
-        storage.flush();
+        storage.flush().unwrap();
         storage.close().expect("close seeded sqlite storage");
         seeded
     };
@@ -1197,24 +1197,22 @@ async fn sealed_batch_frontier_conflict_rejects_after_restart() {
     assert_eq!(
         reopened
             .load_authoritative_batch_fate(batch_id)
-            .expect("load rejected settlement"),
-        Some(BatchFate::Rejected {
+            .expect("load accepted settlement"),
+        Some(BatchFate::AcceptedTransaction {
             batch_id,
-            code: "transaction_conflict".to_string(),
-            reason: "family-visible frontier changed since batch was sealed".to_string(),
+            confirmed_tier: DurabilityTier::GlobalServer,
         })
     );
     assert_eq!(
         reopened
             .load_sealed_batch_submission(batch_id)
-            .expect("load sealed submission after rejection"),
+            .expect("load sealed submission after acceptance"),
         None
     );
-    assert_eq!(
-        reopened
-            .load_visible_region_row("todos", target_branch.as_str(), staged_row_id)
-            .expect("load staged row visibility"),
-        None
-    );
+    let visible = reopened
+        .load_visible_region_row("todos", target_branch.as_str(), staged_row_id)
+        .expect("load staged row visibility")
+        .expect("accepted row should remain visible");
+    assert_eq!(visible.state, RowState::VisibleTransactional);
     reopened.close().expect("close reopened sqlite storage");
 }

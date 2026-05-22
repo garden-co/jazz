@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::object::ObjectId;
 use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use uuid::Uuid;
 
 /// Maximum payload size allowed for a single BYTEA value (1 MiB).
 pub const BYTEA_MAX_BYTES: usize = 1_048_576;
+const INVALID_UUID_TEXT_SENTINEL: [u8; 16] = [0xff; 16];
 
 /// Encoding error types.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1323,6 +1325,9 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
 /// Encode a Value to binary bytes with type information (needed for Row values).
 pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
     match (value, col_type) {
+        (Value::Text(raw), ColumnType::Uuid) => Uuid::parse_str(raw)
+            .map(|uuid| ObjectId::from_uuid(uuid).uuid().as_bytes().to_vec())
+            .unwrap_or_else(|_| INVALID_UUID_TEXT_SENTINEL.to_vec()),
         (Value::Text(raw), ColumnType::Enum { variants }) if col_type.fixed_size().is_some() => {
             vec![encode_enum_variant_index(variants, raw).unwrap_or_else(|_| unreachable!())]
         }
@@ -1750,6 +1755,19 @@ mod tests {
         let decoded = decode_row(&descriptor, &encoded).unwrap();
 
         assert_eq!(values, decoded);
+    }
+
+    #[test]
+    fn text_uuid_encoding_is_fixed_width_for_valid_and_invalid_text() {
+        let encoded_valid = encode_value_with_type(
+            &Value::Text(Uuid::from_u128(12345).to_string()),
+            &ColumnType::Uuid,
+        );
+        let encoded_invalid =
+            encode_value_with_type(&Value::Text("not-a-uuid".into()), &ColumnType::Uuid);
+
+        assert_eq!(encoded_valid.len(), 16);
+        assert_eq!(encoded_invalid.len(), 16);
     }
 
     #[test]

@@ -108,6 +108,7 @@ fn query_on_composed_noncurrent_branch_reads_rows() {
             "users",
             &draft_branch,
             &[Value::Text("Dora".into()), Value::Integer(42)],
+            None,
         )
         .unwrap();
 

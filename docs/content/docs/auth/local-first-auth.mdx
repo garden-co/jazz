@@ -50,6 +50,8 @@ Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/AuthLocalfirst.svelte#auth-localfirst-svelte
     </include>
+    `LocalFirstAuth` from `jazz-tools/svelte` also exposes `login` and `signOut` for switching or
+    clearing accounts.
   </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="jazz-client.ts"'>
@@ -154,8 +156,9 @@ The parser is case-insensitive and tolerant of extra whitespace between words. I
 `invalid-checksum`.
 
 <Callout type="info">
-  In React and Expo, `useLocalFirstAuth().login()` updates the mounted `JazzProvider` immediately.
-  Other frameworks use `BrowserAuthSecretStore.saveSecret()` directly, which doesn't notify the live
+  Calling `login()` on the framework-specific local-first auth handle (`useLocalFirstAuth()` in
+  React/Expo/Vue, `LocalFirstAuth` in Svelte) updates the mounted provider immediately. Plain
+  TypeScript uses `BrowserAuthSecretStore.saveSecret()` directly, which doesn't notify the live
   client — the snippets above reload the page so the new secret is picked up on the next load.
 </Callout>
 
