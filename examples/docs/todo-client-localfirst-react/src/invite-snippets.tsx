@@ -55,7 +55,7 @@ export function InviteHandler({ chatId, code }: { chatId: string; code: string }
     })
       .then((res) => {
         if (!res.ok) throw new Error(`redeem failed: ${res.status}`);
-        navigate(`/#/chat/${chatId}`);
+        navigate(`/chat/${chatId}`);
       })
       .catch((err) => {
         console.error("failed to join", err);
