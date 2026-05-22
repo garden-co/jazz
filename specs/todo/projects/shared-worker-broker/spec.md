@@ -124,8 +124,8 @@ The implementation must document that content-hashed broker URLs can create more
 
 One name, fixed per `(appId, dbName)`:
 
-```
-LOCK_NAME = `jazz-worker:${appId}:${dbName}`
+```ts
+LOCK_NAME = `jazz-worker:${appId}:${dbName}`;
 ```
 
 `LOCK_NAME` is deliberately **not** versioned. Different Jazz package versions that point at the same OPFS database must contend on the same lock. Versioning the lock without also versioning the OPFS namespace would allow two writers to the same storage.
