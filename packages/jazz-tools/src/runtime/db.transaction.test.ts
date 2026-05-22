@@ -203,13 +203,12 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    db.transaction(
-      (tx) => tx.insert(table, { title: "Visible later", done: false }),
-      { visibleAt: "global" },
-    );
+    db.transaction((tx) => tx.insert(table, { title: "Visible later", done: false }), {
+      visibility: "deferred",
+    });
 
     expect(beginTransactionInternal).toHaveBeenCalledWith(undefined, undefined, {
-      visibleAt: "global",
+      visibility: "deferred",
     });
   });
 

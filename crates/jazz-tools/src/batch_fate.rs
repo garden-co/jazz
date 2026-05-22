@@ -37,60 +37,53 @@ impl BatchMode {
     }
 }
 
+/// Defines when a transaction's writes become visible outside the transaction
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransactionVisibility {
+    /// Becomes visible on transaction commit
     #[serde(rename = "immediate")]
     #[default]
     Immediate,
-    #[serde(rename = "local")]
-    Local,
-    #[serde(rename = "edge")]
-    EdgeServer,
-    #[serde(rename = "global")]
-    GlobalServer,
+    /// Becomes visible once the tier accepts the transaction
+    #[serde(rename = "deferred")]
+    Deferred(DurabilityTier),
 }
 
 impl TransactionVisibility {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Immediate => "immediate",
-            Self::Local => "local",
-            Self::EdgeServer => "edge",
-            Self::GlobalServer => "global",
+            Self::Deferred(DurabilityTier::Local) => "local",
+            Self::Deferred(DurabilityTier::EdgeServer) => "edge",
+            Self::Deferred(DurabilityTier::GlobalServer) => "global",
         }
     }
 
     pub fn parse(raw: &str) -> Result<Self, String> {
         match raw {
             "immediate" => Ok(Self::Immediate),
-            "local" => Ok(Self::Local),
-            "edge" => Ok(Self::EdgeServer),
-            "global" => Ok(Self::GlobalServer),
+            "local" => Ok(Self::Deferred(DurabilityTier::Local)),
+            "edge" => Ok(Self::Deferred(DurabilityTier::EdgeServer)),
+            "global" => Ok(Self::Deferred(DurabilityTier::GlobalServer)),
             other => Err(format!("unknown transaction visibility '{other}'")),
         }
     }
 
     pub fn from_confirmed_tier(tier: DurabilityTier) -> Self {
-        match tier {
-            DurabilityTier::Local => Self::Local,
-            DurabilityTier::EdgeServer => Self::EdgeServer,
-            DurabilityTier::GlobalServer => Self::GlobalServer,
-        }
+        Self::Deferred(tier)
     }
 
     pub fn legacy_default_for_batch_mode(mode: BatchMode) -> Self {
         match mode {
             BatchMode::Direct => Self::Immediate,
-            BatchMode::Transactional => Self::Local,
+            BatchMode::Transactional => Self::Deferred(DurabilityTier::GlobalServer),
         }
     }
 
     pub fn is_satisfied_by(self, confirmed_tier: DurabilityTier) -> bool {
         match self {
             Self::Immediate => true,
-            Self::Local => confirmed_tier >= DurabilityTier::Local,
-            Self::EdgeServer => confirmed_tier >= DurabilityTier::EdgeServer,
-            Self::GlobalServer => confirmed_tier >= DurabilityTier::GlobalServer,
+            Self::Deferred(required_tier) => confirmed_tier >= required_tier,
         }
     }
 }
@@ -1422,12 +1415,12 @@ mod tests {
         let mut record = LocalBatchRecord::new_with_visibility(
             batch_id,
             BatchMode::Transactional,
-            TransactionVisibility::GlobalServer,
+            TransactionVisibility::Deferred(DurabilityTier::GlobalServer),
             true,
             Some(BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier: DurabilityTier::EdgeServer,
-                visible_at: TransactionVisibility::GlobalServer,
+                visible_at: TransactionVisibility::Deferred(DurabilityTier::GlobalServer),
             }),
         );
         record.upsert_member(LocalBatchMember {
@@ -1462,7 +1455,10 @@ mod tests {
 
         let decoded = LocalBatchRecord::decode_storage_row(&bytes).expect("decode legacy record");
 
-        assert_eq!(decoded.visible_at, TransactionVisibility::Local);
+        assert_eq!(
+            decoded.visible_at,
+            TransactionVisibility::Deferred(DurabilityTier::Local)
+        );
     }
 
     #[test]
@@ -1564,12 +1560,12 @@ mod tests {
         let current = BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_at: TransactionVisibility::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         };
         let incoming = BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
-            visible_at: TransactionVisibility::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         };
 
         assert_eq!(
@@ -1577,7 +1573,7 @@ mod tests {
             BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier: DurabilityTier::GlobalServer,
-                visible_at: TransactionVisibility::Local,
+                visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
             }
         );
     }
@@ -1588,7 +1584,7 @@ mod tests {
         let fate = BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::EdgeServer,
-            visible_at: TransactionVisibility::GlobalServer,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::GlobalServer),
         };
 
         let bytes = fate.encode_storage_row().expect("encode fate");
@@ -1620,7 +1616,7 @@ mod tests {
             BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier: DurabilityTier::EdgeServer,
-                visible_at: TransactionVisibility::EdgeServer,
+                visible_at: TransactionVisibility::Deferred(DurabilityTier::EdgeServer),
             }
         );
     }
@@ -1738,7 +1734,10 @@ mod tests {
         let decoded =
             SealedBatchSubmission::decode_storage_row(&bytes).expect("decode legacy submission");
 
-        assert_eq!(decoded.visible_at, TransactionVisibility::Local);
+        assert_eq!(
+            decoded.visible_at,
+            TransactionVisibility::Deferred(DurabilityTier::Local)
+        );
         assert_eq!(decoded.batch_digest, legacy_digest);
     }
 
@@ -1761,7 +1760,7 @@ mod tests {
         let global = SealedBatchSubmission::new_with_visibility(
             batch_id,
             BatchMode::Transactional,
-            TransactionVisibility::GlobalServer,
+            TransactionVisibility::Deferred(DurabilityTier::GlobalServer),
             BranchName::new("main"),
             members,
             Vec::new(),

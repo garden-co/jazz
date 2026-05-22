@@ -13,7 +13,7 @@ export {
   type BatchScope,
   type TransactionOptions,
   type TransactionScope,
-  type TransactionVisibleAt,
+  type TransactionVisibility,
   loadWasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,

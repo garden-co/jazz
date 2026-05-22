@@ -411,7 +411,7 @@ fn initial_query_sync_replays_current_accepted_transaction_settlement() {
         } if *id == client_id && *fate == BatchFate::AcceptedTransaction {
             batch_id: row.batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_at: TransactionVisibility::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         }
     )));
 }
@@ -458,7 +458,7 @@ fn batch_fate_needed_returns_current_accepted_transaction() {
         } if id == client_id && fate == BatchFate::AcceptedTransaction {
             batch_id: row.batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_at: TransactionVisibility::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         }
     )));
 }
@@ -480,7 +480,7 @@ fn accepted_transaction_settlement_before_rows_materializes_when_row_arrives() {
     let settlement = BatchFate::AcceptedTransaction {
         batch_id,
         confirmed_tier: DurabilityTier::EdgeServer,
-        visible_at: TransactionVisibility::EdgeServer,
+        visible_at: TransactionVisibility::Deferred(DurabilityTier::EdgeServer),
     };
 
     seed_users_schema(&mut io);
@@ -555,7 +555,7 @@ fn accepted_transaction_waits_until_confirmed_tier_satisfies_visible_at() {
             fate: BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier: DurabilityTier::EdgeServer,
-                visible_at: TransactionVisibility::GlobalServer,
+                visible_at: TransactionVisibility::Deferred(DurabilityTier::GlobalServer),
             },
         },
     );
@@ -589,7 +589,7 @@ fn accepted_transaction_waits_until_confirmed_tier_satisfies_visible_at() {
             fate: BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier: DurabilityTier::GlobalServer,
-                visible_at: TransactionVisibility::GlobalServer,
+                visible_at: TransactionVisibility::Deferred(DurabilityTier::GlobalServer),
             },
         },
     );
@@ -640,7 +640,7 @@ fn accepted_transaction_row_before_settlement_waits_until_visible_at_is_satisfie
             fate: BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier: DurabilityTier::EdgeServer,
-                visible_at: TransactionVisibility::GlobalServer,
+                visible_at: TransactionVisibility::Deferred(DurabilityTier::GlobalServer),
             },
         },
     );
@@ -658,7 +658,7 @@ fn accepted_transaction_row_before_settlement_waits_until_visible_at_is_satisfie
             fate: BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier: DurabilityTier::GlobalServer,
-                visible_at: TransactionVisibility::GlobalServer,
+                visible_at: TransactionVisibility::Deferred(DurabilityTier::GlobalServer),
             },
         },
     );
@@ -987,7 +987,7 @@ fn seal_batch_accepts_all_staged_transactional_rows_as_one_settlement() {
         } if *id == client_id && *returned == BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_at: TransactionVisibility::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         }
     )));
 }

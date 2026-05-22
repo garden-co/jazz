@@ -1751,10 +1751,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbTransaction(
       (schema) => this.getClient(schema),
-      (client) =>
-        options === undefined
-          ? client.beginTransactionInternal(context?.session, context?.attribution)
-          : client.beginTransactionInternal(context?.session, context?.attribution, options),
+      (client) => client.beginTransactionInternal(context?.session, context?.attribution, options),
     );
   }
 

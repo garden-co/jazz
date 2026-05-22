@@ -194,8 +194,6 @@ struct WriteContextPayloadWire {
     batch_id: Option<String>,
     #[serde(default)]
     visible_at: Option<String>,
-    #[serde(default, alias = "visibleAt")]
-    visible_at_camel: Option<String>,
     #[serde(default)]
     target_branch_name: Option<String>,
 }
@@ -219,11 +217,7 @@ impl TryFrom<WriteContextPayloadWire> for WriteContext {
             .as_deref()
             .map(parse_batch_id_input)
             .transpose()?;
-        let visible_at = match value
-            .visible_at
-            .as_deref()
-            .or(value.visible_at_camel.as_deref())
-        {
+        let visible_at = match value.visible_at.as_deref() {
             None => None,
             Some(raw) => Some(TransactionVisibility::parse(raw)?),
         };
@@ -490,6 +484,7 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
+    use crate::sync_manager::DurabilityTier;
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -726,7 +721,7 @@ mod tests {
             r#"{
                 "batch_mode": "transactional",
                 "batch_id": "0196721ac2617f10a4bebbc7f7ffdb3f",
-                "visibleAt": "global",
+                "visible_at": "global",
                 "target_branch_name": "dev-111111111111-main"
             }"#,
         ))
@@ -735,7 +730,9 @@ mod tests {
 
         assert_eq!(
             context.visible_at(),
-            Some(TransactionVisibility::GlobalServer)
+            Some(TransactionVisibility::Deferred(
+                DurabilityTier::GlobalServer
+            ))
         );
     }
 }

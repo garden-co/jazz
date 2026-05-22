@@ -200,10 +200,12 @@ interface TimestampOverrideOptions {
 }
 
 export type BatchMode = "direct" | "transactional";
-export type TransactionVisibleAt = "immediate" | "local" | "edge" | "global";
+export type TransactionVisibility = LocalUpdatesMode;
+
+type TransactionVisibleAt = "immediate" | DurabilityTier;
 
 export interface TransactionOptions {
-  visibleAt?: TransactionVisibleAt;
+  visibility?: TransactionVisibility;
 }
 
 export type BatchFate =
@@ -226,13 +228,13 @@ export type BatchFate =
       kind: "acceptedTransaction";
       batchId: string;
       confirmedTier: DurabilityTier;
-      visibleAt?: TransactionVisibleAt;
+      visibleAt?: TransactionVisibility;
     };
 
 export interface LocalBatchRecord {
   batchId: string;
   mode: BatchMode;
-  visibleAt?: TransactionVisibleAt;
+  visibleAt?: TransactionVisibility;
   sealed: boolean;
   latestSettlement: BatchFate | null;
   encodedRecord?: Uint8Array;
@@ -343,19 +345,25 @@ export function resolveEffectiveQueryExecutionOptions(
   };
 }
 
-export function resolveDefaultTransactionVisibleAt(
+export function resolveTransactionVisibleAt(
   context: TransactionVisibilityDefaultsContext,
   options?: TransactionOptions,
 ): TransactionVisibleAt {
-  if (options?.visibleAt) {
-    return options.visibleAt;
+  // Transactions explicitly marked as "immediate" become visible on commit
+  if (options?.visibility === "immediate") {
+    return "immediate";
   }
+  // If the DB is connected to a server, the transaction becomes visible
+  // once it's accepted by the core server
   if (context.serverUrl) {
     return "global";
   }
+  // For in-memory DBs, transactions becomes visible on commit
   if (context.driver?.type === "memory") {
     return "immediate";
   }
+  // For persistent DBs without a server, transactions become visible
+  // once the persistent runtime accepts them
   return "local";
 }
 
@@ -1151,7 +1159,7 @@ export class JazzClient {
 
   private createBatchContext(
     batchMode: BatchMode,
-    visibleAt?: TransactionVisibleAt,
+    visibleAt: TransactionVisibleAt,
   ): BatchWriteContext {
     return {
       batchMode,
@@ -1168,10 +1176,7 @@ export class JazzClient {
   ): Transaction {
     return new Transaction(
       this,
-      this.createBatchContext(
-        "transactional",
-        resolveDefaultTransactionVisibleAt(this.context, options),
-      ),
+      this.createBatchContext("transactional", resolveTransactionVisibleAt(this.context, options)),
       this.resolveWriteSession(session, attribution),
       attribution,
     );
@@ -1180,7 +1185,7 @@ export class JazzClient {
   beginBatchInternal(session?: Session, attribution?: string): DirectBatch {
     return new DirectBatch(
       this,
-      this.createBatchContext("direct"),
+      this.createBatchContext("direct", "immediate"),
       this.resolveWriteSession(session, attribution),
       attribution,
     );

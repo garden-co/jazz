@@ -319,17 +319,17 @@ describe("JazzClient transactions", () => {
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
   });
 
-  it("threads explicit transaction visibility into write contexts", () => {
+  it("transaction explicitly marked as `immediate` become visible on commit", () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const tx = client.beginTransaction({ visibleAt: "edge" });
+    const tx = client.beginTransaction({ visibility: "immediate" });
 
     tx.create("todos", {});
 
     const writeContext = JSON.parse(runtime.insertWithSession.mock.calls[0]?.[2] ?? "{}");
     expect(writeContext).toMatchObject({
       batch_mode: "transactional",
-      visible_at: "edge",
+      visible_at: "immediate",
     });
   });
 

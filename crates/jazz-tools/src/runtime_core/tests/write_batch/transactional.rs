@@ -57,8 +57,9 @@ fn rc_transactional_seal_persists_write_context_visibility() {
         "transaction-visibility-write-context-test",
         Box::new(MemoryStorage::new()),
     );
-    let write_context = transactional_write_context()
-        .with_visible_at(crate::batch_fate::TransactionVisibility::GlobalServer);
+    let write_context = transactional_write_context().with_visible_at(
+        crate::batch_fate::TransactionVisibility::Deferred(DurabilityTier::GlobalServer),
+    );
 
     let (_, batch_id) = core
         .insert(
@@ -76,7 +77,7 @@ fn rc_transactional_seal_persists_write_context_visibility() {
         .expect("sealed transaction submission");
     assert_eq!(
         submission.visible_at,
-        crate::batch_fate::TransactionVisibility::GlobalServer
+        crate::batch_fate::TransactionVisibility::Deferred(DurabilityTier::GlobalServer)
     );
 }
 
@@ -593,7 +594,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_at: crate::batch_fate::TransactionVisibility::Local,
+            visible_at: crate::batch_fate::TransactionVisibility::Deferred(DurabilityTier::Local),
         })
     );
 }
@@ -703,7 +704,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
         Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_at: crate::batch_fate::TransactionVisibility::Local,
+            visible_at: crate::batch_fate::TransactionVisibility::Deferred(DurabilityTier::Local),
         })
     );
 }
