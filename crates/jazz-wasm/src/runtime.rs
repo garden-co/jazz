@@ -400,6 +400,10 @@ fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
     }
 }
 
+fn should_allow_unprivileged_schema_catalogue_writes(env: &str) -> bool {
+    !matches!(env, "prod" | "production")
+}
+
 #[cfg(target_arch = "wasm32")]
 const DEFAULT_OPFS_CACHE_SIZE: usize = 32 * 1024 * 1024;
 
@@ -418,6 +422,9 @@ fn build_schema_manager(
     let mut sync_manager = SyncManager::new();
     if !node_tiers.is_empty() {
         sync_manager = sync_manager.with_durability_tiers(node_tiers);
+    }
+    if should_allow_unprivileged_schema_catalogue_writes(env) {
+        sync_manager = sync_manager.with_unprivileged_schema_catalogue_writes();
     }
     SchemaManager::new_with_policy_mode(
         sync_manager,
@@ -447,6 +454,7 @@ fn assemble_wasm_runtime(
     _use_binary_encoding: bool,
 ) -> WasmRuntime {
     let scheduler = WasmScheduler::new();
+    let scheduled = scheduler.scheduled.clone();
     let mutation_error_emit_scheduled = scheduler.mutation_error_emit_scheduled.clone();
     let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
     core.set_tier_label(tier_label);
@@ -460,6 +468,7 @@ fn assemble_wasm_runtime(
     core_rc.borrow_mut().persist_schema();
     WasmRuntime {
         core: core_rc,
+        scheduled,
         mutation_error_emit_scheduled,
         upstream_server_id: Rc::new(std::cell::Cell::new(None)),
         tier_label,
@@ -1030,6 +1039,7 @@ fn post_message_with_transfer(
 #[wasm_bindgen]
 pub struct WasmRuntime {
     pub(crate) core: Rc<RefCell<WasmCoreType>>,
+    pub(crate) scheduled: Rc<RefCell<bool>>,
     pub(crate) mutation_error_emit_scheduled: Rc<RefCell<bool>>,
     /// `Rc<Cell<…>>` so `WasmRuntime` clones share state. The bridge keeps a
     /// clone and mutates `upstream_server_id` via `add_server` / `remove_server`
@@ -1043,6 +1053,7 @@ impl Clone for WasmRuntime {
     fn clone(&self) -> Self {
         Self {
             core: Rc::clone(&self.core),
+            scheduled: Rc::clone(&self.scheduled),
             mutation_error_emit_scheduled: Rc::clone(&self.mutation_error_emit_scheduled),
             upstream_server_id: Rc::clone(&self.upstream_server_id),
             tier_label: self.tier_label,
@@ -1132,6 +1143,9 @@ impl WasmRuntime {
         if !node_tiers.is_empty() {
             sync_manager = sync_manager.with_durability_tiers(node_tiers);
         }
+        if should_allow_unprivileged_schema_catalogue_writes(env) {
+            sync_manager = sync_manager.with_unprivileged_schema_catalogue_writes();
+        }
 
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
 
@@ -1153,6 +1167,7 @@ impl WasmRuntime {
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
+        let scheduled = scheduler.scheduled.clone();
         let mutation_error_emit_scheduled = scheduler.mutation_error_emit_scheduled.clone();
         // The outbox `SyncSender` is installed by the worker bridge or host
         // when they know the postMessage target. Direct (non-worker) clients
@@ -1183,6 +1198,7 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
+            scheduled,
             mutation_error_emit_scheduled,
             upstream_server_id: Rc::new(std::cell::Cell::new(None)),
             tier_label,
@@ -1220,12 +1236,7 @@ impl WasmRuntime {
             payload,
         };
 
-        let mut core = self.core.borrow_mut();
-        if let Some(sequence) = sequence {
-            core.park_sync_message_with_sequence(entry, sequence);
-        } else {
-            core.park_sync_message(entry);
-        }
+        self.park_sync_message_or_retry(entry, sequence);
         Ok(())
     }
 
@@ -1257,7 +1268,7 @@ impl WasmRuntime {
             payload,
         };
 
-        self.core.borrow_mut().park_sync_message(entry);
+        self.park_sync_message_or_retry(entry, None);
         Ok(())
     }
 
@@ -1269,7 +1280,44 @@ impl WasmRuntime {
     }
 
     fn batched_tick_and_emit_mutation_errors(&self) {
-        self.core.borrow_mut().batched_tick();
+        if let Ok(mut core) = self.core.try_borrow_mut() {
+            core.batched_tick();
+        } else {
+            self.schedule_batched_tick();
+        }
+    }
+
+    fn park_sync_message_or_retry(&self, entry: InboxEntry, sequence: Option<u64>) {
+        if let Ok(mut core) = self.core.try_borrow_mut() {
+            if let Some(sequence) = sequence {
+                core.park_sync_message_with_sequence(entry, sequence);
+            } else {
+                core.park_sync_message(entry);
+            }
+            return;
+        }
+
+        let runtime = self.clone();
+        let task = Closure::once_into_js(move || {
+            runtime.park_sync_message_or_retry(entry, sequence);
+        });
+
+        let global = js_sys::global();
+        let Ok(set_timeout) = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .and_then(|value| value.dyn_into::<Function>())
+        else {
+            return;
+        };
+        let _ = set_timeout.call2(&global, &task, &JsValue::from_f64(0.0));
+    }
+
+    fn schedule_batched_tick(&self) {
+        let mut scheduled = self.scheduled.borrow_mut();
+        if !*scheduled {
+            *scheduled = true;
+            drop(scheduled);
+            schedule_batched_tick_task(Rc::downgrade(&self.core), self.scheduled.clone());
+        }
     }
 
     fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
@@ -1983,7 +2031,8 @@ impl WasmRuntime {
     pub fn flush(&self) -> Result<(), JsValue> {
         let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
         self.core
-            .borrow_mut()
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("flush failed: runtime is busy"))?
             .flush_storage()
             .map_err(|e| JsValue::from_str(&format!("flush failed: {e}")))
     }
@@ -1993,7 +2042,8 @@ impl WasmRuntime {
     pub fn flush_wal(&self) -> Result<(), JsValue> {
         let _span = debug_span!("wasm::flushWal", tier = self.tier_label).entered();
         self.core
-            .borrow_mut()
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("flush WAL failed: runtime is busy"))?
             .flush_wal()
             .map_err(|e| JsValue::from_str(&format!("flush WAL failed: {e}")))
     }

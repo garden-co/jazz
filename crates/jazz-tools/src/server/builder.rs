@@ -68,6 +68,7 @@ pub struct ServerBuilder {
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
     upstream_url: Option<String>,
     shutdown_timeout: Duration,
+    allow_unprivileged_schema_catalogue_writes: bool,
 }
 
 impl ServerBuilder {
@@ -85,6 +86,8 @@ impl ServerBuilder {
             sync_tracer: None,
             upstream_url: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
+            allow_unprivileged_schema_catalogue_writes:
+                should_allow_unprivileged_schema_catalogue_writes(),
         }
     }
 
@@ -110,6 +113,11 @@ impl ServerBuilder {
 
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
+        self
+    }
+
+    pub fn with_unprivileged_schema_catalogue_writes(mut self, enabled: bool) -> Self {
+        self.allow_unprivileged_schema_catalogue_writes = enabled;
         self
     }
 
@@ -212,7 +220,10 @@ impl ServerBuilder {
     }
 
     fn build_schema_manager(&self, storage: &dyn Storage) -> Result<SchemaManager, String> {
-        let sync_manager = server_sync_manager(self.local_durability_tier());
+        let sync_manager = server_sync_manager(
+            self.local_durability_tier(),
+            self.allow_unprivileged_schema_catalogue_writes,
+        );
 
         match &self.schema_mode {
             ServerSchemaMode::Dynamic => {
@@ -296,10 +307,13 @@ impl ServerBuilder {
     }
 }
 
-fn server_sync_manager(local_tier: DurabilityTier) -> SyncManager {
+fn server_sync_manager(
+    local_tier: DurabilityTier,
+    allow_unprivileged_schema_catalogue_writes: bool,
+) -> SyncManager {
     let sync_manager = SyncManager::new().with_durability_tier(local_tier);
 
-    if should_allow_unprivileged_schema_catalogue_writes() {
+    if allow_unprivileged_schema_catalogue_writes {
         sync_manager.with_unprivileged_schema_catalogue_writes()
     } else {
         sync_manager

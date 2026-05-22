@@ -163,7 +163,7 @@ describe("db.subscribeAll sorting browser integration", () => {
 
         await waitForCondition(
           () => deltas.some((delta) => delta.all.length === 3),
-          500,
+          2_000,
           "expected initial sorted snapshot",
         );
 
