@@ -350,7 +350,7 @@ fn set_client_query_scope(
 fn client_query_scope_replays_materialized_scope_rows_without_storage_lookup() {
     let mut sm = SyncManager::new();
     let io = MemoryStorage::new();
-    let client_id = ClientId(ObjectId::new());
+    let client_id = ClientId::new();
     let query_id = QueryId(7);
     let row_id = ObjectId::new();
     let branch = BranchName::new("main");
@@ -391,7 +391,7 @@ fn client_query_scope_replays_materialized_scope_rows_without_storage_lookup() {
         entry,
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::RowBatchCreated {
+            payload: SyncPayload::RowBatchNeeded {
                 metadata: Some(metadata),
                 row,
             },
