@@ -96,14 +96,14 @@ use jazz_tools::query_manager::manager::LocalUpdates;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::Value;
+use jazz_tools::query_manager::types::{SchemaHash, Value};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{MutationErrorCallback, RejectedBatchAcknowledgedCallback};
 use jazz_tools::runtime_core::{
     QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
 };
 #[cfg(target_arch = "wasm32")]
-use jazz_tools::runtime_core::{SubscriptionCallback, SubscriptionDelta, SubscriptionHandle};
+use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::schema_manager::rehydrate_schema_manager_from_catalogue;
 use jazz_tools::schema_manager::{AppId, SchemaManager};
@@ -1784,38 +1784,6 @@ impl WasmRuntime {
         Ok(())
     }
 
-    /// Batch phase 2 for a burst of subscriptions so they share one runtime tick.
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = executeSubscriptions)]
-    pub fn execute_subscriptions(
-        &self,
-        handles: js_sys::Array,
-        callbacks: js_sys::Array,
-    ) -> Result<(), JsError> {
-        let mut subscriptions = Vec::new();
-        for index in 0..handles.length() {
-            let handle = handles
-                .get(index)
-                .as_f64()
-                .ok_or_else(|| JsError::new("Invalid subscription handle"))?;
-            let callback = callbacks
-                .get(index)
-                .dyn_into::<Function>()
-                .map_err(|_| JsError::new("Invalid subscription callback"))?;
-            subscriptions.push((
-                SubscriptionHandle(handle as u64),
-                Box::new(make_subscription_callback(callback)) as SubscriptionCallback,
-            ));
-        }
-
-        self.core
-            .borrow_mut()
-            .execute_subscriptions(subscriptions)
-            .map_err(|e| JsError::new(&format!("Execute subscriptions failed: {:?}", e)))?;
-
-        Ok(())
-    }
-
     // =========================================================================
     // Sync Operations
     // =========================================================================
@@ -1931,7 +1899,8 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = getSchemaHash)]
     pub fn get_schema_hash(&self) -> String {
         let core = self.core.borrow();
-        core.current_schema_hash().to_string()
+        let schema = core.current_schema();
+        SchemaHash::compute(schema).to_string()
     }
 
     /// Debug helper: expose schema/lens state currently loaded in SchemaManager.
