@@ -299,20 +299,22 @@ impl PolicyGraph {
                     output_is_current || Self::relation_references_table(rel, table)
                 })
                 .unwrap_or(false);
-        let compile_schema: Schema = if use_structural_rows {
+        let structural_compile_schema;
+        let compile_schema: &Schema = if use_structural_rows {
             // Same-table relation closures and explicitly structural policy
             // checks must inspect raw relation rows rather than re-running
             // SELECT policies on the scanned tables.
-            schema
+            structural_compile_schema = schema
                 .iter()
                 .map(|(table_name, table_schema)| {
                     let mut structural = table_schema.clone();
                     structural.policies = crate::query_manager::types::TablePolicies::default();
                     (*table_name, structural)
                 })
-                .collect()
+                .collect();
+            &structural_compile_schema
         } else {
-            schema.clone()
+            schema
         };
         let branches = vec![branch.to_string()];
         let fallback_context;
@@ -320,7 +322,7 @@ impl PolicyGraph {
             Some(context) => context,
             None => {
                 fallback_context = Arc::new(SchemaContext::with_branch_name(
-                    compile_schema.clone(),
+                    (*compile_schema).clone(),
                     &BranchName::new(branch),
                 ));
                 fallback_context
@@ -328,7 +330,7 @@ impl PolicyGraph {
         };
         let mut graph = QueryGraph::compile_relation_ir_with_shared_schema_context_and_features(
             rel,
-            &compile_schema,
+            compile_schema,
             &branches,
             session,
             schema_context,

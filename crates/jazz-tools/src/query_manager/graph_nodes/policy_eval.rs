@@ -25,7 +25,7 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     branch: &'a str,
     row_policy_mode: RowPolicyMode,
     settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
-    schema_context: Option<Arc<SchemaContext>>,
+    schema_context: Option<&'a SchemaContext>,
     structural_exists_rel_scans: bool,
     phase: &'a str,
 }
@@ -58,13 +58,13 @@ impl<'a> PolicyContextEvaluator<'a> {
     }
 
     pub(crate) fn with_schema_context(mut self, schema_context: Option<&'a SchemaContext>) -> Self {
-        self.schema_context = schema_context.cloned().map(Arc::new);
+        self.schema_context = schema_context;
         self
     }
 
     pub(crate) fn with_shared_schema_context(
         mut self,
-        schema_context: Option<Arc<SchemaContext>>,
+        schema_context: Option<&'a SchemaContext>,
     ) -> Self {
         self.schema_context = schema_context;
         self
@@ -529,7 +529,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.branch,
             operation,
             self.row_policy_mode,
-            self.schema_context.as_deref(),
+            self.schema_context,
         ) {
             Some(g) => g,
             None => return false,
@@ -588,7 +588,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.row_policy_mode,
             Some(&current_table),
             structural_scans,
-            self.schema_context.as_ref().map(Arc::clone),
+            self.schema_context.map(|context| Arc::new(context.clone())),
         ) {
             Some(g) => g,
             None => return false,
