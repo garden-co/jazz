@@ -575,6 +575,145 @@ fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permis
 }
 
 #[test]
+fn local_query_allows_sibling_inherits_checks_through_same_parent_row() {
+    let mut schema = Schema::new();
+    let projects_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("owner_id", ColumnType::Text)]);
+    let projects_policies = TablePolicies::new()
+        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+        .with_update(
+            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            PolicyExpr::True,
+        );
+    schema.insert(
+        TableName::new("projects"),
+        TableSchema::with_policies(projects_descriptor, projects_policies),
+    );
+
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("project_id", ColumnType::Uuid).references("projects"),
+        ColumnDescriptor::new("title", ColumnType::Text),
+    ]);
+    let documents_policies = TablePolicies::new().with_select(PolicyExpr::And(vec![
+        PolicyExpr::Inherits {
+            operation: Operation::Select,
+            via_column: "project_id".into(),
+            max_depth: None,
+        },
+        PolicyExpr::Inherits {
+            operation: Operation::Update,
+            via_column: "project_id".into(),
+            max_depth: None,
+        },
+    ]));
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let project = qm
+        .insert(&mut storage, "projects", &[Value::Text("alice".into())])
+        .expect("seed alice project");
+    let document = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Uuid(project.row_id),
+                Value::Text("Launch plan".into()),
+            ],
+        )
+        .expect("seed project document");
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("documents").select(&["title"]).build(),
+        Some(Session::new("alice")),
+    );
+
+    assert_eq!(
+        rows,
+        vec![(document.row_id, vec![Value::Text("Launch plan".into())])],
+        "sibling inherited checks through the same parent should each evaluate independently"
+    );
+}
+
+#[test]
+fn local_update_allows_sibling_inherits_checks_through_same_parent_row() {
+    let mut schema = Schema::new();
+    let projects_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("owner_id", ColumnType::Text)]);
+    let projects_policies = TablePolicies::new()
+        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+        .with_update(
+            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            PolicyExpr::True,
+        );
+    schema.insert(
+        TableName::new("projects"),
+        TableSchema::with_policies(projects_descriptor, projects_policies),
+    );
+
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("project_id", ColumnType::Uuid).references("projects"),
+        ColumnDescriptor::new("title", ColumnType::Text),
+    ]);
+    let documents_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::And(vec![
+            PolicyExpr::Inherits {
+                operation: Operation::Select,
+                via_column: "project_id".into(),
+                max_depth: None,
+            },
+            PolicyExpr::Inherits {
+                operation: Operation::Update,
+                via_column: "project_id".into(),
+                max_depth: None,
+            },
+        ])),
+        PolicyExpr::True,
+    );
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let project = qm
+        .insert(&mut storage, "projects", &[Value::Text("alice".into())])
+        .expect("seed alice project");
+    let document = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Uuid(project.row_id),
+                Value::Text("Launch plan".into()),
+            ],
+        )
+        .expect("seed project document");
+
+    qm.update_with_session(
+        &mut storage,
+        document.row_id,
+        &[
+            Value::Uuid(project.row_id),
+            Value::Text("Updated launch plan".into()),
+        ],
+        Some(&Session::new("alice")),
+    )
+    .expect("sibling inherited checks through the same parent should each evaluate independently");
+}
+
+#[test]
 fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
     let mut schema = Schema::new();
     let folders_descriptor = RowDescriptor::new(vec![

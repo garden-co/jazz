@@ -399,12 +399,18 @@ impl<'a> PolicyContextEvaluator<'a> {
         let parent_table_name = *parent_table;
         let parent_row = match row_loader(parent_id, Some(parent_table_name)) {
             Some(content) => content,
-            None => return false,
+            None => {
+                visited.remove(&parent_id);
+                return false;
+            }
         };
 
         let parent_schema = match self.schema.get(&parent_table_name) {
             Some(schema) => schema,
-            None => return false,
+            None => {
+                visited.remove(&parent_id);
+                return false;
+            }
         };
 
         let parent_policy = match operation {
@@ -416,7 +422,10 @@ impl<'a> PolicyContextEvaluator<'a> {
 
         let parent_policy = match parent_policy {
             Some(p) => p,
-            None => return false,
+            None => {
+                visited.remove(&parent_id);
+                return false;
+            }
         };
 
         let parent_row = Row::new(
@@ -442,6 +451,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         {
             cache.ref_access_insert(cache_key, result);
         }
+        visited.remove(&parent_id);
         result
     }
 

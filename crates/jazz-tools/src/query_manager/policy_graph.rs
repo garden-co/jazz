@@ -260,22 +260,32 @@ impl PolicyGraph {
         current_table: Option<&TableName>,
         structural_scans: bool,
     ) -> Option<Self> {
-        let use_structural_rows = structural_scans
-            || current_table
-                .and_then(|table| {
-                    Self::exists_rel_output_table(rel, branch).map(|output| output == *table)
-                })
-                .unwrap_or(false);
-        let compile_schema: Schema = if use_structural_rows {
-            // Same-table relation closures and explicitly structural policy
-            // checks must inspect raw relation rows rather than re-running
-            // SELECT policies on the scanned tables.
+        let output_is_current_table = current_table
+            .and_then(|table| {
+                Self::exists_rel_output_table(rel, branch).map(|output| output == *table)
+            })
+            .unwrap_or(false);
+        let compile_schema: Schema = if structural_scans {
+            // Explicitly structural policy checks must inspect raw relation rows
+            // rather than re-running SELECT policies on scanned tables.
             schema
                 .iter()
                 .map(|(table_name, table_schema)| {
                     let mut structural = table_schema.clone();
                     structural.policies = crate::query_manager::types::TablePolicies::default();
                     (*table_name, structural)
+                })
+                .collect()
+        } else if output_is_current_table {
+            schema
+                .iter()
+                .map(|(table_name, table_schema)| {
+                    let mut table_schema = table_schema.clone();
+                    if Some(table_name) == current_table {
+                        table_schema.policies =
+                            table_schema.policies.clone().with_select(PolicyExpr::True);
+                    }
+                    (*table_name, table_schema)
                 })
                 .collect()
         } else {
@@ -290,7 +300,7 @@ impl PolicyGraph {
             session,
             &schema_context,
             RelationCompileFeatures::default(),
-            if use_structural_rows {
+            if structural_scans {
                 RowPolicyMode::PermissiveLocal
             } else {
                 row_policy_mode
@@ -557,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn test_for_exists_rel_ignores_select_policies_on_relation_tables() {
+    fn test_for_exists_rel_compiles_same_table_structural_scan() {
         let schema = test_schema();
         let session = Session::new("user1");
         let current_table = TableName::new("documents");
@@ -583,14 +593,15 @@ mod tests {
         )
         .expect("exists-rel graph");
 
-        assert!(
-            !graph
+        assert_eq!(graph.table().as_str(), "documents");
+        assert!(matches!(
+            graph
                 .graph
                 .nodes
-                .iter()
-                .any(|ctx| matches!(ctx.node, GraphNode::PolicyFilter(_))),
-            "exists-rel evaluation should inspect raw relation rows without injecting select-policy filters"
-        );
+                .get(graph.exists_node.0 as usize)
+                .map(|c| &c.node),
+            Some(GraphNode::ExistsOutput(_))
+        ));
     }
 
     #[test]
@@ -799,14 +810,6 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|ctx| matches!(ctx.node, GraphNode::Join(_)))
-        );
-        assert!(
-            !graph
-                .graph
-                .nodes
-                .iter()
-                .any(|ctx| matches!(ctx.node, GraphNode::PolicyFilter(_))),
-            "recursive exists-rel graphs should not inject select-policy filters for relation tables"
         );
     }
 }

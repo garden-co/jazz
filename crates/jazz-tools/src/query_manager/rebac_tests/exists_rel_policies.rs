@@ -207,6 +207,150 @@ fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table
 }
 
 #[test]
+fn local_update_with_same_table_exists_rel_keeps_select_policies_on_joined_tables() {
+    let mut schema = Schema::new();
+    let projects_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("secret_id", ColumnType::Uuid).references("secrets"),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    let projects_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::ExistsRel {
+            rel: RelExpr::Filter {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::TableScan {
+                        table: TableName::new("projects"),
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("secrets"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("projects", "secret_id"),
+                        right: ColumnRef::scoped("__join_0", "id"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                predicate: PredicateExpr::True,
+            },
+        }),
+        PolicyExpr::True,
+    );
+    schema.insert(
+        TableName::new("projects"),
+        TableSchema::with_policies(projects_descriptor, projects_policies),
+    );
+    schema.insert(
+        TableName::new("secrets"),
+        TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+            "label",
+            ColumnType::Text,
+        )])),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let secret = qm
+        .insert(
+            &mut storage,
+            "secrets",
+            &[Value::Text("launch codes".into())],
+        )
+        .expect("seed protected secret");
+    let project = qm
+        .insert(
+            &mut storage,
+            "projects",
+            &[Value::Uuid(secret.row_id), Value::Text("roadmap".into())],
+        )
+        .expect("seed project");
+
+    let err = qm
+        .update_with_session(
+            &mut storage,
+            project.row_id,
+            &[Value::Uuid(secret.row_id), Value::Text("renamed".into())],
+            Some(&Session::new("alice")),
+        )
+        .expect_err("same-table EXISTS_REL should not bypass joined-table SELECT policies");
+    assert!(matches!(
+        err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Update
+        } if table == TableName::new("projects")
+    ));
+}
+
+#[test]
+fn local_update_with_same_table_exists_rel_allows_visible_joined_tables() {
+    let mut schema = Schema::new();
+    let projects_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("secret_id", ColumnType::Uuid).references("secrets"),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    let projects_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::ExistsRel {
+            rel: RelExpr::Filter {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::TableScan {
+                        table: TableName::new("projects"),
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("secrets"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("projects", "secret_id"),
+                        right: ColumnRef::scoped("__join_0", "id"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                predicate: PredicateExpr::True,
+            },
+        }),
+        PolicyExpr::True,
+    );
+    schema.insert(
+        TableName::new("projects"),
+        TableSchema::with_policies(projects_descriptor, projects_policies),
+    );
+    schema.insert(
+        TableName::new("secrets"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let secret = qm
+        .insert(
+            &mut storage,
+            "secrets",
+            &[Value::Text("launch codes".into())],
+        )
+        .expect("seed visible secret");
+    let project = qm
+        .insert(
+            &mut storage,
+            "projects",
+            &[Value::Uuid(secret.row_id), Value::Text("roadmap".into())],
+        )
+        .expect("seed project");
+
+    qm.update_with_session(
+        &mut storage,
+        project.row_id,
+        &[Value::Uuid(secret.row_id), Value::Text("renamed".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("same-table EXISTS_REL should allow joins through visible tables");
+}
+
+#[test]
 fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
     let mut schema = Schema::new();
     let admins_descriptor = RowDescriptor::new(vec![
