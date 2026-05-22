@@ -5,7 +5,7 @@ use ahash::AHashSet;
 use crate::object::ObjectId;
 
 use super::policy::Operation;
-use super::types::{TableName, Tuple};
+use super::types::{LoadedRow, TableName, Tuple};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct RefAccessSubexprKey {
@@ -21,10 +21,17 @@ pub(crate) struct RelationSubexprKey {
     pub(crate) input_fingerprint: u64,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct RowLoadKey {
+    pub(crate) table_hint: Option<TableName>,
+    pub(crate) id: ObjectId,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SettlementEvalCache {
     ref_access: HashMap<RefAccessSubexprKey, bool>,
     relation_results: HashMap<RelationSubexprKey, AHashSet<Tuple>>,
+    row_loads: HashMap<RowLoadKey, Option<LoadedRow>>,
 }
 
 impl SettlementEvalCache {
@@ -51,6 +58,14 @@ impl SettlementEvalCache {
         value: AHashSet<Tuple>,
     ) {
         self.relation_results.insert(key, value);
+    }
+
+    pub(crate) fn row_load_get(&self, key: &RowLoadKey) -> Option<Option<LoadedRow>> {
+        self.row_loads.get(key).cloned()
+    }
+
+    pub(crate) fn row_load_insert(&mut self, key: RowLoadKey, value: Option<LoadedRow>) {
+        self.row_loads.insert(key, value);
     }
 }
 

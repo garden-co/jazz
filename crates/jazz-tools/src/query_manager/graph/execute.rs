@@ -3,7 +3,7 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 
 use crate::object::ObjectId;
-use crate::query_manager::settlement_eval_cache::SettlementEvalCache;
+use crate::query_manager::settlement_eval_cache::{RowLoadKey, SettlementEvalCache};
 use crate::query_manager::types::{LoadedRow, RowDelta, TableName, Tuple, TupleDelta};
 use crate::storage::Storage;
 use crate::sync_manager::RowBatchKey;
@@ -620,8 +620,23 @@ impl QueryGraph {
 
                     if let Some(GraphNode::Materialize(mat_node)) = self.get_node_mut(node_id) {
                         let deleted_delta = mat_node.check_deleted_tuples();
-                        let new_delta = mat_node.materialize_tuples(input_delta, &mut row_loader);
-                        let update_delta = mat_node.check_updated_tuples(&mut row_loader);
+                        let new_delta =
+                            mat_node.materialize_tuples(input_delta, &mut |id, hint| {
+                                Self::load_row_with_settlement_cache(
+                                    &mut settlement_eval_cache,
+                                    &mut row_loader,
+                                    id,
+                                    hint,
+                                )
+                            });
+                        let update_delta = mat_node.check_updated_tuples(&mut |id, hint| {
+                            Self::load_row_with_settlement_cache(
+                                &mut settlement_eval_cache,
+                                &mut row_loader,
+                                id,
+                                hint,
+                            )
+                        });
 
                         let mut merged = TupleDelta::new();
                         merged.added.extend(new_delta.added);
@@ -653,7 +668,14 @@ impl QueryGraph {
                         let delta = magic_node.process_with_context(
                             input_delta,
                             storage,
-                            &mut |id, hint| row_loader(id, hint),
+                            &mut |id, hint| {
+                                Self::load_row_with_settlement_cache(
+                                    &mut settlement_eval_cache,
+                                    &mut row_loader,
+                                    id,
+                                    hint,
+                                )
+                            },
                         );
                         tracing::debug!(
                             node_id = node_id.0,
@@ -697,7 +719,14 @@ impl QueryGraph {
                             policy_node.process_with_context(
                                 input_delta,
                                 storage,
-                                &mut |id, hint| row_loader(id, hint),
+                                &mut |id, hint| {
+                                    Self::load_row_with_settlement_cache(
+                                        &mut settlement_eval_cache,
+                                        &mut row_loader,
+                                        id,
+                                        hint,
+                                    )
+                                },
                             )
                         } else {
                             RowNode::process(policy_node, input_delta)
@@ -771,8 +800,14 @@ impl QueryGraph {
                     {
                         // Check if inner table changed - need to reevaluate all existing instances
                         let mut delta = if subquery_node.is_inner_dirty() {
-                            subquery_node
-                                .reevaluate_all(storage, &mut |id, hint| row_loader(id, hint))
+                            subquery_node.reevaluate_all(storage, &mut |id, hint| {
+                                Self::load_row_with_settlement_cache(
+                                    &mut settlement_eval_cache,
+                                    &mut row_loader,
+                                    id,
+                                    hint,
+                                )
+                            })
                         } else {
                             TupleDelta::new()
                         };
@@ -781,7 +816,14 @@ impl QueryGraph {
                         let outer_delta = subquery_node.process_with_context(
                             input_delta,
                             storage,
-                            &mut |id, hint| row_loader(id, hint),
+                            &mut |id, hint| {
+                                Self::load_row_with_settlement_cache(
+                                    &mut settlement_eval_cache,
+                                    &mut row_loader,
+                                    id,
+                                    hint,
+                                )
+                            },
                         );
 
                         // Merge outer delta into combined delta
@@ -867,6 +909,50 @@ impl QueryGraph {
                 }
             })
             .unwrap_or_default()
+    }
+
+    fn load_row_with_settlement_cache<F>(
+        settlement_eval_cache: &mut Option<&mut SettlementEvalCache>,
+        row_loader: &mut F,
+        id: ObjectId,
+        table_hint: Option<TableName>,
+    ) -> Option<LoadedRow>
+    where
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    {
+        let Some(cache) = settlement_eval_cache.as_deref_mut() else {
+            return row_loader(id, table_hint);
+        };
+        let key = RowLoadKey { table_hint, id };
+        if let Some(cached) = cache.row_load_get(&key) {
+            crate::query_manager::policy_counters::increment(
+                "settlement_row_load_cache",
+                format!(
+                    "hit table_hint={} id={}",
+                    key.table_hint
+                        .as_ref()
+                        .map(TableName::as_str)
+                        .unwrap_or("<unknown>"),
+                    key.id
+                ),
+            );
+            return cached;
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "settlement_row_load_cache",
+            format!(
+                "miss table_hint={} id={}",
+                key.table_hint
+                    .as_ref()
+                    .map(TableName::as_str)
+                    .unwrap_or("<unknown>"),
+                key.id
+            ),
+        );
+        let loaded = row_loader(id, key.table_hint);
+        cache.row_load_insert(key, loaded.clone());
+        loaded
     }
 
     /// Collect tuple sets from input nodes for a transform node.
