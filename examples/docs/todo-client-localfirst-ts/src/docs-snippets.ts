@@ -177,6 +177,16 @@ export async function readDeletableTodos(db: Db) {
 }
 // #endregion reading-magic-columns-ts
 
+// #region reading-magic-columns-include-ts
+export async function readProjectsWithTodoPermissions(db: Db) {
+  return db.all(
+    app.projects.include({
+      todosViaProject: app.todos.select("title", "$canEdit", "$canDelete").orderBy("title", "asc"),
+    }),
+  );
+}
+// #endregion reading-magic-columns-include-ts
+
 // #region reading-edit-metadata-magic-columns-ts
 export async function readTodoEditMetadata(db: Db, currentUserId: string, updatedSinceMs: number) {
   return db.all(
