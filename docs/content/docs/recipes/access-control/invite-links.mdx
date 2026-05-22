@@ -1,0 +1,113 @@
+---
+title: "Invite links"
+description: Let users share a URL that grants another user access to a private resource without knowing their identity in advance.
+reviewedAt: "9712a744f"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+Invite links are a pattern that let a resource owner share a URL that grants access to anyone who has it without knowing the recipient's identity in advance. The URL carries the resource ID plus a secret that the owner stores on the resource row.
+
+When an invitee opens the URL, your application validates the code against the stored value and inserts a membership row for them. From that point on, access flows through the normal membership rule.
+
+The primary pattern in this recipe uses a small server route to validate the code and insert the membership row. For [local-first auth](/docs/auth/local-first-auth), or applications with no server component, [it is possible to do the same check](#secondary-pattern-jwt-claim-local-first-auth-only) inside a permission rule. This removes the need for a server route but requires the client to mint a JWT with a claim.
+
+## Schema
+
+Add a `joinCode` column to the resource table. The members table records which code each user used to join, so you can audit or revoke individual memberships later.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-schema
+</include>
+
+## Permissions
+
+A user can read a chat once they have a membership row. A chat creator can bootstrap their own membership, but no other user can write a `chatMembers` row, so the only way for an invitee to join is via the server route below. The server has a [backend identity](/docs/getting-started/server-setup#backend-identity-pattern) and inserts the row on their behalf after validating the join code.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-permissions
+</include>
+
+See [Permissions](/docs/auth/permissions) for more on `exists.where`, `allOf`, and `anyOf`, and [Session identity and authorship](/docs/auth/sessions#session-identity-and-authorship) for how the backend stamps the user as the row's author while keeping backend permissions.
+
+## Generating a link
+
+The creator inserts the chat and their own membership client-side. Both writes are allowed by the permission rules above because the creator's `createdBy` matches their session. The join code goes on the row and into the URL.
+
+<include cwd lang="ts" meta='title="createInviteLink.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/invite-snippets.tsx#invite-create-link
+</include>
+
+<Callout type="warn">
+  The code lives in the URL fragment (after `#`) to keep it out of server access logs, CDN logs, and
+  `Referer` headers. Don't pass the code as a route parameter or query string&hairsp;—&hairsp;those
+  land in server logs.
+</Callout>
+
+## Accepting an invite
+
+The invitee opens the link while signed in. The client posts the chat ID and code to a server route. The server reads the chat with backend privileges, checks the code against the stored value, and inserts the membership row.
+
+### Server route
+
+The route reads and writes as the backend: the invitee has no read access to the chat until they're a member, and the `chatMembers.allowInsert` rule only admits the chat's creator, so they can't insert their own membership directly. Authorship is stamped to the user via `withAttribution`, so edit metadata still records who joined.
+
+The `context` referenced below is the backend Jazz context for your app&hairsp;—&hairsp;see [Backend context setup](/docs/getting-started/server-setup#backend-context-setup) for how to create one.
+
+<include cwd lang="ts" meta='title="api/invite/redeem.ts"'>
+  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-redeem-route
+</include>
+
+<Accordions type="single">
+<Accordion title="Single-use, expiring, or role-scoped codes">
+
+For single-use codes, rotate the code in your server route after a successful redeem. For richer requirements (expiry, codes that grant specific roles, audit metadata), put codes in their own table alongside the data you need to colocate with each one&hairsp;—&hairsp;creation date, granted role, expiry timestamp, and so on.
+
+</Accordion>
+</Accordions>
+
+### Client handler
+
+Route `/#/invite/:chatId/:code` to a component that calls the server route and then redirects.
+
+<include cwd lang="tsx" meta='title="InviteHandler.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/invite-snippets.tsx#invite-handler-primary
+</include>
+
+Once the route returns, the user's subscription picks the chat up via the membership rule, and access persists for as long as the membership row exists.
+
+## Revoking access
+
+Delete a member's row to revoke their access immediately. The server stops syncing the resource to them as soon as the row is gone.
+
+<include cwd lang="ts" meta='title="revokeMember.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/invite-snippets.tsx#invite-revoke
+</include>
+
+If you also want to invalidate the link itself for any future redeemers, clear or rotate the `joinCode` on the chat row.
+
+## Secondary pattern: JWT claim (local-first auth only)
+
+If you are using [local-first auth](/docs/auth/local-first-auth), the client mints its own JWTs and can attach arbitrary claims. You can use this to do the invite check entirely inside the permission rule, with no server route.
+
+This pattern only fits applications where the client controls JWT minting. In most stacks the server or an external auth provider issues JWTs, so the pattern above is the right choice.
+
+### Permissions
+
+Extend both the read rule and the `chatMembers.allowInsert` rule with a second branch that accepts the claim:
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-permissions-jwt-claim
+</include>
+
+The claim branch is temporary&hairsp;—&hairsp;once the invitee has inserted their `chatMembers` row, future reads match the membership branch and the claim is never consulted again.
+
+### Client handler
+
+Subscribe with the invite code as a JWT claim, wait for the chat row to arrive, then insert the membership row directly from the client.
+
+<include cwd lang="tsx" meta='title="InviteHandler.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/invite-snippets.tsx#invite-handler-jwt-claim
+</include>
+
+`authMode: "external"` tells the Jazz client to authenticate using the supplied claims object rather than the user's normal session token. The `session["claims.join_code"]` reference in the permission rule reads the claim from that token.
