@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
