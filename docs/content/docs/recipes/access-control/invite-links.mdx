@@ -10,7 +10,7 @@ Invite links are a pattern that let a resource owner share a URL that grants acc
 
 When an invitee opens the URL, your application validates the code against the stored value and inserts a membership row for them. From that point on, access flows through the normal membership rule.
 
-The primary pattern in this recipe uses a small server route to validate the code and insert the membership row. For [local-first auth](/docs/auth/local-first-auth), or applications with no server component, [it is possible to do the same check](#secondary-pattern-jwt-claim-local-first-auth-only) inside a permission rule. This removes the need for a server route but requires the client to mint a JWT with a claim.
+The primary pattern in this recipe uses a small server route to validate the code and insert the membership row. For [local-first auth](/docs/auth/local-first-auth), or applications with no server component, [it is possible to do the same check](#secondary-pattern-session-claim-local-first-auth-only) inside a permission rule. This removes the need for a server route but requires the client to attach a claim to its session.
 
 ## Schema
 
@@ -32,7 +32,7 @@ See [Permissions](/docs/auth/permissions) for more on `exists.where`, `allOf`, a
 
 ## Generating a link
 
-The creator inserts the chat and their own membership client-side. Both writes are allowed by the permission rules above because the creator's `createdBy` matches their session. The join code goes on the row and into the URL.
+The creator inserts the chat and their own membership client-side. Both writes are allowed by the permission rules above&hairsp;—&hairsp;the chat row is open to insert, and the membership rule lets the creator add themselves because they match the row's `$createdBy`. The join code goes on the row and into the URL.
 
 <include cwd lang="ts" meta='title="createInviteLink.ts"'>
   ../examples/docs/todo-client-localfirst-react/src/invite-snippets.tsx#invite-create-link
@@ -86,28 +86,34 @@ Delete a member's row to revoke their access immediately. The server stops synci
 
 If you also want to invalidate the link itself for any future redeemers, clear or rotate the `joinCode` on the chat row.
 
-## Secondary pattern: JWT claim (local-first auth only)
+## Secondary pattern: session claim (local-first auth only)
 
-If you are using [local-first auth](/docs/auth/local-first-auth), the client mints its own JWTs and can attach arbitrary claims. You can use this to do the invite check entirely inside the permission rule, with no server route.
+If you are using [local-first auth](/docs/auth/local-first-auth), your client controls its own session and can attach arbitrary claims to it. You can use this to do the invite check entirely inside the permission rule, with no server route.
 
-This pattern only fits applications where the client controls JWT minting. In most stacks the server or an external auth provider issues JWTs, so the pattern above is the right choice.
+This pattern only fits applications where the client controls its session. In most stacks the server or an external auth provider issues a session token, so the pattern above is the right choice.
 
 ### Permissions
 
 Extend both the read rule and the `chatMembers.allowInsert` rule with a second branch that accepts the claim:
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-permissions-jwt-claim
+  ../examples/docs/todo-server-ts/src/invite-claim-snippets.ts#invite-permissions-jwt-claim
 </include>
 
 The claim branch is temporary&hairsp;—&hairsp;once the invitee has inserted their `chatMembers` row, future reads match the membership branch and the claim is never consulted again.
 
 ### Client handler
 
-Subscribe with the invite code as a JWT claim, wait for the chat row to arrive, then insert the membership row directly from the client.
+Subscribe with the invite code as a session claim, wait for the chat row to arrive, then insert the membership row directly from the client.
 
 <include cwd lang="tsx" meta='title="InviteHandler.tsx"'>
-  ../examples/docs/todo-client-localfirst-react/src/invite-snippets.tsx#invite-handler-jwt-claim
+  ../examples/docs/todo-client-localfirst-react/src/invite-claim-snippets.tsx#invite-handler-jwt-claim
 </include>
 
-`authMode: "external"` tells the Jazz client to authenticate using the supplied claims object rather than the user's normal session token. The `session["claims.join_code"]` reference in the permission rule reads the claim from that token.
+<Callout type="info">
+  Identity (`user_id`) comes from the server-verified authentication handshake and can't be
+  overridden by a subscription payload. Claims set during that handshake also take precedence over
+  payload claims of the same name, so a client can't escalate by passing
+  `claims: { role: "admin" }`&hairsp;—&hairsp;only claims your auth provider doesn't already issue
+  (like `join_code`) can be supplied this way.
+</Callout>

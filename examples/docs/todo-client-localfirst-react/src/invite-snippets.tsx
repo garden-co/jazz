@@ -1,16 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { schema as s } from "jazz-tools";
-import { useDb, useSession } from "jazz-tools/react";
+import { useDb } from "jazz-tools/react";
 
 const schema = {
   chats: s.table({
-    isPublic: s.boolean(),
-    createdBy: s.string(),
     joinCode: s.string().optional(),
   }),
   chatMembers: s.table({
     chatId: s.ref("chats"),
-    userId: s.string(),
+    user_id: s.string(),
     joinCode: s.string().optional(),
   }),
 };
@@ -28,13 +26,9 @@ function navigate(to: string) {
 export function createInviteLink(db: ReturnType<typeof useDb>, userId: string): string {
   const joinCode = crypto.randomUUID().slice(0, 8);
 
-  const { value: chat } = db.insert(app.chats, {
-    isPublic: false,
-    createdBy: userId,
-    joinCode,
-  });
+  const { value: chat } = db.insert(app.chats, { joinCode });
 
-  db.insert(app.chatMembers, { chatId: chat.id, userId, joinCode });
+  db.insert(app.chatMembers, { chatId: chat.id, user_id: userId, joinCode });
 
   return `${window.location.origin}/#/invite/${chat.id}/${joinCode}`;
 }
@@ -72,40 +66,3 @@ export function InviteHandler({ chatId, code }: { chatId: string; code: string }
   return <p>Joining…</p>;
 }
 // #endregion invite-handler-primary
-
-// #region invite-handler-jwt-claim
-export function InviteHandlerWithClaim({ chatId, code }: { chatId: string; code: string }) {
-  const db = useDb();
-  const session = useSession();
-  const userId = session?.user_id ?? null;
-  const [chatLoaded, setChatLoaded] = useState(false);
-  const handled = useRef(false);
-
-  useEffect(() => {
-    if (!userId) return;
-    return db.subscribeAll(
-      app.chats.where({ id: chatId }),
-      (delta) => {
-        if (delta.all.length > 0) setChatLoaded(true);
-      },
-      undefined,
-      { user_id: userId, claims: { join_code: code }, authMode: "external" },
-    );
-  }, [db, userId, chatId, code]);
-
-  useEffect(() => {
-    if (!chatLoaded || handled.current || !userId) return;
-    handled.current = true;
-
-    db.insert(app.chatMembers, { chatId, userId, joinCode: code })
-      .wait({ tier: "local" })
-      .then(() => navigate(`/#/chat/${chatId}`))
-      .catch((err) => {
-        console.error("failed to join", err);
-        handled.current = false;
-      });
-  }, [chatLoaded, db, userId, chatId, code]);
-
-  return <p>Joining…</p>;
-}
-// #endregion invite-handler-jwt-claim
