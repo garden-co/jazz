@@ -1006,7 +1006,6 @@ impl QueryGraph {
         })?;
 
         validate_execution_plan(&plan, schema)?;
-
         Self::compile_execution_plan_with_schema_context(
             &plan,
             schema,
@@ -2145,7 +2144,7 @@ fn index_scan_plan(
     for condition in disjunct
         .conditions
         .iter()
-        .filter(|c| c.is_index_scannable() && table_schema.is_indexed_column(c.column()))
+        .filter(|c| c.is_index_scannable() && scan_index_exists(table_schema, c.column()))
     {
         if !column_plans
             .iter()
@@ -2209,7 +2208,7 @@ fn common_scoped_eq_scan_plan(
                 return None;
             }
             let column = condition.column();
-            if !table_schema.is_indexed_column(column) || value.is_null() {
+            if !scan_index_exists(table_schema, column) || value.is_null() {
                 return None;
             }
             Some((column.to_string(), value.clone()))
@@ -2247,6 +2246,15 @@ fn common_scoped_eq_scan_plan(
             fully_covers: false,
         },
     }
+}
+
+fn scan_index_exists(
+    table_schema: &crate::query_manager::types::TableSchema,
+    column: &str,
+) -> bool {
+    matches!(column, "_id" | "_id_deleted")
+        || (table_schema.columns.column_index(column).is_some()
+            && table_schema.is_indexed_column(column))
 }
 
 fn column_scan_plan(
