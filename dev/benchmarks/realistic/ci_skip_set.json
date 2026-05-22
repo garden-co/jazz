@@ -1,7 +1,47 @@
 {
   "version": 1,
-  "updated_at": "2026-05-05T10:32:41.360Z",
+  "updated_at": "2026-05-22T06:50:03.678Z",
   "entries": [
+    {
+      "id": "browser:b1",
+      "suite": "browser",
+      "label": "Browser B1 CRUD sustained",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-05-22T06:40:15.205Z",
+      "last_observed_at": "2026-05-22T06:40:15.205Z",
+      "observations": 1
+    },
+    {
+      "id": "browser:b2",
+      "suite": "browser",
+      "label": "Browser B2 reads sustained",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-05-22T06:40:15.205Z",
+      "last_observed_at": "2026-05-22T06:40:15.205Z",
+      "observations": 1
+    },
+    {
+      "id": "browser:b3",
+      "suite": "browser",
+      "label": "Browser B3 cold load large",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-05-22T06:40:15.205Z",
+      "last_observed_at": "2026-05-22T06:40:15.205Z",
+      "observations": 1
+    },
+    {
+      "id": "browser:b4",
+      "suite": "browser",
+      "label": "Browser B4 fanout updates",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-05-22T06:40:15.205Z",
+      "last_observed_at": "2026-05-22T06:40:15.205Z",
+      "observations": 1
+    },
     {
       "id": "browser:b5",
       "suite": "browser",
@@ -21,6 +61,26 @@
       "first_observed_at": "2026-04-10T15:44:43.273Z",
       "last_observed_at": "2026-04-18T23:46:52.218Z",
       "observations": 3
+    },
+    {
+      "id": "browser:w1",
+      "suite": "browser",
+      "label": "Browser W1 (interactive)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-05-22T06:40:15.205Z",
+      "last_observed_at": "2026-05-22T06:40:15.205Z",
+      "observations": 1
+    },
+    {
+      "id": "browser:w4",
+      "suite": "browser",
+      "label": "Browser W4 (cold start)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-05-22T06:40:15.205Z",
+      "last_observed_at": "2026-05-22T06:40:15.205Z",
+      "observations": 1
     },
     {
       "id": "native-criterion:r4_fanout_updates",
