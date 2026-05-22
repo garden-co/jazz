@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::{cmp::Ordering, ops::Bound};
 
 use crate::object::{BranchName, ObjectId};
@@ -18,7 +19,7 @@ use super::super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::super::graph_nodes::magic_columns::{MagicColumnRequest, MagicColumnsNode};
 use super::super::graph_nodes::materialize::MaterializeNode;
 use super::super::graph_nodes::output::{OutputMode, OutputNode};
-use super::super::graph_nodes::policy_filter::PolicyFilterNode;
+use super::super::graph_nodes::policy_filter::{PolicyFilterNode, PolicyFilterOptions};
 use super::super::graph_nodes::project::ProjectNode;
 use super::super::graph_nodes::recursive_relation::{
     CorrelationSource, RecursiveHop, RecursiveRelationNode,
@@ -363,7 +364,7 @@ impl QueryGraph {
 
     /// Legacy compile sites default to querying `main` without schema fan-out.
     fn default_schema_context(schema: &Schema) -> SchemaContext {
-        SchemaContext::with_defaults(schema.clone(), "main")
+        SchemaContext::with_plain_branch(schema.clone(), "main")
     }
 
     /// Compile relation IR directly into a graph.
@@ -397,12 +398,13 @@ impl QueryGraph {
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let schema_context = Self::default_schema_context(schema);
-        Self::compile_relation_ir_with_schema_context_and_features(
+        let schema_context = Arc::new(schema_context);
+        Self::compile_relation_ir_with_shared_schema_context_and_features(
             relation,
             schema,
             branches,
             session,
-            &schema_context,
+            schema_context,
             features,
             row_policy_mode,
         )
@@ -416,23 +418,23 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
-        Self::compile_relation_ir_with_schema_context_and_features(
+        Self::compile_relation_ir_with_shared_schema_context_and_features(
             relation,
             schema,
             branches,
             session,
-            schema_context,
+            Arc::new(schema_context.clone()),
             RelationCompileFeatures::default(),
             RowPolicyMode::PermissiveLocal,
         )
     }
 
-    pub(crate) fn compile_relation_ir_with_schema_context_and_features(
+    pub(crate) fn compile_relation_ir_with_shared_schema_context_and_features(
         relation: &RelExpr,
         schema: &Schema,
         branches: &[String],
         session: Option<Session>,
-        schema_context: &SchemaContext,
+        schema_context: Arc<SchemaContext>,
         features: RelationCompileFeatures,
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
@@ -468,18 +470,18 @@ impl QueryGraph {
         schema: &Schema,
         branches: &[String],
         session: Option<Session>,
-        schema_context: &SchemaContext,
+        schema_context: Arc<SchemaContext>,
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let mut compiled_inputs = inputs
             .iter()
             .map(|input| {
-                Self::compile_relation_ir_with_schema_context_and_features(
+                Self::compile_relation_ir_with_shared_schema_context_and_features(
                     input,
                     schema,
                     branches,
                     session.clone(),
-                    schema_context,
+                    Arc::clone(&schema_context),
                     RelationCompileFeatures::default(),
                     row_policy_mode,
                 )
@@ -533,7 +535,7 @@ impl QueryGraph {
         plan: &ExecutionQueryPlan,
         schema: &Schema,
         session: Option<Session>,
-        schema_context: &SchemaContext,
+        schema_context: Arc<SchemaContext>,
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         // Build branch -> schema hash map for column translation.
@@ -567,7 +569,7 @@ impl QueryGraph {
                 schema,
                 &branches,
                 session.clone(),
-                schema_context,
+                Arc::clone(&schema_context),
                 row_policy_mode,
             );
         }
@@ -593,9 +595,9 @@ impl QueryGraph {
             let branch_schema_hash = branch_schema_map
                 .get(branch)
                 .copied()
-                .or_else(|| resolve_branch_schema_hash(schema_context, branch));
+                .or_else(|| resolve_branch_schema_hash(schema_context.as_ref(), branch));
             let Some(scan_table_name) =
-                translate_scan_table_name(schema_context, table_str, branch_schema_hash)
+                translate_scan_table_name(schema_context.as_ref(), table_str, branch_schema_hash)
             else {
                 continue;
             };
@@ -607,7 +609,7 @@ impl QueryGraph {
                     if target_hash != schema_context.current_hash {
                         // This branch uses an old schema - translate column name
                         translate_column_for_index(
-                            schema_context,
+                            schema_context.as_ref(),
                             table_str,
                             scan_column,
                             &target_hash,
@@ -692,14 +694,15 @@ impl QueryGraph {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+            let policy_node = PolicyFilterNode::new_with_options(
                 current_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
-                branch_for_policy,
-                row_policy_mode,
+                PolicyFilterOptions::for_branch(branch_for_policy)
+                    .with_row_policy_mode(row_policy_mode)
+                    .with_shared_schema_context(Arc::clone(&schema_context)),
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -721,7 +724,7 @@ impl QueryGraph {
                 &current_descriptor,
                 schema,
                 &branches,
-                schema_context,
+                Arc::clone(&schema_context),
                 session.as_ref(),
                 row_policy_mode,
             ) {
@@ -903,7 +906,7 @@ impl QueryGraph {
                 &current_descriptor,
                 schema,
                 &branches,
-                schema_context,
+                Arc::clone(&schema_context),
                 session.as_ref(),
                 row_policy_mode,
             )
@@ -962,6 +965,22 @@ impl QueryGraph {
         schema_context: &SchemaContext,
         row_policy_mode: RowPolicyMode,
     ) -> Result<Self, QueryCompileError> {
+        Self::try_compile_with_shared_schema_context(
+            query,
+            schema,
+            session,
+            Arc::new(schema_context.clone()),
+            row_policy_mode,
+        )
+    }
+
+    pub(crate) fn try_compile_with_shared_schema_context(
+        query: &Query,
+        schema: &Schema,
+        session: Option<Session>,
+        schema_context: Arc<SchemaContext>,
+        row_policy_mode: RowPolicyMode,
+    ) -> Result<Self, QueryCompileError> {
         let branches: Vec<String> = if query.branches.is_empty() {
             schema_context
                 .all_branch_names()
@@ -1011,7 +1030,7 @@ impl QueryGraph {
         outer_descriptor: &RowDescriptor,
         schema: &Schema,
         branches: &[String],
-        schema_context: &SchemaContext,
+        schema_context: Arc<SchemaContext>,
         session: Option<&Session>,
         row_policy_mode: RowPolicyMode,
     ) -> Option<(ArraySubqueryNode, RowDescriptor)> {
@@ -1096,12 +1115,12 @@ impl QueryGraph {
         );
 
         // Create subgraph template
-        let subgraph_template = SubgraphTemplate::new(
+        let subgraph_template = SubgraphTemplate::new_with_shared_schema_context(
             base_query,
             spec.inner_column.clone(),
             spec.select_columns.clone().unwrap_or_default(),
             inner_output_descriptor,
-            schema_context.clone(),
+            Arc::clone(&schema_context),
             session.cloned(),
             row_policy_mode,
         );
@@ -1171,7 +1190,7 @@ impl QueryGraph {
         current_descriptor: &RowDescriptor,
         schema: &Schema,
         branches: &[String],
-        schema_context: &SchemaContext,
+        schema_context: Arc<SchemaContext>,
         session: Option<&Session>,
         row_policy_mode: RowPolicyMode,
     ) -> Option<(RecursiveRelationNode, RowDescriptor, TableName)> {
@@ -1266,12 +1285,12 @@ impl QueryGraph {
             None
         };
 
-        let step_template = SubgraphTemplate::new(
+        let step_template = SubgraphTemplate::new_with_shared_schema_context(
             step_query,
             spec.inner_column.clone(),
             spec.select_columns.clone().unwrap_or_default(),
             step_output_descriptor,
-            schema_context.clone(),
+            Arc::clone(&schema_context),
             session.cloned(),
             row_policy_mode,
         );
@@ -1296,7 +1315,7 @@ impl QueryGraph {
         schema: &Schema,
         branches: &[String],
         session: Option<Session>,
-        schema_context: &SchemaContext,
+        schema_context: Arc<SchemaContext>,
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
@@ -1326,12 +1345,12 @@ impl QueryGraph {
         let mut seen_tables: HashSet<String> = HashSet::new();
         seen_tables.insert(plan.table.as_str().to_string());
         let (mut left_id, mut left_descriptor) = if let Some(seed_relation) = &plan.seed_relation {
-            let seed_graph = Self::compile_relation_ir_with_schema_context_and_features(
+            let seed_graph = Self::compile_relation_ir_with_shared_schema_context_and_features(
                 seed_relation,
                 schema,
                 branches,
                 session.clone(),
-                schema_context,
+                Arc::clone(&schema_context),
                 RelationCompileFeatures::default(),
                 row_policy_mode,
             )?;
@@ -1357,7 +1376,7 @@ impl QueryGraph {
             for branch in &join_branches {
                 let branch_schema_hash = branch_schema_map.get(*branch).copied();
                 let Some(base_scan_table) = translate_scan_table_name(
-                    schema_context,
+                    schema_context.as_ref(),
                     plan.table.as_str(),
                     branch_schema_hash,
                 ) else {
@@ -1407,14 +1426,15 @@ impl QueryGraph {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "main".to_string());
-                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+                let policy_node = PolicyFilterNode::new_with_options(
                     base_descriptor.clone(),
                     policy,
                     session.clone(),
                     schema.clone(),
                     plan.table.as_str(),
-                    branch_for_policy,
-                    row_policy_mode,
+                    PolicyFilterOptions::for_branch(branch_for_policy)
+                        .with_row_policy_mode(row_policy_mode)
+                        .with_shared_schema_context(Arc::clone(&schema_context)),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -1437,7 +1457,7 @@ impl QueryGraph {
                 &left_descriptor,
                 schema,
                 branches,
-                schema_context,
+                Arc::clone(&schema_context),
                 session.as_ref(),
                 row_policy_mode,
             )
@@ -1463,30 +1483,35 @@ impl QueryGraph {
 
             let right_table_schema = schema.get(&join_spec.table)?;
             let right_descriptor = right_table_schema.columns.clone();
+            let right_scan_plan = common_scoped_eq_scan_plan(
+                &plan.disjuncts,
+                join_spec.effective_name(),
+                right_table_schema,
+            );
 
             // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
             let mut right_scan_ids = Vec::new();
             for branch in &join_branches {
                 let branch_schema_hash = branch_schema_map.get(*branch).copied();
                 let Some(right_scan_table) = translate_scan_table_name(
-                    schema_context,
+                    schema_context.as_ref(),
                     join_spec.table.as_str(),
                     branch_schema_hash,
                 ) else {
                     continue;
                 };
-                let id_column = ColumnName::new("_id");
+                let scan_column = ColumnName::new(&right_scan_plan.column);
                 let right_scan = IndexScanNode::new_with_branch(
                     right_scan_table,
-                    id_column,
+                    scan_column,
                     *branch,
-                    ScanCondition::All,
+                    right_scan_plan.condition.clone(),
                     right_descriptor.clone(),
                 );
                 let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
                 graph
                     .index_scan_nodes
-                    .push((right_scan_id, right_scan_table, id_column));
+                    .push((right_scan_id, right_scan_table, scan_column));
                 right_scan_ids.push(right_scan_id);
             }
             let right_scan_output = if right_scan_ids.len() > 1 {
@@ -1517,14 +1542,15 @@ impl QueryGraph {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "main".to_string());
-                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+                let policy_node = PolicyFilterNode::new_with_options(
                     right_descriptor.clone(),
                     policy,
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
-                    branch_for_policy,
-                    row_policy_mode,
+                    PolicyFilterOptions::for_branch(branch_for_policy)
+                        .with_row_policy_mode(row_policy_mode)
+                        .with_shared_schema_context(Arc::clone(&schema_context)),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -2161,6 +2187,65 @@ fn index_scan_plan(
         column: selected.column.clone(),
         condition: selected.condition.clone(),
         fully_covers,
+    }
+}
+
+fn common_scoped_eq_scan_plan(
+    disjuncts: &[Conjunction],
+    scope: &str,
+    table_schema: &crate::query_manager::types::TableSchema,
+) -> IndexScanPlan {
+    let mut selected: Option<(String, Value)> = None;
+
+    for disjunct in disjuncts
+        .iter()
+        .filter(|disjunct| !disjunct.conditions.is_empty())
+    {
+        let Some((column, value)) = disjunct.conditions.iter().find_map(|condition| {
+            let Condition::Eq { value, .. } = condition else {
+                return None;
+            };
+            if condition.column_scope() != Some(scope) {
+                return None;
+            }
+            let column = condition.column();
+            if !table_schema.is_indexed_column(column) || value.is_null() {
+                return None;
+            }
+            Some((column.to_string(), value.clone()))
+        }) else {
+            return IndexScanPlan {
+                column: "_id".to_string(),
+                condition: ScanCondition::All,
+                fully_covers: false,
+            };
+        };
+
+        match &selected {
+            Some((selected_column, selected_value))
+                if selected_column == &column && selected_value == &value => {}
+            Some(_) => {
+                return IndexScanPlan {
+                    column: "_id".to_string(),
+                    condition: ScanCondition::All,
+                    fully_covers: false,
+                };
+            }
+            None => selected = Some((column, value)),
+        }
+    }
+
+    match selected {
+        Some((column, value)) => IndexScanPlan {
+            column,
+            condition: ScanCondition::Eq(value),
+            fully_covers: false,
+        },
+        None => IndexScanPlan {
+            column: "_id".to_string(),
+            condition: ScanCondition::All,
+            fully_covers: false,
+        },
     }
 }
 

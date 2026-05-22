@@ -77,6 +77,7 @@ export interface Runtime {
     options_json?: string | null,
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
+  executeSubscriptions?(handles: number[], on_updates: Function[]): void;
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
   /**
@@ -488,6 +489,41 @@ function getScheduler(): (task: () => void) => void {
   // Wrap rather than returning queueMicrotask directly: the native function
   // throws "Illegal invocation" when called without globalThis as receiver.
   return (task: () => void) => queueMicrotask(task);
+}
+
+const pendingSubscriptionExecutions = new Map<
+  Runtime,
+  { handles: number[]; callbacks: Function[] }
+>();
+const scheduledSubscriptionFlushes = new WeakSet<Runtime>();
+
+function scheduleSubscriptionExecution(runtime: Runtime, handle: number, callback: Function): void {
+  if (!runtime.executeSubscriptions) {
+    getScheduler()(() => runtime.executeSubscription(handle, callback));
+    return;
+  }
+
+  let pending = pendingSubscriptionExecutions.get(runtime);
+  if (!pending) {
+    pending = { handles: [], callbacks: [] };
+    pendingSubscriptionExecutions.set(runtime, pending);
+  }
+  pending.handles.push(handle);
+  pending.callbacks.push(callback);
+
+  if (scheduledSubscriptionFlushes.has(runtime)) {
+    return;
+  }
+  scheduledSubscriptionFlushes.add(runtime);
+  getScheduler()(() => {
+    scheduledSubscriptionFlushes.delete(runtime);
+    const batch = pendingSubscriptionExecutions.get(runtime);
+    pendingSubscriptionExecutions.delete(runtime);
+    if (!batch || batch.handles.length === 0) {
+      return;
+    }
+    runtime.executeSubscriptions?.(batch.handles, batch.callbacks);
+  });
 }
 
 function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
@@ -1795,19 +1831,17 @@ export class JazzClient {
       optionsJson,
     );
 
-    this.scheduler(() => {
-      this.runtime.executeSubscription(handle, (...args: unknown[]) => {
-        const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
-        if (deltaJsonOrObject === undefined) {
-          return;
-        }
+    scheduleSubscriptionExecution(this.runtime, handle, (...args: unknown[]) => {
+      const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
+      if (deltaJsonOrObject === undefined) {
+        return;
+      }
 
-        const delta: SubscriptionWireDelta =
-          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(
-          this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, effectiveRuntimeSchema),
-        );
-      });
+      const delta: SubscriptionWireDelta =
+        typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
+      callback(
+        this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, effectiveRuntimeSchema),
+      );
     });
 
     return handle;

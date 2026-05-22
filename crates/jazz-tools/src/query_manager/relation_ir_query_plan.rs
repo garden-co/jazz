@@ -435,10 +435,11 @@ fn projected_result_element_index(
     let projected_column = match columns {
         [
             ProjectColumn {
+                alias,
                 expr: ProjectExpr::Column(column),
                 ..
             },
-        ] => column,
+        ] if alias == "id" => column,
         _ => return None,
     };
     if to_runtime_column(&projected_column.column) != "_id" {
@@ -831,6 +832,11 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             }
 
             let normalized_columns = normalize_project_columns(columns);
+            if let Some(mut gather_info) = parse_gather_join_info(input) {
+                gather_info.plan.project_columns = Some(normalized_columns);
+                return Some(gather_info.plan);
+            }
+
             let linear = extract_linear_join_info(input)?;
             let result_element_index =
                 projected_result_element_index(&linear.scope_order, &normalized_columns);

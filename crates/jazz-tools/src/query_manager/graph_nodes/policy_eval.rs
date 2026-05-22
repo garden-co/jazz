@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::object::ObjectId;
 use crate::query_manager::policy::{
@@ -12,6 +14,7 @@ use crate::query_manager::settlement_eval_cache::{RefAccessSubexprKey, Settlemen
 use crate::query_manager::types::{
     ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Value,
 };
+use crate::schema_manager::SchemaContext;
 use crate::storage::Storage;
 
 use super::super::encoding::{column_is_null, decode_column};
@@ -22,7 +25,9 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     branch: &'a str,
     row_policy_mode: RowPolicyMode,
     settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
+    schema_context: Option<Arc<SchemaContext>>,
     structural_exists_rel_scans: bool,
+    phase: &'a str,
 }
 
 impl<'a> PolicyContextEvaluator<'a> {
@@ -38,7 +43,9 @@ impl<'a> PolicyContextEvaluator<'a> {
             branch,
             row_policy_mode,
             settlement_eval_cache: None,
+            schema_context: None,
             structural_exists_rel_scans: false,
+            phase: "unknown",
         }
     }
 
@@ -50,8 +57,26 @@ impl<'a> PolicyContextEvaluator<'a> {
         self
     }
 
+    pub(crate) fn with_schema_context(mut self, schema_context: Option<&'a SchemaContext>) -> Self {
+        self.schema_context = schema_context.cloned().map(Arc::new);
+        self
+    }
+
+    pub(crate) fn with_shared_schema_context(
+        mut self,
+        schema_context: Option<Arc<SchemaContext>>,
+    ) -> Self {
+        self.schema_context = schema_context;
+        self
+    }
+
     pub(crate) fn with_structural_exists_rel_scans(mut self, structural_scans: bool) -> Self {
         self.structural_exists_rel_scans = structural_scans;
+        self
+    }
+
+    pub(crate) fn with_phase(mut self, phase: &'a str) -> Self {
+        self.phase = phase;
         self
     }
 
@@ -80,7 +105,17 @@ impl<'a> PolicyContextEvaluator<'a> {
 
         crate::query_manager::policy_counters::increment(
             "row_access_eval",
-            format!("table={} op={:?} depth={}", table_name, operation, depth),
+            format!(
+                "phase={} table={} op={:?} depth={}",
+                self.phase, table_name, operation, depth
+            ),
+        );
+        crate::query_manager::policy_counters::increment(
+            "auth_row_identity",
+            format!(
+                "phase={} branch={} table={} id={} op={:?} depth={}",
+                self.phase, self.branch, table_name, row.id, operation, depth
+            ),
         );
         let local_policy = local_policy_override
             .cloned()
@@ -494,6 +529,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.branch,
             operation,
             self.row_policy_mode,
+            self.schema_context.as_deref(),
         ) {
             Some(g) => g,
             None => return false,
@@ -533,6 +569,15 @@ impl<'a> PolicyContextEvaluator<'a> {
                 Some(expr) => expr,
                 None => return false,
             };
+        let bound_rel_fingerprint = fingerprint_relation(&bound_rel);
+
+        crate::query_manager::policy_counters::increment(
+            "exists_rel_identity",
+            format!(
+                "branch={} table={} row={} depth={} structural={} rel={:016x}",
+                self.branch, table_name, row.id, depth, structural_scans, bound_rel_fingerprint
+            ),
+        );
 
         let current_table = TableName::new(table_name);
         let mut graph = match PolicyGraph::for_exists_rel(
@@ -543,6 +588,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.row_policy_mode,
             Some(&current_table),
             structural_scans,
+            self.schema_context.as_ref().map(Arc::clone),
         ) {
             Some(g) => g,
             None => return false,
@@ -560,6 +606,15 @@ impl<'a> PolicyContextEvaluator<'a> {
 
         graph.result()
     }
+}
+
+fn fingerprint_relation(rel: &RelExpr) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match postcard::to_allocvec(rel) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => format!("{rel:?}").hash(&mut hasher),
+    }
+    hasher.finish()
 }
 
 fn referencing_edge_matches_target(
