@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
@@ -13,15 +15,19 @@ use crate::sync_manager::{
     ClientId, ClientRole, DurabilityTier, PendingPermissionCheck, SyncPayload,
 };
 
+use super::encoding::decode_column;
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
-use super::policy::{Operation, PolicyExpr};
+use super::policy::{Operation, PolicyExpr, bind_relation_refs};
+use super::policy_graph::PolicyGraph;
+use super::relation_ir::{ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef};
 use super::session::Session;
 use super::settlement_eval_cache::SettlementEvalCache;
 use super::types::{
-    ComposedBranchName, LoadedRow, Row, Schema, SchemaHash, TableName, TableSchema,
+    ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName, TableSchema,
+    Value,
 };
 
-const MAX_INITIAL_QUERY_REPLAY_OUTBOX_PER_PASS: usize = 32;
+const MAX_INITIAL_QUERY_REPLAY_OUTBOX_PER_PASS: usize = 2048;
 
 enum WriteSchemaResolution {
     Resolved(Box<TableSchema>),
@@ -32,6 +38,29 @@ enum WriteSchemaResolution {
 enum AuthorizedTuplesResult {
     Ready(Vec<super::types::Tuple>),
     PermissionsUnavailable,
+}
+
+struct AuthorizedParentSetPlan<'a> {
+    child_schema: &'a TableSchema,
+    parent_table: TableName,
+    fk_column_index: usize,
+}
+
+#[derive(Clone)]
+struct CorrelatedRelationSetPlan {
+    rel: RelExpr,
+    relation_column: ColumnRef,
+    outer_column: ColumnRef,
+}
+
+struct AuthorizedScopeRequest<'a> {
+    storage: &'a dyn Storage,
+    settlement_eval_cache: &'a mut SettlementEvalCache,
+    graph: &'a super::graph::QueryGraph,
+    schema_context: &'a crate::schema_manager::SchemaContext,
+    source_branch_schema_map: &'a std::collections::HashMap<String, SchemaHash>,
+    session: Option<&'a Session>,
+    phase: &'static str,
 }
 
 pub(super) struct ResolvedSchemaRow {
@@ -63,6 +92,7 @@ pub(crate) struct AuthorizationPolicyRequest<'a> {
     pub(crate) source_branch_schema_map: &'a std::collections::HashMap<String, SchemaHash>,
     pub(crate) operation: Operation,
     pub(crate) settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
+    pub(crate) phase: &'a str,
 }
 
 struct UpdatePermissionRequest<'a> {
@@ -376,6 +406,7 @@ impl QueryManager {
             source_branch_schema_map,
             operation,
             settlement_eval_cache,
+            phase,
         } = request;
 
         let Some(table_schema) = auth_schema.get(&table_name) else {
@@ -398,10 +429,24 @@ impl QueryManager {
             branch_name.as_str(),
             self.row_policy_mode,
         )
-        .with_settlement_eval_cache(settlement_eval_cache);
+        .with_schema_context(Some(auth_context))
+        .with_settlement_eval_cache(settlement_eval_cache)
+        .with_phase(phase);
         let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
         let mut visited = HashSet::new();
-        let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
+        let mut row_loader = |related_id: ObjectId, table_hint: Option<TableName>| {
+            crate::query_manager::policy_counters::increment(
+                "auth_storage_load_identity",
+                format!(
+                    "branch={} table_hint={} id={}",
+                    branch_name.as_str(),
+                    table_hint
+                        .as_ref()
+                        .map(TableName::as_str)
+                        .unwrap_or("<unknown>"),
+                    related_id
+                ),
+            );
             self.load_row_for_authorization_context(
                 storage,
                 related_id,
@@ -435,6 +480,7 @@ impl QueryManager {
         auth_schema: &Schema,
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        phase: &'static str,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
         let Some((table, row)) = self.load_best_visible_row_batch(
@@ -481,6 +527,7 @@ impl QueryManager {
                 source_branch_schema_map,
                 operation: Operation::Select,
                 settlement_eval_cache: Some(settlement_eval_cache),
+                phase,
             },
         )
     }
@@ -539,6 +586,7 @@ impl QueryManager {
                                         &auth_schema,
                                         &auth_context,
                                         source_branch_schema_map,
+                                        "authorized_tuples",
                                     )
                                 })
                         })
@@ -572,18 +620,37 @@ impl QueryManager {
 
     fn authorized_scope_from_graph_if_available(
         &mut self,
-        storage: &dyn Storage,
-        settlement_eval_cache: &mut SettlementEvalCache,
-        graph: &super::graph::QueryGraph,
-        schema_context: &crate::schema_manager::SchemaContext,
-        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
-        session: Option<&Session>,
+        request: AuthorizedScopeRequest<'_>,
     ) -> Option<HashSet<(ObjectId, BranchName)>> {
+        let AuthorizedScopeRequest {
+            storage,
+            settlement_eval_cache,
+            graph,
+            schema_context,
+            source_branch_schema_map,
+            session,
+            phase,
+        } = request;
+        let started_at = Instant::now();
+        let table_name = graph.table.as_str().to_string();
+        let tuple_count = graph.sync_scope_tuples().len();
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {
             if !self.authorization_schema_required {
-                return Some(graph.sync_scope_object_ids());
+                let scope = graph.sync_scope_object_ids();
+                crate::query_manager::policy_counters::observe_duration(
+                    "authorized_scope_duration",
+                    format!(
+                        "phase={} table={} path=no_auth_schema tuples={} scope={}",
+                        phase,
+                        table_name,
+                        tuple_count,
+                        scope.len()
+                    ),
+                    started_at.elapsed(),
+                );
+                return Some(scope);
             }
             return None;
         };
@@ -593,7 +660,67 @@ impl QueryManager {
                 .values()
                 .all(|table_schema| table_schema.policies.select.using.is_none())
         {
-            return Some(graph.sync_scope_object_ids());
+            let scope = graph.sync_scope_object_ids();
+            crate::query_manager::policy_counters::observe_duration(
+                "authorized_scope_duration",
+                format!(
+                    "phase={} table={} path=no_select_policies tuples={} scope={}",
+                    phase,
+                    table_name,
+                    tuple_count,
+                    scope.len()
+                ),
+                started_at.elapsed(),
+            );
+            return Some(scope);
+        }
+
+        if let Some(scope) = self.authorized_scope_via_parent_set_if_available(
+            storage,
+            settlement_eval_cache,
+            graph,
+            auth_schema.as_ref(),
+            &auth_context,
+            source_branch_schema_map,
+            session,
+            phase,
+        ) {
+            crate::query_manager::policy_counters::observe_duration(
+                "authorized_scope_duration",
+                format!(
+                    "phase={} table={} path=parent_set tuples={} scope={}",
+                    phase,
+                    table_name,
+                    tuple_count,
+                    scope.len()
+                ),
+                started_at.elapsed(),
+            );
+            return Some(scope);
+        }
+
+        if let Some(scope) = self.authorized_scope_via_correlated_relation_set_if_available(
+            storage,
+            settlement_eval_cache,
+            graph,
+            auth_schema.as_ref(),
+            &auth_context,
+            source_branch_schema_map,
+            session,
+            phase,
+        ) {
+            crate::query_manager::policy_counters::observe_duration(
+                "authorized_scope_duration",
+                format!(
+                    "phase={} table={} path=correlated_relation_set tuples={} scope={}",
+                    phase,
+                    table_name,
+                    tuple_count,
+                    scope.len()
+                ),
+                started_at.elapsed(),
+            );
+            return Some(scope);
         }
 
         let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
@@ -616,10 +743,131 @@ impl QueryManager {
                                 &auth_schema,
                                 &auth_context,
                                 source_branch_schema_map,
+                                phase,
                             )
                         })
                 })
         });
+
+        let scope = authorized_scope_tuples
+            .into_iter()
+            .flat_map(|tuple| tuple.provenance().clone().into_iter())
+            .collect::<HashSet<_>>();
+        crate::query_manager::policy_counters::observe_duration(
+            "authorized_scope_duration",
+            format!(
+                "phase={} table={} path=row_filter tuples={} scope={}",
+                phase,
+                table_name,
+                tuple_count,
+                scope.len()
+            ),
+            started_at.elapsed(),
+        );
+        Some(scope)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorized_scope_via_parent_set_if_available(
+        &mut self,
+        storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
+        graph: &super::graph::QueryGraph,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+        phase: &'static str,
+    ) -> Option<HashSet<(ObjectId, BranchName)>> {
+        let started_at = Instant::now();
+        let plan = Self::authorized_parent_set_plan(auth_schema, &graph.table)?;
+
+        let mut parent_authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
+        let mut child_fk_cache: HashMap<(ObjectId, BranchName), Option<ObjectId>> = HashMap::new();
+        let mut used_set_plan = false;
+
+        let authorized_scope_tuples = graph.filtered_sync_scope_tuples(|tuple| {
+            let Some(child_row) = tuple.to_single_row() else {
+                return false;
+            };
+            let Some(child_branch) = tuple
+                .provenance()
+                .iter()
+                .find_map(|(id, branch)| (*id == child_row.id).then_some(*branch))
+            else {
+                return false;
+            };
+
+            let parent_id = child_fk_cache
+                .entry((child_row.id, child_branch))
+                .or_insert_with(|| {
+                    match decode_column(
+                        &plan.child_schema.columns,
+                        &child_row.data,
+                        plan.fk_column_index,
+                    ) {
+                        Ok(Value::Uuid(parent_id)) => Some(parent_id),
+                        _ => None,
+                    }
+                });
+            let Some(parent_id) = *parent_id else {
+                return false;
+            };
+
+            used_set_plan = true;
+            *parent_authorization_cache
+                .entry((parent_id, child_branch))
+                .or_insert_with(|| {
+                    crate::query_manager::policy_counters::increment(
+                        "authorized_parent_set_eval",
+                        format!(
+                            "phase={} child_table={} parent_table={}",
+                            phase,
+                            graph.table.as_str(),
+                            plan.parent_table.as_str()
+                        ),
+                    );
+                    self.provenance_row_matches_current_select_policy(
+                        storage,
+                        settlement_eval_cache,
+                        parent_id,
+                        child_branch,
+                        session,
+                        auth_schema,
+                        auth_context,
+                        source_branch_schema_map,
+                        "authorized_parent_set",
+                    )
+                })
+        });
+
+        if !used_set_plan {
+            return None;
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "authorized_parent_set_scope",
+            format!(
+                "phase={} child_table={} parent_table={} visible_tuples={} parent_keys={}",
+                phase,
+                graph.table.as_str(),
+                plan.parent_table.as_str(),
+                authorized_scope_tuples.len(),
+                parent_authorization_cache.len()
+            ),
+        );
+        crate::query_manager::policy_counters::observe_duration(
+            "authorized_parent_set_duration",
+            format!(
+                "phase={} child_table={} parent_table={} visible_tuples={} parent_keys={}",
+                phase,
+                graph.table.as_str(),
+                plan.parent_table.as_str(),
+                authorized_scope_tuples.len(),
+                parent_authorization_cache.len()
+            ),
+            started_at.elapsed(),
+        );
 
         Some(
             authorized_scope_tuples
@@ -627,6 +875,338 @@ impl QueryManager {
                 .flat_map(|tuple| tuple.provenance().clone().into_iter())
                 .collect(),
         )
+    }
+
+    fn authorized_parent_set_plan<'a>(
+        auth_schema: &'a Schema,
+        table_name: &TableName,
+    ) -> Option<AuthorizedParentSetPlan<'a>> {
+        let table_schema = auth_schema.get(table_name)?;
+        let PolicyExpr::Inherits {
+            operation: Operation::Select,
+            via_column,
+            ..
+        } = table_schema.policies.select_policy()?
+        else {
+            return None;
+        };
+        let column_index = table_schema.columns.column_index(via_column)?;
+        let parent_table = *table_schema.columns.columns[column_index]
+            .references
+            .as_ref()?;
+        let parent_schema = auth_schema.get(&parent_table)?;
+        parent_schema.policies.select_policy()?;
+
+        Some(AuthorizedParentSetPlan {
+            child_schema: table_schema,
+            parent_table,
+            fk_column_index: column_index,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorized_scope_via_correlated_relation_set_if_available(
+        &mut self,
+        storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
+        graph: &super::graph::QueryGraph,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+        phase: &'static str,
+    ) -> Option<HashSet<(ObjectId, BranchName)>> {
+        let started_at = Instant::now();
+        let session = session?;
+        let table_schema = auth_schema.get(&graph.table)?;
+        let select_policy = table_schema.policies.select_policy()?;
+        let plans = Self::correlated_relation_set_plans(select_policy);
+        if std::env::var_os("JAZZ_DEBUG_CORRELATED_REL").is_some() {
+            eprintln!(
+                "[jazz-debug-correlated-rel] table={} plans={} policy={:#?}",
+                graph.table.as_str(),
+                plans.len(),
+                select_policy
+            );
+        }
+        if plans.is_empty() {
+            return None;
+        }
+        if plans
+            .iter()
+            .any(|plan| plan.outer_column != plans[0].outer_column)
+        {
+            return None;
+        }
+        let evaluates_resource_ids = plans[0].outer_column.column == "id";
+        crate::query_manager::policy_counters::increment(
+            "authorized_correlated_relation_set_attempt",
+            format!(
+                "phase={} table={} plans={}",
+                phase,
+                graph.table.as_str(),
+                plans.len()
+            ),
+        );
+
+        let branches = graph
+            .sync_scope_tuples()
+            .iter()
+            .flat_map(|tuple| tuple.provenance().iter().map(|(_, branch)| *branch))
+            .collect::<HashSet<_>>();
+        if branches.len() != 1 {
+            return None;
+        }
+        let branch_name = *branches.iter().next()?;
+        let branch = branch_name.as_str();
+
+        let mut authorized_ids = HashSet::new();
+        for plan in &plans {
+            let empty_outer_descriptor = RowDescriptor::new(Vec::new());
+            let bound_rel =
+                bind_relation_refs(&plan.rel, &[], &empty_outer_descriptor, session, None)?;
+            let Some(mut policy_graph) = PolicyGraph::for_exists_rel(
+                &bound_rel,
+                auth_schema,
+                branch,
+                Some(session.clone()),
+                self.row_policy_mode,
+                Some(&graph.table),
+                evaluates_resource_ids,
+                Some(Arc::new(auth_context.clone())),
+            ) else {
+                crate::query_manager::policy_counters::increment(
+                    "authorized_correlated_relation_set_bail",
+                    format!("table={} reason=compile", graph.table.as_str()),
+                );
+                return None;
+            };
+            let mut row_loader = |related_id: ObjectId, table_hint: Option<TableName>| {
+                crate::query_manager::policy_counters::increment(
+                    "auth_storage_load_identity",
+                    format!(
+                        "branch={} table_hint={} id={}",
+                        branch,
+                        table_hint
+                            .as_ref()
+                            .map(TableName::as_str)
+                            .unwrap_or("<unknown>"),
+                        related_id
+                    ),
+                );
+                self.load_row_for_authorization_context(
+                    storage,
+                    related_id,
+                    branch_name,
+                    source_branch_schema_map,
+                    auth_context,
+                )
+            };
+            for _ in 0..100 {
+                if policy_graph.settle_with_settlement_eval_cache(
+                    storage,
+                    Some(settlement_eval_cache),
+                    &mut row_loader,
+                ) {
+                    break;
+                }
+            }
+
+            let output_tuple_descriptor = policy_graph.output_tuple_descriptor().clone();
+            for tuple in policy_graph.output_tuples() {
+                if let Some(Value::Uuid(id)) = Self::decode_column_ref_from_tuple(
+                    &tuple,
+                    &output_tuple_descriptor,
+                    &plan.relation_column,
+                ) {
+                    authorized_ids.insert(id);
+                }
+            }
+        }
+
+        if authorized_ids.is_empty() {
+            return None;
+        }
+
+        let outer_column = plans.first()?.outer_column.clone();
+        let outer_column_index = if outer_column.column == "id" {
+            None
+        } else {
+            Some(table_schema.columns.column_index(&outer_column.column)?)
+        };
+
+        let authorized_scope_tuples = graph.filtered_sync_scope_tuples(|tuple| {
+            let Some(row) = tuple.to_single_row() else {
+                return false;
+            };
+            let row_value = match outer_column_index {
+                None => row.id,
+                Some(index) => match decode_column(&table_schema.columns, &row.data, index) {
+                    Ok(Value::Uuid(id)) => id,
+                    _ => return false,
+                },
+            };
+            authorized_ids.contains(&row_value)
+        });
+
+        crate::query_manager::policy_counters::increment(
+            "authorized_correlated_relation_set_scope",
+            format!(
+                "phase={} table={} authorized_ids={} visible_tuples={}",
+                phase,
+                graph.table.as_str(),
+                authorized_ids.len(),
+                authorized_scope_tuples.len()
+            ),
+        );
+        crate::query_manager::policy_counters::observe_duration(
+            "authorized_correlated_relation_set_duration",
+            format!(
+                "phase={} table={} authorized_ids={} visible_tuples={}",
+                phase,
+                graph.table.as_str(),
+                authorized_ids.len(),
+                authorized_scope_tuples.len()
+            ),
+            started_at.elapsed(),
+        );
+
+        Some(
+            authorized_scope_tuples
+                .into_iter()
+                .flat_map(|tuple| tuple.provenance().clone().into_iter())
+                .collect(),
+        )
+    }
+
+    fn correlated_relation_set_plans(policy: &PolicyExpr) -> Vec<CorrelatedRelationSetPlan> {
+        let mut plans = Vec::new();
+        match policy {
+            PolicyExpr::ExistsRel { rel } => {
+                if let Some(plan) = Self::decorrelate_current_row_id_filter(rel) {
+                    plans.push(plan);
+                }
+            }
+            PolicyExpr::Or(exprs) => {
+                for expr in exprs {
+                    plans.extend(Self::correlated_relation_set_plans(expr));
+                }
+            }
+            _ => {}
+        }
+        plans
+    }
+
+    fn decorrelate_current_row_id_filter(rel: &RelExpr) -> Option<CorrelatedRelationSetPlan> {
+        match rel {
+            RelExpr::Filter { input, predicate } => {
+                let (predicate, relation_column, outer_column) =
+                    Self::remove_current_row_id_predicate(predicate)?;
+                let rel = match predicate {
+                    PredicateExpr::True => *input.clone(),
+                    predicate => RelExpr::Filter {
+                        input: input.clone(),
+                        predicate,
+                    },
+                };
+                Some(CorrelatedRelationSetPlan {
+                    rel,
+                    relation_column,
+                    outer_column,
+                })
+            }
+            RelExpr::Project { input, columns } => {
+                let _ = columns;
+                Self::decorrelate_current_row_id_filter(input)
+            }
+            RelExpr::Distinct { input, key } => {
+                let mut plan = Self::decorrelate_current_row_id_filter(input)?;
+                plan.rel = RelExpr::Distinct {
+                    input: Box::new(plan.rel),
+                    key: key.clone(),
+                };
+                Some(plan)
+            }
+            _ => None,
+        }
+    }
+
+    fn remove_current_row_id_predicate(
+        predicate: &PredicateExpr,
+    ) -> Option<(PredicateExpr, ColumnRef, ColumnRef)> {
+        match predicate {
+            PredicateExpr::Cmp {
+                left,
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::OuterColumn(outer_column),
+            } => Some((PredicateExpr::True, left.clone(), outer_column.clone())),
+            PredicateExpr::Cmp {
+                left,
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::RowId(RowIdRef::Current | RowIdRef::Outer),
+            } => Some((PredicateExpr::True, left.clone(), ColumnRef::unscoped("id"))),
+            PredicateExpr::And(exprs) => {
+                let mut found = None;
+                let mut remaining = Vec::new();
+                for expr in exprs {
+                    if found.is_none()
+                        && let Some((replacement, relation_column, outer_column)) =
+                            Self::remove_current_row_id_predicate(expr)
+                    {
+                        found = Some((relation_column, outer_column));
+                        if replacement != PredicateExpr::True {
+                            remaining.push(replacement);
+                        }
+                    } else {
+                        remaining.push(expr.clone());
+                    }
+                }
+                let (relation_column, outer_column) = found?;
+                let predicate = match remaining.len() {
+                    0 => PredicateExpr::True,
+                    1 => remaining.into_iter().next().expect("single predicate"),
+                    _ => PredicateExpr::And(remaining),
+                };
+                Some((predicate, relation_column, outer_column))
+            }
+            _ => None,
+        }
+    }
+
+    fn decode_column_ref_from_tuple(
+        tuple: &super::types::Tuple,
+        tuple_descriptor: &super::types::TupleDescriptor,
+        column_ref: &ColumnRef,
+    ) -> Option<Value> {
+        if column_ref.column == "id" || column_ref.column == "_id" {
+            let element_index = match column_ref.scope.as_deref() {
+                Some(scope) => tuple_descriptor
+                    .iter()
+                    .position(|element| element.table.as_str() == scope)?,
+                None => {
+                    let global_index = tuple_descriptor
+                        .column_index(&column_ref.column)
+                        .or_else(|| tuple_descriptor.column_index("id"))
+                        .or_else(|| tuple_descriptor.column_index("_id"));
+                    match global_index.and_then(|index| tuple_descriptor.resolve_column(index)) {
+                        Some((element_index, _)) => element_index,
+                        None if tuple.len() == 1 => 0,
+                        None => return tuple.first_id().map(Value::Uuid),
+                    }
+                }
+            };
+            return tuple
+                .get(element_index)
+                .map(|element| Value::Uuid(element.id()));
+        }
+        let global_index = match column_ref.scope.as_deref() {
+            Some(scope) => tuple_descriptor.qualified_column_index(scope, &column_ref.column),
+            None => tuple_descriptor.column_index(&column_ref.column),
+        }?;
+        let (element_index, local_index) = tuple_descriptor.resolve_column(global_index)?;
+        let element_descriptor = &tuple_descriptor.element(element_index)?.descriptor;
+        let content = tuple.get(element_index)?.content()?;
+        decode_column(element_descriptor, content, local_index).ok()
     }
 
     pub(super) fn resolved_server_query_branches(
@@ -791,10 +1371,23 @@ impl QueryManager {
     /// 3. Set the scope in SyncManager (which triggers initial sync)
     pub(super) fn process_pending_query_subscriptions<H: Storage>(&mut self, storage: &mut H) {
         let pending = self.sync_manager.take_pending_query_subscriptions();
+        crate::query_manager::policy_counters::increment(
+            "pending_query_subscription_batch",
+            format!("count={}", pending.len()),
+        );
         let mut pending_by_key = HashMap::new();
         let mut pending_keys = Vec::new();
         for sub in pending {
             let key = (sub.client_id, sub.query_id);
+            crate::query_manager::policy_counters::increment(
+                "pending_query_subscription_identity",
+                format!(
+                    "client={} query={} table={}",
+                    sub.client_id.0,
+                    sub.query_id.0,
+                    sub.query.table.as_str()
+                ),
+            );
             if !pending_by_key.contains_key(&key) {
                 pending_keys.push(key);
             }
@@ -988,14 +1581,25 @@ impl QueryManager {
                 })
             } else {
                 let mut settlement_eval_cache = SettlementEvalCache::default();
-                self.authorized_scope_from_graph_if_available(
-                    storage_ref,
-                    &mut settlement_eval_cache,
-                    &graph,
-                    &subscription_context,
-                    &branch_schema_map,
-                    session_for_policy.as_ref(),
-                )
+                crate::query_manager::policy_counters::increment(
+                    "authorized_scope_call",
+                    format!(
+                        "phase=initial client={} query={} table={} tuples={}",
+                        sub.client_id.0,
+                        sub.query_id.0,
+                        graph.table.as_str(),
+                        graph.sync_scope_tuples().len()
+                    ),
+                );
+                self.authorized_scope_from_graph_if_available(AuthorizedScopeRequest {
+                    storage: storage_ref,
+                    settlement_eval_cache: &mut settlement_eval_cache,
+                    graph: &graph,
+                    schema_context: &subscription_context,
+                    source_branch_schema_map: &branch_schema_map,
+                    session: session_for_policy.as_ref(),
+                    phase: "authorized_scope_initial",
+                })
             };
             let settled_once = scope.is_some();
             let mut sent_below_required_settled = existing_subscription_state
@@ -1015,12 +1619,25 @@ impl QueryManager {
                         .is_none_or(|(_, _, _, last_scope, _)| *last_scope != *scope);
 
                 if scope_changed {
+                    let scope_install_started_at = Instant::now();
+                    let scope_len = scope.len();
                     self.sync_manager.set_client_query_scope_with_storage(
                         storage_ref,
                         sub.client_id,
                         sub.query_id,
                         scope.clone(),
                         session_for_policy.clone(),
+                    );
+                    crate::query_manager::policy_counters::observe_duration(
+                        "set_client_query_scope_duration",
+                        format!(
+                            "phase=initial client={} query={} table={} scope={}",
+                            sub.client_id.0,
+                            sub.query_id.0,
+                            graph.table.as_str(),
+                            scope_len
+                        ),
+                        scope_install_started_at.elapsed(),
                     );
                 }
 
@@ -1240,14 +1857,27 @@ impl QueryManager {
                     }
                 } else {
                     let mut settlement_eval_cache = SettlementEvalCache::default();
-                    self.authorized_scope_from_graph_if_available(
+                    crate::query_manager::policy_counters::increment(
+                        "authorized_scope_call",
+                        format!(
+                            "phase=reactive client={} query={} table={} tuples={} dirty={} recompile={}",
+                            client_id.0,
+                            query_id.0,
+                            sub.graph.table.as_str(),
+                            sub.graph.sync_scope_tuples().len(),
+                            had_dirty_graph,
+                            sub.needs_recompile
+                        ),
+                    );
+                    self.authorized_scope_from_graph_if_available(AuthorizedScopeRequest {
                         storage,
-                        &mut settlement_eval_cache,
-                        &sub.graph,
-                        &sub.schema_context,
-                        &branch_schema_map,
-                        sub.session.as_ref(),
-                    )
+                        settlement_eval_cache: &mut settlement_eval_cache,
+                        graph: &sub.graph,
+                        schema_context: &sub.schema_context,
+                        source_branch_schema_map: &branch_schema_map,
+                        session: sub.session.as_ref(),
+                        phase: "authorized_scope_reactive",
+                    })
                     .map(Cow::Owned)
                 }
             };
@@ -1255,12 +1885,25 @@ impl QueryManager {
                 let scope_changed = new_scope.as_ref() != &sub.last_scope;
                 if scope_changed {
                     let owned_scope = new_scope.into_owned();
+                    let scope_install_started_at = Instant::now();
+                    let scope_len = owned_scope.len();
                     self.sync_manager.set_client_query_scope_with_storage(
                         storage,
                         client_id,
                         query_id,
                         owned_scope.clone(),
                         sub.session.clone(),
+                    );
+                    crate::query_manager::policy_counters::observe_duration(
+                        "set_client_query_scope_duration",
+                        format!(
+                            "phase=reactive client={} query={} table={} scope={}",
+                            client_id.0,
+                            query_id.0,
+                            sub.graph.table.as_str(),
+                            scope_len
+                        ),
+                        scope_install_started_at.elapsed(),
                     );
                     sub.last_scope = owned_scope;
                 }
@@ -1666,6 +2309,7 @@ impl QueryManager {
                 source_branch_schema_map: &source_branch_schema_map,
                 operation: check.operation,
                 settlement_eval_cache: None,
+                phase: "remote_write",
             },
         ) {
             let reason = format!(
@@ -1795,6 +2439,7 @@ impl QueryManager {
                     source_branch_schema_map: &source_branch_schema_map,
                     operation: Operation::Update,
                     settlement_eval_cache: None,
+                    phase: "remote_write_update_using",
                 },
             ) {
                 let reason = format!(
@@ -1847,6 +2492,7 @@ impl QueryManager {
                     source_branch_schema_map: &source_branch_schema_map,
                     operation: Operation::Update,
                     settlement_eval_cache: None,
+                    phase: "remote_write_update_check",
                 },
             ) {
                 let reason = format!(
@@ -1934,5 +2580,32 @@ impl QueryManager {
                     .reject_permission_check(storage, state.pending_check, reason);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, Tuple, TupleDescriptor, TupleElement,
+    };
+
+    #[test]
+    fn decode_column_ref_from_tuple_reads_id_from_unmaterialized_tuple_elements() {
+        let team_id = ObjectId::new();
+        let tuple = Tuple::new(vec![TupleElement::Id(team_id)]);
+        let descriptor = TupleDescriptor::single(
+            TableName::new("team"),
+            RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Uuid)]),
+        );
+
+        assert_eq!(
+            QueryManager::decode_column_ref_from_tuple(
+                &tuple,
+                &descriptor,
+                &ColumnRef::unscoped("id")
+            ),
+            Some(Value::Uuid(team_id))
+        );
     }
 }

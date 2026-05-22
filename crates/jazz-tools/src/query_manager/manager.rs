@@ -1431,6 +1431,7 @@ impl QueryManager {
         }
         let storage_ref: &dyn Storage = storage;
         let subscription_ids: Vec<_> = self.subscriptions.keys().copied().collect();
+        let mut settlement_eval_cache = SettlementEvalCache::default();
 
         for sub_id in subscription_ids {
             let should_process_subscription =
@@ -1568,7 +1569,6 @@ impl QueryManager {
             let mut visible_tuples = if subscription.uses_explicit_authorization_filtering {
                 let auth_schema_context = self.schema_context.clone();
                 let auth_branch_schema_map = self.branch_schema_map.clone();
-                let mut settlement_eval_cache = SettlementEvalCache::default();
                 Cow::Owned(self.authorized_tuples_from_graph_with_cache(
                     storage_ref,
                     &mut settlement_eval_cache,

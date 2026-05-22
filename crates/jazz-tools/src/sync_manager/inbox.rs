@@ -1356,6 +1356,17 @@ impl SyncManager {
                 let object_id = entry.object_id;
                 let branch_name = BranchName::new("main");
                 match client.role {
+                    ClientRole::Peer
+                        if self.allow_unprivileged_schema_catalogue_writes
+                            && entry.is_structural_schema_catalogue() =>
+                    {
+                        self.apply_payload_from_client(
+                            storage,
+                            client_id,
+                            payload,
+                            AuthoritativeFateRecording::Skip,
+                        );
+                    }
                     ClientRole::Peer | ClientRole::Backend => {
                         self.outbox.push(OutboxEntry {
                             destination: Destination::Client(client_id),
@@ -1412,6 +1423,17 @@ impl SyncManager {
                 match client.role {
                     ClientRole::Peer => {
                         if payload.is_catalogue() {
+                            if self.allow_unprivileged_schema_catalogue_writes
+                                && payload.is_structural_schema_catalogue()
+                            {
+                                self.apply_payload_from_client(
+                                    storage,
+                                    client_id,
+                                    payload,
+                                    AuthoritativeFateRecording::Skip,
+                                );
+                                return;
+                            }
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
                                 payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {

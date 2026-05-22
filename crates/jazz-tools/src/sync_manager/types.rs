@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use web_time::Instant;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -497,7 +497,19 @@ impl SyncPayload {
 
     /// Check if this payload carries a structural schema catalogue object.
     pub fn is_structural_schema_catalogue(&self) -> bool {
-        matches!(self, SyncPayload::CatalogueEntryUpdated { entry } if entry.is_structural_schema_catalogue())
+        match self {
+            SyncPayload::CatalogueEntryUpdated { entry } => entry.is_structural_schema_catalogue(),
+            SyncPayload::RowBatchCreated { metadata, .. }
+            | SyncPayload::RowBatchNeeded { metadata, .. } => metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata
+                        .metadata
+                        .get(crate::metadata::MetadataKey::Type.as_str())
+                })
+                .is_some_and(|kind| kind == crate::metadata::ObjectType::CatalogueSchema.as_str()),
+            _ => false,
+        }
     }
 
     /// Get the variant name for debugging.

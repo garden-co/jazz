@@ -15,6 +15,38 @@ fn owned_items_schema() -> Schema {
     schema
 }
 
+fn parent_set_policy_schema() -> Schema {
+    let mut schema = Schema::new();
+    let parent_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    let parent_policies = TablePolicies::new()
+        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(parent_descriptor, parent_policies),
+    );
+
+    let child_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let child_policies = TablePolicies::new().with_select(PolicyExpr::Inherits {
+        operation: Operation::Select,
+        via_column: "folder_id".into(),
+        max_depth: None,
+    });
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(child_descriptor, child_policies),
+    );
+
+    schema
+}
+
 #[test]
 fn server_builds_query_graph_on_subscription() {
     use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
@@ -46,7 +78,9 @@ fn server_builds_query_graph_on_subscription() {
             &[Value::Text("Charlie".into()), Value::Integer(75)],
         )
         .unwrap();
-    server_qm.process(&mut storage);
+    for _ in 0..10 {
+        server_qm.process(&mut storage);
+    }
 
     // Add a client
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -94,6 +128,91 @@ fn server_builds_query_graph_on_subscription() {
 
     assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
     assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn server_authorizes_fk_inherited_subscription_through_parent_set() {
+    use crate::query_manager::session::Session;
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
+    };
+
+    let schema = parent_set_policy_schema();
+    let mut server_qm = QueryManager::new(SyncManager::new());
+    server_qm.set_current_schema(schema.clone(), "dev", "main");
+    server_qm.set_authorization_schema(schema);
+    let inner = seeded_memory_storage(&server_qm.schema_context().current_schema);
+    let mut storage = CountingCatalogueUpsertsStorage::with_inner(inner);
+
+    let alice_folder = server_qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[Value::Text("alice".into()), Value::Text("Alice".into())],
+        )
+        .expect("insert alice folder")
+        .row_id;
+    let bob_folder = server_qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[Value::Text("bob".into()), Value::Text("Bob".into())],
+        )
+        .expect("insert bob folder")
+        .row_id;
+
+    for index in 0..40 {
+        let folder_id = if index < 30 { alice_folder } else { bob_folder };
+        server_qm
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text(format!("Document {index}")),
+                    Value::Uuid(folder_id),
+                ],
+            )
+            .expect("insert document");
+    }
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId::new();
+    connect_client(&mut server_qm, &storage, client_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let query = server_qm.query("documents").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: Some(Session::new("alice")),
+            required_tier: None,
+            propagation: QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let settled_scope_len = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
+        .find_map(|entry| match &entry.payload {
+            SyncPayload::QuerySettled {
+                query_id: QueryId(1),
+                scope,
+                ..
+            } => Some(scope.len()),
+            _ => None,
+        })
+        .expect("query should settle");
+
+    assert_eq!(
+        settled_scope_len, 30,
+        "FK-inherited read should include children of readable parents only"
+    );
 }
 
 #[test]

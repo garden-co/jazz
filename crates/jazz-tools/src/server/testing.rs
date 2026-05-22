@@ -253,7 +253,9 @@ impl TestingServer {
             ..Default::default()
         };
 
-        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        let mut server_builder = ServerBuilder::new(app_id)
+            .with_auth_config(auth_config)
+            .with_unprivileged_schema_catalogue_writes(true);
         if let Some(upstream_url) = upstream_url {
             server_builder = server_builder.with_upstream_url(upstream_url);
         }

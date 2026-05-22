@@ -390,6 +390,50 @@ fn catalogue_update_from_peer_client_is_denied() {
 }
 
 #[test]
+fn structural_catalogue_update_from_peer_client_can_be_allowed() {
+    let mut sm = SyncManager::new()
+        .with_durability_tier(DurabilityTier::GlobalServer)
+        .with_unprivileged_schema_catalogue_writes();
+    let mut io = MemoryStorage::new();
+    let peer_id = ClientId::new();
+    let catalogue_object_id = ObjectId::new();
+
+    add_client(&mut sm, &io, peer_id);
+    sm.set_client_role(peer_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let entry = CatalogueEntry {
+        object_id: catalogue_object_id,
+        metadata: HashMap::from([(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CatalogueSchema.to_string(),
+        )]),
+        content: b"edge-owned-catalogue-entry".to_vec(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(peer_id),
+        payload: SyncPayload::CatalogueEntryUpdated {
+            entry: entry.clone(),
+        },
+    });
+    sm.process_inbox(&mut io);
+
+    assert_eq!(
+        io.load_catalogue_entry(catalogue_object_id)
+            .expect("catalogue lookup should succeed"),
+        Some(entry)
+    );
+    assert!(
+        sm.take_outbox().iter().all(|message| !matches!(
+            message.payload,
+            SyncPayload::Error(SyncError::CatalogueWriteDenied { .. })
+        )),
+        "allowed peer structural catalogue write must not emit CatalogueWriteDenied"
+    );
+}
+
+#[test]
 fn catalogue_row_batch_from_peer_client_is_denied() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::GlobalServer);
     let mut io = MemoryStorage::new();
@@ -440,5 +484,49 @@ fn catalogue_row_batch_from_peer_client_is_denied() {
             } if *id == peer_id && *object_id == catalogue_object_id
         )),
         "peer client should receive CatalogueWriteDenied for catalogue RowBatchCreated; outbox: {outbox:?}"
+    );
+}
+
+#[test]
+fn structural_catalogue_row_batch_from_peer_client_can_be_allowed() {
+    let mut sm = SyncManager::new()
+        .with_durability_tier(DurabilityTier::GlobalServer)
+        .with_unprivileged_schema_catalogue_writes();
+    let mut io = MemoryStorage::new();
+    let peer_id = ClientId::new();
+    let catalogue_object_id = ObjectId::new();
+    let row = visible_row(
+        catalogue_object_id,
+        "main",
+        Vec::new(),
+        1_000,
+        b"edge-catalogue-row",
+    );
+
+    add_client(&mut sm, &io, peer_id);
+    sm.set_client_role(peer_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(peer_id),
+        payload: SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: catalogue_object_id,
+                metadata: HashMap::from([(
+                    crate::metadata::MetadataKey::Type.to_string(),
+                    crate::metadata::ObjectType::CatalogueSchema.to_string(),
+                )]),
+            }),
+            row,
+        },
+    });
+    sm.process_inbox(&mut io);
+
+    assert!(
+        sm.take_outbox().iter().all(|message| !matches!(
+            message.payload,
+            SyncPayload::Error(SyncError::CatalogueWriteDenied { .. })
+        )),
+        "allowed peer structural catalogue row batch must not emit CatalogueWriteDenied"
     );
 }
