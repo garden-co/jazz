@@ -41,6 +41,7 @@ pub struct PolicyFilterNode {
     /// Branch name for index lookups.
     branch: String,
     row_policy_mode: RowPolicyMode,
+    structural_exists_rel_scans: bool,
     /// Initial recursion depth used for policy evaluation.
     initial_depth: usize,
     /// Current tuples that pass the policy.
@@ -62,6 +63,7 @@ pub(crate) struct PolicyFilterOptions {
     initial_depth: usize,
     row_policy_mode: RowPolicyMode,
     policy_operation: Operation,
+    structural_exists_rel_scans: bool,
 }
 
 impl PolicyFilterOptions {
@@ -86,6 +88,11 @@ impl PolicyFilterOptions {
         self.policy_operation = policy_operation;
         self
     }
+
+    pub(crate) fn with_structural_exists_rel_scans(mut self, structural_scans: bool) -> Self {
+        self.structural_exists_rel_scans = structural_scans;
+        self
+    }
 }
 
 impl Default for PolicyFilterOptions {
@@ -95,6 +102,7 @@ impl Default for PolicyFilterOptions {
             initial_depth: 0,
             row_policy_mode: RowPolicyMode::PermissiveLocal,
             policy_operation: Operation::Select,
+            structural_exists_rel_scans: true,
         }
     }
 }
@@ -219,6 +227,7 @@ impl PolicyFilterNode {
             table_name,
             branch: options.branch,
             row_policy_mode: options.row_policy_mode,
+            structural_exists_rel_scans: options.structural_exists_rel_scans,
             initial_depth: options.initial_depth,
             current_tuples: AHashSet::new(),
             input_tuples: AHashSet::new(),
@@ -373,7 +382,8 @@ impl PolicyFilterNode {
             &self.session,
             &self.branch,
             self.row_policy_mode,
-        );
+        )
+        .with_structural_exists_rel_scans(self.structural_exists_rel_scans);
         let mut visited_referencing = HashSet::new();
         evaluator.evaluate_row_access(
             self.policy_operation,

@@ -16,16 +16,16 @@ use crate::storage::{
 };
 use crate::sync_manager::RowBatchKey;
 
-use super::encoding::{decode_column, decode_row, encode_row};
+use super::encoding::{decode_row, encode_row};
 use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
     WriteTableCacheEntry,
 };
-use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id};
+use super::policy::Operation;
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
-    ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash,
+    ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash,
     TableName, Value,
 };
 
@@ -127,7 +127,6 @@ impl QueryManager {
                 .effective_delete_using()
                 .cloned()
                 .map(Arc::new),
-            select_policy: table_schema.policies.select_policy().cloned().map(Arc::new),
         });
         self.write_table_cache.insert(cache_key, entry.clone());
         Ok(entry)
@@ -1349,101 +1348,8 @@ impl QueryManager {
         depth: usize,
         visited: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
-        self.evaluate_policy_for_content_with_context_inner(
-            storage,
-            policy,
-            content,
-            provenance,
-            descriptor,
-            session,
-            table,
-            branch,
-            operation,
-            Some(row_id),
-            depth,
-            visited,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn evaluate_policy_for_content_with_context_inner<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        policy: &crate::query_manager::policy::PolicyExpr,
-        content: &[u8],
-        provenance: &RowProvenance,
-        descriptor: &RowDescriptor,
-        session: &Session,
-        table: &str,
-        branch: &str,
-        operation: Operation,
-        row_id: Option<ObjectId>,
-        depth: usize,
-        visited: &mut HashSet<(TableName, ObjectId, Operation)>,
-    ) -> bool {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
-        }
-        let simple_result = evaluate_simple_parts_with_row_id(
-            policy, content, provenance, descriptor, session, row_id,
-        );
-        if !simple_result.passed {
-            return false;
-        }
-        if simple_result.complex_clauses.is_empty() {
-            return true;
-        }
-
-        let table_name = TableName::new(table);
-        let mut graph_clauses = Vec::new();
-        for clause in simple_result.complex_clauses {
-            match clause {
-                ComplexClause::InheritsReferencing {
-                    operation,
-                    source_table,
-                    via_column,
-                    max_depth,
-                } => {
-                    let Some(target_row_id) = row_id else {
-                        return false;
-                    };
-                    if !self.evaluate_referencing_inherited_access_recursive(
-                        storage,
-                        table_name,
-                        target_row_id,
-                        operation,
-                        &source_table,
-                        &via_column,
-                        max_depth,
-                        session,
-                        branch,
-                        depth,
-                        visited,
-                    ) {
-                        return false;
-                    }
-                }
-                other => graph_clauses.push(other),
-            }
-        }
-
-        if graph_clauses.is_empty() {
-            return true;
-        }
-
-        let Some(mut graphs) = self.create_policy_graphs_for_complex_clauses(
-            &graph_clauses,
-            content,
-            descriptor,
-            &table_name,
-            operation,
-            session,
-            branch,
-        ) else {
-            return false;
-        };
-        if graphs.is_empty() {
-            return true;
         }
 
         let storage_ref: &dyn Storage = storage;
@@ -1472,237 +1378,30 @@ impl QueryManager {
             ))
         };
 
-        for graph in &mut graphs {
-            for _ in 0..100 {
-                if graph.settle(storage_ref, &mut row_loader) {
-                    break;
-                }
-            }
-            if !graph.result() {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn evaluate_referencing_inherited_access_recursive<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        target_table: TableName,
-        target_row_id: ObjectId,
-        operation: Operation,
-        source_table: &str,
-        via_column: &str,
-        max_depth: Option<usize>,
-        session: &Session,
-        branch: &str,
-        depth: usize,
-        visited: &mut HashSet<(TableName, ObjectId, Operation)>,
-    ) -> bool {
-        if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
-            return false;
-        }
-        let Some(effective_max_depth) =
-            crate::query_manager::policy::normalize_recursive_max_depth(max_depth)
-        else {
-            return false;
-        };
-        if depth >= effective_max_depth {
-            return false;
-        }
-
-        let source_table_name = TableName::new(source_table);
-        let Some(source_schema) = self.schema.get(&source_table_name) else {
-            return false;
-        };
-        let source_descriptor = source_schema.columns.clone();
-
-        let Some(col_idx) = source_descriptor.column_index(via_column) else {
-            return false;
-        };
-        let col = &source_descriptor.columns[col_idx];
-        if col.references != Some(target_table) {
-            return false;
-        }
-
-        match &col.column_type {
-            crate::query_manager::types::ColumnType::Uuid => {
-                let candidate_ids = if source_schema.is_indexed_column(col.name.as_str()) {
-                    storage.index_lookup(
-                        source_table_name.as_str(),
-                        col.name.as_str(),
-                        branch,
-                        &Value::Uuid(target_row_id),
-                    )
-                } else {
-                    storage
-                        .index_scan_all(source_table_name.as_str(), "_id", branch)
-                        .into_iter()
-                        .filter(|source_row_id| {
-                            let Some(source_content) =
-                                self.load_row_content_on_branch(storage, *source_row_id, branch)
-                            else {
-                                return false;
-                            };
-                            declared_edge_references_target(
-                                &source_descriptor,
-                                &source_content,
-                                col_idx,
-                                target_row_id,
-                            )
-                        })
-                        .collect()
-                };
-                for source_row_id in candidate_ids {
-                    if self.evaluate_source_row_access_for_operation(
-                        storage,
-                        source_table_name,
-                        source_row_id,
-                        operation,
-                        session,
-                        branch,
-                        depth + 1,
-                        visited,
-                        None,
-                    ) {
-                        return true;
-                    }
-                }
-            }
-            crate::query_manager::types::ColumnType::Array { element }
-                if **element == crate::query_manager::types::ColumnType::Uuid =>
-            {
-                let candidate_ids = storage.index_scan_all(
-                    source_table_name.as_str(),
-                    if source_schema.is_indexed_column(col.name.as_str()) {
-                        col.name.as_str()
-                    } else {
-                        "_id"
-                    },
-                    branch,
-                );
-                for source_row_id in candidate_ids {
-                    let Some(source_content) =
-                        self.load_row_content_on_branch(storage, source_row_id, branch)
-                    else {
-                        continue;
-                    };
-
-                    if !declared_edge_references_target(
-                        &source_descriptor,
-                        &source_content,
-                        col_idx,
-                        target_row_id,
-                    ) {
-                        continue;
-                    }
-
-                    if self.evaluate_source_row_access_for_operation(
-                        storage,
-                        source_table_name,
-                        source_row_id,
-                        operation,
-                        session,
-                        branch,
-                        depth + 1,
-                        visited,
-                        Some(source_content),
-                    ) {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        false
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn evaluate_source_row_access_for_operation<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table_name: TableName,
-        row_id: ObjectId,
-        operation: Operation,
-        session: &Session,
-        branch: &str,
-        depth: usize,
-        visited: &mut HashSet<(TableName, ObjectId, Operation)>,
-        preloaded_content: Option<Vec<u8>>,
-    ) -> bool {
-        if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
-            return false;
-        }
-
-        let key = (table_name, row_id, operation);
-        if !visited.insert(key) {
-            // Cycle detected for this recursion branch.
-            return false;
-        }
-
-        let Some(content) =
-            preloaded_content.or_else(|| self.load_row_content_on_branch(storage, row_id, branch))
-        else {
-            visited.remove(&(table_name, row_id, operation));
-            return false;
-        };
-        let Some(provenance) = self.load_row_provenance_on_branch(storage, row_id, branch) else {
-            visited.remove(&(table_name, row_id, operation));
-            return false;
-        };
-
-        let write_schema = self.schema.clone();
-        let Ok(table_write) =
-            self.write_table_cache_entry_for_schema(branch, table_name, write_schema.as_ref())
-        else {
-            visited.remove(&(table_name, row_id, operation));
-            return false;
-        };
-
-        let local_policy = match operation {
-            Operation::Select => table_write.select_policy.as_deref(),
-            Operation::Insert => table_write.insert_policy.as_deref(),
-            Operation::Update => table_write.update_using_policy.as_deref(),
-            Operation::Delete => table_write.delete_using_policy.as_deref(),
-        };
-
-        let local_allow = local_policy
-            .map(|policy| {
-                self.evaluate_policy_for_content_with_context_for_row(
-                    storage,
-                    policy,
-                    &content,
-                    &provenance,
-                    table_write.descriptor.as_ref(),
-                    session,
-                    table_name.as_str(),
-                    branch,
-                    operation,
-                    row_id,
-                    depth,
-                    visited,
-                )
-            })
-            .unwrap_or(!self.row_policy_mode.denies_missing_explicit_policy());
-
-        visited.remove(&(table_name, row_id, operation));
-        local_allow
-    }
-
-    fn load_row_content_on_branch<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        row_id: ObjectId,
-        branch: &str,
-    ) -> Option<Vec<u8>> {
-        let (_, row) = self.load_visible_row_on_branch(storage, row_id, branch)?;
-        if row.is_hard_deleted() {
-            return None;
-        }
-        Some(row.data.to_vec())
+        let row = Row::new(
+            row_id,
+            content.to_vec(),
+            BatchId([0; 16]),
+            provenance.clone(),
+        );
+        let mut evaluator =
+            crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator::new(
+                self.schema.as_ref(),
+                session,
+                branch,
+                self.row_policy_mode,
+            );
+        evaluator.evaluate_row_access(
+            operation,
+            &row,
+            descriptor,
+            table,
+            Some(policy),
+            storage_ref,
+            &mut row_loader,
+            depth,
+            visited,
+        )
     }
 
     pub(super) fn visible_row_is_hard_deleted(
@@ -2454,20 +2153,5 @@ impl QueryManager {
         storage
             .row_batch_exists(&table, self.current_branch().as_str(), object_id, *batch_id)
             .unwrap_or(false)
-    }
-}
-
-fn declared_edge_references_target(
-    descriptor: &RowDescriptor,
-    content: &[u8],
-    column_index: usize,
-    target_row_id: ObjectId,
-) -> bool {
-    match decode_column(descriptor, content, column_index) {
-        Ok(Value::Uuid(id)) => id == target_row_id,
-        Ok(Value::Array(values)) => values
-            .iter()
-            .any(|value| matches!(value, Value::Uuid(id) if *id == target_row_id)),
-        _ => false,
     }
 }

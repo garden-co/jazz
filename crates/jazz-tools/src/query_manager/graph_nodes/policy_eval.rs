@@ -22,6 +22,7 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     branch: &'a str,
     row_policy_mode: RowPolicyMode,
     settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
+    structural_exists_rel_scans: bool,
 }
 
 impl<'a> PolicyContextEvaluator<'a> {
@@ -37,6 +38,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             branch,
             row_policy_mode,
             settlement_eval_cache: None,
+            structural_exists_rel_scans: false,
         }
     }
 
@@ -45,6 +47,11 @@ impl<'a> PolicyContextEvaluator<'a> {
         settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
     ) -> Self {
         self.settlement_eval_cache = settlement_eval_cache;
+        self
+    }
+
+    pub(crate) fn with_structural_exists_rel_scans(mut self, structural_scans: bool) -> Self {
+        self.structural_exists_rel_scans = structural_scans;
         self
     }
 
@@ -151,15 +158,27 @@ impl<'a> PolicyContextEvaluator<'a> {
         }
 
         let candidate_ids = match &col.column_type {
-            ColumnType::Uuid => io.index_lookup(
-                source_table_name.as_str(),
-                col.name.as_str(),
-                self.branch,
-                &Value::Uuid(row.id),
-            ),
-            ColumnType::Array { element } if **element == ColumnType::Uuid => {
-                io.index_scan_all(source_table_name.as_str(), col.name.as_str(), self.branch)
+            ColumnType::Uuid => {
+                if source_schema.is_indexed_column(col.name.as_str()) {
+                    io.index_lookup(
+                        source_table_name.as_str(),
+                        col.name.as_str(),
+                        self.branch,
+                        &Value::Uuid(row.id),
+                    )
+                } else {
+                    io.index_scan_all(source_table_name.as_str(), "_id", self.branch)
+                }
             }
+            ColumnType::Array { element } if **element == ColumnType::Uuid => io.index_scan_all(
+                source_table_name.as_str(),
+                if source_schema.is_indexed_column(col.name.as_str()) {
+                    col.name.as_str()
+                } else {
+                    "_id"
+                },
+                self.branch,
+            ),
             _ => return false,
         };
 
@@ -259,7 +278,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             ),
             PolicyExpr::ExistsRel { rel } => self.evaluate_exists_rel_with_context(
                 rel,
-                operation == Operation::Select,
+                self.structural_exists_rel_scans,
                 row,
                 descriptor,
                 table_name,
@@ -414,9 +433,8 @@ impl<'a> PolicyContextEvaluator<'a> {
             Operation::Delete => parent_schema.policies.effective_delete_using(),
         };
 
-        let parent_policy = match parent_policy {
-            Some(p) => p,
-            None => return false,
+        let Some(parent_policy) = parent_policy else {
+            return !self.row_policy_mode.denies_missing_explicit_policy();
         };
 
         let parent_row = Row::new(
