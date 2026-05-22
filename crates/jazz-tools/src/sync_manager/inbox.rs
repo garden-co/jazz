@@ -854,10 +854,13 @@ impl SyncManager {
     }
 
     fn sealed_submission_prunable_after_fate(fate: &BatchFate) -> bool {
-        matches!(fate, BatchFate::Rejected { .. })
-            || fate
-                .confirmed_tier()
-                .is_some_and(|tier| tier >= DurabilityTier::GlobalServer)
+        match fate {
+            BatchFate::Rejected { .. } | BatchFate::DurableDirect { .. } => true,
+            BatchFate::AcceptedTransaction { confirmed_tier, .. } => {
+                *confirmed_tier >= DurabilityTier::GlobalServer
+            }
+            BatchFate::Missing { .. } => false,
+        }
     }
 
     fn declared_rows_for_submission(
@@ -1109,7 +1112,41 @@ impl SyncManager {
         };
 
         let mut recovered_any = false;
+        let highest_authority_tier = self.my_tiers.iter().copied().max();
         for submission in submissions {
+            match storage.load_authoritative_batch_fate(submission.batch_id) {
+                Ok(Some(fate)) => {
+                    let should_revalidate_for_promotion = matches!(
+                        fate,
+                        BatchFate::DurableDirect { confirmed_tier, .. }
+                            if highest_authority_tier
+                                .is_some_and(|authority_tier| confirmed_tier < authority_tier)
+                    );
+                    if !should_revalidate_for_promotion {
+                        if Self::sealed_submission_prunable_after_fate(&fate)
+                            && let Err(error) =
+                                storage.delete_sealed_batch_submission(submission.batch_id)
+                        {
+                            tracing::warn!(
+                                batch_id = ?submission.batch_id,
+                                %error,
+                                "failed to delete sealed batch submission"
+                            );
+                        }
+                        continue;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        batch_id = ?submission.batch_id,
+                        %error,
+                        "failed to load authoritative batch fate during sealed batch recovery"
+                    );
+                    continue;
+                }
+            }
+
             let batch_rows = self.transactional_batch_rows(
                 storage,
                 submission.batch_id,

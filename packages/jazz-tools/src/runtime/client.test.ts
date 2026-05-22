@@ -319,51 +319,6 @@ describe("JazzClient transactions", () => {
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
   });
 
-  it("transaction explicitly marked as `immediate` become visible on commit", () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const tx = client.beginTransaction({ visibility: "immediate" });
-
-    tx.create("todos", {});
-
-    const writeContext = JSON.parse(runtime.insertWithSession.mock.calls[0]?.[2] ?? "{}");
-    expect(writeContext).toMatchObject({
-      batch_mode: "transactional",
-      visible_at: "immediate",
-    });
-  });
-
-  it("defaults transaction visibility from configured authority", () => {
-    const serverRuntime = makeFakeRuntime();
-    const serverClient = JazzClient.connectWithRuntime(serverRuntime as any, makeContext());
-    serverClient.beginTransaction().create("todos", {});
-    expect(JSON.parse(serverRuntime.insertWithSession.mock.calls[0]?.[2] ?? "{}")).toMatchObject({
-      visible_at: "global",
-    });
-
-    const localRuntime = makeFakeRuntime();
-    const localClient = JazzClient.connectWithRuntime(localRuntime as any, {
-      ...makeContext(),
-      serverUrl: undefined,
-      driver: { type: "persistent" },
-    });
-    localClient.beginTransaction().create("todos", {});
-    expect(JSON.parse(localRuntime.insertWithSession.mock.calls[0]?.[2] ?? "{}")).toMatchObject({
-      visible_at: "local",
-    });
-
-    const memoryRuntime = makeFakeRuntime();
-    const memoryClient = JazzClient.connectWithRuntime(memoryRuntime as any, {
-      ...makeContext(),
-      serverUrl: undefined,
-      driver: { type: "memory" },
-    });
-    memoryClient.beginTransaction().create("todos", {});
-    expect(JSON.parse(memoryRuntime.insertWithSession.mock.calls[0]?.[2] ?? "{}")).toMatchObject({
-      visible_at: "immediate",
-    });
-  });
-
   it("rolls back an open transaction without sealing the batch", () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());

@@ -76,7 +76,7 @@ impl TransactionVisibility {
     pub fn legacy_default_for_batch_mode(mode: BatchMode) -> Self {
         match mode {
             BatchMode::Direct => Self::Immediate,
-            BatchMode::Transactional => Self::Deferred(DurabilityTier::GlobalServer),
+            BatchMode::Transactional => Self::Deferred(DurabilityTier::Local),
         }
     }
 

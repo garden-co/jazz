@@ -3071,7 +3071,7 @@ mod tests {
             &bytes,
         )
         .expect("decode local batch record row");
-        assert_eq!(values.len(), 4);
+        assert_eq!(values.len(), 5);
         assert_eq!(
             storage
                 .load_sealed_batch_submission(batch_id)

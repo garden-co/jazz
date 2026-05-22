@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use jazz_tools::batch_fate::{
     BatchFate, BatchMode, CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission,
+    TransactionVisibility,
 };
 use jazz_tools::catalogue::CatalogueEntry;
 use jazz_tools::metadata::{MetadataKey, ObjectType, RowProvenance};
@@ -1145,6 +1146,7 @@ async fn sealed_batch_acceptance_recovers_after_restart() {
             .expect("load authoritative settlement"),
         Some(BatchFate::AcceptedTransaction {
             batch_id,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
             confirmed_tier: DurabilityTier::GlobalServer,
         })
     );
@@ -1201,6 +1203,7 @@ async fn sealed_batch_unrelated_frontier_change_accepts_after_restart() {
         Some(BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         })
     );
     assert_eq!(

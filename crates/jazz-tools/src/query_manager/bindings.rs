@@ -217,10 +217,11 @@ impl TryFrom<WriteContextPayloadWire> for WriteContext {
             .as_deref()
             .map(parse_batch_id_input)
             .transpose()?;
-        let visible_at = match value.visible_at.as_deref() {
-            None => None,
-            Some(raw) => Some(TransactionVisibility::parse(raw)?),
-        };
+        let visible_at = value
+            .visible_at
+            .as_deref()
+            .map(TransactionVisibility::parse)
+            .transpose()?;
 
         Ok(WriteContext {
             session: value.session,

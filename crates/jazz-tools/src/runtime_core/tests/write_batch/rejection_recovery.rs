@@ -1675,6 +1675,7 @@ fn rc_restart_accepts_stale_unrelated_family_frontier_sealed_batch_from_storage(
         Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: crate::batch_fate::TransactionVisibility::Deferred(DurabilityTier::Local),
         })
     );
     let visible = restarted
@@ -1694,11 +1695,12 @@ fn rc_restart_accepts_stale_unrelated_family_frontier_sealed_batch_from_storage(
             .state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(
+    assert!(
         restarted
             .storage()
             .load_sealed_batch_submission(batch_id)
-            .unwrap(),
-        None
+            .unwrap()
+            .is_some(),
+        "locally accepted transactions should retain sealed submissions for upstream reconciliation"
     );
 }

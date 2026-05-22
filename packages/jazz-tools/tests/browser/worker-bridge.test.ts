@@ -1344,6 +1344,7 @@ describe("Worker Bridge with OPFS", () => {
       batch: {
         batchId: insertResult.batchId,
         mode: "direct",
+        visibleAt: "immediate",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
@@ -1424,6 +1425,7 @@ describe("Worker Bridge with OPFS", () => {
       batch: {
         batchId: insertResult.batchId,
         mode: "direct",
+        visibleAt: "immediate",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
@@ -1471,6 +1473,7 @@ describe("Worker Bridge with OPFS", () => {
       batch: {
         batchId: insertResult.batchId,
         mode: "direct",
+        visibleAt: "immediate",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
@@ -1544,6 +1547,7 @@ describe("Worker Bridge with OPFS", () => {
       batch: {
         batchId: insertResult.batchId,
         mode: "direct",
+        visibleAt: "immediate",
         sealed: true,
         latestSettlement: {
           kind: "rejected",

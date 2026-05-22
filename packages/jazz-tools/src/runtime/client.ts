@@ -6,13 +6,7 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type {
-  InsertValues,
-  StorageDriver,
-  Value,
-  SubscriptionWireDelta,
-  WasmSchema,
-} from "../drivers/types.js";
+import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
@@ -312,11 +306,6 @@ type QueryExecutionDefaultsContext = {
   defaultDurabilityTier?: DurabilityTier;
 };
 
-type TransactionVisibilityDefaultsContext = {
-  serverUrl?: string;
-  driver?: StorageDriver;
-};
-
 export function resolveDefaultDurabilityTier(
   context: QueryExecutionDefaultsContext,
 ): DurabilityTier {
@@ -346,7 +335,7 @@ export function resolveEffectiveQueryExecutionOptions(
 }
 
 export function resolveTransactionVisibleAt(
-  context: TransactionVisibilityDefaultsContext,
+  context: Pick<AppContext, "serverUrl" | "driver">,
   options?: TransactionOptions,
 ): TransactionVisibleAt {
   // Transactions explicitly marked as "immediate" become visible on commit
@@ -357,10 +346,6 @@ export function resolveTransactionVisibleAt(
   // once it's accepted by the core server
   if (context.serverUrl) {
     return "global";
-  }
-  // For in-memory DBs, transactions becomes visible on commit
-  if (context.driver?.type === "memory") {
-    return "immediate";
   }
   // For persistent DBs without a server, transactions become visible
   // once the persistent runtime accepts them
@@ -1289,9 +1274,7 @@ export class JazzClient {
     if (batchContext) {
       payload.batch_mode = batchContext.batchMode;
       payload.batch_id = batchContext.batchId;
-      if (batchContext.visibleAt !== undefined) {
-        payload.visible_at = batchContext.visibleAt;
-      }
+      payload.visible_at = batchContext.visibleAt;
       payload.target_branch_name = batchContext.targetBranchName;
     }
     return JSON.stringify(payload);

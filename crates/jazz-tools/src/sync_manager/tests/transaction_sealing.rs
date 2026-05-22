@@ -1269,6 +1269,7 @@ fn seal_batch_accepts_when_unrelated_family_visible_frontier_changed() {
         Some(BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         })
     );
     let visible = io
