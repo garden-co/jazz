@@ -1,14 +1,9 @@
-// Lens-diagram geometry — builds a single CCW path that snakes through the
-// data card, every schema/lens card on the projection chain, and out to the
-// client. Shared geometry primitives live in ./diagram/geometry.
+// Lens-diagram geometry — a single CCW path that snakes through the data card,
+// every schema/lens card on the projection chain, and out to the client. Pure:
+// it consumes engine-measured Anchors (natural coords), no DOM, so it inherits
+// the engine's offset-based measurement + scale-to-fit for free.
 
-import {
-  PATH_INSET,
-  DEFAULT_CORNER_RADIUS,
-  type Anchors,
-  insetRect,
-  loopRoundedBox,
-} from "./diagram/geometry";
+import { type Anchors, DEFAULT_CORNER_RADIUS, loopRoundedBox, PATH_INSET } from "./diagram";
 
 export type Version = 1 | 2 | 3;
 export type Direction = "forward" | "backward" | "na";
@@ -18,46 +13,15 @@ export function getDirection(from: Version, to: Version): Direction {
   return from < to ? "forward" : "backward";
 }
 
-function unreachable(x: never): never {
-  throw new Error(`unreachable: ${String(x)}`);
-}
+export const schemaId = (v: Version) => `schema-${v}`;
+export const lensId = (idx: number) => `lens-${idx}`;
+export const dataId = (v: Version) => `data-${v}`;
+export const CLIENT_ID = "client";
 
-type LoopStart = "left" | "top" | "bottom";
+export type Card = { type: "schema" | "lens"; id: string };
 
-// Schema cards are rounded-lg → DEFAULT_CORNER_RADIUS works directly.
-function loopSchema(rect: DOMRect, container: DOMRect, start: LoopStart): string {
-  const a = insetRect(rect, container);
-  const entry = start === "left" ? a.midY : a.midX;
-  return loopRoundedBox(a, entry, start);
-}
-
-// Lens cards use a pill/ellipse shape (borderRadius "50% / 35%"). The path
-// hugs that silhouette — straight sides, elliptical top and bottom caps.
-function loopLens(rect: DOMRect, container: DOMRect, start: LoopStart): string {
-  const a = insetRect(rect, container);
-  const { left, right, top, bottom, midX, midY } = a;
-  const rx = rect.width / 2 - PATH_INSET;
-  const ry = rect.height * 0.35 - PATH_INSET;
-  switch (start) {
-    case "left":
-      return `L ${left} ${bottom - ry} A ${rx} ${ry} 0 0 0 ${midX} ${bottom} A ${rx} ${ry} 0 0 0 ${right} ${bottom - ry} L ${right} ${top + ry} A ${rx} ${ry} 0 0 0 ${midX} ${top} A ${rx} ${ry} 0 0 0 ${left} ${top + ry} L ${left} ${midY}`;
-    case "top":
-      return `A ${rx} ${ry} 0 0 0 ${left} ${top + ry} L ${left} ${bottom - ry} A ${rx} ${ry} 0 0 0 ${midX} ${bottom} A ${rx} ${ry} 0 0 0 ${right} ${bottom - ry} L ${right} ${top + ry} A ${rx} ${ry} 0 0 0 ${midX} ${top}`;
-    case "bottom":
-      return `A ${rx} ${ry} 0 0 0 ${right} ${bottom - ry} L ${right} ${top + ry} A ${rx} ${ry} 0 0 0 ${midX} ${top} A ${rx} ${ry} 0 0 0 ${left} ${top + ry} L ${left} ${bottom - ry} A ${rx} ${ry} 0 0 0 ${midX} ${bottom}`;
-    default:
-      return unreachable(start);
-  }
-}
-
-export type Card = { type: "schema" | "lens"; el: HTMLElement };
-
-export function collectCards(
-  dataVersion: Version,
-  client: Version,
-  schemaRefs: Partial<Record<Version, HTMLDivElement | null>>,
-  lensRefs: Partial<Record<number, HTMLDivElement | null>>,
-): Card[] | null {
+// Ordered schema/lens cards on the projection chain between data and client.
+export function collectCards(dataVersion: Version, client: Version): Card[] {
   const back = dataVersion > client;
   const lo = Math.min(dataVersion, client);
   const hi = Math.max(dataVersion, client);
@@ -67,77 +31,89 @@ export function collectCards(
   } else {
     for (let v = lo; v <= hi; v++) versions.push(v as Version);
   }
-
   const cards: Card[] = [];
   for (let i = 0; i < versions.length; i++) {
     const v = versions[i];
-    const sEl = schemaRefs[v];
-    if (!sEl) return null;
-    cards.push({ type: "schema", el: sEl });
+    cards.push({ type: "schema", id: schemaId(v) });
     if (i < versions.length - 1) {
-      // Lens between schemas v and v+1 lives at index min(v, v+1) - 1.
-      const lensIdx = Math.min(v, versions[i + 1]) - 1;
-      const lEl = lensRefs[lensIdx];
-      if (!lEl) return null;
-      cards.push({ type: "lens", el: lEl });
+      const idx = Math.min(v, versions[i + 1]) - 1;
+      cards.push({ type: "lens", id: lensId(idx) });
     }
   }
   return cards;
 }
 
+type LoopStart = "left" | "top" | "bottom";
+
+function loopSchema(a: Anchors, start: LoopStart): string {
+  const entry = start === "left" ? a.midY : a.midX;
+  return loopRoundedBox(a, entry, start);
+}
+
+// Lens cards use a pill silhouette (borderRadius "50% / 35%"): straight sides,
+// elliptical caps. Derived from the inset Anchors.
+function loopLens(a: Anchors, start: LoopStart): string {
+  const { left, right, top, bottom, midX, midY } = a;
+  const innerW = right - left;
+  const innerH = bottom - top;
+  const rx = innerW / 2;
+  const ry = (innerH + 2 * PATH_INSET) * 0.35 - PATH_INSET;
+  switch (start) {
+    case "left":
+      return `L ${left} ${bottom - ry} A ${rx} ${ry} 0 0 0 ${midX} ${bottom} A ${rx} ${ry} 0 0 0 ${right} ${bottom - ry} L ${right} ${top + ry} A ${rx} ${ry} 0 0 0 ${midX} ${top} A ${rx} ${ry} 0 0 0 ${left} ${top + ry} L ${left} ${midY}`;
+    case "top":
+      return `A ${rx} ${ry} 0 0 0 ${left} ${top + ry} L ${left} ${bottom - ry} A ${rx} ${ry} 0 0 0 ${midX} ${bottom} A ${rx} ${ry} 0 0 0 ${right} ${bottom - ry} L ${right} ${top + ry} A ${rx} ${ry} 0 0 0 ${midX} ${top}`;
+    case "bottom":
+      return `A ${rx} ${ry} 0 0 0 ${right} ${bottom - ry} L ${right} ${top + ry} A ${rx} ${ry} 0 0 0 ${midX} ${top} A ${rx} ${ry} 0 0 0 ${left} ${top + ry} L ${left} ${bottom - ry} A ${rx} ${ry} 0 0 0 ${midX} ${bottom}`;
+  }
+}
+
 export function buildPath(args: {
   cards: Card[];
-  rects: DOMRect[];
-  container: DOMRect;
-  data: DOMRect;
-  client: DOMRect;
+  anchors: Record<string, Anchors>;
+  dataId: string;
+  clientId: string;
   direction: Direction;
 }): string {
-  const { cards, rects, container: c, data: d, client: cl, direction } = args;
+  const { cards, anchors, dataId: dId, clientId, direction } = args;
+  const data = anchors[dId];
+  const client = anchors[clientId];
+  const first = cards[0] && anchors[cards[0].id];
+  if (!data || !client || !first) return "";
   const back = direction === "backward";
-  const firstRect = rects[0];
-  const busX = (firstRect.left + firstRect.right) / 2 - c.left;
-  const firstMidY = (firstRect.top + firstRect.bottom) / 2 - c.top;
+  const busX = first.midX;
+  const firstMidY = first.midY;
 
-  let path = `M ${d.right - c.left} ${firstMidY}`;
-  path += ` L ${firstRect.left - c.left + PATH_INSET} ${firstMidY}`;
+  let path = `M ${data.right} ${firstMidY}`;
+  path += ` L ${first.left} ${firstMidY}`;
 
   for (let i = 0; i < cards.length; i++) {
-    const rect = rects[i];
+    const a = anchors[cards[i].id];
+    if (!a) return "";
     const isLens = cards[i].type === "lens";
     const isFirst = i === 0;
     const isLast = i === cards.length - 1;
-    const a: Anchors = insetRect(rect, c);
     const { right, midX, midY, top, bottom } = a;
-
-    // First card enters at left-mid (from the data card); subsequent cards
-    // enter at top-mid (forward/idle) or bottom-mid (backward).
     const start: LoopStart = isFirst ? "left" : back ? "bottom" : "top";
-    path += " " + (isLens ? loopLens(rect, c, start) : loopSchema(rect, c, start));
+    path += " " + (isLens ? loopLens(a, start) : loopSchema(a, start));
 
-    // Body cross from where the loop ended toward the next destination.
     if (isFirst && isLast) {
-      path += ` L ${right} ${midY} L ${cl.left - c.left} ${midY}`;
+      path += ` L ${right} ${midY} L ${client.left} ${midY}`;
     } else if (isFirst) {
       path += ` L ${midX} ${midY} L ${midX} ${back ? top : bottom}`;
     } else if (isLast) {
-      path += ` L ${midX} ${midY} L ${right} ${midY} L ${cl.left - c.left} ${midY}`;
+      path += ` L ${midX} ${midY} L ${right} ${midY} L ${client.left} ${midY}`;
     } else {
       path += ` L ${midX} ${back ? top : bottom}`;
     }
 
     if (!isLast) {
-      const nextRect = rects[i + 1];
-      const nextEntryY = back
-        ? nextRect.bottom - c.top - PATH_INSET
-        : nextRect.top - c.top + PATH_INSET;
-      path += ` L ${busX} ${nextEntryY}`;
+      const next = anchors[cards[i + 1].id];
+      if (!next) return "";
+      path += ` L ${busX} ${back ? next.bottom : next.top}`;
     }
   }
-
   return path;
 }
 
-// Re-export the unused symbol so it lives in the bundle if anything elsewhere
-// references it. (Kept to mirror the previous public surface.)
 export { DEFAULT_CORNER_RADIUS };

@@ -206,3 +206,19 @@ h6 {
 :where(code, kbd, samp) {
   letter-spacing: -0.04em;
 }
+
+/* Diagram engine theme adapter — the ONLY coupling point between the
+   framework-agnostic diagram engine (components/mdx/diagram/*) and fumadocs.
+   The engine reads --diagram-* only; here we point those at the fumadocs
+   tokens so the diagrams follow the site theme (incl. dark mode) for free.
+   --diagram-accent is intentionally NOT mapped: the brand-blue trace colour
+   is theme-independent by design. */
+.diagram-host {
+  --diagram-bg: var(--color-fd-background);
+  --diagram-border: var(--color-fd-border);
+  --diagram-edge: var(--color-fd-muted-foreground);
+  --diagram-card: var(--color-fd-card);
+  --diagram-card-muted: var(--color-fd-muted);
+  --diagram-fg: var(--color-fd-foreground);
+  --diagram-muted: var(--color-fd-muted-foreground);
+}

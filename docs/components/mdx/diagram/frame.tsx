@@ -1,21 +1,27 @@
 import type { ReactNode } from "react";
 
-// Shared chrome for MDX diagrams: hidden on small screens (mobile gets a
-// static fallback), wrapped in a rounded card with the eyebrow + description
-// styling that every diagram uses.
+// Shared chrome for diagrams. Portable CSS via --diagram-* (no fd-/Tailwind);
+// `not-prose` is the one deliberate host-typography seam so MDX prose styles
+// don't bleed into the diagram — harmless on non-Tailwind hosts.
 export function DiagramFrame({
   eyebrow,
   description,
   children,
+  responsive = false,
 }: {
   eyebrow: string;
   description: ReactNode;
   children: ReactNode;
+  // false (default): desktop-only (adds `dg-frame--desktop-only`). true
+  // (Graph/Sequence): one responsive definition, static below the threshold.
+  responsive?: boolean;
 }) {
   return (
-    <div className="my-6 rounded-xl border border-fd-border bg-fd-card/30 p-5 not-prose hidden lg:block">
-      <p className="uppercase text-xs font-bold text-fd-primary">{eyebrow}</p>
-      <p className="text-sm text-fd-muted-foreground mb-6">{description}</p>
+    <div
+      className={"diagram-host dg-frame not-prose" + (responsive ? "" : " dg-frame--desktop-only")}
+    >
+      <p className="dg-frame-eyebrow">{eyebrow}</p>
+      <p className="dg-frame-desc">{description}</p>
       {children}
     </div>
   );
