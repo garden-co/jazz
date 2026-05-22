@@ -46,7 +46,7 @@ export function InviteHandlerWithClaim({ chatId, code }: { chatId: string; code:
 
     db.insert(app.chatMembers, { chatId, user_id: userId, joinCode: code })
       .wait({ tier: "local" })
-      .then(() => navigate(`/#/chat/${chatId}`))
+      .then(() => navigate(`/chat/${chatId}`))
       .catch((err) => {
         console.error("failed to join", err);
         handled.current = false;

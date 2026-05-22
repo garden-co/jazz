@@ -46,7 +46,7 @@ The creator inserts the chat and their own membership client-side. Both writes a
 
 ## Accepting an invite
 
-The invitee opens the link while signed in. The client posts the chat ID and code to a server route. The server reads the chat with backend privileges, checks the code against the stored value, and inserts the membership row.
+The invitee opens the link while signed in. The client posts the chat ID and code to a server route. The server reads the chat with backend privileges, checks the code against the stored value, and inserts the membership row. The route is idempotent&hairsp;—&hairsp;it skips the insert if the user already has a membership, so re-opening the link or retrying after a transient error won't create duplicate rows.
 
 ### Server route
 
@@ -62,6 +62,8 @@ The `context` referenced below is the backend Jazz context for your app&hairsp;�
 <Accordion title="Single-use, expiring, or role-scoped codes">
 
 For single-use codes, rotate the code in your server route after a successful redeem. For richer requirements (expiry, codes that grant specific roles, audit metadata), put codes in their own table alongside the data you need to colocate with each one&hairsp;—&hairsp;creation date, granted role, expiry timestamp, and so on.
+
+The 8-character code above (~32 bits) keeps the example URL readable and is fine paired with an unguessable chat ID. A code that isn't single-use or expiring is worth widening&hairsp;—&hairsp;use the full `crypto.randomUUID()` so it can't be brute-forced on its own.
 
 </Accordion>
 </Accordions>

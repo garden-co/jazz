@@ -71,6 +71,13 @@ export async function POST(req: AuthenticatedRequest): Promise<Response> {
     return new Response("invalid invite", { status: 400 });
   }
 
+  // Idempotent: a repeated redeem (link reopened, retry after a transient error)
+  // must not insert a second membership row.
+  const existing = await context
+    .asBackend(app)
+    .one(app.chatMembers.where({ chatId, user_id: userId }));
+  if (existing) return Response.json({ ok: true });
+
   await context
     .withAttribution(userId, app)
     .insert(app.chatMembers, { chatId, user_id: userId, joinCode: code })
