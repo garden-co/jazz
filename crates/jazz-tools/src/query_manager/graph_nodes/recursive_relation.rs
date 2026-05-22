@@ -465,12 +465,26 @@ impl RecursiveRelationNode {
                 "relation_subexpr_cache",
                 format!("hit kind=recursive_hop site={:016x}", key.site_fingerprint),
             );
+            crate::query_manager::policy_counters::increment(
+                "relation_subexpr_identity",
+                format!(
+                    "hit kind=recursive_hop site={:016x} input={:016x}",
+                    key.site_fingerprint, key.input_fingerprint
+                ),
+            );
             return cached;
         }
 
         crate::query_manager::policy_counters::increment(
             "relation_subexpr_cache",
             format!("miss kind=recursive_hop site={:016x}", key.site_fingerprint),
+        );
+        crate::query_manager::policy_counters::increment(
+            "relation_subexpr_identity",
+            format!(
+                "miss kind=recursive_hop site={:016x} input={:016x}",
+                key.site_fingerprint, key.input_fingerprint
+            ),
         );
         let result = self.recompute_with_hop_uncached(io, row_loader);
         cache.relation_result_insert(key, result.clone());

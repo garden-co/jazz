@@ -182,6 +182,47 @@ impl SchemaContext {
         Self::new(schema, "dev", user_branch)
     }
 
+    /// Create from an already-composed branch name without recomputing the schema hash.
+    ///
+    /// Composed branch names only contain the short hash prefix, but that is
+    /// enough for branch-name reconstruction and short-hash matching in query
+    /// compilation fallback paths.
+    pub(crate) fn with_branch_name(schema: Schema, branch: &BranchName) -> Self {
+        if let Some(composed) = ComposedBranchName::parse(branch) {
+            Self {
+                current_schema: schema,
+                current_hash: composed.schema_hash,
+                env: composed.env,
+                user_branch: composed.user_branch,
+                live_schemas: HashMap::new(),
+                lenses: HashMap::new(),
+                pending_schemas: HashMap::new(),
+                is_initialized: true,
+            }
+        } else {
+            Self::with_plain_branch(schema, branch.as_str())
+        }
+    }
+
+    /// Create a plain-branch context without recomputing the schema hash.
+    ///
+    /// This is for legacy compile paths that query a concrete user branch such
+    /// as `main` rather than schema-hash-composed branches. In that case query
+    /// compilation does not need the structural schema hash for branch
+    /// resolution, so a sentinel avoids repeatedly hashing large schemas.
+    pub(crate) fn with_plain_branch(schema: Schema, user_branch: &str) -> Self {
+        Self {
+            current_schema: schema,
+            current_hash: SchemaHash::from_bytes([0; 32]),
+            env: "dev".to_string(),
+            user_branch: user_branch.to_string(),
+            live_schemas: HashMap::new(),
+            lenses: HashMap::new(),
+            pending_schemas: HashMap::new(),
+            is_initialized: true,
+        }
+    }
+
     /// Set the current schema (can only be called once).
     ///
     /// # Panics

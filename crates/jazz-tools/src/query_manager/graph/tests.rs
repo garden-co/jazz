@@ -1078,6 +1078,48 @@ fn compile_relation_ir_with_join_projection_preserves_aliases() {
 }
 
 #[test]
+fn compile_relation_ir_uses_bound_join_scope_eq_for_right_scan() {
+    let schema = join_schema();
+    let relation = RelExpr::Filter {
+        input: Box::new(RelExpr::Join {
+            left: Box::new(RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            right: Box::new(RelExpr::TableScan {
+                table: TableName::new("posts"),
+            }),
+            on: vec![JoinCondition {
+                left: ColumnRef::scoped("users", "id"),
+                right: ColumnRef::scoped("posts", "author_id"),
+            }],
+            join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+        }),
+        predicate: PredicateExpr::Cmp {
+            left: ColumnRef::scoped("posts", "author_id"),
+            op: PredicateCmpOp::Eq,
+            right: ValueRef::Literal(Value::Integer(7)),
+        },
+    };
+
+    let branches = vec!["main".to_string()];
+    let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+        .expect("Graph should compile");
+
+    let scan = graph
+        .nodes
+        .iter()
+        .filter_map(|ctx| match &ctx.node {
+            GraphNode::IndexScan(scan) if scan.table.as_str() == "posts" => Some(scan),
+            _ => None,
+        })
+        .next()
+        .expect("posts scan");
+
+    assert_eq!(scan.column.as_str(), "author_id");
+    assert_eq!(scan.condition, ScanCondition::Eq(Value::Integer(7)));
+}
+
+#[test]
 fn compile_relation_ir_with_or_filter_produces_union_plan() {
     let schema = test_schema();
     let relation = RelExpr::Filter {

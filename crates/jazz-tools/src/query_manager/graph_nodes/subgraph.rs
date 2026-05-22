@@ -11,6 +11,7 @@ use crate::query_manager::types::{RowDescriptor, RowPolicyMode, Schema, Value};
 use crate::schema_manager::SchemaContext;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// Template for creating subgraph instances.
 ///
@@ -29,7 +30,7 @@ pub struct SubgraphTemplate {
     /// Output descriptor for individual result rows.
     output_descriptor: RowDescriptor,
     /// Schema context inherited from the parent graph compile.
-    schema_context: SchemaContext,
+    schema_context: Arc<SchemaContext>,
     /// Session inherited from the parent graph compile.
     session: Option<Session>,
     /// Policy mode inherited from the parent graph compile.
@@ -50,6 +51,26 @@ impl SubgraphTemplate {
         select_columns: Vec<String>,
         output_descriptor: RowDescriptor,
         schema_context: SchemaContext,
+        session: Option<Session>,
+        row_policy_mode: RowPolicyMode,
+    ) -> Self {
+        Self::new_with_shared_schema_context(
+            base_query,
+            inner_column,
+            select_columns,
+            output_descriptor,
+            Arc::new(schema_context),
+            session,
+            row_policy_mode,
+        )
+    }
+
+    pub(crate) fn new_with_shared_schema_context(
+        base_query: Query,
+        inner_column: String,
+        select_columns: Vec<String>,
+        output_descriptor: RowDescriptor,
+        schema_context: Arc<SchemaContext>,
         session: Option<Session>,
         row_policy_mode: RowPolicyMode,
     ) -> Self {
@@ -169,11 +190,11 @@ impl SubgraphTemplate {
         }
 
         let query = query_builder.try_build().ok()?;
-        let graph = QueryGraph::try_compile_with_schema_context(
+        let graph = QueryGraph::try_compile_with_shared_schema_context(
             &query,
             schema,
             self.session.clone(),
-            &self.schema_context,
+            Arc::clone(&self.schema_context),
             self.row_policy_mode,
         )
         .ok()?;
