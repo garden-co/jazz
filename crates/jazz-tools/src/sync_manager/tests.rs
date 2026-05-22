@@ -4,9 +4,12 @@ use crate::batch_fate::{
 };
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::query_manager::encoding::encode_row;
+use crate::query_manager::graph::ScopeRow;
 use crate::query_manager::policy::Operation;
 use crate::query_manager::query::QueryBuilder;
-use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
+use crate::query_manager::types::{
+    ColumnType, RowBytes, SchemaBuilder, SchemaHash, TableName, TableSchema, Value,
+};
 use crate::row_histories::{BatchId, StoredRowBatch, VisibleRowEntry};
 use crate::storage::{MemoryStorage, Storage};
 use crate::test_support::{create_test_row_with_id, persist_test_schema};
@@ -341,6 +344,64 @@ fn set_client_query_scope(
     session: Option<crate::query_manager::session::Session>,
 ) {
     sm.set_client_query_scope_with_storage(io, client_id, query_id, scope, session);
+}
+
+#[test]
+fn client_query_scope_replays_materialized_scope_rows_without_storage_lookup() {
+    let mut sm = SyncManager::new();
+    let io = MemoryStorage::new();
+    let client_id = ClientId(ObjectId::new());
+    let query_id = QueryId(7);
+    let row_id = ObjectId::new();
+    let branch = BranchName::new("main");
+    let batch_id = BatchId::new();
+    let data = encode_row(
+        &users_test_schema()[&"users".into()].columns,
+        &[Value::Text("already loaded".to_string())],
+    )
+    .expect("scope row should encode");
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    let scope = HashSet::from([(row_id, branch)]);
+    let scope_rows = HashMap::from([(
+        (row_id, branch),
+        ScopeRow {
+            table: TableName::new("users"),
+            branch,
+            id: row_id,
+            data: RowBytes::from(data.clone()),
+            batch_id,
+            provenance: RowProvenance::for_insert("test", 1),
+        },
+    )]);
+
+    sm.set_client_query_scope_with_rows_and_storage(
+        &io,
+        client_id,
+        query_id,
+        scope,
+        &scope_rows,
+        None,
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::RowBatchCreated {
+                metadata: Some(metadata),
+                row,
+            },
+        } if *id == client_id
+            && metadata.id == row_id
+            && metadata.metadata.get(MetadataKey::Table.as_str()) == Some(&"users".to_string())
+            && row.row_id == row_id
+            && row.batch_id == batch_id
+            && row.data.as_ref() == data.as_slice()
+    )));
 }
 
 fn load_visible_row(

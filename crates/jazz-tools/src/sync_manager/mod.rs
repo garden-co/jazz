@@ -6,10 +6,11 @@ use web_time::Instant;
 use crate::batch_fate::{BatchFate, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::graph::ScopeRow;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
-use crate::row_histories::{BatchId, RowVisibilityChange};
+use crate::row_histories::{BatchId, RowState, RowVisibilityChange, StoredRowBatch};
 use crate::storage::{PreparedRowTableContext, Storage};
 
 // Module declarations
@@ -760,6 +761,92 @@ impl SyncManager {
         // Initial query scope delivery can include many rows from the same
         // sealed batch. Queue rows first so client interest is complete, then
         // send one fate per batch instead of one growing fate per row.
+        for batch_id in newly_visible_batch_ids {
+            if let Some(fate) = self.load_batch_fate_by_batch_id_from_storage(storage, batch_id) {
+                self.queue_batch_fate_to_client(client_id, fate);
+            }
+        }
+    }
+
+    pub fn set_client_query_scope_with_rows_and_storage<H: Storage + ?Sized>(
+        &mut self,
+        storage: &H,
+        client_id: ClientId,
+        query_id: QueryId,
+        scope: HashSet<(ObjectId, BranchName)>,
+        scope_rows: &HashMap<(ObjectId, BranchName), ScopeRow>,
+        session: Option<Session>,
+    ) {
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return;
+        };
+
+        let old_query_scope = client
+            .queries
+            .get(&query_id)
+            .map(|query| query.scope.clone())
+            .unwrap_or_default();
+        let old_scope: HashSet<(ObjectId, BranchName)> = client
+            .queries
+            .values()
+            .flat_map(|q| q.scope.iter().cloned())
+            .collect();
+
+        client.queries.insert(
+            query_id,
+            QueryScope {
+                scope: scope.clone(),
+                session,
+            },
+        );
+
+        let new_scope: HashSet<(ObjectId, BranchName)> = client
+            .queries
+            .values()
+            .flat_map(|q| q.scope.iter().cloned())
+            .collect();
+
+        let no_longer_visible: HashSet<(ObjectId, BranchName)> =
+            old_scope.difference(&new_scope).cloned().collect();
+        let newly_visible_for_query: Vec<(ObjectId, BranchName)> =
+            scope.difference(&old_query_scope).cloned().collect();
+
+        self.prune_client_scope_tracking(client_id, &no_longer_visible);
+
+        let mut newly_visible_batch_ids = HashSet::new();
+        for (object_id, branch_name) in newly_visible_for_query {
+            if let Some(scope_row) = scope_rows.get(&(object_id, branch_name)) {
+                let metadata = HashMap::from([(
+                    crate::metadata::MetadataKey::Table.to_string(),
+                    scope_row.table.as_str().to_string(),
+                )]);
+                let row = StoredRowBatch::new_with_batch_id(
+                    scope_row.batch_id,
+                    scope_row.id,
+                    scope_row.branch.as_str(),
+                    [],
+                    scope_row.data.to_vec(),
+                    scope_row.provenance.clone(),
+                    metadata.clone(),
+                    RowState::VisibleDirect,
+                    None,
+                );
+                self.queue_row_to_client(client_id, object_id, metadata, row, true);
+                newly_visible_batch_ids.insert(scope_row.batch_id);
+                continue;
+            }
+
+            if let Some(batch_id) = self.queue_initial_row_to_client_with_storage(
+                storage,
+                client_id,
+                object_id,
+                branch_name,
+                true,
+            ) {
+                newly_visible_batch_ids.insert(batch_id);
+            }
+        }
+
         for batch_id in newly_visible_batch_ids {
             if let Some(fate) = self.load_batch_fate_by_batch_id_from_storage(storage, batch_id) {
                 self.queue_batch_fate_to_client(client_id, fate);
