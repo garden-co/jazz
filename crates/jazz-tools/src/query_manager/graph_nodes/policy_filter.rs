@@ -394,7 +394,7 @@ impl PolicyFilterNode {
             &self.branch,
             self.row_policy_mode,
         )
-        .with_shared_schema_context(self.schema_context.as_ref().map(Arc::clone))
+        .with_shared_schema_context(self.schema_context.as_deref())
         .with_structural_exists_rel_scans(self.structural_exists_rel_scans);
         let mut visited_referencing = HashSet::new();
         evaluator.evaluate_row_access(
