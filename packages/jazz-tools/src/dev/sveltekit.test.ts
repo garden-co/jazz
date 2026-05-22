@@ -77,12 +77,16 @@ afterEach(async () => {
 describe("jazzSvelteKit", () => {
   it("config hook accepts both Vite ssr.external shapes (true and string[])", () => {
     const plugin = jazzSvelteKit();
+    // Without a serve ConfigEnv the hook returns the merged config synchronously
+    // (the async runtime path only runs for `command: "serve"`).
+    const runConfig = (c: Record<string, unknown>) =>
+      plugin.config(c) as { ssr: { external: true | string[] } };
 
-    const arrayResult = plugin.config({ ssr: { external: ["other-pkg"] } });
+    const arrayResult = runConfig({ ssr: { external: ["other-pkg"] } });
     expect(arrayResult.ssr.external).toContain("jazz-napi");
     expect(arrayResult.ssr.external).toContain("other-pkg");
 
-    const externaliseAll = plugin.config({ ssr: { external: true } });
+    const externaliseAll = runConfig({ ssr: { external: true } });
     expect(externaliseAll.ssr.external).toBe(true);
   });
 
@@ -146,22 +150,11 @@ describe("jazzSvelteKit", () => {
     expect(logSpy).toHaveBeenCalledWith("[jazz] telemetry collector: http://127.0.0.1:54418");
   });
 
-  it("restarts the dev server on first-ever cold start so SvelteKit's $env capture sees the freshly allocated appId", async () => {
-    const port = await getAvailablePort();
-    const root = await tempRoots.create("jazz-sveltekit-cold-start-");
-    await mkdir(join(root, "src", "lib"), { recursive: true });
-    await writeFile(join(root, "src", "lib", "schema.ts"), todoSchema());
+  it("is enforce:'pre' so its config hook precedes SvelteKit's env capture", () => {
+    expect(jazzSvelteKit().enforce).toBe("pre");
+  });
 
-    const plugin = jazzSvelteKit({
-      server: { port, adminSecret: "cold-start-admin" },
-    });
-    const viteServer = makeViteServer("serve", root);
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
-
-    expect(viteServer.restart).toHaveBeenCalledTimes(1);
-  }, 30_000);
-
-  it("does not restart when appId is already persisted in .env (warm start)", async () => {
+  it("config hook populates process.env with PUBLIC_JAZZ_* before SvelteKit captures env", async () => {
     const persistedAppId = "00000000-0000-0000-0000-000000000099";
     vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
       appId: persistedAppId,
@@ -173,16 +166,54 @@ describe("jazzSvelteKit", () => {
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
-    const root = await tempRoots.create("jazz-sveltekit-warm-start-");
-    await writeFile(join(root, ".env"), `PUBLIC_JAZZ_APP_ID=${persistedAppId}\n`);
-
+    const root = await tempRoots.create("jazz-sveltekit-config-hook-");
     const plugin = jazzSvelteKit({
-      server: { port: 19990, adminSecret: "warm-start-admin" },
+      appId: persistedAppId,
+      server: { port: 19990, adminSecret: "config-hook-admin" },
     });
+
+    const config = plugin.config as (
+      c: Record<string, unknown>,
+      e?: { command: "serve" | "build"; mode?: string },
+    ) => unknown;
+    const merged = (await config({ root }, { command: "serve", mode: "development" })) as {
+      ssr?: { external?: string[] };
+    };
+
+    // The merged Vite config is still returned for Vite to consume.
+    expect(merged.ssr?.external).toContain("jazz-napi");
+    // …and the env is populated by the time the config hook resolves, so
+    // SvelteKit's later config({order:'pre'}) capture sees it on the first pass.
+    expect(process.env.PUBLIC_JAZZ_APP_ID).toBe(persistedAppId);
+    expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19990");
+  });
+
+  it("never restarts the dev server (env is injected in the config hook instead)", async () => {
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000098",
+      port: 19991,
+      url: "http://127.0.0.1:19991",
+      dataDir: undefined as unknown as string,
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-no-restart-");
+    const plugin = jazzSvelteKit({
+      server: { port: 19991, adminSecret: "no-restart-admin" },
+    });
+    const config = plugin.config as (
+      c: Record<string, unknown>,
+      e?: { command: "serve" | "build"; mode?: string },
+    ) => unknown;
+    await config({ root }, { command: "serve", mode: "development" });
+
     const viteServer = makeViteServer("serve", root);
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(viteServer.restart).not.toHaveBeenCalled();
+    expect(viteServer.config.env!.PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19991");
   });
 
   it("does not start a server during build", async () => {

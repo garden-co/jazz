@@ -1543,7 +1543,7 @@ fn rc_worker_accepts_local_batch_replay_payloads_from_peer() {
 // }
 
 #[test]
-fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
+fn rc_restart_accepts_stale_unrelated_family_frontier_sealed_batch_from_storage() {
     let schema = test_schema();
     let schema_hash = SchemaHash::compute(&schema);
     let batch_id = BatchId::new();
@@ -1671,18 +1671,19 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
             .storage()
             .load_authoritative_batch_fate(batch_id)
             .unwrap(),
-        Some(crate::batch_fate::BatchFate::Rejected {
+        Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
-            code: "transaction_conflict".to_string(),
-            reason: "family-visible frontier changed since batch was sealed".to_string(),
+            confirmed_tier: DurabilityTier::Local,
         })
     );
+    let visible = restarted
+        .storage()
+        .load_visible_region_row("users", target_branch.as_str(), staged_row_id)
+        .unwrap()
+        .expect("accepted sealed batch should publish staged row");
     assert_eq!(
-        restarted
-            .storage()
-            .load_visible_region_row("users", target_branch.as_str(), staged_row_id)
-            .unwrap(),
-        None
+        visible.state,
+        crate::row_histories::RowState::VisibleTransactional
     );
     assert_eq!(
         restarted
@@ -1690,7 +1691,7 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
             .scan_history_row_batches("users", staged_row_id)
             .unwrap()[0]
             .state,
-        crate::row_histories::RowState::Rejected
+        crate::row_histories::RowState::VisibleTransactional
     );
     assert_eq!(
         restarted

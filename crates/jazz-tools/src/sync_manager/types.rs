@@ -232,7 +232,7 @@ pub enum SyncError {
         object_id: ObjectId,
         branch_name: BranchName,
     },
-    /// User clients cannot write catalogue objects.
+    /// This client role cannot write catalogue objects.
     CatalogueWriteDenied {
         object_id: ObjectId,
         branch_name: BranchName,
@@ -480,7 +480,19 @@ impl SyncPayload {
 
     /// Check if this payload carries a catalogue object (schema or lens).
     pub fn is_catalogue(&self) -> bool {
-        matches!(self, SyncPayload::CatalogueEntryUpdated { entry } if entry.is_catalogue())
+        match self {
+            SyncPayload::CatalogueEntryUpdated { entry } => entry.is_catalogue(),
+            SyncPayload::RowBatchCreated { metadata, .. }
+            | SyncPayload::RowBatchNeeded { metadata, .. } => metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata
+                        .metadata
+                        .get(crate::metadata::MetadataKey::Type.as_str())
+                })
+                .is_some_and(|kind| crate::metadata::ObjectType::is_catalogue_type_str(kind)),
+            _ => false,
+        }
     }
 
     /// Check if this payload carries a structural schema catalogue object.
@@ -507,6 +519,12 @@ impl SyncPayload {
     }
 }
 
+/// Either end of a peer relationship. `Source` and `Destination` are mirror
+/// images, and both expose the same peer identity fields for telemetry.
+trait PeerEnd {
+    fn descriptor(&self) -> (&'static str, Uuid);
+}
+
 /// Destination for an outbox entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Destination {
@@ -514,11 +532,49 @@ pub enum Destination {
     Client(ClientId),
 }
 
+impl PeerEnd for Destination {
+    fn descriptor(&self) -> (&'static str, Uuid) {
+        match self {
+            Destination::Server(id) => ("server", id.0),
+            Destination::Client(id) => ("client", id.0),
+        }
+    }
+}
+
+impl Destination {
+    pub fn peer_kind(&self) -> &'static str {
+        PeerEnd::descriptor(self).0
+    }
+
+    pub fn peer_uuid(&self) -> Uuid {
+        PeerEnd::descriptor(self).1
+    }
+}
+
 /// Source of an inbox entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Source {
     Server(ServerId),
     Client(ClientId),
+}
+
+impl PeerEnd for Source {
+    fn descriptor(&self) -> (&'static str, Uuid) {
+        match self {
+            Source::Server(id) => ("server", id.0),
+            Source::Client(id) => ("client", id.0),
+        }
+    }
+}
+
+impl Source {
+    pub fn peer_kind(&self) -> &'static str {
+        PeerEnd::descriptor(self).0
+    }
+
+    pub fn peer_uuid(&self) -> Uuid {
+        PeerEnd::descriptor(self).1
+    }
 }
 
 /// Outgoing message to be sent.
@@ -579,6 +635,34 @@ pub struct PendingPermissionCheck {
 mod tests {
     use super::*;
     use crate::query_manager::session::AuthMode;
+
+    #[test]
+    fn destination_exposes_peer_identity_for_telemetry() {
+        let server_id = ServerId::new();
+        let client_id = ClientId::new();
+
+        let server = Destination::Server(server_id);
+        let client = Destination::Client(client_id);
+
+        assert_eq!(server.peer_kind(), "server");
+        assert_eq!(server.peer_uuid(), server_id.0);
+        assert_eq!(client.peer_kind(), "client");
+        assert_eq!(client.peer_uuid(), client_id.0);
+    }
+
+    #[test]
+    fn source_exposes_peer_identity_for_telemetry() {
+        let server_id = ServerId::new();
+        let client_id = ClientId::new();
+
+        let server = Source::Server(server_id);
+        let client = Source::Client(client_id);
+
+        assert_eq!(server.peer_kind(), "server");
+        assert_eq!(server.peer_uuid(), server_id.0);
+        assert_eq!(client.peer_kind(), "client");
+        assert_eq!(client.peer_uuid(), client_id.0);
+    }
 
     #[test]
     fn query_subscription_postcard_roundtrip_preserves_session_auth_mode() {

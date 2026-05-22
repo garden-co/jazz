@@ -3,6 +3,7 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 
 use crate::object::ObjectId;
+use crate::query_manager::settlement_eval_cache::SettlementEvalCache;
 use crate::query_manager::types::{LoadedRow, RowDelta, TableName, Tuple, TupleDelta};
 use crate::storage::Storage;
 use crate::sync_manager::RowBatchKey;
@@ -406,6 +407,31 @@ impl QueryGraph {
     where
         F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
+        self.settle_with_context(storage, local_overlay_rows, None, &mut row_loader)
+    }
+
+    pub(crate) fn settle_with_settlement_eval_cache<F>(
+        &mut self,
+        storage: &dyn Storage,
+        settlement_eval_cache: Option<&mut SettlementEvalCache>,
+        row_loader: F,
+    ) -> RowDelta
+    where
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    {
+        self.settle_with_context(storage, None, settlement_eval_cache, row_loader)
+    }
+
+    fn settle_with_context<F>(
+        &mut self,
+        storage: &dyn Storage,
+        local_overlay_rows: Option<&HashMap<ObjectId, RowBatchKey>>,
+        mut settlement_eval_cache: Option<&mut SettlementEvalCache>,
+        mut row_loader: F,
+    ) -> RowDelta
+    where
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {
             tracing::trace!(dirty_nodes = order.len(), table = %self.table, "settling query graph");
@@ -572,6 +598,7 @@ impl QueryGraph {
                         let delta = recursive_node.process_with_context(
                             input_delta,
                             storage,
+                            settlement_eval_cache.as_deref_mut(),
                             &mut |id, hint| row_loader(id, hint),
                         );
                         tracing::debug!(

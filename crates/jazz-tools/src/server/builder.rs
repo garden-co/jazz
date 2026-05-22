@@ -25,6 +25,7 @@ use crate::sync_manager::{Destination, DurabilityTier, SyncManager};
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -66,6 +67,7 @@ pub struct ServerBuilder {
     storage_backend: StorageBackend,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
     upstream_url: Option<String>,
+    shutdown_timeout: Duration,
 }
 
 impl ServerBuilder {
@@ -82,6 +84,7 @@ impl ServerBuilder {
             },
             sync_tracer: None,
             upstream_url: None,
+            shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         }
     }
 
@@ -102,6 +105,11 @@ impl ServerBuilder {
 
     pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
         self.upstream_url = Some(upstream_url.into());
+        self
+    }
+
+    pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = timeout;
         self
     }
 
@@ -157,6 +165,7 @@ impl ServerBuilder {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: self.sync_tracer.clone(),
+            shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 
         // Spawn periodic client state sweep (uses Weak so the task exits

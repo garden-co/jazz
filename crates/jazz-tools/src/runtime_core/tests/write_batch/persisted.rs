@@ -833,6 +833,9 @@ fn rc_add_server_requests_pending_batch_fate_reconciliation() {
 
 #[test]
 fn rc_missing_batch_fate_retransmits_original_captured_frontier() {
+    // `captured_frontier` is compatibility payload now. This test only proves
+    // old-format sealed submissions are preserved while retransmitting; it is
+    // not a transaction conflict validation contract.
     let mut s = create_3tier_rc();
     let existing_row_id = ObjectId::new();
     let later_row_id = ObjectId::new();

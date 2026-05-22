@@ -15,11 +15,13 @@ use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
 mod builder;
 mod hosted;
 pub mod routes;
+mod shutdown;
 #[cfg(feature = "test-utils")]
 mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub use hosted::HostedServer;
+pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "test-utils")]
 pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
 
@@ -182,6 +184,7 @@ pub struct ServerState {
     pub client_ttl: RwLock<Duration>,
     /// Optional sync message tracer for test observability.
     pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    pub shutdown: ShutdownController,
 }
 
 /// State for a single SSE connection.
@@ -190,6 +193,83 @@ pub struct ConnectionState {
 }
 
 impl ServerState {
+    pub async fn run_shutdown_finalization(&self) -> ShutdownPhase {
+        if !self.shutdown.try_begin_finalization() {
+            return self.shutdown.phase();
+        }
+
+        self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
+        #[cfg(feature = "transport-websocket")]
+        self.runtime.disconnect();
+
+        let mut failed = false;
+        let websockets_drained = self.shutdown.wait_for_websocket_drain().await;
+        if !websockets_drained {
+            tracing::warn!(
+                active_websockets = self.shutdown.active_websockets(),
+                "shutdown websocket drain timed out"
+            );
+            failed = true;
+        }
+
+        let app_requests_drained = self.shutdown.wait_for_app_request_drain().await;
+        if !app_requests_drained {
+            tracing::warn!(
+                active_app_requests = self.shutdown.active_app_requests(),
+                "shutdown app request drain timed out"
+            );
+            failed = true;
+        }
+
+        if failed {
+            self.shutdown.set_phase(ShutdownPhase::Failed);
+            return ShutdownPhase::Failed;
+        }
+
+        self.shutdown.set_phase(ShutdownPhase::FlushingRuntime);
+        if let Err(error) = self.runtime.flush().await {
+            tracing::error!(%error, "shutdown runtime flush failed");
+            failed = true;
+        }
+
+        self.shutdown.set_phase(ShutdownPhase::ClosingStorage);
+        let storage_result = self.runtime.with_storage(|storage| {
+            let flush_result = storage.flush();
+            let flush_wal_result = storage.flush_wal();
+            let close_result = storage.close();
+            (flush_result, flush_wal_result, close_result)
+        });
+
+        match storage_result {
+            Ok((flush_result, flush_wal_result, close_result)) => {
+                if let Err(error) = flush_result {
+                    tracing::error!(%error, "shutdown storage flush failed");
+                    failed = true;
+                }
+                if let Err(error) = flush_wal_result {
+                    tracing::error!(%error, "shutdown storage WAL flush failed");
+                    failed = true;
+                }
+                if let Err(error) = close_result {
+                    tracing::error!(%error, "shutdown storage close failed");
+                    failed = true;
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "shutdown storage lock failed");
+                failed = true;
+            }
+        }
+
+        if failed {
+            self.shutdown.set_phase(ShutdownPhase::Failed);
+            ShutdownPhase::Failed
+        } else {
+            self.shutdown.set_phase(ShutdownPhase::StorageClosed);
+            ShutdownPhase::StorageClosed
+        }
+    }
+
     /// Record that a connection closed. If this was the last SSE connection
     /// for the given client_id, add it to disconnect_candidates.
     ///
@@ -312,6 +392,10 @@ impl ServerState {
         client_id: ClientId,
         payload: &[u8],
     ) -> Result<(), String> {
+        if self.shutdown.is_shutting_down() {
+            return Err("server is shutting down".to_string());
+        }
+
         if let Ok(payload) = crate::transport_protocol::decode_outbox_entry_payload(payload) {
             let inbox = InboxEntry {
                 source: Source::Client(client_id),
@@ -345,20 +429,82 @@ impl ServerState {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
+    use crate::middleware::AuthConfig;
+    use crate::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
     use crate::schema_manager::AppId;
+    use crate::schema_manager::SchemaManager;
     use crate::server::builder::{ServerBuilder, StorageBackend};
+    use crate::storage::StorageError;
+    use crate::sync_manager::SyncManager;
+
+    struct CloseObservingStorage {
+        close_calls: Arc<AtomicUsize>,
+    }
+
+    impl Storage for CloseObservingStorage {
+        fn close(&self) -> Result<(), StorageError> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn shutdown_test_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build()
+    }
 
     async fn build_test_state() -> Arc<ServerState> {
+        build_test_state_with_shutdown_timeout(Duration::from_secs(30)).await
+    }
+
+    async fn build_test_state_with_shutdown_timeout(timeout: Duration) -> Arc<ServerState> {
         let app_id = AppId::from_name("lifecycle-test");
         let built = ServerBuilder::new(app_id)
             .with_storage(StorageBackend::InMemory)
+            .with_shutdown_timeout(timeout)
             .build()
             .await
             .expect("build test server");
         built.state
+    }
+
+    fn build_test_state_with_storage(storage: DynStorage, timeout: Duration) -> Arc<ServerState> {
+        let app_id = AppId::from_name("shutdown-storage-test");
+        let schema_manager = SchemaManager::new(
+            SyncManager::new(),
+            shutdown_test_schema(),
+            app_id,
+            "dev",
+            "main",
+        )
+        .expect("build schema manager");
+        Arc::new(ServerState {
+            runtime: TokioRuntime::new(schema_manager, storage, |_| {}),
+            app_id,
+            connections: RwLock::new(HashMap::new()),
+            next_connection_id: std::sync::atomic::AtomicU64::new(1),
+            connection_event_hub: Arc::new(ConnectionEventHub::default()),
+            auth_config: AuthConfig::default(),
+            upstream_http_url: None,
+            topology: ServerTopology::Core,
+            http_client: reqwest::Client::builder()
+                .build()
+                .expect("build HTTP client"),
+            jwt_verifier: None,
+            disconnect_candidates: RwLock::new(HashMap::new()),
+            client_ttl: RwLock::new(Duration::from_secs(300)),
+            sync_tracer: None,
+            shutdown: ShutdownController::new(timeout),
+        })
     }
 
     /// Simulate adding a connection (like events_handler does).
@@ -399,6 +545,59 @@ mod tests {
             candidates.contains_key(&alice),
             "alice should be a disconnect candidate"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_finalization_marks_failed_after_app_request_drain_timeout() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_millis(10)).await;
+        let _request_guard = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+
+        state.shutdown.request_shutdown();
+        let phase = state.run_shutdown_finalization().await;
+
+        assert_eq!(phase, ShutdownPhase::Failed);
+        assert_eq!(state.shutdown.phase(), ShutdownPhase::Failed);
+    }
+
+    #[tokio::test]
+    async fn shutdown_finalization_does_not_close_storage_when_app_requests_remain_active() {
+        let close_calls = Arc::new(AtomicUsize::new(0));
+        let state = build_test_state_with_storage(
+            Box::new(CloseObservingStorage {
+                close_calls: Arc::clone(&close_calls),
+            }),
+            Duration::from_millis(10),
+        );
+        let _request_guard = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+
+        state.shutdown.request_shutdown();
+        let phase = state.run_shutdown_finalization().await;
+
+        assert_eq!(phase, ShutdownPhase::Failed);
+        assert_eq!(
+            close_calls.load(Ordering::SeqCst),
+            0,
+            "storage must not be closed while app request guards are still active"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_frames_are_rejected_after_shutdown_is_requested() {
+        let state = build_test_state().await;
+        state.shutdown.request_shutdown();
+
+        let error = state
+            .process_ws_client_frame(ClientId::new(), b"not a sync frame")
+            .await
+            .expect_err("websocket frame should be rejected during shutdown");
+
+        assert_eq!(error, "server is shutting down");
     }
 
     #[tokio::test]

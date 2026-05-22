@@ -1007,7 +1007,7 @@ impl ColdLoadSeededDb {
                 create_rocksdb_runtime(project_board_schema(), &db_path, scenario.cache_size_bytes);
             let seeded =
                 seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
-            runtime.flush_storage();
+            runtime.flush_storage().unwrap();
             runtime.storage().close().expect("close seeded rocksdb");
             seeded
         };
@@ -1037,7 +1037,7 @@ impl ColdLoadSeededDb {
             let mut runtime = create_sqlite_runtime(project_board_schema(), &db_path);
             let seeded =
                 seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
-            runtime.flush_storage();
+            runtime.flush_storage().unwrap();
             runtime.storage().close().expect("close seeded sqlite");
             seeded
         };
@@ -2016,7 +2016,7 @@ fn realistic_r1_crud_rocksdb(c: &mut Criterion) {
                 let executed = state.run_crud_batch(scenario);
                 black_box(executed);
             });
-            state.runtime.flush_storage();
+            state.runtime.flush_storage().unwrap();
             state.runtime.storage().close().expect("close rocksdb");
         },
     );
@@ -2054,7 +2054,7 @@ fn realistic_r1_crud_sqlite(c: &mut Criterion) {
                 let executed = state.run_crud_batch(scenario);
                 black_box(executed);
             });
-            state.runtime.flush_storage();
+            state.runtime.flush_storage().unwrap();
             state.runtime.storage().close().expect("close sqlite");
         },
     );
@@ -2093,7 +2093,7 @@ fn realistic_r2_reads_rocksdb(c: &mut Criterion) {
                 let total_rows = state.run_read_batch(scenario);
                 black_box(total_rows);
             });
-            state.runtime.flush_storage();
+            state.runtime.flush_storage().unwrap();
             state.runtime.storage().close().expect("close rocksdb");
         },
     );
@@ -2131,7 +2131,7 @@ fn realistic_r2_reads_sqlite(c: &mut Criterion) {
                 let total_rows = state.run_read_batch(scenario);
                 black_box(total_rows);
             });
-            state.runtime.flush_storage();
+            state.runtime.flush_storage().unwrap();
             state.runtime.storage().close().expect("close sqlite");
         },
     );
@@ -2181,7 +2181,7 @@ fn realistic_r3_cold_load_rocksdb(c: &mut Criterion) {
                 let rows = block_on(runtime.query(query, None)).expect("cold-load query");
                 let query_elapsed = query_start.elapsed();
 
-                runtime.flush_storage();
+                runtime.flush_storage().unwrap();
                 runtime.storage().close().expect("close cold-load rocksdb");
 
                 black_box(open_elapsed);
@@ -2232,7 +2232,7 @@ fn realistic_r3_cold_load_sqlite(c: &mut Criterion) {
                 let rows = block_on(runtime.query(query, None)).expect("cold-load query");
                 let query_elapsed = query_start.elapsed();
 
-                runtime.flush_storage();
+                runtime.flush_storage().unwrap();
                 runtime.storage().close().expect("close cold-load sqlite");
 
                 black_box(open_elapsed);
@@ -2839,7 +2839,7 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
                     &seeded.branch_names,
                     &seeded.prefix,
                 );
-                storage.flush();
+                storage.flush().unwrap();
                 storage
                     .close()
                     .expect("close many-branches rocksdb storage");
@@ -2887,7 +2887,7 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
                     &seeded.branch_names,
                     &seeded.prefix,
                 );
-                storage.flush();
+                storage.flush().unwrap();
                 storage.close().expect("close many-branches sqlite storage");
                 black_box(scan);
             });
@@ -3005,7 +3005,7 @@ fn realistic_r8_many_branches_rocksdb(c: &mut Criterion) {
                 let mut storage = RocksDBStorage::open(&db_path, scenario.cache_size_bytes)
                     .expect("open rocksdb for many-branches write benchmark");
                 let dataset = build_many_branches_dataset(&mut storage, scenario);
-                storage.flush();
+                storage.flush().unwrap();
                 storage.close().expect("close many-branches rocksdb write");
                 black_box(dataset.object_id);
                 black_box(dataset.branch_names.len());
@@ -3070,7 +3070,7 @@ fn realistic_r8_many_branches_rocksdb(c: &mut Criterion) {
         },
     );
     scan_leaf_group.finish();
-    loaded_storage.flush();
+    loaded_storage.flush().unwrap();
     loaded_storage
         .close()
         .expect("close many-branches rocksdb scan storage");
@@ -3095,7 +3095,7 @@ fn realistic_r8_many_branches_rocksdb(c: &mut Criterion) {
                     &seeded.branch_names,
                     &seeded.prefix,
                 );
-                storage.flush();
+                storage.flush().unwrap();
                 storage
                     .close()
                     .expect("close many-branches rocksdb cold-load");
@@ -3138,7 +3138,7 @@ fn realistic_r8_many_branches_sqlite(c: &mut Criterion) {
                 let mut storage = SqliteStorage::open(&db_path)
                     .expect("open sqlite for many-branches write benchmark");
                 let dataset = build_many_branches_dataset(&mut storage, scenario);
-                storage.flush();
+                storage.flush().unwrap();
                 storage.close().expect("close many-branches sqlite write");
                 black_box(dataset.object_id);
                 black_box(dataset.branch_names.len());
@@ -3224,7 +3224,7 @@ fn realistic_r8_many_branches_sqlite(c: &mut Criterion) {
                     &seeded.branch_names,
                     &seeded.prefix,
                 );
-                storage.flush();
+                storage.flush().unwrap();
                 storage
                     .close()
                     .expect("close many-branches sqlite cold-load");
@@ -3431,7 +3431,7 @@ impl ManyBranchesSeededDb {
         let mut storage = RocksDBStorage::open(&db_path, scenario.cache_size_bytes)
             .expect("open rocksdb for many-branches seed");
         let dataset = build_many_branches_dataset(&mut storage, scenario);
-        storage.flush();
+        storage.flush().unwrap();
         storage
             .close()
             .expect("close seeded many-branches rocksdb storage");
@@ -3455,7 +3455,7 @@ impl ManyBranchesSeededDb {
         let mut storage =
             SqliteStorage::open(&db_path).expect("open sqlite for many-branches seed");
         let dataset = build_many_branches_dataset(&mut storage, scenario);
-        storage.flush();
+        storage.flush().unwrap();
         storage
             .close()
             .expect("close seeded many-branches sqlite storage");
@@ -3966,7 +3966,7 @@ fn workspace_path(path: &str) -> PathBuf {
 }
 
 fn flush_and_close_runtime<S: Storage>(runtime: &mut BenchRuntime<S>) {
-    runtime.flush_storage();
+    runtime.flush_storage().unwrap();
     runtime.storage().close().expect("close benchmark storage");
 }
 

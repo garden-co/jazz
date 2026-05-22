@@ -1,7 +1,7 @@
 ---
 title: Permissions
 description: Jazz's approach to row-level security using relationship-based access controls, and how to build policies of varying complexity.
-reviewedAt: "f6535a533"
+reviewedAt: "2e983ef11"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -166,6 +166,21 @@ schema, and they are omitted from `select("*")`, so opt in explicitly when you w
   <Tab value="Rust">
     <include cwd lang="rs">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-magic-columns-rust
+    </include>
+  </Tab>
+</Tabs>
+
+Permission columns work the same way inside `include(...)` subqueries: the booleans are evaluated **per row**, against the policy on the included table, not inherited from the parent. A query that loads a project with its todos can ask whether the current session can edit each individual todo, driving per-row UI affordances like edit buttons or delete confirmations without mirroring your permission policy on the client.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-magic-columns-include-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-magic-columns-include-rust
     </include>
   </Tab>
 </Tabs>

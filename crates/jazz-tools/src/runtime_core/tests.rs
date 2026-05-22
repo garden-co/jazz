@@ -502,12 +502,12 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.index_scan_all(table, column, branch)
     }
 
-    fn flush(&self) {
-        self.inner.flush();
+    fn flush(&self) -> Result<(), StorageError> {
+        self.inner.flush()
     }
 
-    fn flush_wal(&self) {
-        self.inner.flush_wal();
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        self.inner.flush_wal()
     }
 
     fn close(&self) -> Result<(), StorageError> {
@@ -895,12 +895,12 @@ impl Storage for LegacyPersistenceObservingStorage {
         self.inner.index_scan_all(table, column, branch)
     }
 
-    fn flush(&self) {
-        self.inner.flush();
+    fn flush(&self) -> Result<(), StorageError> {
+        self.inner.flush()
     }
 
-    fn flush_wal(&self) {
-        self.inner.flush_wal();
+    fn flush_wal(&self) -> Result<(), StorageError> {
+        self.inner.flush_wal()
     }
 
     fn close(&self) -> Result<(), StorageError> {
@@ -1313,13 +1313,13 @@ impl Storage for RowMutationObservingStorage {
         self.inner.index_scan_all(table, column, branch)
     }
 
-    fn flush(&self) {
-        self.inner.flush();
+    fn flush(&self) -> Result<(), StorageError> {
+        self.inner.flush()
     }
 
-    fn flush_wal(&self) {
+    fn flush_wal(&self) -> Result<(), StorageError> {
         self.calls.lock().unwrap().flush_wal_calls += 1;
-        self.inner.flush_wal();
+        self.inner.flush_wal()
     }
 
     fn close(&self) -> Result<(), StorageError> {
@@ -1743,10 +1743,13 @@ fn pump_client_messages_to_server(
     server: &mut TestCore,
     server_id: ServerId,
     client_id: ClientId,
-) {
+) -> bool {
+    let mut any_messages = false;
+
     client.batched_tick();
     for entry in client.sync_sender().take() {
         if entry.destination == Destination::Server(server_id) {
+            any_messages = true;
             server.park_sync_message(InboxEntry {
                 source: Source::Client(client_id),
                 payload: entry.payload,
@@ -1755,95 +1758,71 @@ fn pump_client_messages_to_server(
     }
     server.batched_tick();
     server.immediate_tick();
+
+    any_messages
 }
 
-#[allow(clippy::too_many_arguments)]
-fn pump_server_with_three_clients(
+struct ClientForServer<'a> {
+    core: &'a mut TestCore,
+    server_id: ServerId,
+    client_id: ClientId,
+}
+
+fn pump_server_messages_to_clients(
     server: &mut TestCore,
-    writer: &mut TestCore,
-    writer_server_id: ServerId,
-    writer_client_id: ClientId,
-    alice_reader: &mut TestCore,
-    alice_reader_server_id: ServerId,
-    alice_reader_client_id: ClientId,
-    bob_reader: &mut TestCore,
-    bob_reader_server_id: ServerId,
-    bob_reader_client_id: ClientId,
+    clients: &mut [ClientForServer<'_>],
+    server_outputs: &mut Vec<OutboxEntry>,
+) -> bool {
+    let mut any_messages = false;
+
+    server.batched_tick();
+
+    let server_out = server.sync_sender().take();
+    server_outputs.extend(server_out.iter().cloned());
+    for entry in server_out {
+        let Destination::Client(destination_client_id) = entry.destination else {
+            continue;
+        };
+
+        if let Some(client) = clients
+            .iter_mut()
+            .find(|client| client.client_id == destination_client_id)
+        {
+            any_messages = true;
+            client.core.park_sync_message(InboxEntry {
+                source: Source::Server(client.server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    any_messages
+}
+
+fn sync_server_with_clients(
+    server: &mut TestCore,
+    clients: &mut [ClientForServer<'_>],
 ) -> Vec<OutboxEntry> {
     let mut server_outputs = Vec::new();
 
     for _ in 0..10 {
         let mut any_messages = false;
 
-        writer.batched_tick();
-        for entry in writer.sync_sender().take() {
-            if entry.destination == Destination::Server(writer_server_id) {
-                any_messages = true;
-                server.park_sync_message(InboxEntry {
-                    source: Source::Client(writer_client_id),
-                    payload: entry.payload,
-                });
-            }
+        for client in clients.iter_mut() {
+            any_messages |= pump_client_messages_to_server(
+                client.core,
+                server,
+                client.server_id,
+                client.client_id,
+            );
         }
 
-        alice_reader.batched_tick();
-        for entry in alice_reader.sync_sender().take() {
-            if entry.destination == Destination::Server(alice_reader_server_id) {
-                any_messages = true;
-                server.park_sync_message(InboxEntry {
-                    source: Source::Client(alice_reader_client_id),
-                    payload: entry.payload,
-                });
-            }
-        }
+        any_messages |= pump_server_messages_to_clients(server, clients, &mut server_outputs);
 
-        bob_reader.batched_tick();
-        for entry in bob_reader.sync_sender().take() {
-            if entry.destination == Destination::Server(bob_reader_server_id) {
-                any_messages = true;
-                server.park_sync_message(InboxEntry {
-                    source: Source::Client(bob_reader_client_id),
-                    payload: entry.payload,
-                });
-            }
+        for client in clients.iter_mut() {
+            client.core.batched_tick();
+            client.core.immediate_tick();
         }
-
-        server.batched_tick();
-        let server_out = server.sync_sender().take();
-        server_outputs.extend(server_out.iter().cloned());
-        for entry in server_out {
-            match entry.destination {
-                Destination::Client(client_id) if client_id == writer_client_id => {
-                    any_messages = true;
-                    writer.park_sync_message(InboxEntry {
-                        source: Source::Server(writer_server_id),
-                        payload: entry.payload,
-                    });
-                }
-                Destination::Client(client_id) if client_id == alice_reader_client_id => {
-                    any_messages = true;
-                    alice_reader.park_sync_message(InboxEntry {
-                        source: Source::Server(alice_reader_server_id),
-                        payload: entry.payload,
-                    });
-                }
-                Destination::Client(client_id) if client_id == bob_reader_client_id => {
-                    any_messages = true;
-                    bob_reader.park_sync_message(InboxEntry {
-                        source: Source::Server(bob_reader_server_id),
-                        payload: entry.payload,
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        writer.batched_tick();
-        writer.immediate_tick();
-        alice_reader.batched_tick();
-        alice_reader.immediate_tick();
-        bob_reader.batched_tick();
-        bob_reader.immediate_tick();
 
         if !any_messages {
             break;

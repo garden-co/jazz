@@ -170,3 +170,7 @@ required-features = ["rocksdb", "test"]
 [[test]]
 name = "sqlite_storage_integration"
 required-features = ["sqlite", "test"]
+
+[[test]]
+name = "sync_telemetry_otel"
+required-features = ["test", "otel-core"]

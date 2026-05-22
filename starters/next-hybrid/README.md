@@ -47,9 +47,9 @@ lib/auth-client.ts                  ← Better Auth React client
 ## How it works
 
 `JazzProvider` in `components/jazz-provider.tsx` watches the Better Auth session via
-`authClient.useSession()`. When there is no session, it calls
-`BrowserAuthSecretStore.getOrCreateSecret()` and passes the secret to
-`<JazzProvider>` as `secret`. When a session exists, it
+`authClient.useSession()`. When there is no session, it reads `secret`
+from `useLocalFirstAuth()` (a React hook from `jazz-tools/react`) and
+passes it to `<JazzProvider>` as `secret`. When a session exists, it
 fetches a Better Auth JWT and passes it to `<JazzProvider>` as
 `jwtToken` instead.
 
