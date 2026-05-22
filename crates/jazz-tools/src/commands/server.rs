@@ -25,11 +25,15 @@ pub async fn run(
     let app_id_string = app_id.to_string();
     let admin_secret = auth_config.admin_secret.clone();
 
-    info!("Starting Jazz server for app: {}", app_id);
-    if in_memory {
-        info!("Storage mode: in-memory");
-    } else {
-        info!("Data directory: {}", data_dir);
+    {
+        let startup_span = tracing::info_span!("server_startup", app_id = %app_id);
+        let _guard = startup_span.enter();
+        info!("Starting Jazz server for app: {}", app_id);
+        if in_memory {
+            info!("Storage mode: in-memory");
+        } else {
+            info!("Data directory: {}", data_dir);
+        }
     }
 
     let builder = ServerBuilder::new(app_id)
