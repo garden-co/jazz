@@ -4,13 +4,11 @@ import type { JazzContext } from "jazz-tools/backend";
 // #region invite-schema
 const schema = {
   chats: s.table({
-    isPublic: s.boolean(),
-    createdBy: s.string(),
     joinCode: s.string().optional(),
   }),
   chatMembers: s.table({
     chatId: s.ref("chats"),
-    userId: s.string(),
+    user_id: s.string(),
     joinCode: s.string().optional(),
   }),
 };
@@ -18,22 +16,21 @@ const schema = {
 
 type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
-export const claimsApp: s.App<AppSchema> = s.defineApp(schema);
 
 // #region invite-permissions
 s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   policy.chats.allowRead.where((chat) =>
-    policy.chatMembers.exists.where({ chatId: chat.id, userId: session.user_id }),
+    policy.chatMembers.exists.where({ chatId: chat.id, user_id: session.user_id }),
   );
-  policy.chats.allowInsert.where({ createdBy: session.user_id });
+  policy.chats.allowInsert.always();
 
   // Users can read their own membership row; chat creators can read every
   // member of their chats. Explicit because the row carries the join code,
   // and we don't want it leaking through other members' rows.
   policy.chatMembers.allowRead.where((member) =>
     anyOf([
-      { userId: session.user_id },
-      policy.chats.exists.where({ id: member.chatId, createdBy: session.user_id }),
+      { user_id: session.user_id },
+      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user_id }),
     ]),
   );
 
@@ -42,51 +39,20 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   // privileges.
   policy.chatMembers.allowInsert.where((member) =>
     allOf([
-      { userId: session.user_id },
-      policy.chats.exists.where({ id: member.chatId, createdBy: session.user_id }),
+      { user_id: session.user_id },
+      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user_id }),
     ]),
   );
 
   // Users can leave; chat creators can remove any member.
   policy.chatMembers.allowDelete.where((member) =>
     anyOf([
-      { userId: session.user_id },
-      policy.chats.exists.where({ id: member.chatId, createdBy: session.user_id }),
+      { user_id: session.user_id },
+      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user_id }),
     ]),
   );
 });
 // #endregion invite-permissions
-
-// #region invite-permissions-jwt-claim
-s.definePermissions(claimsApp, ({ policy, allOf, anyOf, session }) => {
-  policy.chats.allowRead.where((chat) =>
-    anyOf([
-      policy.chatMembers.exists.where({ chatId: chat.id, userId: session.user_id }),
-      { joinCode: session["claims.join_code"] },
-    ]),
-  );
-
-  policy.chatMembers.allowRead.where((member) =>
-    anyOf([
-      { userId: session.user_id },
-      policy.chats.exists.where({ id: member.chatId, createdBy: session.user_id }),
-    ]),
-  );
-
-  policy.chatMembers.allowInsert.where((member) =>
-    allOf([
-      { userId: session.user_id },
-      anyOf([
-        policy.chats.exists.where({ id: member.chatId, createdBy: session.user_id }),
-        policy.chats.exists.where({
-          id: member.chatId,
-          joinCode: session["claims.join_code"],
-        }),
-      ]),
-    ]),
-  );
-});
-// #endregion invite-permissions-jwt-claim
 
 declare const context: JazzContext;
 
@@ -107,7 +73,7 @@ export async function POST(req: AuthenticatedRequest): Promise<Response> {
 
   await context
     .withAttribution(userId, app)
-    .insert(app.chatMembers, { chatId, userId, joinCode: code })
+    .insert(app.chatMembers, { chatId, user_id: userId, joinCode: code })
     .wait({ tier: "edge" });
 
   return Response.json({ ok: true });
