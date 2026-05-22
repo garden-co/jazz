@@ -125,6 +125,13 @@ const DIAGRAM_STYLES_CSS = `
 .dg-node-action:hover {
   background: var(--diagram-accent-soft);
 }
+.dg-node-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.dg-node-action:disabled:hover {
+  background: var(--diagram-card);
+}
 
 /* Shared diagram frame chrome. */
 .dg-frame {
