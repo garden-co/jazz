@@ -405,7 +405,7 @@ fn should_allow_unprivileged_schema_catalogue_writes(env: &str) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-const DEFAULT_OPFS_CACHE_SIZE: usize = 64 * 1024 * 1024;
+const DEFAULT_OPFS_CACHE_SIZE: usize = 96 * 1024 * 1024;
 
 /// Build a `SchemaManager` from raw inputs. Shared by `open_persistent` and `open_ephemeral`.
 #[cfg(target_arch = "wasm32")]
