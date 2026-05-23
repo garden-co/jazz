@@ -96,6 +96,7 @@ pub struct OpfsBTree<F: SyncFile> {
     active: Superblock,
     root_page_id: Option<PageId>,
     total_pages: u64,
+    persisted_pages: u64,
     pages: OpfsMap<PageId, Vec<u8>>,
     blob_pages: OpfsSet<PageId>,
     page_access_epoch: OpfsMap<PageId, u64>,
@@ -189,6 +190,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         let a = read_slot(&file, SuperblockSlot::A, options.page_size)?;
         let b = read_slot(&file, SuperblockSlot::B, options.page_size)?;
         let file_len = file.len()?;
+        let persisted_pages = file_len / options.page_size as u64;
 
         let (active_slot, active) = choose_active(a, b).unwrap_or((
             SuperblockSlot::A,
@@ -202,6 +204,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             active,
             root_page_id: None,
             total_pages: 2,
+            persisted_pages,
             pages: OpfsMap::default(),
             blob_pages: OpfsSet::default(),
             page_access_epoch: OpfsMap::default(),
@@ -227,6 +230,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             tree.active_slot = SuperblockSlot::A;
             tree.active = bootstrap;
             tree.total_pages = 2;
+            tree.persisted_pages = 2;
             return Ok(tree);
         }
 
@@ -454,6 +458,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             freelist_head_page_id,
             self.total_pages,
         )?;
+        self.persisted_pages = self.total_pages;
         let superblock_us = elapsed_us(superblock_started_at);
         self.dirty_pages.clear();
         let evict_started_at = now_us();
@@ -1274,8 +1279,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             )));
         }
 
-        let file_pages = self.file.len()? / self.options.page_size as u64;
-        let readable_pages = self.total_pages.min(file_pages);
+        let readable_pages = self.total_pages.min(self.persisted_pages);
         if page_id >= readable_pages {
             return Err(BTreeError::Corrupt(format!(
                 "page id {} out of bounds for persisted pages {}",
@@ -1345,8 +1349,9 @@ impl<F: SyncFile> OpfsBTree<F> {
             .total_pages
             .checked_mul(self.options.page_size as u64)
             .ok_or_else(|| BTreeError::Io("file size overflow".to_string()))?;
-        if self.file.len()? < required_len {
+        if self.persisted_pages < self.total_pages {
             self.file.truncate(required_len)?;
+            self.persisted_pages = self.total_pages;
             stats.truncated_file = true;
         }
 

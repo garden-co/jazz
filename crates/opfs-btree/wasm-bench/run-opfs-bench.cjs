@@ -110,8 +110,8 @@ function parseArgs(argv) {
 
     if (arg === "--profile") {
       const next = String(argv[i + 1] || "").trim();
-      if (!["basic", "mixed", "range", "all"].includes(next)) {
-        throw new Error("`--profile` must be one of: basic, mixed, range, all");
+      if (!["basic", "mixed", "range", "app", "all"].includes(next)) {
+        throw new Error("`--profile` must be one of: basic, mixed, range, app, all");
       }
       out.profile = next;
       i += 1;
@@ -245,6 +245,7 @@ import init, {
   bench_opfs_mixed_scenario,
   bench_opfs_range_seq_window,
   bench_opfs_range_random_window,
+  bench_opfs_app_parent_child_load,
   bench_set_cache_bytes,
   bench_set_overflow_threshold_bytes,
   bench_set_pin_internal_pages,
@@ -349,6 +350,22 @@ async function runRequest(payload) {
           });
           self.postMessage({ type: "result", result: withName });
         }
+      }
+
+      if (profile === "app" || profile === "all") {
+        const startedAt = performance.now();
+        self.postMessage({ type: "progress", event: "start", operation: "app_parent_child_load", value_size: valueSize });
+        const result = await bench_opfs_app_parent_child_load(count, valueSize);
+        out.push(result);
+        self.postMessage({
+          type: "progress",
+          event: "end",
+          operation: "app_parent_child_load",
+          value_size: valueSize,
+          elapsed_ms: performance.now() - startedAt,
+          phase_times_ms: result.phase_times_ms || []
+        });
+        self.postMessage({ type: "result", result });
       }
 
       if (includeColdRead) {

@@ -70,6 +70,7 @@ const DEFAULT_PIN_INTERNAL_PAGES: bool = true;
 const DEFAULT_READ_COALESCE_PAGES: usize = 4;
 const RANGE_WINDOW_KEYS: usize = 128;
 const RANGE_RESULT_LIMIT: usize = 64;
+const APP_PARENT_KEYS: usize = 30;
 
 thread_local! {
     static BENCH_CACHE_BYTES: Cell<usize> = const { Cell::new(DEFAULT_BENCH_CACHE_BYTES) };
@@ -132,6 +133,18 @@ fn value(size: usize, seed: u8) -> Vec<u8> {
         *byte = seed.wrapping_add((i % 251) as u8);
     }
     out
+}
+
+fn app_parent_key(parent_idx: usize) -> Vec<u8> {
+    format!("dropdowns:p{parent_idx:02}").into_bytes()
+}
+
+fn app_child_key(parent_idx: usize, child_idx: usize) -> Vec<u8> {
+    format!("dropdown_entry:p{parent_idx:02}:{child_idx:08}").into_bytes()
+}
+
+fn app_child_end_key(parent_idx: usize) -> Vec<u8> {
+    format!("dropdown_entry:p{parent_idx:02}:~").into_bytes()
 }
 
 fn shuffled_indices(n: usize, seed: u64) -> Vec<usize> {
@@ -946,6 +959,137 @@ async fn run_range_scan(
     })
 }
 
+async fn run_app_parent_child_load(
+    count: u32,
+    value_size: u32,
+) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
+    let mut phase_times_ms = Vec::new();
+    let wall_start = high_res_now_ms();
+    let namespace = unique_namespace("app-parent-child-load");
+    let phase_start = high_res_now_ms();
+    OpfsFile::destroy(&namespace)
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
+
+    let phase_start = high_res_now_ms();
+    let mut db = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "open_db", phase_start);
+
+    let size = value_size as usize;
+    let child_count = count as usize;
+    let children_per_parent = child_count.div_ceil(APP_PARENT_KEYS).max(1);
+    let seed = derive_seed(DEFAULT_BASE_SEED, "app_parent_child_load", value_size);
+
+    let parent_put_start = high_res_now_ms();
+    for parent_idx in 0..APP_PARENT_KEYS {
+        let k = app_parent_key(parent_idx);
+        let v = value(size.clamp(32, 512), parent_idx as u8);
+        db.put(&k, &v)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    }
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_parent_put_loop",
+        parent_put_start,
+    );
+
+    let child_put_start = high_res_now_ms();
+    for child_idx in 0..child_count {
+        let parent_idx = child_idx % APP_PARENT_KEYS;
+        let per_parent_idx = child_idx / APP_PARENT_KEYS;
+        let k = app_child_key(parent_idx, per_parent_idx);
+        let v = value(size, (child_idx % 251) as u8);
+        db.put(&k, &v)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    }
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_child_put_loop",
+        child_put_start,
+    );
+
+    let prefill_checkpoint_start = high_res_now_ms();
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_checkpoint",
+        prefill_checkpoint_start,
+    );
+    drop(db);
+
+    let reopen_start = high_res_now_ms();
+    let mut db = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "cold_reopen_db", reopen_start);
+
+    let io_start = opfs_io_counters_snapshot();
+    let load_start = high_res_now_ms();
+    let mut checksum = seed;
+    let mut rows_read = 0u32;
+    let mut read_hits = 0u32;
+    let mut read_misses = 0u32;
+
+    for parent_idx in 0..APP_PARENT_KEYS {
+        let parent = db
+            .get(&app_parent_key(parent_idx))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if let Some(parent_value) = parent {
+            read_hits = read_hits.saturating_add(1);
+            checksum = checksum.wrapping_add(parent_value[0] as u64);
+        } else {
+            read_misses = read_misses.saturating_add(1);
+        }
+
+        let start = app_child_key(parent_idx, 0);
+        let end = app_child_end_key(parent_idx);
+        let rows = db
+            .range(&start, &end, children_per_parent + 1)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if rows.is_empty() {
+            read_misses = read_misses.saturating_add(1);
+        } else {
+            read_hits = read_hits.saturating_add(1);
+            rows_read = rows_read.saturating_add(rows.len() as u32);
+            checksum = checksum.wrapping_add(rows.len() as u64);
+            for (_, value) in rows {
+                checksum = checksum.wrapping_add(value[0] as u64);
+            }
+        }
+    }
+    push_phase(&mut phase_times_ms, "cold_parent_child_load", load_start);
+    let elapsed_ms = high_res_now_ms() - load_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
+
+    drop(db);
+    let phase_start = high_res_now_ms();
+    OpfsFile::destroy(&namespace)
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
+    let wall_elapsed_ms = high_res_now_ms() - wall_start;
+
+    Ok(BenchmarkResult {
+        operation: "app_parent_child_load".to_string(),
+        value_size,
+        count,
+        seed,
+        wall_elapsed_ms,
+        elapsed_ms,
+        ops_per_sec: (rows_read as f64) / (elapsed_ms / 1000.0),
+        p95_op_ms: 0.0,
+        reads: rows_read.saturating_add(APP_PARENT_KEYS as u32),
+        read_hits,
+        read_misses,
+        writes: count.saturating_add(APP_PARENT_KEYS as u32),
+        deletes: 0,
+        checksum,
+        phase_times_ms,
+        opfs_io_counters,
+    })
+}
+
 #[wasm_bindgen]
 pub async fn bench_opfs_sequential_write(count: u32, value_size: u32) -> Result<JsValue, JsValue> {
     to_js_value(&run_seq_write(count, value_size).await?)
@@ -1088,6 +1232,14 @@ pub async fn bench_opfs_range_random_window(
     value_size: u32,
 ) -> Result<JsValue, JsValue> {
     to_js_value(&run_range_random_window(count, value_size).await?)
+}
+
+#[wasm_bindgen]
+pub async fn bench_opfs_app_parent_child_load(
+    count: u32,
+    value_size: u32,
+) -> Result<JsValue, JsValue> {
+    to_js_value(&run_app_parent_child_load(count, value_size).await?)
 }
 
 #[wasm_bindgen]
