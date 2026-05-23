@@ -2362,6 +2362,12 @@ fn write_checkpoint_run_with_retry<F: SyncFile>(
             let page_count = buf.len() / page_size;
             let left_pages = page_count / 2;
             let left_bytes = left_pages * page_size;
+            tracing::warn!(
+                bytes = buf.len(),
+                page_count,
+                left_bytes,
+                "jazz perf opfs checkpoint write split after browser failure"
+            );
             let right_offset = offset.checked_add(left_bytes as u64).ok_or_else(|| {
                 BTreeError::Io("checkpoint split write offset overflow".to_string())
             })?;
