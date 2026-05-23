@@ -13,7 +13,7 @@ use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowBytes, RowDes
 use crate::row_format::{
     CompiledRowLayout, EncodingError, column_bytes_with_layout, column_is_null_with_layout,
     compiled_row_layout, decode_row, encode_row_with_prefix_and_projected_tail,
-    project_row_with_layout,
+    project_row_tail_with_layout,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -250,15 +250,21 @@ pub(crate) struct FlatRowCodecs {
     user_layout: Arc<CompiledRowLayout>,
     history_descriptor: Arc<RowDescriptor>,
     history_layout: Arc<CompiledRowLayout>,
-    history_user_projection: Vec<(usize, usize)>,
+    history_user_start_column: usize,
     visible_descriptor: Arc<RowDescriptor>,
     visible_layout: Arc<CompiledRowLayout>,
-    visible_user_projection: Vec<(usize, usize)>,
+    visible_user_start_column: usize,
 }
 
 fn flat_row_codecs_cache() -> &'static Mutex<HashMap<[u8; 32], Arc<FlatRowCodecs>>> {
     static CACHE: OnceLock<Mutex<HashMap<[u8; 32], Arc<FlatRowCodecs>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(super) struct UserTailProjection<'a> {
+    descriptor: &'a RowDescriptor,
+    layout: &'a CompiledRowLayout,
+    start_column: usize,
 }
 
 pub(crate) fn flat_row_codecs(user_descriptor: &RowDescriptor) -> Arc<FlatRowCodecs> {
@@ -277,20 +283,15 @@ pub(crate) fn flat_row_codecs(user_descriptor: &RowDescriptor) -> Arc<FlatRowCod
     let visible_descriptor = Arc::new(visible_row_physical_descriptor(user_descriptor.as_ref()));
     let history_system_count = HISTORY_ROW_SYSTEM_COLUMN_COUNT;
     let visible_system_count = VISIBLE_ROW_SYSTEM_COLUMN_COUNT;
-    let user_projection_len = user_descriptor.columns.len();
     let codecs = Arc::new(FlatRowCodecs {
         user_descriptor: user_descriptor.clone(),
         user_layout: compiled_row_layout(user_descriptor.as_ref()),
         history_layout: compiled_row_layout(history_descriptor.as_ref()),
         history_descriptor,
-        history_user_projection: (0..user_projection_len)
-            .map(|index| (history_system_count + index, index))
-            .collect(),
+        history_user_start_column: history_system_count,
         visible_layout: compiled_row_layout(visible_descriptor.as_ref()),
         visible_descriptor,
-        visible_user_projection: (0..user_projection_len)
-            .map(|index| (visible_system_count + index, index))
-            .collect(),
+        visible_user_start_column: visible_system_count,
     });
 
     flat_row_codecs_cache()
@@ -717,8 +718,7 @@ fn decode_metadata_bytes(bytes: Option<&[u8]>) -> Result<RowMetadata, EncodingEr
 pub(super) fn project_user_row_data_from_physical(
     physical_descriptor: &RowDescriptor,
     physical_layout: &CompiledRowLayout,
-    user_descriptor: &RowDescriptor,
-    projection: &[(usize, usize)],
+    user_projection: UserTailProjection<'_>,
     data: &[u8],
     delete_kind: Option<DeleteKind>,
     is_deleted: bool,
@@ -727,24 +727,31 @@ pub(super) fn project_user_row_data_from_physical(
         return Ok(Vec::new());
     }
 
-    let all_user_columns_null = projection
-        .iter()
-        .try_fold(true, |all_null, (src_index, _)| {
+    let all_user_columns_null = (0..user_projection.descriptor.columns.len()).try_fold(
+        true,
+        |all_null, user_col_index| {
             if !all_null {
                 return Ok(false);
             }
-            column_is_null_with_layout(physical_descriptor, physical_layout, data, *src_index)
-        })?;
+            column_is_null_with_layout(
+                physical_descriptor,
+                physical_layout,
+                data,
+                user_projection.start_column + user_col_index,
+            )
+        },
+    )?;
     if is_deleted && all_user_columns_null {
         return Ok(Vec::new());
     }
 
-    project_row_with_layout(
+    project_row_tail_with_layout(
         physical_descriptor,
         physical_layout,
         data,
-        user_descriptor,
-        projection,
+        user_projection.descriptor,
+        user_projection.layout,
+        user_projection.start_column,
     )
 }
 
@@ -766,8 +773,11 @@ pub(crate) fn decode_flat_history_row_with_codecs(
     let user_data = project_user_row_data_from_physical(
         descriptor,
         layout,
-        codecs.user_descriptor.as_ref(),
-        &codecs.history_user_projection,
+        UserTailProjection {
+            descriptor: codecs.user_descriptor.as_ref(),
+            layout: codecs.user_layout.as_ref(),
+            start_column: codecs.history_user_start_column,
+        },
         data,
         delete_kind,
         is_deleted,
@@ -863,8 +873,11 @@ pub(crate) fn decode_flat_visible_row_entry_with_codecs(
         data: project_user_row_data_from_physical(
             descriptor,
             layout,
-            codecs.user_descriptor.as_ref(),
-            &codecs.visible_user_projection,
+            UserTailProjection {
+                descriptor: codecs.user_descriptor.as_ref(),
+                layout: codecs.user_layout.as_ref(),
+                start_column: codecs.visible_user_start_column,
+            },
             data,
             delete_kind,
             is_deleted,
