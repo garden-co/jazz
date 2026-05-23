@@ -193,50 +193,15 @@ impl OpfsBTreeStorage {
         self.with_tree_mut(|tree| tree.delete(key.as_bytes()).map_err(map_storage_err))
     }
 
-    fn tree_scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+    fn tree_scan_prefix_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         let start = prefix.as_bytes();
         let mut end = start.to_vec();
         increment_bytes(&mut end);
-        self.tree_scan_range_bytes(start, &end)
-    }
-
-    fn tree_scan_range(
-        &self,
-        start: &str,
-        end: &str,
-    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
-        self.tree_scan_range_bytes(start.as_bytes(), end.as_bytes())
-    }
-
-    fn tree_scan_prefix_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        Ok(self
-            .tree_scan_prefix(prefix)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect())
+        self.tree_scan_range_key_bytes(start, &end)
     }
 
     fn tree_scan_range_keys(&self, start: &str, end: &str) -> Result<Vec<String>, StorageError> {
-        Ok(self
-            .tree_scan_range(start, end)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect())
-    }
-
-    fn tree_scan_range_bytes(
-        &self,
-        start: &[u8],
-        end: &[u8],
-    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
-        self.tree_scan_range_raw(start, end)?
-            .into_iter()
-            .map(|(key, value)| {
-                let key = String::from_utf8(key)
-                    .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e)))?;
-                Ok((key, value))
-            })
-            .collect()
+        self.tree_scan_range_key_bytes(start.as_bytes(), end.as_bytes())
     }
 
     fn tree_scan_range_raw(&self, start: &[u8], end: &[u8]) -> Result<RawTreeRows, StorageError> {
@@ -245,6 +210,27 @@ impl OpfsBTreeStorage {
         }
 
         self.with_tree_mut(|tree| tree.range(start, end, usize::MAX).map_err(map_storage_err))
+    }
+
+    fn tree_scan_range_key_bytes(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<String>, StorageError> {
+        if start >= end {
+            return Ok(Vec::new());
+        }
+
+        self.with_tree_mut(|tree| {
+            tree.range_keys(start, end, usize::MAX)
+                .map_err(map_storage_err)
+        })?
+        .into_iter()
+        .map(|key| {
+            String::from_utf8(key)
+                .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e)))
+        })
+        .collect()
     }
 
     fn raw_table_scan_range_bytes(

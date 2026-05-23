@@ -459,6 +459,53 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(out)
     }
 
+    pub fn range_keys(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, BTreeError> {
+        let _span = tracing::trace_span!("OpfsBTree::range_keys", limit).entered();
+        if limit == 0 || start >= end {
+            return Ok(Vec::new());
+        }
+
+        let mut out = Vec::new();
+        let mut current = self.find_leaf_page_id(start)?;
+        let mut visited = OpfsSet::default();
+
+        while let Some(page_id) = current {
+            if !visited.insert(page_id) {
+                return Err(BTreeError::Corrupt(
+                    "leaf chain contains a cycle".to_string(),
+                ));
+            }
+
+            self.ensure_page_loaded(page_id)?;
+            let remaining = limit.saturating_sub(out.len());
+            let raw = self.raw_page_bytes(page_id)?;
+            let next = raw_leaf_scan(
+                raw,
+                self.options.page_size,
+                start,
+                end,
+                remaining,
+                |key, _| {
+                    out.push(key.to_vec());
+                    Ok(())
+                },
+            )?;
+
+            if out.len() == limit {
+                return Ok(out);
+            }
+
+            current = next;
+        }
+
+        Ok(out)
+    }
+
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
         let checkpoint_started_at = now_us();
         self.perf.checkpoints = self.perf.checkpoints.saturating_add(1);
@@ -2547,6 +2594,10 @@ mod tests {
                 (b"b".to_vec(), b"20".to_vec()),
                 (b"c".to_vec(), b"3".to_vec()),
             ]
+        );
+        assert_eq!(
+            tree.range_keys(b"a", b"d", 10).expect("range keys a..d"),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
         );
 
         tree.delete(b"b").expect("delete b");
