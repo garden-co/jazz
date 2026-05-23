@@ -23,6 +23,7 @@ const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
 const CACHE_EVICTION_ALLOWANCE_DIVISOR: usize = 4;
 const CHECKPOINT_WRITE_COALESCE_GAP_PAGES: u64 = 2;
+const MAX_CHECKPOINT_WRITE_RUN_BYTES: usize = 32 * 1024 * 1024;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
@@ -568,7 +569,34 @@ impl<F: SyncFile> OpfsBTree<F> {
                     if value.len() <= self.options.overflow_threshold {
                         (ValueCell::Inline(value.to_vec()), None)
                     } else if value.len() < OVERFLOW_REUSE_MIN_BYTES {
-                        (self.build_value_cell(value)?, None)
+                        let existing_overflow = {
+                            let existing_value_lookup_started_at = now_us();
+                            let raw = self.raw_page_bytes(page_id)?;
+                            let existing_value =
+                                match raw_leaf_find_value(raw, self.options.page_size, key)? {
+                                    Some(ValueCellRef::Overflow {
+                                        head_page_id,
+                                        total_len,
+                                    }) => Some(OverflowRef {
+                                        head_page_id,
+                                        total_len,
+                                    }),
+                                    _ => None,
+                                };
+                            self.perf.existing_value_lookup_us = self
+                                .perf
+                                .existing_value_lookup_us
+                                .saturating_add(elapsed_us(existing_value_lookup_started_at));
+                            existing_value
+                        };
+                        if existing_overflow.is_some() {
+                            // Medium overflow updates usually arrive in key order during sync.
+                            // Appending replacement extents keeps checkpoint writes contiguous
+                            // instead of recycling scattered old extents from the same batch.
+                            (self.build_value_cell_at_tail(value)?, None)
+                        } else {
+                            (self.build_value_cell(value)?, None)
+                        }
                     } else {
                         let existing_overflow = {
                             let existing_value_lookup_started_at = now_us();
@@ -1110,6 +1138,36 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok((self.build_value_cell(value)?, None))
     }
 
+    fn build_value_cell_at_tail(&mut self, value: &[u8]) -> Result<ValueCell, BTreeError> {
+        if value.len() <= self.options.overflow_threshold {
+            return Ok(ValueCell::Inline(value.to_vec()));
+        }
+
+        let max_chunk = self.options.page_size;
+        let total_len = u32::try_from(value.len())
+            .map_err(|_| BTreeError::InvalidOptions("value too large".to_string()))?;
+        let page_count = overflow_pages_for_len(value.len(), max_chunk);
+        let head_page_id = self.alloc_extent_pages_at_tail(page_count)?;
+
+        let mut remaining = value;
+        for idx in 0..page_count {
+            let consume = remaining.len().min(max_chunk);
+            let chunk = &remaining[..consume];
+            remaining = &remaining[consume..];
+
+            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
+            })?;
+            let raw = build_blob_page(chunk, self.options.page_size)?;
+            self.set_dirty_blob_page(page_id, raw);
+        }
+
+        Ok(ValueCell::Overflow {
+            head_page_id,
+            total_len,
+        })
+    }
+
     fn rewrite_overflow_extent(
         &mut self,
         head_page_id: PageId,
@@ -1408,12 +1466,25 @@ impl<F: SyncFile> OpfsBTree<F> {
         stats.sort_dedupe_us = elapsed_us(sort_dedupe_started_at);
 
         let page_size = self.options.page_size;
+        let max_write_run_pages = (MAX_CHECKPOINT_WRITE_RUN_BYTES / page_size).max(1);
         let mut idx = 0usize;
         while idx < encoded_pages.len() {
             let group_started_at = now_us();
             let start_page_id = encoded_pages[idx].0;
             let mut end = idx + 1;
             while end < encoded_pages.len() {
+                let candidate_last_page_id = encoded_pages[end].0;
+                let candidate_run_pages = candidate_last_page_id
+                    .checked_sub(start_page_id)
+                    .and_then(|span| span.checked_add(1))
+                    .and_then(|span| usize::try_from(span).ok())
+                    .ok_or_else(|| {
+                        BTreeError::Io("checkpoint candidate run length overflow".to_string())
+                    })?;
+                if candidate_run_pages > max_write_run_pages {
+                    break;
+                }
+
                 let prev_page_id = encoded_pages[end - 1].0;
                 let Some(expected_next_page_id) = prev_page_id.checked_add(1) else {
                     break;
@@ -1706,6 +1777,29 @@ impl<F: SyncFile> OpfsBTree<F> {
             page_count,
             reused = false,
             "alloc_extent_pages"
+        );
+        Ok(start)
+    }
+
+    fn alloc_extent_pages_at_tail(&mut self, page_count: usize) -> Result<PageId, BTreeError> {
+        if page_count == 0 {
+            return Err(BTreeError::InvalidOptions(
+                "extent page_count must be > 0".to_string(),
+            ));
+        }
+
+        let start = self.total_pages;
+        self.total_pages = self
+            .total_pages
+            .checked_add(page_count as u64)
+            .ok_or_else(|| {
+                BTreeError::Io("total_pages overflow while allocating tail extent".to_string())
+            })?;
+        tracing::trace!(
+            head_page_id = start,
+            page_count,
+            reused = false,
+            "alloc_extent_pages_at_tail"
         );
         Ok(start)
     }
@@ -2537,6 +2631,102 @@ mod tests {
             max_data_write_len > options.page_size,
             "expected coalesced write larger than one page, got {} bytes",
             max_data_write_len
+        );
+    }
+
+    #[test]
+    fn checkpoint_coalesces_small_cached_clean_gaps() {
+        let options = small_options();
+        let file = CountingFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        tree.total_pages = 5;
+        tree.root_page_id = Some(2);
+        tree.set_dirty_page(
+            2,
+            Page::Leaf {
+                entries: vec![(b"a".to_vec(), ValueCell::Inline(b"v1".to_vec()))],
+                next: Some(4),
+            },
+        )
+        .expect("dirty page 2");
+        let clean_gap = encode_page(
+            &Page::Leaf {
+                entries: vec![(b"b".to_vec(), ValueCell::Inline(b"clean".to_vec()))],
+                next: Some(4),
+            },
+            options.page_size,
+        )
+        .expect("encode clean gap");
+        tree.pages.insert(3, clean_gap);
+        tree.touch_page(3);
+        tree.set_dirty_page(
+            4,
+            Page::Leaf {
+                entries: vec![(b"c".to_vec(), ValueCell::Inline(b"v2".to_vec()))],
+                next: None,
+            },
+        )
+        .expect("dirty page 4");
+
+        file.reset_io_stats();
+        tree.checkpoint().expect("checkpoint");
+
+        let writes = file.data_write_segments(options.page_size);
+        assert_eq!(
+            writes,
+            vec![(2 * options.page_size as u64, 3 * options.page_size)],
+            "dirty pages 2 and 4 should be bridged through cached clean page 3"
+        );
+    }
+
+    fn overflow_ref_for_key(tree: &mut OpfsBTree<CountingFile>, key: &[u8]) -> Option<OverflowRef> {
+        let leaf_page_id = tree.find_leaf_page_id(key).expect("find leaf")?;
+        let raw = tree.raw_page_bytes(leaf_page_id).expect("leaf raw");
+        match raw_leaf_find_value(raw, tree.options.page_size, key).expect("find value") {
+            Some(ValueCellRef::Overflow {
+                head_page_id,
+                total_len,
+            }) => Some(OverflowRef {
+                head_page_id,
+                total_len,
+            }),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn medium_overflow_update_appends_replacement_extent() {
+        let options = small_options();
+        let file = CountingFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        let first_value = vec![1u8; options.overflow_threshold + 1];
+        tree.put(b"k", &first_value).expect("put first overflow");
+        tree.checkpoint().expect("checkpoint first overflow");
+        let old_overflow =
+            overflow_ref_for_key(&mut tree, b"k").expect("old overflow ref should exist");
+        let tail_before_update = tree.total_pages;
+
+        let second_value = vec![2u8; options.overflow_threshold + 1];
+        tree.put(b"k", &second_value).expect("update overflow");
+        let new_overflow =
+            overflow_ref_for_key(&mut tree, b"k").expect("new overflow ref should exist");
+
+        assert_eq!(
+            new_overflow.head_page_id, tail_before_update,
+            "medium overflow updates should append replacement extents at the tail"
+        );
+        assert_ne!(new_overflow.head_page_id, old_overflow.head_page_id);
+        assert!(
+            tree.free_set.contains(&old_overflow.head_page_id),
+            "old overflow page should be freed after replacement"
+        );
+
+        tree.checkpoint().expect("checkpoint update");
+        assert_eq!(
+            tree.get(b"k").expect("read updated value"),
+            Some(second_value)
         );
     }
 

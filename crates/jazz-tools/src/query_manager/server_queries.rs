@@ -636,9 +636,9 @@ impl QueryManager {
     ) -> Option<Vec<super::types::Tuple>> {
         let started_at = Instant::now();
         let plan = Self::authorized_parent_set_plan(auth_schema, &graph.table)?;
-        let output_tuples = graph.current_output_tuples();
+        let output_tuples = graph.current_output_tuples_ref();
         if output_tuples.is_empty() {
-            return Some(output_tuples);
+            return Some(Vec::new());
         }
 
         let mut child_entries = Vec::with_capacity(output_tuples.len());
@@ -684,21 +684,31 @@ impl QueryManager {
                 phase,
             )
         {
-            let authorized_tuples = child_entries
-                .into_iter()
-                .filter_map(|(tuple, parent_id, child_branch)| match parent_id {
-                    Some(parent_id) => authorized_parent_keys
-                        .contains(&(parent_id, child_branch))
-                        .then_some(tuple),
-                    None => Some(tuple),
-                })
-                .collect::<Vec<_>>();
+            let all_parents_authorized = authorized_parent_keys.len() == parent_keys.len();
+            let authorized_tuples = if all_parents_authorized {
+                graph.current_output_tuples()
+            } else {
+                child_entries
+                    .into_iter()
+                    .filter_map(|(tuple, parent_id, child_branch)| match parent_id {
+                        Some(parent_id) => authorized_parent_keys
+                            .contains(&(parent_id, child_branch))
+                            .then(|| tuple.clone()),
+                        None => Some(tuple.clone()),
+                    })
+                    .collect::<Vec<_>>()
+            };
 
             crate::query_manager::policy_counters::increment(
                 "authorized_parent_set_scope",
                 format!(
-                    "phase={} mode=correlated_parent child_table={} parent_table={} visible_tuples={} parent_keys={}",
+                    "phase={} mode={} child_table={} parent_table={} visible_tuples={} parent_keys={}",
                     phase,
+                    if all_parents_authorized {
+                        "correlated_parent_all"
+                    } else {
+                        "correlated_parent_filter"
+                    },
                     graph.table.as_str(),
                     plan.parent_table.as_str(),
                     authorized_tuples.len(),
@@ -708,8 +718,13 @@ impl QueryManager {
             crate::query_manager::policy_counters::observe_duration(
                 "authorized_parent_set_duration",
                 format!(
-                    "phase={} mode=correlated_parent child_table={} parent_table={} visible_tuples={} parent_keys={}",
+                    "phase={} mode={} child_table={} parent_table={} visible_tuples={} parent_keys={}",
                     phase,
+                    if all_parents_authorized {
+                        "correlated_parent_all"
+                    } else {
+                        "correlated_parent_filter"
+                    },
                     graph.table.as_str(),
                     plan.parent_table.as_str(),
                     authorized_tuples.len(),
@@ -754,7 +769,7 @@ impl QueryManager {
             };
 
             if is_authorized {
-                authorized_tuples.push(tuple);
+                authorized_tuples.push(tuple.clone());
             }
         }
 
