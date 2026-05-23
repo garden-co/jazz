@@ -22,7 +22,7 @@ const DEFAULT_SEED = "0xA5A5A5A501234567";
 const DEFAULT_CACHE_MB = 32;
 const DEFAULT_OVERFLOW_THRESHOLD_BYTES = 4 * 1024;
 const DEFAULT_PIN_INTERNAL_PAGES = true;
-const DEFAULT_READ_COALESCE_PAGES = 4;
+const DEFAULT_READ_COALESCE_PAGES = 8;
 
 function parseSeed(raw) {
   const text = String(raw || "").trim();

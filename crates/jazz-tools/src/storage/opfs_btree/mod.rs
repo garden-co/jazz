@@ -163,7 +163,7 @@ impl OpfsBTreeStorage {
             cache_bytes: cache_size_bytes.max(MIN_CACHE_SIZE_BYTES),
             overflow_threshold: OPFS_OVERFLOW_THRESHOLD_BYTES,
             pin_internal_pages: true,
-            read_coalesce_pages: 4,
+            read_coalesce_pages: 8,
             ..Default::default()
         }
     }
