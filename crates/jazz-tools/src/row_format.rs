@@ -109,6 +109,7 @@ pub struct CompiledRowLayout {
     columns: Vec<CompiledColumnLayout>,
     fixed_section_size: usize,
     variable_column_count: usize,
+    variable_data_start: usize,
 }
 
 fn compiled_row_layout_cache() -> &'static Mutex<HashMap<[u8; 32], Arc<CompiledRowLayout>>> {
@@ -144,10 +145,12 @@ fn compile_row_layout(descriptor: &RowDescriptor) -> CompiledRowLayout {
         }
     }
 
+    let offset_table_size = variable_index.saturating_sub(1) * 4;
     CompiledRowLayout {
         columns,
         fixed_section_size: fixed_offset,
         variable_column_count: variable_index,
+        variable_data_start: fixed_offset.saturating_add(offset_table_size),
     }
 }
 
@@ -1022,20 +1025,9 @@ fn variable_column_bytes<'a>(
     data: &'a [u8],
     col_index: usize,
 ) -> Result<(&'a [u8], bool), EncodingError> {
-    let fixed_size = layout.fixed_section_size;
     let var_count = layout.variable_column_count;
-    let offset_table_size = if var_count > 1 {
-        (var_count - 1) * 4
-    } else {
-        0
-    };
-
-    let var_data_start =
-        fixed_size
-            .checked_add(offset_table_size)
-            .ok_or(EncodingError::MalformedData {
-                message: "variable data start offset overflowed".into(),
-            })?;
+    let fixed_size = layout.fixed_section_size;
+    let var_data_start = layout.variable_data_start;
 
     if var_data_start > data.len() {
         return Err(EncodingError::MalformedData {
