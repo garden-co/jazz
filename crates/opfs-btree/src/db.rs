@@ -107,6 +107,7 @@ pub struct OpfsBTree<F: SyncFile> {
     free_pages: Vec<PageId>,
     free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
+    last_medium_overflow_update_end: Option<PageId>,
     perf: BTreePerfCounters,
 }
 
@@ -216,6 +217,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             free_pages: Vec::new(),
             free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
+            last_medium_overflow_update_end: None,
             perf: BTreePerfCounters::default(),
         };
 
@@ -464,6 +466,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.persisted_pages = self.total_pages;
         let superblock_us = elapsed_us(superblock_started_at);
         self.dirty_pages.clear();
+        self.last_medium_overflow_update_end = None;
         let evict_started_at = now_us();
         self.evict_pages_if_needed(None);
         let post_checkpoint_evict_us = elapsed_us(evict_started_at);
@@ -565,61 +568,86 @@ impl<F: SyncFile> OpfsBTree<F> {
             PageKind::Leaf => {
                 self.perf.insert_leaf_calls = self.perf.insert_leaf_calls.saturating_add(1);
                 let build_value_cell_started_at = now_us();
-                let (new_value, reused_overflow_head) =
-                    if value.len() <= self.options.overflow_threshold {
-                        (ValueCell::Inline(value.to_vec()), None)
-                    } else if value.len() < OVERFLOW_REUSE_MIN_BYTES {
-                        let existing_overflow = {
-                            let existing_value_lookup_started_at = now_us();
-                            let raw = self.raw_page_bytes(page_id)?;
-                            let existing_value =
-                                match raw_leaf_find_value(raw, self.options.page_size, key)? {
-                                    Some(ValueCellRef::Overflow {
-                                        head_page_id,
-                                        total_len,
-                                    }) => Some(OverflowRef {
-                                        head_page_id,
-                                        total_len,
-                                    }),
-                                    _ => None,
-                                };
-                            self.perf.existing_value_lookup_us = self
-                                .perf
-                                .existing_value_lookup_us
-                                .saturating_add(elapsed_us(existing_value_lookup_started_at));
-                            existing_value
-                        };
-                        if existing_overflow.is_some() {
+                let (new_value, reused_overflow_head) = if value.len()
+                    <= self.options.overflow_threshold
+                {
+                    (ValueCell::Inline(value.to_vec()), None)
+                } else if value.len() < OVERFLOW_REUSE_MIN_BYTES {
+                    let existing_overflow = {
+                        let existing_value_lookup_started_at = now_us();
+                        let raw = self.raw_page_bytes(page_id)?;
+                        let existing_value =
+                            match raw_leaf_find_value(raw, self.options.page_size, key)? {
+                                Some(ValueCellRef::Overflow {
+                                    head_page_id,
+                                    total_len,
+                                }) => Some(OverflowRef {
+                                    head_page_id,
+                                    total_len,
+                                }),
+                                _ => None,
+                            };
+                        self.perf.existing_value_lookup_us = self
+                            .perf
+                            .existing_value_lookup_us
+                            .saturating_add(elapsed_us(existing_value_lookup_started_at));
+                        existing_value
+                    };
+                    match existing_overflow {
+                        Some(existing)
+                            if self.should_rewrite_medium_overflow(existing, value.len())? =>
+                        {
+                            let existing_pages = overflow_pages_for_len(
+                                existing.total_len as usize,
+                                self.options.page_size,
+                            );
+                            (
+                                self.rewrite_overflow_extent(
+                                    existing.head_page_id,
+                                    existing_pages,
+                                    value,
+                                )?,
+                                Some(existing.head_page_id),
+                            )
+                        }
+                        Some(_) => {
                             // Medium overflow updates usually arrive in key order during sync.
                             // Appending replacement extents keeps checkpoint writes contiguous
                             // instead of recycling scattered old extents from the same batch.
-                            (self.build_value_cell_at_tail(value)?, None)
-                        } else {
-                            (self.build_value_cell(value)?, None)
+                            let cell = self.build_value_cell_at_tail(value)?;
+                            if let ValueCell::Overflow { head_page_id, .. } = cell {
+                                let page_count =
+                                    overflow_pages_for_len(value.len(), self.options.page_size);
+                                self.last_medium_overflow_update_end =
+                                    head_page_id.checked_add(page_count as u64);
+                            }
+                            (cell, None)
                         }
-                    } else {
-                        let existing_overflow = {
-                            let existing_value_lookup_started_at = now_us();
-                            let raw = self.raw_page_bytes(page_id)?;
-                            let existing_value =
-                                match raw_leaf_find_value(raw, self.options.page_size, key)? {
-                                    Some(ValueCellRef::Overflow {
-                                        head_page_id,
-                                        total_len,
-                                    }) => Some(OverflowRef {
-                                        head_page_id,
-                                        total_len,
-                                    }),
-                                    _ => None,
-                                };
-                            self.perf.existing_value_lookup_us = self
-                                .perf
-                                .existing_value_lookup_us
-                                .saturating_add(elapsed_us(existing_value_lookup_started_at));
-                            existing_value
-                        };
-                        self.build_value_cell_for_existing(existing_overflow, value)?
+                        None => (self.build_value_cell(value)?, None),
+                    }
+                } else {
+                    let existing_overflow = {
+                        let existing_value_lookup_started_at = now_us();
+                        let raw = self.raw_page_bytes(page_id)?;
+                        let existing_value =
+                            match raw_leaf_find_value(raw, self.options.page_size, key)? {
+                                Some(ValueCellRef::Overflow {
+                                    head_page_id,
+                                    total_len,
+                                }) => Some(OverflowRef {
+                                    head_page_id,
+                                    total_len,
+                                }),
+                                _ => None,
+                            };
+                        self.perf.existing_value_lookup_us = self
+                            .perf
+                            .existing_value_lookup_us
+                            .saturating_add(elapsed_us(existing_value_lookup_started_at));
+                        existing_value
                     };
+                    self.build_value_cell_for_existing(existing_overflow, value)?
+                };
                 self.perf.build_value_cell_us = self
                     .perf
                     .build_value_cell_us
@@ -1136,6 +1164,35 @@ impl<F: SyncFile> OpfsBTree<F> {
             }
         }
         Ok((self.build_value_cell(value)?, None))
+    }
+
+    fn should_rewrite_medium_overflow(
+        &mut self,
+        existing: OverflowRef,
+        value_len: usize,
+    ) -> Result<bool, BTreeError> {
+        let page_count = overflow_pages_for_len(value_len, self.options.page_size);
+        let existing_pages =
+            overflow_pages_for_len(existing.total_len as usize, self.options.page_size);
+        if page_count != existing_pages {
+            return Ok(false);
+        }
+
+        let existing_end = existing
+            .head_page_id
+            .checked_add(page_count as u64)
+            .ok_or_else(|| BTreeError::Corrupt("overflow extent page id overflow".to_string()))?;
+        let should_rewrite = match self.last_medium_overflow_update_end {
+            None => true,
+            Some(previous_end) => {
+                existing.head_page_id >= previous_end
+                    && existing.head_page_id - previous_end <= CHECKPOINT_WRITE_COALESCE_GAP_PAGES
+            }
+        };
+        if should_rewrite {
+            self.last_medium_overflow_update_end = Some(existing_end);
+        }
+        Ok(should_rewrite)
     }
 
     fn build_value_cell_at_tail(&mut self, value: &[u8]) -> Result<ValueCell, BTreeError> {
@@ -2696,36 +2753,46 @@ mod tests {
     }
 
     #[test]
-    fn medium_overflow_update_appends_replacement_extent() {
+    fn medium_overflow_update_appends_after_fragmented_extent() {
         let options = small_options();
         let file = CountingFile::new();
         let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
 
         let first_value = vec![1u8; options.overflow_threshold + 1];
-        tree.put(b"k", &first_value).expect("put first overflow");
+        tree.put(b"k0", &first_value).expect("put first overflow");
+        for i in 0..8u8 {
+            tree.put(&[b'f', i], &first_value)
+                .expect("put filler overflow");
+        }
+        tree.put(b"k1", &first_value).expect("put second overflow");
         tree.checkpoint().expect("checkpoint first overflow");
-        let old_overflow =
-            overflow_ref_for_key(&mut tree, b"k").expect("old overflow ref should exist");
-        let tail_before_update = tree.total_pages;
+        let old_k0 = overflow_ref_for_key(&mut tree, b"k0").expect("old k0 overflow");
+        let old_k1 = overflow_ref_for_key(&mut tree, b"k1").expect("old k1 overflow");
 
         let second_value = vec![2u8; options.overflow_threshold + 1];
-        tree.put(b"k", &second_value).expect("update overflow");
-        let new_overflow =
-            overflow_ref_for_key(&mut tree, b"k").expect("new overflow ref should exist");
-
+        tree.put(b"k0", &second_value).expect("update k0 overflow");
+        let new_k0 = overflow_ref_for_key(&mut tree, b"k0").expect("new k0 overflow");
         assert_eq!(
-            new_overflow.head_page_id, tail_before_update,
-            "medium overflow updates should append replacement extents at the tail"
+            new_k0.head_page_id, old_k0.head_page_id,
+            "the first medium overflow update may rewrite in place"
         );
-        assert_ne!(new_overflow.head_page_id, old_overflow.head_page_id);
+
+        let tail_before_k1 = tree.total_pages;
+        tree.put(b"k1", &second_value).expect("update k1 overflow");
+        let new_k1 = overflow_ref_for_key(&mut tree, b"k1").expect("new k1 overflow");
+        assert_eq!(
+            new_k1.head_page_id, tail_before_k1,
+            "fragmented medium overflow updates should append replacement extents at the tail"
+        );
+        assert_ne!(new_k1.head_page_id, old_k1.head_page_id);
         assert!(
-            tree.free_set.contains(&old_overflow.head_page_id),
+            tree.free_set.contains(&old_k1.head_page_id),
             "old overflow page should be freed after replacement"
         );
 
         tree.checkpoint().expect("checkpoint update");
         assert_eq!(
-            tree.get(b"k").expect("read updated value"),
+            tree.get(b"k1").expect("read updated value"),
             Some(second_value)
         );
     }
