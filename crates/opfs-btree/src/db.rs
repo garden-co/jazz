@@ -1552,6 +1552,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         let page_size = self.options.page_size;
         let max_write_run_pages = (MAX_CHECKPOINT_WRITE_RUN_BYTES / page_size).max(1);
         let mut idx = 0usize;
+        let mut run = Vec::new();
         while idx < encoded_pages.len() {
             let group_started_at = now_us();
             let start_page_id = encoded_pages[idx].0;
@@ -1611,7 +1612,10 @@ impl<F: SyncFile> OpfsBTree<F> {
                 .checked_mul(page_size)
                 .ok_or_else(|| BTreeError::Io("checkpoint run buffer size overflow".to_string()))?;
             let run_buffer_started_at = now_us();
-            let mut run = Vec::with_capacity(run_capacity);
+            run.clear();
+            if run.capacity() < run_capacity {
+                run.reserve_exact(run_capacity - run.capacity());
+            }
             let mut encoded_idx = idx;
             for page_id in start_page_id..=last_page_id {
                 if encoded_idx < end && encoded_pages[encoded_idx].0 == page_id {
