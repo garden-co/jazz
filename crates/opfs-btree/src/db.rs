@@ -22,6 +22,7 @@ const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
 const CACHE_EVICTION_ALLOWANCE_DIVISOR: usize = 4;
+const CHECKPOINT_WRITE_COALESCE_GAP_PAGES: u64 = 2;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
@@ -155,6 +156,7 @@ struct WritePagesStats {
     dirty_tree_pages: usize,
     dirty_blob_pages: usize,
     freelist_pages: usize,
+    coalesced_gap_pages: usize,
     runs: usize,
     bytes: usize,
     prepare_us: u64,
@@ -495,6 +497,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             write_dirty_tree_pages = write_pages_stats.dirty_tree_pages,
             write_dirty_blob_pages = write_pages_stats.dirty_blob_pages,
             write_freelist_pages = write_pages_stats.freelist_pages,
+            write_coalesced_gap_pages = write_pages_stats.coalesced_gap_pages,
             write_runs = write_pages_stats.runs,
             write_bytes = write_pages_stats.bytes,
             write_prepare_us = write_pages_stats.prepare_us,
@@ -1412,20 +1415,69 @@ impl<F: SyncFile> OpfsBTree<F> {
             let mut end = idx + 1;
             while end < encoded_pages.len() {
                 let prev_page_id = encoded_pages[end - 1].0;
-                if prev_page_id.checked_add(1) != Some(encoded_pages[end].0) {
+                let Some(expected_next_page_id) = prev_page_id.checked_add(1) else {
+                    break;
+                };
+                let current_page_id = encoded_pages[end].0;
+                if expected_next_page_id == current_page_id {
+                    end += 1;
+                    continue;
+                }
+
+                let gap_pages = current_page_id.saturating_sub(expected_next_page_id);
+                if gap_pages > CHECKPOINT_WRITE_COALESCE_GAP_PAGES {
                     break;
                 }
+
+                let mut can_fill_gap = true;
+                for page_id in expected_next_page_id..current_page_id {
+                    if !self.pages.contains_key(&page_id) {
+                        can_fill_gap = false;
+                        break;
+                    }
+                }
+                if !can_fill_gap {
+                    break;
+                }
+
+                stats.coalesced_gap_pages =
+                    stats.coalesced_gap_pages.saturating_add(gap_pages as usize);
                 end += 1;
             }
             stats.group_us = stats.group_us.saturating_add(elapsed_us(group_started_at));
 
-            let run_len = end - idx;
+            let last_page_id = encoded_pages[end - 1].0;
+            let run_len = last_page_id
+                .checked_sub(start_page_id)
+                .and_then(|span| span.checked_add(1))
+                .and_then(|span| usize::try_from(span).ok())
+                .ok_or_else(|| BTreeError::Io("checkpoint run length overflow".to_string()))?;
             let run_capacity = run_len
                 .checked_mul(page_size)
                 .ok_or_else(|| BTreeError::Io("checkpoint run buffer size overflow".to_string()))?;
             let run_buffer_started_at = now_us();
             let mut run = Vec::with_capacity(run_capacity);
-            for (_, raw) in &encoded_pages[idx..end] {
+            let mut encoded_idx = idx;
+            for page_id in start_page_id..=last_page_id {
+                if encoded_idx < end && encoded_pages[encoded_idx].0 == page_id {
+                    run.extend_from_slice(&encoded_pages[encoded_idx].1);
+                    encoded_idx += 1;
+                    continue;
+                }
+
+                let raw = self.pages.get(&page_id).ok_or_else(|| {
+                    BTreeError::Corrupt(format!(
+                        "cached checkpoint gap page {} missing while building write run",
+                        page_id
+                    ))
+                })?;
+                if raw.len() != page_size {
+                    return Err(BTreeError::Corrupt(format!(
+                        "cached checkpoint gap page {} has invalid length {}",
+                        page_id,
+                        raw.len()
+                    )));
+                }
                 run.extend_from_slice(raw);
             }
             stats.run_buffer_us = stats
@@ -1848,7 +1900,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         );
 
         let target_slot = self.active_slot.inactive();
-        write_slot(&self.file, target_slot, self.options.page_size, next)?;
+        write_slot_known_sized(&self.file, target_slot, self.options.page_size, next)?;
         self.file.flush()?;
 
         self.active_slot = target_slot;
@@ -2062,6 +2114,18 @@ fn write_slot<F: SyncFile>(
         file.truncate(required_file_len)?;
     }
 
+    let mut page = vec![0u8; page_size];
+    sb.encode_into_page(&mut page)?;
+    file.write_all_at(slot.byte_offset(page_size), &page)?;
+    Ok(())
+}
+
+fn write_slot_known_sized<F: SyncFile>(
+    file: &F,
+    slot: SuperblockSlot,
+    page_size: usize,
+    sb: Superblock,
+) -> Result<(), BTreeError> {
     let mut page = vec![0u8; page_size];
     sb.encode_into_page(&mut page)?;
     file.write_all_at(slot.byte_offset(page_size), &page)?;

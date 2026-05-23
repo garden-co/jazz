@@ -1244,6 +1244,157 @@ async fn run_app_sync_apply(
     })
 }
 
+async fn run_app_sync_settle(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
+    let mut phase_times_ms = Vec::new();
+    let wall_start = high_res_now_ms();
+    let namespace = unique_namespace("app-sync-settle");
+    let phase_start = high_res_now_ms();
+    OpfsFile::destroy(&namespace)
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
+
+    let phase_start = high_res_now_ms();
+    let mut db = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "open_db_prefill", phase_start);
+
+    let size = value_size as usize;
+    let child_count = count as usize;
+    let seed = derive_seed(DEFAULT_BASE_SEED, "app_sync_apply", value_size);
+
+    let parent_put_start = high_res_now_ms();
+    for parent_idx in 0..APP_PARENT_KEYS {
+        db.put(
+            &app_parent_key(parent_idx),
+            &value(size.clamp(32, 512), parent_idx as u8),
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        for accessor_idx in 0..2 {
+            db.put(
+                &app_access_edge_key(parent_idx, accessor_idx),
+                &value(256, (parent_idx + accessor_idx) as u8),
+            )
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+    }
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_parent_and_edge_put_loop",
+        parent_put_start,
+    );
+
+    let child_put_start = high_res_now_ms();
+    for child_idx in 0..child_count {
+        let parent_idx = child_idx % APP_PARENT_KEYS;
+        let per_parent_idx = child_idx / APP_PARENT_KEYS;
+        db.put(
+            &app_child_key(parent_idx, per_parent_idx),
+            &value(size, (child_idx % 251) as u8),
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    }
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_child_put_loop",
+        child_put_start,
+    );
+
+    let checkpoint_start = high_res_now_ms();
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "prefill_checkpoint", checkpoint_start);
+    drop(db);
+
+    let reopen_start = high_res_now_ms();
+    let mut db = open_db(&namespace).await?;
+    push_phase(
+        &mut phase_times_ms,
+        "cold_reopen_db_for_settle",
+        reopen_start,
+    );
+
+    let mut checksum = seed;
+    let mut writes = 0u32;
+    let mut update_order = shuffled_indices(child_count, seed);
+    update_order.sort_by_key(|child_idx| {
+        let parent_idx = child_idx % APP_PARENT_KEYS;
+        let per_parent_idx = child_idx / APP_PARENT_KEYS;
+        (parent_idx, per_parent_idx)
+    });
+
+    let io_start = opfs_io_counters_snapshot();
+    let apply_start = high_res_now_ms();
+
+    for parent_idx in 0..APP_PARENT_KEYS {
+        db.put(
+            &app_parent_key(parent_idx),
+            &value(size.clamp(32, 512), parent_idx.wrapping_add(17) as u8),
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        checksum = checksum.wrapping_add(parent_idx as u64);
+        writes = writes.saturating_add(1);
+    }
+
+    let batch_size = (child_count / 8).max(1);
+    for (batch_idx, chunk) in update_order.chunks(batch_size).enumerate() {
+        let batch_start = high_res_now_ms();
+        for &child_idx in chunk {
+            let parent_idx = child_idx % APP_PARENT_KEYS;
+            let per_parent_idx = child_idx / APP_PARENT_KEYS;
+            let v = value(size, ((child_idx + 97) % 251) as u8);
+            checksum = checksum.wrapping_add(v[0] as u64);
+            db.put(&app_child_key(parent_idx, per_parent_idx), &v)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            writes = writes.saturating_add(1);
+        }
+        push_phase(
+            &mut phase_times_ms,
+            &format!("settle_batch_{batch_idx}_put_loop"),
+            batch_start,
+        );
+
+        let checkpoint_start = high_res_now_ms();
+        db.checkpoint()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        push_phase(
+            &mut phase_times_ms,
+            &format!("settle_batch_{batch_idx}_checkpoint"),
+            checkpoint_start,
+        );
+    }
+
+    let elapsed_ms = high_res_now_ms() - apply_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
+
+    drop(db);
+    let phase_start = high_res_now_ms();
+    OpfsFile::destroy(&namespace)
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
+    let wall_elapsed_ms = high_res_now_ms() - wall_start;
+
+    Ok(BenchmarkResult {
+        operation: "app_sync_settle".to_string(),
+        value_size,
+        count,
+        seed,
+        wall_elapsed_ms,
+        elapsed_ms,
+        ops_per_sec: (writes as f64) / (elapsed_ms / 1000.0),
+        p95_op_ms: 0.0,
+        reads: 0,
+        read_hits: 0,
+        read_misses: 0,
+        writes,
+        deletes: 0,
+        checksum,
+        phase_times_ms,
+        opfs_io_counters,
+    })
+}
+
 #[wasm_bindgen]
 pub async fn bench_opfs_sequential_write(count: u32, value_size: u32) -> Result<JsValue, JsValue> {
     to_js_value(&run_seq_write(count, value_size).await?)
@@ -1407,6 +1558,11 @@ pub async fn bench_opfs_app_sync_apply_sorted(
     value_size: u32,
 ) -> Result<JsValue, JsValue> {
     to_js_value(&run_app_sync_apply(count, value_size, true).await?)
+}
+
+#[wasm_bindgen]
+pub async fn bench_opfs_app_sync_settle(count: u32, value_size: u32) -> Result<JsValue, JsValue> {
+    to_js_value(&run_app_sync_settle(count, value_size).await?)
 }
 
 #[wasm_bindgen]
