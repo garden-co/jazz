@@ -23,7 +23,8 @@ const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
 const CACHE_EVICTION_ALLOWANCE_DIVISOR: usize = 4;
 const CHECKPOINT_WRITE_COALESCE_GAP_PAGES: u64 = 2;
-const MAX_CHECKPOINT_WRITE_RUN_BYTES: usize = 32 * 1024 * 1024;
+// Chromium OPFS sync writes can fail around a 32MiB single-write burst in workers.
+const MAX_CHECKPOINT_WRITE_RUN_BYTES: usize = 16 * 1024 * 1024;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;

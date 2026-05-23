@@ -405,7 +405,27 @@ impl SyncFile for OpfsFile {
             .inner
             .handle
             .write_with_u8_array_and_options(buf, &self.inner.write_options)
-            .map_err(map_js_error)? as usize;
+            .map_err(map_js_error)?;
+        if !written.is_finite() {
+            return Err(BTreeError::Io(format!(
+                "opfs write returned non-finite byte count {} for {} bytes",
+                written,
+                buf.len()
+            )));
+        }
+        if written < 0.0 || written > i32::MAX as f64 {
+            let code = if written > i32::MAX as f64 {
+                (written as u32) as i32
+            } else {
+                written as i32
+            };
+            return Err(BTreeError::Io(format!(
+                "opfs write failed with code {} for {} bytes",
+                code,
+                buf.len()
+            )));
+        }
+        let written = written as usize;
         if written != buf.len() {
             return Err(BTreeError::Io(format!(
                 "short write: wrote {} of {} bytes",
