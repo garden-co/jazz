@@ -24,6 +24,7 @@ const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
 const CACHE_EVICTION_ALLOWANCE_DIVISOR: usize = 4;
 const CHECKPOINT_WRITE_COALESCE_GAP_PAGES: u64 = 8;
+const MEDIUM_OVERFLOW_REWRITE_GAP_PAGES: u64 = 2;
 // Chromium OPFS sync writes can fail around a 32MiB single-write burst in workers.
 const MAX_CHECKPOINT_WRITE_RUN_BYTES: usize = 16 * 1024 * 1024;
 
@@ -1201,7 +1202,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             None => true,
             Some(previous_end) => {
                 existing.head_page_id >= previous_end
-                    && existing.head_page_id - previous_end <= CHECKPOINT_WRITE_COALESCE_GAP_PAGES
+                    && existing.head_page_id - previous_end <= MEDIUM_OVERFLOW_REWRITE_GAP_PAGES
             }
         };
         if should_rewrite {
