@@ -173,6 +173,20 @@ struct WritePagesStats {
     truncated_file: bool,
 }
 
+enum CheckpointPage<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl CheckpointPage<'_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(raw) => raw,
+            Self::Owned(raw) => raw,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct SplitResult {
     separator: Vec<u8>,
@@ -1483,7 +1497,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             stats.truncated_file = true;
         }
 
-        let mut encoded_pages: Vec<(PageId, Vec<u8>)> =
+        let mut encoded_pages: Vec<(PageId, CheckpointPage<'_>)> =
             Vec::with_capacity(dirty_page_ids.len() + freelist_pages.len());
         let dirty_prepare_started_at = now_us();
         for page_id in dirty_page_ids {
@@ -1502,7 +1516,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     stats.dirty_tree_pages = stats.dirty_tree_pages.saturating_add(1);
                     let _ = validate_page(raw, self.options.page_size)?;
                 }
-                encoded_pages.push((*page_id, raw.clone()));
+                encoded_pages.push((*page_id, CheckpointPage::Borrowed(raw)));
             }
         }
         stats.dirty_prepare_us = elapsed_us(dirty_prepare_started_at);
@@ -1510,7 +1524,10 @@ impl<F: SyncFile> OpfsBTree<F> {
         let freelist_prepare_started_at = now_us();
         for (page_id, page) in freelist_pages {
             self.validate_writable_page_id(*page_id)?;
-            encoded_pages.push((*page_id, encode_page(page, self.options.page_size)?));
+            encoded_pages.push((
+                *page_id,
+                CheckpointPage::Owned(encode_page(page, self.options.page_size)?),
+            ));
             stats.freelist_pages = stats.freelist_pages.saturating_add(1);
         }
         stats.freelist_prepare_us = elapsed_us(freelist_prepare_started_at);
@@ -1598,7 +1615,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             let mut encoded_idx = idx;
             for page_id in start_page_id..=last_page_id {
                 if encoded_idx < end && encoded_pages[encoded_idx].0 == page_id {
-                    run.extend_from_slice(&encoded_pages[encoded_idx].1);
+                    run.extend_from_slice(encoded_pages[encoded_idx].1.as_slice());
                     encoded_idx += 1;
                     continue;
                 }
