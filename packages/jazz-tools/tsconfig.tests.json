@@ -17,6 +17,7 @@
   "exclude": [
     "node_modules",
     "dist",
+    "src/solid/**/*",
     "src/**/*.svelte.test.ts",
     "src/svelte/test-helpers.svelte.ts"
   ]
