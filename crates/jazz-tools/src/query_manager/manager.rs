@@ -1188,6 +1188,12 @@ impl QueryManager {
         }
     }
 
+    fn should_defer_initial_subscription_settle(&self, sub: &QuerySubscription) -> bool {
+        !sub.settled_once
+            && !Self::subscription_query_frontier_satisfied(sub)
+            && self.sync_manager.has_servers_or_pending_servers()
+    }
+
     pub(crate) fn mark_subscriptions_visibility_recompute_for_batch(&mut self, batch_id: BatchId) {
         for subscription in self.subscriptions.values_mut() {
             if subscription
@@ -1443,6 +1449,26 @@ impl QueryManager {
                         || subscription.graph.has_dirty_nodes()
                 });
             if !should_process_subscription {
+                continue;
+            }
+
+            if self.subscriptions.get(&sub_id).is_some_and(|subscription| {
+                self.should_defer_initial_subscription_settle(subscription)
+            }) {
+                if let Some(subscription) = self.subscriptions.get(&sub_id) {
+                    tracing::trace!(
+                        sub_id = sub_id.0,
+                        table = %subscription.graph.table,
+                        required_tier = ?subscription.durability_tier,
+                        settled_tier = ?subscription.query_frontier_settled_tier,
+                        dirty = subscription.graph.has_dirty_nodes(),
+                        needs_recompile = subscription.needs_recompile,
+                        needs_visibility_recompute = subscription.needs_visibility_recompute,
+                        pending_local_updates = subscription.has_pending_local_updates,
+                        has_servers_or_pending_servers = self.sync_manager.has_servers_or_pending_servers(),
+                        "jazz trace subscription deferring initial settle until frontier"
+                    );
+                }
                 continue;
             }
 

@@ -562,38 +562,546 @@ impl QueryManager {
             return AuthorizedTuplesResult::Ready(graph.current_output_tuples());
         }
 
-        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
+        if let Some(authorized_tuples) = self.authorized_tuples_via_parent_set_if_available(
+            storage,
+            settlement_eval_cache,
+            graph,
+            &auth_schema,
+            &auth_context,
+            source_branch_schema_map,
+            session,
+            "authorized_tuples",
+        ) {
+            return AuthorizedTuplesResult::Ready(authorized_tuples);
+        }
 
-        AuthorizedTuplesResult::Ready(
-            graph
-                .current_output_tuples()
+        if let Some(authorized_tuples) = self
+            .authorized_tuples_via_correlated_relation_set_if_available(
+                storage,
+                settlement_eval_cache,
+                graph,
+                &auth_schema,
+                &auth_context,
+                source_branch_schema_map,
+                session,
+                "authorized_tuples",
+            )
+        {
+            return AuthorizedTuplesResult::Ready(authorized_tuples);
+        }
+
+        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
+        let authorized_tuples = graph
+            .current_output_tuples()
+            .into_iter()
+            .filter_map(|tuple| {
+                tuple
+                    .provenance()
+                    .iter()
+                    .copied()
+                    .all(|(object_id, branch_name)| {
+                        *authorization_cache
+                            .entry((object_id, branch_name))
+                            .or_insert_with(|| {
+                                self.provenance_row_matches_current_select_policy(
+                                    storage,
+                                    settlement_eval_cache,
+                                    object_id,
+                                    branch_name,
+                                    session,
+                                    &auth_schema,
+                                    &auth_context,
+                                    source_branch_schema_map,
+                                    "authorized_tuples",
+                                )
+                            })
+                    })
+                    .then_some(tuple)
+            })
+            .collect::<Vec<_>>();
+        AuthorizedTuplesResult::Ready(authorized_tuples)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorized_tuples_via_parent_set_if_available(
+        &mut self,
+        storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
+        graph: &super::graph::QueryGraph,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+        phase: &'static str,
+    ) -> Option<Vec<super::types::Tuple>> {
+        let started_at = Instant::now();
+        let plan = Self::authorized_parent_set_plan(auth_schema, &graph.table)?;
+        let output_tuples = graph.current_output_tuples();
+        if output_tuples.is_empty() {
+            return Some(output_tuples);
+        }
+
+        let mut child_entries = Vec::with_capacity(output_tuples.len());
+        let mut parent_keys = HashSet::new();
+
+        for tuple in output_tuples {
+            let child_row = tuple.to_single_row()?;
+            if tuple.provenance().len() != 1 {
+                return None;
+            }
+            let (provenance_id, child_branch) = tuple.provenance().iter().next().copied()?;
+            if provenance_id != child_row.id {
+                return None;
+            }
+
+            let parent_id = match decode_column(
+                &plan.child_schema.columns,
+                &child_row.data,
+                plan.fk_column_index,
+            ) {
+                Ok(Value::Uuid(parent_id)) => Some(parent_id),
+                Ok(Value::Null) => None,
+                _ => return None,
+            };
+
+            if let Some(parent_id) = parent_id {
+                parent_keys.insert((parent_id, child_branch));
+            }
+            child_entries.push((tuple, parent_id, child_branch));
+        }
+
+        if let Some(authorized_parent_keys) = self
+            .authorized_parent_keys_via_correlated_relation_set_if_available(
+                storage,
+                settlement_eval_cache,
+                auth_schema,
+                auth_context,
+                source_branch_schema_map,
+                session,
+                plan.parent_table,
+                &parent_keys,
+                graph.table,
+                phase,
+            )
+        {
+            let authorized_tuples = child_entries
                 .into_iter()
-                .filter_map(|tuple| {
-                    tuple
-                        .provenance()
-                        .iter()
-                        .copied()
-                        .all(|(object_id, branch_name)| {
-                            *authorization_cache
-                                .entry((object_id, branch_name))
-                                .or_insert_with(|| {
-                                    self.provenance_row_matches_current_select_policy(
-                                        storage,
-                                        settlement_eval_cache,
-                                        object_id,
-                                        branch_name,
-                                        session,
-                                        &auth_schema,
-                                        &auth_context,
-                                        source_branch_schema_map,
-                                        "authorized_tuples",
-                                    )
-                                })
-                        })
-                        .then_some(tuple)
+                .filter_map(|(tuple, parent_id, child_branch)| match parent_id {
+                    Some(parent_id) => authorized_parent_keys
+                        .contains(&(parent_id, child_branch))
+                        .then_some(tuple),
+                    None => Some(tuple),
                 })
-                .collect(),
-        )
+                .collect::<Vec<_>>();
+
+            crate::query_manager::policy_counters::increment(
+                "authorized_parent_set_scope",
+                format!(
+                    "phase={} mode=correlated_parent child_table={} parent_table={} visible_tuples={} parent_keys={}",
+                    phase,
+                    graph.table.as_str(),
+                    plan.parent_table.as_str(),
+                    authorized_tuples.len(),
+                    parent_keys.len()
+                ),
+            );
+            crate::query_manager::policy_counters::observe_duration(
+                "authorized_parent_set_duration",
+                format!(
+                    "phase={} mode=correlated_parent child_table={} parent_table={} visible_tuples={} parent_keys={}",
+                    phase,
+                    graph.table.as_str(),
+                    plan.parent_table.as_str(),
+                    authorized_tuples.len(),
+                    parent_keys.len()
+                ),
+                started_at.elapsed(),
+            );
+
+            return Some(authorized_tuples);
+        }
+
+        let mut parent_authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
+        let mut authorized_tuples = Vec::with_capacity(child_entries.len());
+
+        for (tuple, parent_id, child_branch) in child_entries {
+            let is_authorized = match parent_id {
+                Some(parent_id) => *parent_authorization_cache
+                    .entry((parent_id, child_branch))
+                    .or_insert_with(|| {
+                        crate::query_manager::policy_counters::increment(
+                            "authorized_parent_set_eval",
+                            format!(
+                                "phase={} child_table={} parent_table={}",
+                                phase,
+                                graph.table.as_str(),
+                                plan.parent_table.as_str()
+                            ),
+                        );
+                        self.provenance_row_matches_current_select_policy(
+                            storage,
+                            settlement_eval_cache,
+                            parent_id,
+                            child_branch,
+                            session,
+                            auth_schema,
+                            auth_context,
+                            source_branch_schema_map,
+                            "authorized_parent_set",
+                        )
+                    }),
+                None => true,
+            };
+
+            if is_authorized {
+                authorized_tuples.push(tuple);
+            }
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "authorized_parent_set_scope",
+            format!(
+                "phase={} child_table={} parent_table={} visible_tuples={} parent_keys={}",
+                phase,
+                graph.table.as_str(),
+                plan.parent_table.as_str(),
+                authorized_tuples.len(),
+                parent_authorization_cache.len()
+            ),
+        );
+        crate::query_manager::policy_counters::observe_duration(
+            "authorized_parent_set_duration",
+            format!(
+                "phase={} child_table={} parent_table={} visible_tuples={} parent_keys={}",
+                phase,
+                graph.table.as_str(),
+                plan.parent_table.as_str(),
+                authorized_tuples.len(),
+                parent_authorization_cache.len()
+            ),
+            started_at.elapsed(),
+        );
+
+        Some(authorized_tuples)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorized_tuples_via_correlated_relation_set_if_available(
+        &mut self,
+        storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
+        graph: &super::graph::QueryGraph,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+        phase: &'static str,
+    ) -> Option<Vec<super::types::Tuple>> {
+        let started_at = Instant::now();
+        let session = session?;
+        let table_schema = auth_schema.get(&graph.table)?;
+        let select_policy = table_schema.policies.select_policy()?;
+        let plans = Self::correlated_relation_set_plans(select_policy);
+        if plans.is_empty() {
+            return None;
+        }
+        if plans
+            .iter()
+            .any(|plan| plan.outer_column != plans[0].outer_column)
+        {
+            return None;
+        }
+
+        let output_tuples = graph.current_output_tuples();
+        if output_tuples.is_empty() {
+            return Some(output_tuples);
+        }
+
+        let outer_column = plans.first()?.outer_column.clone();
+        let evaluates_resource_ids = outer_column.column == "id";
+        let outer_column_index = if evaluates_resource_ids {
+            None
+        } else {
+            Some(table_schema.columns.column_index(&outer_column.column)?)
+        };
+
+        let mut row_entries = Vec::with_capacity(output_tuples.len());
+        let mut branches = HashSet::new();
+
+        for tuple in output_tuples {
+            let row = tuple.to_single_row()?;
+            if tuple.provenance().len() != 1 {
+                return None;
+            }
+            let (provenance_id, branch_name) = tuple.provenance().iter().next().copied()?;
+            if provenance_id != row.id {
+                return None;
+            }
+
+            let row_value = match outer_column_index {
+                None => Some(row.id),
+                Some(index) => match decode_column(&table_schema.columns, &row.data, index) {
+                    Ok(Value::Uuid(id)) => Some(id),
+                    Ok(Value::Null) => None,
+                    _ => return None,
+                },
+            };
+            branches.insert(branch_name);
+            row_entries.push((tuple, row_value, branch_name));
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "authorized_correlated_relation_set_output_attempt",
+            format!(
+                "phase={} table={} plans={} tuples={}",
+                phase,
+                graph.table.as_str(),
+                plans.len(),
+                row_entries.len()
+            ),
+        );
+
+        let mut authorized_keys = HashSet::new();
+        for branch_name in branches {
+            let branch = branch_name.as_str();
+            for plan in &plans {
+                let empty_outer_descriptor = RowDescriptor::new(Vec::new());
+                let bound_rel =
+                    bind_relation_refs(&plan.rel, &[], &empty_outer_descriptor, session, None)?;
+                let Some(mut policy_graph) = PolicyGraph::for_exists_rel(
+                    &bound_rel,
+                    auth_schema,
+                    branch,
+                    Some(session.clone()),
+                    self.row_policy_mode,
+                    Some(&graph.table),
+                    evaluates_resource_ids,
+                    Some(Arc::new(auth_context.clone())),
+                ) else {
+                    crate::query_manager::policy_counters::increment(
+                        "authorized_correlated_relation_set_output_bail",
+                        format!(
+                            "phase={} table={} reason=compile",
+                            phase,
+                            graph.table.as_str()
+                        ),
+                    );
+                    return None;
+                };
+
+                let mut row_loader = |related_id: ObjectId, table_hint: Option<TableName>| {
+                    crate::query_manager::policy_counters::increment(
+                        "auth_storage_load_identity",
+                        format!(
+                            "branch={} table_hint={} id={}",
+                            branch,
+                            table_hint
+                                .as_ref()
+                                .map(TableName::as_str)
+                                .unwrap_or("<unknown>"),
+                            related_id
+                        ),
+                    );
+                    self.load_row_for_authorization_context(
+                        storage,
+                        related_id,
+                        branch_name,
+                        source_branch_schema_map,
+                        auth_context,
+                    )
+                };
+                for _ in 0..100 {
+                    if policy_graph.settle_with_settlement_eval_cache(
+                        storage,
+                        Some(settlement_eval_cache),
+                        &mut row_loader,
+                    ) {
+                        break;
+                    }
+                }
+
+                let output_tuple_descriptor = policy_graph.output_tuple_descriptor().clone();
+                for tuple in policy_graph.output_tuples() {
+                    if let Some(Value::Uuid(id)) = Self::decode_column_ref_from_tuple(
+                        &tuple,
+                        &output_tuple_descriptor,
+                        &plan.relation_column,
+                    ) {
+                        authorized_keys.insert((id, branch_name));
+                    }
+                }
+            }
+        }
+
+        let authorized_tuples = row_entries
+            .into_iter()
+            .filter_map(|(tuple, row_value, branch_name)| {
+                row_value
+                    .filter(|id| authorized_keys.contains(&(*id, branch_name)))
+                    .map(|_| tuple)
+            })
+            .collect::<Vec<_>>();
+
+        crate::query_manager::policy_counters::increment(
+            "authorized_correlated_relation_set_output_scope",
+            format!(
+                "phase={} table={} authorized_ids={} visible_tuples={}",
+                phase,
+                graph.table.as_str(),
+                authorized_keys.len(),
+                authorized_tuples.len()
+            ),
+        );
+        crate::query_manager::policy_counters::observe_duration(
+            "authorized_correlated_relation_set_output_duration",
+            format!(
+                "phase={} table={} authorized_ids={} visible_tuples={}",
+                phase,
+                graph.table.as_str(),
+                authorized_keys.len(),
+                authorized_tuples.len()
+            ),
+            started_at.elapsed(),
+        );
+
+        Some(authorized_tuples)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorized_parent_keys_via_correlated_relation_set_if_available(
+        &mut self,
+        storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+        parent_table: TableName,
+        parent_keys: &HashSet<(ObjectId, BranchName)>,
+        child_table: TableName,
+        phase: &'static str,
+    ) -> Option<HashSet<(ObjectId, BranchName)>> {
+        let session = session?;
+        let parent_schema = auth_schema.get(&parent_table)?;
+        let select_policy = parent_schema.policies.select_policy()?;
+        let plans = Self::correlated_relation_set_plans(select_policy);
+        if plans.is_empty() {
+            return None;
+        }
+        if plans
+            .iter()
+            .any(|plan| plan.outer_column != plans[0].outer_column)
+        {
+            return None;
+        }
+        if plans[0].outer_column.column != "id" {
+            return None;
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "authorized_parent_correlated_set_attempt",
+            format!(
+                "phase={} child_table={} parent_table={} plans={} parent_keys={}",
+                phase,
+                child_table.as_str(),
+                parent_table.as_str(),
+                plans.len(),
+                parent_keys.len()
+            ),
+        );
+
+        let mut authorized_parent_keys = HashSet::new();
+        let branches = parent_keys
+            .iter()
+            .map(|(_, branch)| *branch)
+            .collect::<HashSet<_>>();
+
+        for branch_name in branches {
+            let branch = branch_name.as_str();
+            for plan in &plans {
+                let empty_outer_descriptor = RowDescriptor::new(Vec::new());
+                let bound_rel =
+                    bind_relation_refs(&plan.rel, &[], &empty_outer_descriptor, session, None)?;
+                let Some(mut policy_graph) = PolicyGraph::for_exists_rel(
+                    &bound_rel,
+                    auth_schema,
+                    branch,
+                    Some(session.clone()),
+                    self.row_policy_mode,
+                    Some(&parent_table),
+                    true,
+                    Some(Arc::new(auth_context.clone())),
+                ) else {
+                    crate::query_manager::policy_counters::increment(
+                        "authorized_parent_correlated_set_bail",
+                        format!(
+                            "phase={} child_table={} parent_table={} reason=compile",
+                            phase,
+                            child_table.as_str(),
+                            parent_table.as_str()
+                        ),
+                    );
+                    return None;
+                };
+
+                let mut row_loader = |related_id: ObjectId, table_hint: Option<TableName>| {
+                    crate::query_manager::policy_counters::increment(
+                        "auth_storage_load_identity",
+                        format!(
+                            "branch={} table_hint={} id={}",
+                            branch,
+                            table_hint
+                                .as_ref()
+                                .map(TableName::as_str)
+                                .unwrap_or("<unknown>"),
+                            related_id
+                        ),
+                    );
+                    self.load_row_for_authorization_context(
+                        storage,
+                        related_id,
+                        branch_name,
+                        source_branch_schema_map,
+                        auth_context,
+                    )
+                };
+                for _ in 0..100 {
+                    if policy_graph.settle_with_settlement_eval_cache(
+                        storage,
+                        Some(settlement_eval_cache),
+                        &mut row_loader,
+                    ) {
+                        break;
+                    }
+                }
+
+                let output_tuple_descriptor = policy_graph.output_tuple_descriptor().clone();
+                for tuple in policy_graph.output_tuples() {
+                    if let Some(Value::Uuid(id)) = Self::decode_column_ref_from_tuple(
+                        &tuple,
+                        &output_tuple_descriptor,
+                        &plan.relation_column,
+                    ) && parent_keys.contains(&(id, branch_name))
+                    {
+                        authorized_parent_keys.insert((id, branch_name));
+                    }
+                }
+            }
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "authorized_parent_correlated_set_scope",
+            format!(
+                "phase={} child_table={} parent_table={} authorized_parent_keys={} parent_keys={}",
+                phase,
+                child_table.as_str(),
+                parent_table.as_str(),
+                authorized_parent_keys.len(),
+                parent_keys.len()
+            ),
+        );
+
+        Some(authorized_parent_keys)
     }
 
     pub(super) fn authorized_tuples_from_graph_with_cache(
