@@ -103,6 +103,7 @@ pub struct OpfsBTree<F: SyncFile> {
     total_pages: u64,
     persisted_pages: u64,
     pages: OpfsMap<PageId, Vec<u8>>,
+    page_kinds: OpfsMap<PageId, PageKind>,
     blob_pages: OpfsSet<PageId>,
     page_access_epoch: OpfsMap<PageId, u64>,
     access_epoch: u64,
@@ -231,6 +232,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             total_pages: 2,
             persisted_pages,
             pages: OpfsMap::with_capacity_and_hasher(cache_capacity, Default::default()),
+            page_kinds: OpfsMap::with_capacity_and_hasher(cache_capacity, Default::default()),
             blob_pages: OpfsSet::with_capacity_and_hasher(cache_capacity / 2, Default::default()),
             page_access_epoch: OpfsMap::with_capacity_and_hasher(
                 cache_capacity,
@@ -1170,6 +1172,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             let end = start + self.options.page_size;
             let page_raw = &raw[start..end];
             self.pages.insert(page_id, page_raw.to_vec());
+            self.page_kinds.remove(&page_id);
             self.blob_pages.insert(page_id);
             self.touch_page(page_id);
         }
@@ -1416,7 +1419,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ));
             }
 
-            let raw = self.read_page_raw_from_disk(current)?;
+            let (raw, _) = self.read_page_raw_from_disk(current)?;
             let (ids, next) = raw_freelist_page(&raw, self.options.page_size)?;
             self.freelist_meta_pages.push(current);
             for id in ids {
@@ -1428,7 +1431,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
-    fn read_page_raw_from_disk(&self, page_id: PageId) -> Result<Vec<u8>, BTreeError> {
+    fn read_page_raw_from_disk(&self, page_id: PageId) -> Result<(Vec<u8>, PageKind), BTreeError> {
         if page_id < 2 || page_id >= self.total_pages {
             return Err(BTreeError::Corrupt(format!(
                 "page id {} out of bounds for total_pages {}",
@@ -1442,14 +1445,14 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let mut raw = vec![0u8; self.options.page_size];
         self.file.read_exact_at(offset, &mut raw)?;
-        let _ = validate_page(&raw, self.options.page_size)?;
-        Ok(raw)
+        let kind = validate_page(&raw, self.options.page_size)?;
+        Ok((raw, kind))
     }
 
     fn read_page_run_from_disk(&mut self, page_id: PageId) -> Result<(), BTreeError> {
         if self.options.read_coalesce_pages <= 1 {
-            let raw = self.read_page_raw_from_disk(page_id)?;
-            self.cache_loaded_raw_page(page_id, raw);
+            let (raw, kind) = self.read_page_raw_from_disk(page_id)?;
+            self.cache_loaded_raw_page(page_id, raw, kind);
             return Ok(());
         }
 
@@ -1489,13 +1492,17 @@ impl<F: SyncFile> OpfsBTree<F> {
             let end = start + self.options.page_size;
             let page_raw = &raw[start..end];
 
-            let validate = validate_page(page_raw, self.options.page_size);
-            if i == 0 {
-                validate?;
-            } else if validate.is_err() {
-                break;
+            let kind = match validate_page(page_raw, self.options.page_size) {
+                Ok(kind) => kind,
+                Err(err) => {
+                    if i == 0 {
+                        return Err(err);
+                    }
+                    break;
+                }
             };
             self.pages.insert(current_page_id, page_raw.to_vec());
+            self.page_kinds.insert(current_page_id, kind);
             self.touch_page(current_page_id);
         }
         self.evict_pages_if_needed(Some(page_id));
@@ -1552,7 +1559,11 @@ impl<F: SyncFile> OpfsBTree<F> {
                     stats.dirty_tree_pages = stats.dirty_tree_pages.saturating_add(1);
                     // Dirty tree pages come from encode_page or raw leaf mutators,
                     // both of which already maintain the page checksum.
-                    match raw_page_kind(raw, self.options.page_size)? {
+                    let kind = match self.page_kinds.get(page_id).copied() {
+                        Some(kind) => kind,
+                        None => raw_page_kind(raw, self.options.page_size)?,
+                    };
+                    match kind {
                         PageKind::Leaf | PageKind::Internal => {}
                         PageKind::Overflow | PageKind::Freelist => {
                             return Err(BTreeError::Corrupt(format!(
@@ -1725,8 +1736,11 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn set_dirty_page(&mut self, page_id: PageId, page: Page) -> Result<(), BTreeError> {
         let started_at = now_us();
+        let kind = page_kind_for_page(&page);
         let raw = encode_page(&page, self.options.page_size)?;
         self.pages.insert(page_id, raw);
+        self.page_kinds.insert(page_id, kind);
+        self.blob_pages.remove(&page_id);
         self.perf.dirty_tree_marks = self.perf.dirty_tree_marks.saturating_add(1);
         self.mark_dirty_loaded_page(page_id);
         self.perf.set_dirty_page_us = self
@@ -1738,6 +1752,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn set_dirty_blob_page(&mut self, page_id: PageId, raw: Vec<u8>) {
         self.pages.insert(page_id, raw);
+        self.page_kinds.remove(&page_id);
         self.blob_pages.insert(page_id);
         self.perf.dirty_blob_marks = self.perf.dirty_blob_marks.saturating_add(1);
         self.mark_dirty_loaded_page(page_id);
@@ -1752,12 +1767,14 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {
         self.dirty_pages.remove(&page_id);
         self.page_access_epoch.remove(&page_id);
+        self.page_kinds.remove(&page_id);
         self.blob_pages.remove(&page_id);
         self.pages.remove(&page_id)
     }
 
-    fn cache_loaded_raw_page(&mut self, page_id: PageId, raw: Vec<u8>) {
+    fn cache_loaded_raw_page(&mut self, page_id: PageId, raw: Vec<u8>, kind: PageKind) {
         self.pages.insert(page_id, raw);
+        self.page_kinds.insert(page_id, kind);
         self.touch_page(page_id);
         self.evict_pages_if_needed_with_read_miss_allowance(Some(page_id));
     }
@@ -2041,7 +2058,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         // Candidate ordering is (priority, access_epoch, page_id), where smaller
         // values are better eviction victims.
         let mut victims: BinaryHeap<(u8, u64, PageId)> = BinaryHeap::with_capacity(target);
-        for (page_id, page) in &self.pages {
+        for page_id in self.pages.keys() {
             self.perf.evict_scanned_pages = self.perf.evict_scanned_pages.saturating_add(1);
             if Some(*page_id) == protected_page {
                 self.perf.evict_protected_skips = self.perf.evict_protected_skips.saturating_add(1);
@@ -2059,8 +2076,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             let priority = if self.blob_pages.contains(page_id) {
                 0
             } else {
-                match raw_page_kind(page, self.options.page_size) {
-                    Ok(kind) => {
+                match self.page_kinds.get(page_id).copied() {
+                    Some(kind) => {
                         if self.options.pin_internal_pages && kind == PageKind::Internal {
                             self.perf.evict_internal_skips =
                                 self.perf.evict_internal_skips.saturating_add(1);
@@ -2068,7 +2085,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                         }
                         eviction_priority(kind)
                     }
-                    Err(_) => 0, // unknown raw pages are always evictable when clean
+                    None => 0, // unknown raw pages are always evictable when clean
                 }
             };
             self.perf.evict_candidates = self.perf.evict_candidates.saturating_add(1);
@@ -2097,6 +2114,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         for (_, _, page_id) in victims {
             self.pages.remove(&page_id);
             self.page_access_epoch.remove(&page_id);
+            self.page_kinds.remove(&page_id);
             self.perf.evicted_pages = self.perf.evicted_pages.saturating_add(1);
         }
     }
@@ -2319,6 +2337,15 @@ fn eviction_priority(kind: PageKind) -> u8 {
         PageKind::Overflow | PageKind::Freelist => 0,
         PageKind::Leaf => 1,
         PageKind::Internal => 2,
+    }
+}
+
+fn page_kind_for_page(page: &Page) -> PageKind {
+    match page {
+        Page::Internal { .. } => PageKind::Internal,
+        Page::Leaf { .. } => PageKind::Leaf,
+        Page::Overflow { .. } => PageKind::Overflow,
+        Page::Freelist { .. } => PageKind::Freelist,
     }
 }
 
