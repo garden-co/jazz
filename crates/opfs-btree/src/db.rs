@@ -8,8 +8,8 @@ use crate::file::SyncFile;
 use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
     ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits, raw_freelist_page,
-    raw_internal_child_for_key, raw_leaf_delete_in_place, raw_leaf_find_value, raw_leaf_scan,
-    raw_leaf_upsert_in_place, raw_page_kind, validate_page,
+    raw_internal_child_for_key, raw_internal_child_index_for_key, raw_leaf_delete_in_place,
+    raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 
@@ -772,9 +772,9 @@ impl<F: SyncFile> OpfsBTree<F> {
             }
             PageKind::Internal => {
                 self.perf.insert_internal_calls = self.perf.insert_internal_calls.saturating_add(1);
-                let child_page_id = {
+                let (child_idx, child_page_id) = {
                     let raw = self.raw_page_bytes(page_id)?;
-                    raw_internal_child_for_key(raw, self.options.page_size, key)?
+                    raw_internal_child_index_for_key(raw, self.options.page_size, key)?
                 };
 
                 let split = self.insert_recursive(child_page_id, key, value)?;
@@ -803,7 +803,6 @@ impl<F: SyncFile> OpfsBTree<F> {
                         page_id
                     )));
                 };
-                let child_idx = child_index(&keys, key);
                 let expected_child_page_id = *children.get(child_idx).ok_or_else(|| {
                     BTreeError::Corrupt(format!(
                         "internal page {} missing child {}",

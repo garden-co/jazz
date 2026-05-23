@@ -220,6 +220,14 @@ pub(crate) fn raw_internal_child_for_key(
     expected_page_size: usize,
     key: &[u8],
 ) -> Result<PageId, BTreeError> {
+    Ok(raw_internal_child_index_for_key(raw, expected_page_size, key)?.1)
+}
+
+pub(crate) fn raw_internal_child_index_for_key(
+    raw: &[u8],
+    expected_page_size: usize,
+    key: &[u8],
+) -> Result<(usize, PageId), BTreeError> {
     let header = parse_header(raw, expected_page_size, false)?;
     if header.kind != PageKind::Internal {
         return Err(BTreeError::Corrupt("expected internal page".to_string()));
@@ -247,11 +255,11 @@ pub(crate) fn raw_internal_child_for_key(
     }
 
     if lo == 0 {
-        return read_u64_at(header.payload, 0, "internal left child");
+        return Ok((lo, read_u64_at(header.payload, 0, "internal left child")?));
     }
 
     let (_, _, right_child) = internal_slot(header.payload, key_count, lo - 1)?;
-    Ok(right_child)
+    Ok((lo, right_child))
 }
 
 pub(crate) fn raw_leaf_find_value<'a>(
