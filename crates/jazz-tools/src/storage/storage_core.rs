@@ -43,6 +43,7 @@ pub(super) fn raw_table_scan_prefix_core(
         .collect())
 }
 
+#[allow(dead_code)]
 pub(super) fn raw_table_scan_prefix_keys_core(
     table: &str,
     prefix: &str,
@@ -78,6 +79,7 @@ pub(super) fn raw_table_scan_range_core(
         .collect())
 }
 
+#[allow(dead_code)]
 pub(super) fn raw_table_scan_range_keys_core(
     table: &str,
     start: Option<&str>,

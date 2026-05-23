@@ -9,8 +9,8 @@ use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
     ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits, raw_freelist_page,
     raw_internal_child_for_key, raw_internal_child_index_for_key, raw_leaf_delete_in_place,
-    raw_leaf_find_value, raw_leaf_scan, raw_leaf_update_hint, raw_leaf_upsert_in_place_with_hint,
-    raw_page_kind, validate_page,
+    raw_leaf_find_value, raw_leaf_scan, raw_leaf_scan_keys, raw_leaf_update_hint,
+    raw_leaf_upsert_in_place_with_hint, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 
@@ -484,17 +484,11 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.ensure_page_loaded(page_id)?;
             let remaining = limit.saturating_sub(out.len());
             let raw = self.raw_page_bytes(page_id)?;
-            let next = raw_leaf_scan(
-                raw,
-                self.options.page_size,
-                start,
-                end,
-                remaining,
-                |key, _| {
+            let next =
+                raw_leaf_scan_keys(raw, self.options.page_size, start, end, remaining, |key| {
                     out.push(key.to_vec());
                     Ok(())
-                },
-            )?;
+                })?;
 
             if out.len() == limit {
                 return Ok(out);

@@ -34,10 +34,7 @@ use super::{
         history_row_raw_table_key, increment_bytes, increment_string, raw_table_entry_key,
         raw_table_prefix, raw_table_scan_prefix, visible_row_raw_table_key,
     },
-    storage_core::{
-        raw_table_delete_core, raw_table_get_core, raw_table_put_core,
-        raw_table_scan_prefix_keys_core, raw_table_scan_range_keys_core,
-    },
+    storage_core::{raw_table_delete_core, raw_table_get_core, raw_table_put_core},
 };
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
@@ -193,44 +190,12 @@ impl OpfsBTreeStorage {
         self.with_tree_mut(|tree| tree.delete(key.as_bytes()).map_err(map_storage_err))
     }
 
-    fn tree_scan_prefix_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        let start = prefix.as_bytes();
-        let mut end = start.to_vec();
-        increment_bytes(&mut end);
-        self.tree_scan_range_key_bytes(start, &end)
-    }
-
-    fn tree_scan_range_keys(&self, start: &str, end: &str) -> Result<Vec<String>, StorageError> {
-        self.tree_scan_range_key_bytes(start.as_bytes(), end.as_bytes())
-    }
-
     fn tree_scan_range_raw(&self, start: &[u8], end: &[u8]) -> Result<RawTreeRows, StorageError> {
         if start >= end {
             return Ok(Vec::new());
         }
 
         self.with_tree_mut(|tree| tree.range(start, end, usize::MAX).map_err(map_storage_err))
-    }
-
-    fn tree_scan_range_key_bytes(
-        &self,
-        start: &[u8],
-        end: &[u8],
-    ) -> Result<Vec<String>, StorageError> {
-        if start >= end {
-            return Ok(Vec::new());
-        }
-
-        self.with_tree_mut(|tree| {
-            tree.range_keys(start, end, usize::MAX)
-                .map_err(map_storage_err)
-        })?
-        .into_iter()
-        .map(|key| {
-            String::from_utf8(key)
-                .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e)))
-        })
-        .collect()
     }
 
     fn raw_table_scan_range_bytes(
@@ -252,6 +217,29 @@ impl OpfsBTreeStorage {
                 )
             })
             .collect()
+    }
+
+    fn raw_table_scan_range_key_bytes(
+        &self,
+        table: &str,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<super::RawTableKeys, StorageError> {
+        let raw_prefix = raw_table_prefix(table);
+        let raw_prefix = raw_prefix.as_bytes();
+        self.with_tree_mut(|tree| {
+            tree.range_keys(start, end, usize::MAX)
+                .map_err(map_storage_err)
+        })?
+        .into_iter()
+        .filter_map(|key| {
+            let local_key = key.strip_prefix(raw_prefix)?;
+            Some(
+                String::from_utf8(local_key.to_vec())
+                    .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e))),
+            )
+        })
+        .collect()
     }
 }
 
@@ -323,9 +311,10 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         prefix: &str,
     ) -> Result<super::RawTableKeys, StorageError> {
-        raw_table_scan_prefix_keys_core(table, prefix, |storage_prefix| {
-            self.tree_scan_prefix_keys(storage_prefix)
-        })
+        let storage_prefix = raw_table_scan_prefix(table, prefix);
+        let mut end = storage_prefix.as_bytes().to_vec();
+        increment_bytes(&mut end);
+        self.raw_table_scan_range_key_bytes(table, storage_prefix.as_bytes(), &end)
     }
 
     fn raw_table_scan_range(
@@ -351,9 +340,15 @@ impl Storage for OpfsBTreeStorage {
         start: Option<&str>,
         end: Option<&str>,
     ) -> Result<super::RawTableKeys, StorageError> {
-        raw_table_scan_range_keys_core(table, start, end, |start_key, end_key| {
-            self.tree_scan_range_keys(start_key, end_key)
-        })
+        let start_key = raw_table_entry_key(table, start.unwrap_or(""));
+        let end_key = if let Some(end) = end {
+            raw_table_entry_key(table, end)
+        } else {
+            let mut table_end = raw_table_prefix(table);
+            increment_string(&mut table_end);
+            table_end
+        };
+        self.raw_table_scan_range_key_bytes(table, start_key.as_bytes(), end_key.as_bytes())
     }
 
     fn append_history_region_row_bytes(

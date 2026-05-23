@@ -109,6 +109,7 @@ pub(super) fn raw_table_scan_prefix(table: &str, prefix: &str) -> String {
     storage_prefix
 }
 
+#[allow(dead_code)]
 pub(super) fn strip_raw_table_key<'a>(table: &str, storage_key: &'a str) -> Option<&'a str> {
     storage_key
         .strip_prefix(RAW_TABLE_KEY_PREFIX)?

@@ -443,6 +443,95 @@ pub(crate) fn raw_leaf_scan<'a>(
     }
 }
 
+/// Scan a leaf page for keys in the range [start, end) without parsing value cells.
+/// If the end of the range (or the limit of results) is reached, the function returns None.
+/// Otherwise, the function returns the next page ID so the caller can continue scanning.
+pub(crate) fn raw_leaf_scan_keys<'a>(
+    raw: &'a [u8],
+    expected_page_size: usize,
+    start: &[u8],
+    end: &[u8],
+    limit: usize,
+    mut visit: impl FnMut(&'a [u8]) -> Result<(), BTreeError>,
+) -> Result<Option<PageId>, BTreeError> {
+    let header = parse_header(raw, expected_page_size, false)?;
+    if header.kind != PageKind::Leaf {
+        return Err(BTreeError::Corrupt("expected leaf page".to_string()));
+    }
+    if limit == 0 {
+        return Ok(None);
+    }
+
+    let entry_count = header.item_count as usize;
+    let payload = header.payload;
+    let slots_bytes = leaf_slots_bytes(entry_count)?;
+    if payload.len() < slots_bytes {
+        return Err(BTreeError::Corrupt(
+            "leaf page payload shorter than slot directory".to_string(),
+        ));
+    }
+    let slots = &payload[..slots_bytes];
+
+    let mut lo = 0usize;
+    let mut hi = entry_count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let slot_base = leaf_slot_base(mid)?;
+        let slot = &slots[slot_base..slot_base + LEAF_SLOT_BYTES];
+        let key_off =
+            u32::from_le_bytes(slot[0..4].try_into().expect("leaf key offset slot bytes")) as usize;
+        let key_len =
+            u32::from_le_bytes(slot[4..8].try_into().expect("leaf key length slot bytes")) as usize;
+        let key_end = key_off
+            .checked_add(key_len)
+            .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+        if key_end > payload.len() {
+            return Err(BTreeError::Corrupt(
+                "leaf key exceeds payload bounds".to_string(),
+            ));
+        }
+        let current_key = &payload[key_off..key_end];
+        if current_key < start {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    let mut emitted = 0usize;
+    let mut reached_end = false;
+    let mut slot_base = leaf_slot_base(lo)?;
+    while slot_base < slots_bytes && emitted < limit {
+        let slot = &slots[slot_base..slot_base + LEAF_SLOT_BYTES];
+        let key_off =
+            u32::from_le_bytes(slot[0..4].try_into().expect("leaf key offset slot bytes")) as usize;
+        let key_len =
+            u32::from_le_bytes(slot[4..8].try_into().expect("leaf key length slot bytes")) as usize;
+        let key_end = key_off
+            .checked_add(key_len)
+            .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+        if key_end > payload.len() {
+            return Err(BTreeError::Corrupt(
+                "leaf key exceeds payload bounds".to_string(),
+            ));
+        }
+        let key = &payload[key_off..key_end];
+        if key >= end {
+            reached_end = true;
+            break;
+        }
+        visit(key)?;
+        emitted += 1;
+        slot_base += LEAF_SLOT_BYTES;
+    }
+
+    if reached_end || emitted == limit {
+        Ok(None)
+    } else {
+        Ok(header.next_page_id)
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn raw_leaf_upsert_in_place(
     raw: &mut [u8],
@@ -1801,5 +1890,18 @@ mod tests {
         .expect("scan");
         assert_eq!(visited, vec![b"a".to_vec(), b"b".to_vec()]);
         assert_eq!(next, None);
+    }
+
+    #[test]
+    fn raw_leaf_scan_keys_matches_key_range_without_values() {
+        let raw = sample_leaf_page(Some(77));
+        let mut visited = Vec::<Vec<u8>>::new();
+        let next = raw_leaf_scan_keys(&raw, 4096, b"b", b"z", 10, |key| {
+            visited.push(key.to_vec());
+            Ok(())
+        })
+        .expect("scan keys");
+        assert_eq!(visited, vec![b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
+        assert_eq!(next, Some(77));
     }
 }
