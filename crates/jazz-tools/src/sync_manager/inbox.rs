@@ -932,8 +932,10 @@ impl SyncManager {
             }
         };
 
-        if !matches!(fate, BatchFate::Missing { .. })
-            && let Err(error) = storage.delete_sealed_batch_submission(batch_id)
+        if matches!(
+            fate,
+            BatchFate::Rejected { .. } | BatchFate::AcceptedTransaction { .. }
+        ) && let Err(error) = storage.delete_sealed_batch_submission(batch_id)
         {
             tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
         }
@@ -989,10 +991,10 @@ impl SyncManager {
                     // Continue into seal validation so this authority can promote a
                     // previously local direct fate to its own durability tier.
                 } else {
-                    let should_prune_submission = matches!(fate, BatchFate::Rejected { .. })
-                        || fate
-                            .confirmed_tier()
-                            .is_some_and(|tier| tier >= DurabilityTier::GlobalServer);
+                    let should_prune_submission = matches!(
+                        fate,
+                        BatchFate::Rejected { .. } | BatchFate::AcceptedTransaction { .. }
+                    );
                     let prune_result = if should_prune_submission {
                         storage.delete_sealed_batch_submission(batch_id)
                     } else {

@@ -287,6 +287,7 @@ const browserScenarioSelection = new Set(
     .map((value) => value.trim().toUpperCase())
     .filter(Boolean),
 );
+const diagnosticIt = browserScenarioSelection.size === 0 ? it : it.skip;
 const browserRunId = (__JAZZ_REALISTIC_BROWSER_RUN_ID__ ?? "").trim() || "local";
 
 const usersTable = tableProxy<UserRow, Omit<UserRow, "id">>("users");
@@ -911,6 +912,9 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog(`W4 start cycles=${cycles}`);
   let db: Db | null = null;
   const latencies: number[] = [];
+  const createLatencies: number[] = [];
+  const queryLatencies: number[] = [];
+  const shutdownLatencies: number[] = [];
 
   try {
     db = await createDb({ appId, dbName, logLevel: "warn" });
@@ -932,7 +936,10 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
     for (let i = 0; i < cycles; i += 1) {
       progressLog(`W4 cycle ${i + 1}/${cycles}`);
       const t0 = performance.now();
+      const createStart = performance.now();
       db = await createDb({ appId, dbName, logLevel: "warn" });
+      createLatencies.push(performance.now() - createStart);
+      const queryStart = performance.now();
       await db.all(
         query<TaskRow>(
           "tasks",
@@ -942,7 +949,10 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
         ),
         "local",
       );
+      queryLatencies.push(performance.now() - queryStart);
+      const shutdownStart = performance.now();
       await db.shutdown();
+      shutdownLatencies.push(performance.now() - shutdownStart);
       db = null;
       latencies.push(performance.now() - t0);
     }
@@ -959,7 +969,12 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
       operation_summaries: {
         cold_reopen: summarizeLatencies(latencies),
       },
-      extra: { cycles },
+      extra: {
+        cycles,
+        create_db: summarizeLatencies(createLatencies),
+        local_query: summarizeLatencies(queryLatencies),
+        shutdown: summarizeLatencies(shutdownLatencies),
+      },
     };
   } finally {
     if (db) await db.shutdown();
@@ -2127,7 +2142,7 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
 }
 
 describe("realistic browser benchmark harness", () => {
-  it("delivers an initial scoped snapshot for a seeded server-backed project board query", async () => {
+  diagnosticIt("delivers an initial scoped snapshot for a seeded server-backed project board query", async () => {
     const cfg = scaledProfile(profile);
     const appId = await benchmarkAppId("b4-subscribe-repro");
     const dbName = uniqueDbName("b4-subscribe-repro");
@@ -2170,7 +2185,7 @@ describe("realistic browser benchmark harness", () => {
     }
   }, 60_000);
 
-  it("delivers an initial scoped snapshot after a local update on a seeded server-backed row", async () => {
+  diagnosticIt("delivers an initial scoped snapshot after a local update on a seeded server-backed row", async () => {
     const cfg = scaledProfile(profile);
     const appId = await benchmarkAppId("b4-subscribe-after-update");
     const dbName = uniqueDbName("b4-subscribe-after-update");
@@ -2216,7 +2231,7 @@ describe("realistic browser benchmark harness", () => {
     }
   }, 60_000);
 
-  it("profiles repeated query_my_work reads on a seeded server-backed dataset", async () => {
+  diagnosticIt("profiles repeated query_my_work reads on a seeded server-backed dataset", async () => {
     const cfg = scaledProfile(profile);
     const appId = await benchmarkAppId("b2-query-my-work-profile");
     const dbName = uniqueDbName("b2-query-my-work-profile");
@@ -2316,7 +2331,7 @@ describe("realistic browser benchmark harness", () => {
     }
   }, 180_000);
 
-  it("profiles one recursive permission read on a warmed server-backed dataset", async () => {
+  diagnosticIt("profiles one recursive permission read on a warmed server-backed dataset", async () => {
     const cfg = scaledProfile(profile);
     const appId = await benchmarkAppId("b5-permission-read-profile");
     const dbPrefix = uniqueDbName("b5-permission-read-profile");

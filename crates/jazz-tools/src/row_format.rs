@@ -109,6 +109,7 @@ pub struct CompiledRowLayout {
     columns: Vec<CompiledColumnLayout>,
     fixed_section_size: usize,
     variable_column_count: usize,
+    variable_data_start: usize,
 }
 
 fn compiled_row_layout_cache() -> &'static Mutex<HashMap<[u8; 32], Arc<CompiledRowLayout>>> {
@@ -144,10 +145,12 @@ fn compile_row_layout(descriptor: &RowDescriptor) -> CompiledRowLayout {
         }
     }
 
+    let offset_table_size = variable_index.saturating_sub(1) * 4;
     CompiledRowLayout {
         columns,
         fixed_section_size: fixed_offset,
         variable_column_count: variable_index,
+        variable_data_start: fixed_offset.saturating_add(offset_table_size),
     }
 }
 
@@ -1022,20 +1025,9 @@ fn variable_column_bytes<'a>(
     data: &'a [u8],
     col_index: usize,
 ) -> Result<(&'a [u8], bool), EncodingError> {
-    let fixed_size = layout.fixed_section_size;
     let var_count = layout.variable_column_count;
-    let offset_table_size = if var_count > 1 {
-        (var_count - 1) * 4
-    } else {
-        0
-    };
-
-    let var_data_start =
-        fixed_size
-            .checked_add(offset_table_size)
-            .ok_or(EncodingError::MalformedData {
-                message: "variable data start offset overflowed".into(),
-            })?;
+    let fixed_size = layout.fixed_section_size;
+    let var_data_start = layout.variable_data_start;
 
     if var_data_start > data.len() {
         return Err(EncodingError::MalformedData {
@@ -1719,6 +1711,98 @@ pub fn project_row_with_layout(
     }
 
     let mut result = fixed_data;
+    for offset in var_offsets.iter().skip(1) {
+        result.extend_from_slice(&offset.to_le_bytes());
+    }
+    result.extend(var_data);
+
+    Ok(result)
+}
+
+/// Project a contiguous source tail into a destination row.
+///
+/// This is the hot decode counterpart to `encode_row_with_prefix_and_projected_tail`:
+/// flat row-history storage prefixes Jazz metadata columns and stores user
+/// columns after them. The projection is therefore always `src_start_col + i`
+/// into destination column `i`, so avoid allocating and filling a mapping table
+/// for every decoded row.
+pub(crate) fn project_row_tail_with_layout(
+    src_descriptor: &RowDescriptor,
+    src_layout: &CompiledRowLayout,
+    src_data: &[u8],
+    dst_descriptor: &RowDescriptor,
+    dst_layout: &CompiledRowLayout,
+    src_start_col: usize,
+) -> Result<Vec<u8>, EncodingError> {
+    let src_end_col = src_start_col
+        .checked_add(dst_descriptor.columns.len())
+        .ok_or(EncodingError::ColumnIndexOutOfBounds {
+            index: src_start_col,
+            max: src_descriptor.columns.len().saturating_sub(1),
+        })?;
+    if src_end_col > src_descriptor.columns.len() {
+        return Err(EncodingError::ColumnIndexOutOfBounds {
+            index: src_end_col.saturating_sub(1),
+            max: src_descriptor.columns.len().saturating_sub(1),
+        });
+    }
+
+    let offset_table_size = dst_layout.variable_column_count.saturating_sub(1) * size_of::<u32>();
+    let mut fixed_data = Vec::with_capacity(dst_layout.fixed_section_size);
+    let mut var_data = Vec::with_capacity(
+        src_data
+            .len()
+            .saturating_sub(src_layout.variable_data_start),
+    );
+    let mut var_offsets: Vec<u32> = Vec::with_capacity(dst_layout.variable_column_count);
+
+    for (dst_col, dst_col_desc) in dst_descriptor.columns.iter().enumerate() {
+        if dst_col_desc.column_type.is_variable() {
+            continue;
+        }
+
+        let src_col = src_start_col + dst_col;
+        let value_size = dst_col_desc.column_type.fixed_size().unwrap();
+        let (bytes, is_null) =
+            column_bytes_internal_with_layout(src_descriptor, src_layout, src_data, src_col)?;
+
+        if dst_col_desc.nullable {
+            if is_null {
+                fixed_data.push(0);
+                fixed_data.extend(std::iter::repeat_n(0, value_size));
+            } else {
+                fixed_data.push(1);
+                fixed_data.extend_from_slice(bytes);
+            }
+        } else {
+            fixed_data.extend_from_slice(bytes);
+        }
+    }
+
+    for (dst_col, dst_col_desc) in dst_descriptor.columns.iter().enumerate() {
+        if !dst_col_desc.column_type.is_variable() {
+            continue;
+        }
+
+        var_offsets.push(var_data.len() as u32);
+        let src_col = src_start_col + dst_col;
+        let (bytes, is_null) =
+            column_bytes_internal_with_layout(src_descriptor, src_layout, src_data, src_col)?;
+
+        if dst_col_desc.nullable {
+            if is_null {
+                var_data.push(0);
+            } else {
+                var_data.push(1);
+                var_data.extend_from_slice(bytes);
+            }
+        } else {
+            var_data.extend_from_slice(bytes);
+        }
+    }
+
+    let mut result = Vec::with_capacity(fixed_data.len() + offset_table_size + var_data.len());
+    result.extend(fixed_data);
     for offset in var_offsets.iter().skip(1) {
         result.extend_from_slice(&offset.to_le_bytes());
     }
@@ -2642,6 +2726,51 @@ mod tests {
 
         let decoded = decode_row(&descriptor, &projected).unwrap();
         assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn project_tail_with_layout_matches_explicit_projection() {
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("_batch", ColumnType::BatchId),
+            ColumnDescriptor::new("_state", ColumnType::Text),
+            ColumnDescriptor::new("title", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("count", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new("done", ColumnType::Boolean).nullable(),
+        ]);
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("count", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new("done", ColumnType::Boolean).nullable(),
+        ]);
+        let src_values = vec![
+            Value::BatchId([1; 16]),
+            Value::Text("visible".into()),
+            Value::Text("Hello".into()),
+            Value::Null,
+            Value::Boolean(true),
+        ];
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping = [(2, 0), (3, 1), (4, 2)];
+        let explicit = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+        let tail = project_row_tail_with_layout(
+            &src_desc,
+            compiled_row_layout(&src_desc).as_ref(),
+            &src_encoded,
+            &dst_desc,
+            compiled_row_layout(&dst_desc).as_ref(),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(tail, explicit);
+        assert_eq!(
+            decode_row(&dst_desc, &tail).unwrap(),
+            vec![
+                Value::Text("Hello".into()),
+                Value::Null,
+                Value::Boolean(true)
+            ]
+        );
     }
 
     #[test]

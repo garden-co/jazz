@@ -34,6 +34,96 @@ fn set_query_scope_stores_session() {
 }
 
 #[test]
+fn replacing_overlapping_query_scope_keeps_shared_row_interest() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"shared");
+    let row_key = RowBatchKey::from_row(&row);
+    let branch = BranchName::new("main");
+
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, branch)]),
+        None,
+    );
+    sm.take_outbox();
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(2),
+        HashSet::from([(row_id, branch)]),
+        None,
+    );
+    sm.take_outbox();
+    set_client_query_scope(&mut sm, &io, client_id, QueryId(1), HashSet::new(), None);
+
+    let client = sm.get_client(client_id).expect("client should exist");
+    assert!(
+        client.sent_batch_ids.contains_key(&(row_id, branch)),
+        "row interest shared with query 2 should not be pruned when query 1 drops it"
+    );
+    assert_eq!(
+        sm.row_batch_interest.get(&row_key),
+        Some(&HashSet::from([client_id]))
+    );
+}
+
+#[test]
+fn dropping_overlapping_query_scope_keeps_shared_row_interest() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"shared");
+    let row_key = RowBatchKey::from_row(&row);
+    let branch = BranchName::new("main");
+
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, branch)]),
+        None,
+    );
+    sm.take_outbox();
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(2),
+        HashSet::from([(row_id, branch)]),
+        None,
+    );
+    sm.take_outbox();
+    sm.drop_client_query_subscription(client_id, QueryId(1));
+
+    let client = sm.get_client(client_id).expect("client should exist");
+    assert!(
+        client.sent_batch_ids.contains_key(&(row_id, branch)),
+        "row interest shared with query 2 should not be pruned when query 1 unsubscribes"
+    );
+    assert_eq!(
+        sm.row_batch_interest.get(&row_key),
+        Some(&HashSet::from([client_id]))
+    );
+}
+
+#[test]
 fn query_settled_from_server_stores_scope_for_query() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();

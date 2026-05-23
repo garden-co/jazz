@@ -519,8 +519,13 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
         restarted
             .storage()
             .load_sealed_batch_submission(batch_id)
-            .unwrap(),
-        None,
-        "recovered settlement should prune the sealed submission marker"
+            .unwrap()
+            .expect("successful direct settlement should retain batch membership")
+            .members,
+        vec![SealedBatchMember {
+            object_id: row_id,
+            row_digest: staged_row.content_digest(),
+        }],
+        "recovered settlement should retain sealed membership for fast batch row lookup"
     );
 }

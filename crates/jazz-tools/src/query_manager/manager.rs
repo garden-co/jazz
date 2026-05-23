@@ -490,6 +490,7 @@ pub struct QueryManager {
     pub(super) authorization_schema: Option<Arc<Schema>>,
     pub(super) authorization_schema_required: bool,
     pub(super) authorization_context_cache: HashMap<(String, String), Arc<SchemaContext>>,
+    pub(super) structural_authorization_schema_cache: Option<(Arc<Schema>, Arc<Schema>)>,
 
     /// Pending catalogue updates (schemas/lenses received via sync).
     /// SchemaManager should call take_pending_catalogue_updates() to process these.
@@ -643,6 +644,7 @@ impl QueryManager {
             authorization_schema: None,
             authorization_schema_required: false,
             authorization_context_cache: HashMap::new(),
+            structural_authorization_schema_cache: None,
             pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
@@ -700,6 +702,7 @@ impl QueryManager {
             None
         };
         self.authorization_context_cache.clear();
+        self.structural_authorization_schema_cache = None;
         self.authorization_schema_required = false;
         self.write_table_cache.clear();
 
@@ -716,6 +719,7 @@ impl QueryManager {
     pub fn set_authorization_schema(&mut self, schema: Schema) {
         self.authorization_schema = Some(Arc::new(schema));
         self.authorization_context_cache.clear();
+        self.structural_authorization_schema_cache = None;
         self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
         self.mark_subscriptions_for_recompile();
@@ -725,6 +729,7 @@ impl QueryManager {
         self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
         self.authorization_context_cache.clear();
+        self.structural_authorization_schema_cache = None;
     }
 
     /// Add a live schema (one we can read from but don't write to).
@@ -818,21 +823,45 @@ impl QueryManager {
                 .unwrap_or(false)
     }
 
-    pub(super) fn local_subscription_compile_schema(&self, session: Option<&Session>) -> Schema {
+    pub(super) fn local_subscription_compile_schema(
+        &self,
+        session: Option<&Session>,
+    ) -> Arc<Schema> {
         if self.local_subscription_uses_explicit_authorization(session) {
-            self.schema
-                .iter()
-                .map(|(table_name, table_schema)| {
-                    let mut structural = table_schema.clone();
-                    structural.policies = TablePolicies::default();
-                    (*table_name, structural)
-                })
-                .collect()
+            Arc::new(
+                self.schema
+                    .iter()
+                    .map(|(table_name, table_schema)| {
+                        let mut structural = table_schema.clone();
+                        structural.policies = TablePolicies::default();
+                        (*table_name, structural)
+                    })
+                    .collect(),
+            )
         } else {
-            self.schema.as_ref().clone()
+            self.schema.clone()
         }
     }
 
+    fn local_subscription_compile_schema_for_recompile(
+        current_schema: &Arc<Schema>,
+        uses_explicit_authorization_filtering: bool,
+    ) -> Arc<Schema> {
+        if uses_explicit_authorization_filtering {
+            Arc::new(
+                current_schema
+                    .iter()
+                    .map(|(table_name, table_schema)| {
+                        let mut structural = table_schema.clone();
+                        structural.policies = TablePolicies::default();
+                        (*table_name, structural)
+                    })
+                    .collect(),
+            )
+        } else {
+            current_schema.clone()
+        }
+    }
     pub(crate) fn schema_has_any_explicit_policies(schema: &Schema) -> bool {
         schema
             .values()
@@ -942,18 +971,10 @@ impl QueryManager {
                         .as_ref()
                         .map(|auth_schema| auth_schema.as_ref() != current_schema.as_ref())
                         .unwrap_or(false);
-                let compile_schema = if uses_explicit_authorization_filtering {
-                    current_schema
-                        .iter()
-                        .map(|(table_name, table_schema)| {
-                            let mut structural = table_schema.clone();
-                            structural.policies = TablePolicies::default();
-                            (*table_name, structural)
-                        })
-                        .collect()
-                } else {
-                    current_schema.as_ref().clone()
-                };
+                let compile_schema = Self::local_subscription_compile_schema_for_recompile(
+                    &current_schema,
+                    uses_explicit_authorization_filtering,
+                );
 
                 // Recompile the graph
                 let compile_row_policy_mode = if uses_explicit_authorization_filtering {
@@ -963,7 +984,7 @@ impl QueryManager {
                 };
                 match Self::compile_graph(
                     &sub.query,
-                    &compile_schema,
+                    compile_schema.as_ref(),
                     sub.session.clone(),
                     &current_schema_context,
                     compile_row_policy_mode,
@@ -1186,6 +1207,12 @@ impl QueryManager {
                 .is_some_and(|settled_tier| settled_tier >= required_tier),
             None => true,
         }
+    }
+
+    fn should_defer_initial_subscription_settle(&self, sub: &QuerySubscription) -> bool {
+        !sub.settled_once
+            && !Self::subscription_query_frontier_satisfied(sub)
+            && self.sync_manager.has_servers_or_pending_servers()
     }
 
     pub(crate) fn mark_subscriptions_visibility_recompute_for_batch(&mut self, batch_id: BatchId) {
@@ -1443,6 +1470,26 @@ impl QueryManager {
                         || subscription.graph.has_dirty_nodes()
                 });
             if !should_process_subscription {
+                continue;
+            }
+
+            if self.subscriptions.get(&sub_id).is_some_and(|subscription| {
+                self.should_defer_initial_subscription_settle(subscription)
+            }) {
+                if let Some(subscription) = self.subscriptions.get(&sub_id) {
+                    tracing::trace!(
+                        sub_id = sub_id.0,
+                        table = %subscription.graph.table,
+                        required_tier = ?subscription.durability_tier,
+                        settled_tier = ?subscription.query_frontier_settled_tier,
+                        dirty = subscription.graph.has_dirty_nodes(),
+                        needs_recompile = subscription.needs_recompile,
+                        needs_visibility_recompute = subscription.needs_visibility_recompute,
+                        pending_local_updates = subscription.has_pending_local_updates,
+                        has_servers_or_pending_servers = self.sync_manager.has_servers_or_pending_servers(),
+                        "jazz trace subscription deferring initial settle until frontier"
+                    );
+                }
                 continue;
             }
 

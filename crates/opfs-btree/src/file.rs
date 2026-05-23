@@ -296,10 +296,21 @@ impl OpfsFile {
         const MAX_RETRIES: u32 = 12;
         const BASE_DELAY_MS: u32 = 50;
 
+        let opened_at = js_sys::Date::now();
         let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
                 let delay = BASE_DELAY_MS * (1 << (attempt - 1));
+                web_sys::console::warn_1(
+                    &format!(
+                        "[jazz-opfs-open] retry namespace={} attempt={} delay_ms={} elapsed_ms={:.1}",
+                        namespace,
+                        attempt,
+                        delay,
+                        js_sys::Date::now() - opened_at
+                    )
+                    .into(),
+                );
                 sleep_ms(delay).await;
             }
             match JsFuture::from(file.create_sync_access_handle()).await {
@@ -310,6 +321,15 @@ impl OpfsFile {
                         })?;
                     if attempt > 0 {
                         tracing::info!(attempt, "acquired OPFS access handle after retry");
+                        web_sys::console::warn_1(
+                            &format!(
+                                "[jazz-opfs-open] acquired namespace={} attempt={} elapsed_ms={:.1}",
+                                namespace,
+                                attempt,
+                                js_sys::Date::now() - opened_at
+                            )
+                            .into(),
+                        );
                     }
 
                     let read_options = web_sys::FileSystemReadWriteOptions::new();
@@ -324,14 +344,41 @@ impl OpfsFile {
                 }
                 Err(e) => {
                     if !is_retryable_handle_conflict(&e) {
+                        web_sys::console::warn_1(
+                            &format!(
+                                "[jazz-opfs-open] failed namespace={} attempt={} elapsed_ms={:.1} retryable=false",
+                                namespace,
+                                attempt,
+                                js_sys::Date::now() - opened_at
+                            )
+                            .into(),
+                        );
                         return Err(map_js_error(e));
                     }
+                    web_sys::console::warn_1(
+                        &format!(
+                            "[jazz-opfs-open] conflict namespace={} attempt={} elapsed_ms={:.1}",
+                            namespace,
+                            attempt,
+                            js_sys::Date::now() - opened_at
+                        )
+                        .into(),
+                    );
                     last_err = Some(e);
                 }
             }
         }
 
         // All retries exhausted — return the last error.
+        web_sys::console::warn_1(
+            &format!(
+                "[jazz-opfs-open] exhausted namespace={} attempts={} elapsed_ms={:.1}",
+                namespace,
+                MAX_RETRIES + 1,
+                js_sys::Date::now() - opened_at
+            )
+            .into(),
+        );
         Err(map_js_error(last_err.unwrap()))
     }
 
@@ -405,7 +452,27 @@ impl SyncFile for OpfsFile {
             .inner
             .handle
             .write_with_u8_array_and_options(buf, &self.inner.write_options)
-            .map_err(map_js_error)? as usize;
+            .map_err(map_js_error)?;
+        if !written.is_finite() {
+            return Err(BTreeError::Io(format!(
+                "opfs write returned non-finite byte count {} for {} bytes",
+                written,
+                buf.len()
+            )));
+        }
+        if written < 0.0 || written > i32::MAX as f64 {
+            let code = if written > i32::MAX as f64 {
+                (written as u32) as i32
+            } else {
+                written as i32
+            };
+            return Err(BTreeError::Io(format!(
+                "opfs write failed with code {} for {} bytes",
+                code,
+                buf.len()
+            )));
+        }
+        let written = written as usize;
         if written != buf.len() {
             return Err(BTreeError::Io(format!(
                 "short write: wrote {} of {} bytes",

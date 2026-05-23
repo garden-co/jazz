@@ -38,8 +38,9 @@ use crate::worker_protocol::{
     WorkerLifecycleEvent, WorkerToMainWire,
 };
 
-const INIT_RESPONSE_TIMEOUT_MS: i32 = 12_000;
-const SHUTDOWN_ACK_TIMEOUT_MS: i32 = 5_000;
+const INIT_RESPONSE_TIMEOUT_MS: i32 = 60_000;
+const SHUTDOWN_ACK_TIMEOUT_MS: i32 = 60_000;
+const SLOW_INIT_RESPONSE_WARN_MS: f64 = 8_000.0;
 
 fn parse_lifecycle_event(s: &str) -> Option<WorkerLifecycleEvent> {
     Some(match s {
@@ -184,6 +185,7 @@ impl WasmWorkerBridge {
         }
 
         let inner = Rc::clone(&self.inner);
+        let init_started_at = js_sys::Date::now();
         let promise = wasm_bindgen_futures::future_to_promise(async move {
             let timeout = make_timeout(INIT_RESPONSE_TIMEOUT_MS);
             let response = match select(rx, timeout).await {
@@ -194,6 +196,14 @@ impl WasmWorkerBridge {
             };
             match response {
                 Ok(client_id) => {
+                    let elapsed_ms = js_sys::Date::now() - init_started_at;
+                    if elapsed_ms >= SLOW_INIT_RESPONSE_WARN_MS {
+                        tracing::warn!(
+                            elapsed_ms,
+                            timeout_ms = INIT_RESPONSE_TIMEOUT_MS,
+                            "worker init completed slowly"
+                        );
+                    }
                     inner.transition_init_ok(client_id.clone());
                     inner.sender.open_init_gate_and_flush();
                     let result = Object::new();
@@ -772,6 +782,16 @@ impl BridgeInner {
                 if let Some(tx) = self.init_resolver.borrow_mut().take() {
                     let _ = tx.send(Ok(client_id));
                 }
+            }
+            WorkerToMainWire::InitProgress {
+                phase,
+                phase_ms,
+                total_ms,
+                db_name,
+            } => {
+                web_sys::console::warn_1(&JsValue::from_str(&format!(
+                    "[jazz-worker-init] phase={phase} phase_ms={phase_ms:.1} total_ms={total_ms:.1} db_name={db_name}"
+                )));
             }
             WorkerToMainWire::Error { message } => {
                 if let Some(tx) = self.init_resolver.borrow_mut().take() {

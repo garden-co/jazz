@@ -1,4 +1,7 @@
 use super::*;
+use crate::query_manager::relation_ir::{
+    ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
+};
 
 fn owned_items_schema() -> Schema {
     let mut schema = Schema::new();
@@ -39,6 +42,66 @@ fn parent_set_policy_schema() -> Schema {
         via_column: "folder_id".into(),
         max_depth: None,
     });
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(child_descriptor, child_policies),
+    );
+
+    schema
+}
+
+fn parent_set_exists_rel_policy_schema() -> Schema {
+    let mut schema = Schema::new();
+    let parent_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+    let parent_policies = TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::TableScan {
+                    table: TableName::new("folder_access_edges"),
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("folders"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("folder_access_edges", "folder_id"),
+                    right: ColumnRef::scoped("__join_0", "id"),
+                }],
+                join_kind: JoinKind::Inner,
+            }),
+            predicate: PredicateExpr::And(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("folder_access_edges", "user_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("__join_0", "id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::RowId(RowIdRef::Outer),
+                },
+            ]),
+        },
+    });
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(parent_descriptor, parent_policies),
+    );
+
+    schema.insert(
+        TableName::new("folder_access_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("folder_id", ColumnType::Uuid).references("folders"),
+        ])),
+    );
+
+    let child_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("folder_id", ColumnType::Uuid).references("folders"),
+    ]);
+    let child_policies =
+        TablePolicies::new().with_select(PolicyExpr::inherits(Operation::Select, "folder_id"));
     schema.insert(
         TableName::new("documents"),
         TableSchema::with_policies(child_descriptor, child_policies),
@@ -213,6 +276,180 @@ fn server_authorizes_fk_inherited_subscription_through_parent_set() {
         settled_scope_len, 30,
         "FK-inherited read should include children of readable parents only"
     );
+}
+
+#[test]
+fn local_authorizes_fk_inherited_output_tuples_through_parent_set() {
+    use crate::query_manager::session::Session;
+
+    let auth_schema = parent_set_policy_schema();
+    let mut structural_schema = auth_schema.clone();
+    for table_schema in structural_schema.values_mut() {
+        table_schema.policies = TablePolicies::default();
+    }
+
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(structural_schema, "dev", "main");
+    qm.set_authorization_schema(auth_schema);
+    let inner = seeded_memory_storage(&qm.schema_context().current_schema);
+    let mut storage = CountingCatalogueUpsertsStorage::with_inner(inner);
+
+    let alice_folder = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[Value::Text("alice".into()), Value::Text("Alice".into())],
+        )
+        .expect("insert alice folder")
+        .row_id;
+    let bob_folder = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[Value::Text("bob".into()), Value::Text("Bob".into())],
+        )
+        .expect("insert bob folder")
+        .row_id;
+
+    for index in 0..40 {
+        let folder_id = if index < 30 { alice_folder } else { bob_folder };
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text(format!("Document {index}")),
+                Value::Uuid(folder_id),
+            ],
+        )
+        .expect("insert document");
+    }
+    qm.process(&mut storage);
+
+    let sub_id = qm
+        .subscribe_with_session(
+            qm.query("documents").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .expect("subscribe with authorization session");
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        30,
+        "FK-inherited output filtering should include children of readable parents only"
+    );
+}
+
+#[test]
+fn local_authorizes_fk_inherited_output_tuples_through_correlated_parent_set() {
+    use crate::query_manager::session::Session;
+
+    let auth_schema = parent_set_exists_rel_policy_schema();
+    let mut structural_schema = auth_schema.clone();
+    for table_schema in structural_schema.values_mut() {
+        table_schema.policies = TablePolicies::default();
+    }
+
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(structural_schema, "dev", "main");
+    qm.set_authorization_schema(auth_schema);
+    let inner = seeded_memory_storage(&qm.schema_context().current_schema);
+    let mut storage = CountingCatalogueUpsertsStorage::with_inner(inner);
+
+    let alice_folder = qm
+        .insert(&mut storage, "folders", &[Value::Text("Alice".into())])
+        .expect("insert alice folder")
+        .row_id;
+    let bob_folder = qm
+        .insert(&mut storage, "folders", &[Value::Text("Bob".into())])
+        .expect("insert bob folder")
+        .row_id;
+    qm.insert(
+        &mut storage,
+        "folder_access_edges",
+        &[Value::Text("alice".into()), Value::Uuid(alice_folder)],
+    )
+    .expect("insert alice edge");
+
+    for index in 0..40 {
+        let folder_id = if index < 30 { alice_folder } else { bob_folder };
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text(format!("Document {index}")),
+                Value::Uuid(folder_id),
+            ],
+        )
+        .expect("insert document");
+    }
+    qm.process(&mut storage);
+
+    let sub_id = qm
+        .subscribe_with_session(
+            qm.query("documents").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .expect("subscribe with authorization session");
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        30,
+        "FK-inherited output filtering should authorize parents through the decorrelated relation set"
+    );
+}
+
+#[test]
+fn local_authorizes_direct_output_tuples_through_correlated_relation_set() {
+    use crate::query_manager::session::Session;
+
+    let auth_schema = parent_set_exists_rel_policy_schema();
+    let mut structural_schema = auth_schema.clone();
+    for table_schema in structural_schema.values_mut() {
+        table_schema.policies = TablePolicies::default();
+    }
+
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(structural_schema, "dev", "main");
+    qm.set_authorization_schema(auth_schema);
+    let inner = seeded_memory_storage(&qm.schema_context().current_schema);
+    let mut storage = CountingCatalogueUpsertsStorage::with_inner(inner);
+
+    let alice_folder = qm
+        .insert(&mut storage, "folders", &[Value::Text("Alice".into())])
+        .expect("insert alice folder")
+        .row_id;
+    qm.insert(&mut storage, "folders", &[Value::Text("Bob".into())])
+        .expect("insert bob folder");
+    qm.insert(
+        &mut storage,
+        "folder_access_edges",
+        &[Value::Text("alice".into()), Value::Uuid(alice_folder)],
+    )
+    .expect("insert alice edge");
+    qm.process(&mut storage);
+
+    let sub_id = qm
+        .subscribe_with_session(
+            qm.query("folders").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .expect("subscribe with authorization session");
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "direct output filtering should use the decorrelated relation set for readable rows"
+    );
+    assert_eq!(results[0].0, alice_folder);
 }
 
 #[test]

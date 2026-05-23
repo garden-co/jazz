@@ -165,6 +165,20 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.immediate_tick();
     }
 
+    /// Add a short-lived server edge that replays only catalogue entries.
+    ///
+    /// This is intentionally narrower than `add_server*`: it is for worker
+    /// startup catalogue handoff to the main runtime, not for a real upstream
+    /// server reconnect.
+    pub fn add_catalogue_bootstrap_server(&mut self, server_id: ServerId) {
+        info!(%server_id, "adding catalogue bootstrap server");
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_catalogue_bootstrap_server_with_storage(server_id, &self.storage);
+        self.immediate_tick();
+    }
+
     pub fn reconcile_local_batch_with_server(&mut self, batch_id: crate::row_histories::BatchId) {
         let Some(server_id) = self
             .schema_manager

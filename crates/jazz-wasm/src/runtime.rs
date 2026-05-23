@@ -405,7 +405,7 @@ fn should_allow_unprivileged_schema_catalogue_writes(env: &str) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-const DEFAULT_OPFS_CACHE_SIZE: usize = 32 * 1024 * 1024;
+const DEFAULT_OPFS_CACHE_SIZE: usize = 96 * 1024 * 1024;
 
 /// Build a `SchemaManager` from raw inputs. Shared by `open_persistent` and `open_ephemeral`.
 #[cfg(target_arch = "wasm32")]
@@ -1888,6 +1888,14 @@ impl WasmRuntime {
         }
     }
 
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn bootstrap_catalogue_to_main(&self) {
+        let server_id = ServerId::new();
+        let mut core = self.core.borrow_mut();
+        core.add_catalogue_bootstrap_server(server_id);
+        core.remove_server(server_id);
+    }
+
     /// Add a client connection (for server-side use in tests).
     #[wasm_bindgen(js_name = addClient)]
     pub fn add_client(&self) -> String {
@@ -2063,6 +2071,33 @@ impl WasmRuntime {
         tier: Option<String>,
         use_binary_encoding: bool,
     ) -> Result<WasmRuntime, JsValue> {
+        Self::open_persistent_with_progress(
+            schema_json,
+            app_id,
+            env,
+            user_branch,
+            db_name,
+            tier,
+            use_binary_encoding,
+            |_| {},
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn open_persistent_with_progress<F>(
+        schema_json: &str,
+        app_id: &str,
+        env: &str,
+        user_branch: &str,
+        db_name: &str,
+        tier: Option<String>,
+        use_binary_encoding: bool,
+        mut progress: F,
+    ) -> Result<WasmRuntime, JsValue>
+    where
+        F: FnMut(&'static str),
+    {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
         init_tracing();
@@ -2077,13 +2112,18 @@ impl WasmRuntime {
             db_name
         )
         .entered();
-        info!("opening persistent OPFS runtime");
+        info!(
+            opfs_cache_bytes = DEFAULT_OPFS_CACHE_SIZE,
+            "opening persistent OPFS runtime"
+        );
 
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
         let mut schema_manager =
             build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())
                 .map_err(JsValue::from)?;
+        progress("open_runtime.build_schema_manager");
 
+        progress("open_runtime.open_opfs_start");
         let storage: Box<dyn Storage> = Box::new(
             OpfsBTreeStorage::open_opfs(db_name, DEFAULT_OPFS_CACHE_SIZE)
                 .await
@@ -2097,6 +2137,7 @@ impl WasmRuntime {
                     }
                 })?,
         );
+        progress("open_runtime.open_opfs_complete");
 
         if let Err(error) =
             rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)
@@ -2107,13 +2148,12 @@ impl WasmRuntime {
                 "failed to rehydrate schema manager from catalogue storage"
             );
         }
+        progress("open_runtime.rehydrate_catalogue");
 
-        Ok(assemble_wasm_runtime(
-            schema_manager,
-            storage,
-            tier_label,
-            use_binary_encoding,
-        ))
+        let runtime =
+            assemble_wasm_runtime(schema_manager, storage, tier_label, use_binary_encoding);
+        progress("open_runtime.assemble_runtime");
+        Ok(runtime)
     }
 
     /// Create an ephemeral WasmRuntime backed by in-memory storage.

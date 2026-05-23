@@ -147,7 +147,7 @@ impl QueryManager {
         };
         let graph = Self::compile_graph(
             &query,
-            &compile_schema,
+            compile_schema.as_ref(),
             session.clone(),
             &self.schema_context,
             compile_row_policy_mode,

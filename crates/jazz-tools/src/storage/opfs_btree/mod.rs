@@ -30,16 +30,16 @@ use crate::sync_manager::DurabilityTier;
 
 use super::{
     HistoryRowBytes, RawTableMutation, Storage, StorageError, VisibleRowBytes,
-    key_codec::increment_bytes,
-    storage_core::{
-        append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core,
-        upsert_visible_region_row_bytes_core,
+    key_codec::{
+        history_row_raw_table_key, increment_bytes, increment_string, raw_table_entry_key,
+        raw_table_prefix, raw_table_scan_prefix, visible_row_raw_table_key,
     },
+    storage_core::{raw_table_delete_core, raw_table_get_core, raw_table_put_core},
 };
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
+const OPFS_OVERFLOW_THRESHOLD_BYTES: usize = 2 * 1024;
+type RawTreeRows = Vec<(Vec<u8>, Vec<u8>)>;
 
 #[derive(Clone, Debug)]
 pub(super) enum AnyFile {
@@ -160,8 +160,9 @@ impl OpfsBTreeStorage {
     fn options(cache_size_bytes: usize) -> BTreeOptions {
         BTreeOptions {
             cache_bytes: cache_size_bytes.max(MIN_CACHE_SIZE_BYTES),
+            overflow_threshold: OPFS_OVERFLOW_THRESHOLD_BYTES,
             pin_internal_pages: true,
-            read_coalesce_pages: 4,
+            read_coalesce_pages: 8,
             ..Default::default()
         }
     }
@@ -189,60 +190,56 @@ impl OpfsBTreeStorage {
         self.with_tree_mut(|tree| tree.delete(key.as_bytes()).map_err(map_storage_err))
     }
 
-    fn tree_scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
-        let start = prefix.as_bytes();
-        let mut end = start.to_vec();
-        increment_bytes(&mut end);
-        self.tree_scan_range_bytes(start, &end)
-    }
-
-    fn tree_scan_range(
-        &self,
-        start: &str,
-        end: &str,
-    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
-        self.tree_scan_range_bytes(start.as_bytes(), end.as_bytes())
-    }
-
-    fn tree_scan_prefix_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        Ok(self
-            .tree_scan_prefix(prefix)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect())
-    }
-
-    fn tree_scan_range_keys(&self, start: &str, end: &str) -> Result<Vec<String>, StorageError> {
-        Ok(self
-            .tree_scan_range(start, end)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect())
-    }
-
-    fn tree_scan_range_bytes(
-        &self,
-        start: &[u8],
-        end: &[u8],
-    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+    fn tree_scan_range_raw(&self, start: &[u8], end: &[u8]) -> Result<RawTreeRows, StorageError> {
         if start >= end {
             return Ok(Vec::new());
         }
 
-        self.with_tree_mut(|tree| {
-            let entries = tree
-                .range(start, end, usize::MAX)
-                .map_err(map_storage_err)?;
+        self.with_tree_mut(|tree| tree.range(start, end, usize::MAX).map_err(map_storage_err))
+    }
 
-            entries
-                .into_iter()
-                .map(|(key, value)| {
-                    let key = String::from_utf8(key)
-                        .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e)))?;
-                    Ok((key, value))
-                })
-                .collect()
+    fn raw_table_scan_range_bytes(
+        &self,
+        table: &str,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<super::RawTableRows, StorageError> {
+        let raw_prefix = raw_table_prefix(table);
+        let raw_prefix = raw_prefix.as_bytes();
+        self.tree_scan_range_raw(start, end)?
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let local_key = key.strip_prefix(raw_prefix)?;
+                Some(
+                    String::from_utf8(local_key.to_vec())
+                        .map(|local_key| (local_key, value))
+                        .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e))),
+                )
+            })
+            .collect()
+    }
+
+    fn raw_table_scan_range_key_bytes(
+        &self,
+        table: &str,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<super::RawTableKeys, StorageError> {
+        let raw_prefix = raw_table_prefix(table);
+        let raw_prefix = raw_prefix.as_bytes();
+        self.with_tree_mut(|tree| {
+            tree.range_keys(start, end, usize::MAX)
+                .map_err(map_storage_err)
+        })?
+        .into_iter()
+        .filter_map(|key| {
+            let local_key = key.strip_prefix(raw_prefix)?;
+            Some(
+                String::from_utf8(local_key.to_vec())
+                    .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e))),
+            )
         })
+        .collect()
     }
 }
 
@@ -265,20 +262,29 @@ impl Storage for OpfsBTreeStorage {
         &mut self,
         mutations: &[RawTableMutation<'_>],
     ) -> Result<(), StorageError> {
+        let mut staged = mutations
+            .iter()
+            .enumerate()
+            .map(|(idx, mutation)| match mutation {
+                RawTableMutation::Put { table, key, value } => {
+                    (raw_table_entry_key(table, key), idx, Some(*value))
+                }
+                RawTableMutation::Delete { table, key } => {
+                    (raw_table_entry_key(table, key), idx, None)
+                }
+            })
+            .collect::<Vec<_>>();
+        staged.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
         self.with_tree_mut(|tree| {
-            for mutation in mutations {
-                match mutation {
-                    RawTableMutation::Put { table, key, value } => {
-                        raw_table_put_core(table, key, value, |storage_key, bytes| {
-                            tree.put(storage_key.as_bytes(), bytes)
-                                .map_err(map_storage_err)
-                        })?;
-                    }
-                    RawTableMutation::Delete { table, key } => {
-                        raw_table_delete_core(table, key, |storage_key| {
-                            tree.delete(storage_key.as_bytes()).map_err(map_storage_err)
-                        })?;
-                    }
+            for (storage_key, _, value) in staged {
+                match value {
+                    Some(bytes) => tree
+                        .put(storage_key.as_bytes(), bytes)
+                        .map_err(map_storage_err)?,
+                    None => tree
+                        .delete(storage_key.as_bytes())
+                        .map_err(map_storage_err)?,
                 }
             }
             Ok(())
@@ -294,9 +300,10 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         prefix: &str,
     ) -> Result<super::RawTableRows, StorageError> {
-        raw_table_scan_prefix_core(table, prefix, |storage_prefix| {
-            self.tree_scan_prefix(storage_prefix)
-        })
+        let storage_prefix = raw_table_scan_prefix(table, prefix);
+        let mut end = storage_prefix.as_bytes().to_vec();
+        increment_bytes(&mut end);
+        self.raw_table_scan_range_bytes(table, storage_prefix.as_bytes(), &end)
     }
 
     fn raw_table_scan_prefix_keys(
@@ -304,9 +311,10 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         prefix: &str,
     ) -> Result<super::RawTableKeys, StorageError> {
-        raw_table_scan_prefix_keys_core(table, prefix, |storage_prefix| {
-            self.tree_scan_prefix_keys(storage_prefix)
-        })
+        let storage_prefix = raw_table_scan_prefix(table, prefix);
+        let mut end = storage_prefix.as_bytes().to_vec();
+        increment_bytes(&mut end);
+        self.raw_table_scan_range_key_bytes(table, storage_prefix.as_bytes(), &end)
     }
 
     fn raw_table_scan_range(
@@ -315,9 +323,15 @@ impl Storage for OpfsBTreeStorage {
         start: Option<&str>,
         end: Option<&str>,
     ) -> Result<super::RawTableRows, StorageError> {
-        raw_table_scan_range_core(table, start, end, |start_key, end_key| {
-            self.tree_scan_range(start_key, end_key)
-        })
+        let start_key = raw_table_entry_key(table, start.unwrap_or(""));
+        let end_key = if let Some(end) = end {
+            raw_table_entry_key(table, end)
+        } else {
+            let mut table_end = raw_table_prefix(table);
+            increment_string(&mut table_end);
+            table_end
+        };
+        self.raw_table_scan_range_bytes(table, start_key.as_bytes(), end_key.as_bytes())
     }
 
     fn raw_table_scan_range_keys(
@@ -326,9 +340,15 @@ impl Storage for OpfsBTreeStorage {
         start: Option<&str>,
         end: Option<&str>,
     ) -> Result<super::RawTableKeys, StorageError> {
-        raw_table_scan_range_keys_core(table, start, end, |start_key, end_key| {
-            self.tree_scan_range_keys(start_key, end_key)
-        })
+        let start_key = raw_table_entry_key(table, start.unwrap_or(""));
+        let end_key = if let Some(end) = end {
+            raw_table_entry_key(table, end)
+        } else {
+            let mut table_end = raw_table_prefix(table);
+            increment_string(&mut table_end);
+            table_end
+        };
+        self.raw_table_scan_range_key_bytes(table, start_key.as_bytes(), end_key.as_bytes())
     }
 
     fn append_history_region_row_bytes(
@@ -336,7 +356,28 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         rows: &[HistoryRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        append_history_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+        let _ = table;
+        let mut staged: Vec<(String, usize, &[u8])> = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                let local_key = history_row_raw_table_key(row.row_id, row.branch, row.batch_id);
+                (
+                    raw_table_entry_key(row.row_raw_table, &local_key),
+                    idx,
+                    row.bytes,
+                )
+            })
+            .collect();
+        staged.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        self.with_tree_mut(|tree| {
+            for (storage_key, _, bytes) in staged {
+                tree.put(storage_key.as_bytes(), bytes)
+                    .map_err(map_storage_err)?;
+            }
+            Ok(())
+        })
     }
 
     fn upsert_visible_region_row_bytes(
@@ -344,7 +385,28 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         rows: &[VisibleRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        upsert_visible_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+        let _ = table;
+        let mut staged: Vec<(String, usize, &[u8])> = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                let local_key = visible_row_raw_table_key(row.branch, row.row_id);
+                (
+                    raw_table_entry_key(row.row_raw_table, &local_key),
+                    idx,
+                    row.bytes,
+                )
+            })
+            .collect();
+        staged.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        self.with_tree_mut(|tree| {
+            for (storage_key, _, bytes) in staged {
+                tree.put(storage_key.as_bytes(), bytes)
+                    .map_err(map_storage_err)?;
+            }
+            Ok(())
+        })
     }
 
     fn patch_row_region_rows_by_batch(
@@ -757,6 +819,34 @@ mod tests {
                 .unwrap()
                 .and_then(|row| row.confirmed_tier),
             Some(DurabilityTier::EdgeServer)
+        );
+    }
+
+    #[test]
+    fn opfs_btree_sorted_visible_writes_preserve_duplicate_order() {
+        let mut storage = test_storage();
+        let row_id = ObjectId::new();
+        let first = VisibleRowBytes {
+            row_raw_table: "visible_rows",
+            branch: "main",
+            row_id,
+            bytes: b"first",
+        };
+        let second = VisibleRowBytes {
+            row_raw_table: "visible_rows",
+            branch: "main",
+            row_id,
+            bytes: b"second",
+        };
+
+        storage
+            .upsert_visible_region_row_bytes("users", &[first, second])
+            .unwrap();
+
+        let local_key = visible_row_raw_table_key("main", row_id);
+        assert_eq!(
+            storage.raw_table_get("visible_rows", &local_key).unwrap(),
+            Some(b"second".to_vec())
         );
     }
 
