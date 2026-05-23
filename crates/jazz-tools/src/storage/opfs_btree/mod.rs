@@ -265,20 +265,29 @@ impl Storage for OpfsBTreeStorage {
         &mut self,
         mutations: &[RawTableMutation<'_>],
     ) -> Result<(), StorageError> {
+        let mut staged = mutations
+            .iter()
+            .enumerate()
+            .map(|(idx, mutation)| match mutation {
+                RawTableMutation::Put { table, key, value } => {
+                    (raw_table_entry_key(table, key), idx, Some(*value))
+                }
+                RawTableMutation::Delete { table, key } => {
+                    (raw_table_entry_key(table, key), idx, None)
+                }
+            })
+            .collect::<Vec<_>>();
+        staged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
         self.with_tree_mut(|tree| {
-            for mutation in mutations {
-                match mutation {
-                    RawTableMutation::Put { table, key, value } => {
-                        raw_table_put_core(table, key, value, |storage_key, bytes| {
-                            tree.put(storage_key.as_bytes(), bytes)
-                                .map_err(map_storage_err)
-                        })?;
-                    }
-                    RawTableMutation::Delete { table, key } => {
-                        raw_table_delete_core(table, key, |storage_key| {
-                            tree.delete(storage_key.as_bytes()).map_err(map_storage_err)
-                        })?;
-                    }
+            for (storage_key, _, value) in staged {
+                match value {
+                    Some(bytes) => tree
+                        .put(storage_key.as_bytes(), bytes)
+                        .map_err(map_storage_err)?,
+                    None => tree
+                        .delete(storage_key.as_bytes())
+                        .map_err(map_storage_err)?,
                 }
             }
             Ok(())

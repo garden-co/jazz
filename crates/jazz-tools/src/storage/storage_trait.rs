@@ -798,6 +798,7 @@ pub trait Storage {
                 HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
                 &RawTableHeader::system(STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR, 1),
             )?;
+            let mut locator_writes = Vec::new();
             for row in history_rows {
                 if !row.needs_exact_locator {
                     continue;
@@ -807,16 +808,24 @@ pub trait Storage {
                     table_name: row.row_raw_table_id.table_name.clone(),
                     schema_hash: row.row_raw_table_id.schema_hash,
                 })?;
-                self.raw_table_put(
-                    HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
-                    &history_row_batch_table_locator_key(
+                locator_writes.push((
+                    history_row_batch_table_locator_key(
                         row.row_id,
                         row.branch.as_str(),
                         row.batch_id,
                     ),
-                    &bytes,
-                )?;
+                    bytes,
+                ));
             }
+            let mutations = locator_writes
+                .iter()
+                .map(|(key, bytes)| RawTableMutation::Put {
+                    table: HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+                    key,
+                    value: bytes,
+                })
+                .collect::<Vec<_>>();
+            self.apply_raw_table_mutations(&mutations)?;
         }
         if visible_rows.iter().any(|row| row.needs_exact_locator) {
             ensure_raw_table_header(
@@ -824,6 +833,7 @@ pub trait Storage {
                 VISIBLE_ROW_TABLE_LOCATOR_TABLE,
                 &RawTableHeader::system(STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR, 1),
             )?;
+            let mut locator_writes = Vec::new();
             for row in visible_rows {
                 if !row.needs_exact_locator {
                     continue;
@@ -833,12 +843,20 @@ pub trait Storage {
                     table_name: row.row_raw_table_id.table_name.clone(),
                     schema_hash: row.row_raw_table_id.schema_hash,
                 })?;
-                self.raw_table_put(
-                    VISIBLE_ROW_TABLE_LOCATOR_TABLE,
-                    &visible_row_table_locator_key(row.branch.as_str(), row.row_id),
-                    &bytes,
-                )?;
+                locator_writes.push((
+                    visible_row_table_locator_key(row.branch.as_str(), row.row_id),
+                    bytes,
+                ));
             }
+            let mutations = locator_writes
+                .iter()
+                .map(|(key, bytes)| RawTableMutation::Put {
+                    table: VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                    key,
+                    value: bytes,
+                })
+                .collect::<Vec<_>>();
+            self.apply_raw_table_mutations(&mutations)?;
         }
         if !history_rows.is_empty() {
             let borrowed_rows = history_rows
