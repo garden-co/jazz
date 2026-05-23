@@ -20,9 +20,14 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 fn append_hex_bytes(dst: &mut String, bytes: &[u8]) {
     dst.reserve(bytes.len() * 2);
-    for &byte in bytes {
-        dst.push(HEX_DIGITS[(byte >> 4) as usize] as char);
-        dst.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    // Hex digits are ASCII, so writing bytes directly keeps the String valid
+    // while avoiding per-character UTF-8 encoding on hot storage-key paths.
+    unsafe {
+        let raw = dst.as_mut_vec();
+        for &byte in bytes {
+            raw.push(HEX_DIGITS[(byte >> 4) as usize]);
+            raw.push(HEX_DIGITS[(byte & 0x0f) as usize]);
+        }
     }
 }
 
