@@ -31,16 +31,18 @@ use crate::sync_manager::DurabilityTier;
 use super::{
     HistoryRowBytes, RawTableMutation, Storage, StorageError, VisibleRowBytes,
     key_codec::{
-        history_row_raw_table_key, increment_bytes, raw_table_entry_key, visible_row_raw_table_key,
+        history_row_raw_table_key, increment_bytes, increment_string, raw_table_entry_key,
+        raw_table_prefix, raw_table_scan_prefix, visible_row_raw_table_key,
     },
     storage_core::{
-        raw_table_delete_core, raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
+        raw_table_delete_core, raw_table_get_core, raw_table_put_core,
+        raw_table_scan_prefix_keys_core, raw_table_scan_range_keys_core,
     },
 };
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 const OPFS_OVERFLOW_THRESHOLD_BYTES: usize = 2 * 1024;
+type RawTreeRows = Vec<(Vec<u8>, Vec<u8>)>;
 
 #[derive(Clone, Debug)]
 pub(super) enum AnyFile {
@@ -227,24 +229,43 @@ impl OpfsBTreeStorage {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        self.tree_scan_range_raw(start, end)?
+            .into_iter()
+            .map(|(key, value)| {
+                let key = String::from_utf8(key)
+                    .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e)))?;
+                Ok((key, value))
+            })
+            .collect()
+    }
+
+    fn tree_scan_range_raw(&self, start: &[u8], end: &[u8]) -> Result<RawTreeRows, StorageError> {
         if start >= end {
             return Ok(Vec::new());
         }
 
-        self.with_tree_mut(|tree| {
-            let entries = tree
-                .range(start, end, usize::MAX)
-                .map_err(map_storage_err)?;
+        self.with_tree_mut(|tree| tree.range(start, end, usize::MAX).map_err(map_storage_err))
+    }
 
-            entries
-                .into_iter()
-                .map(|(key, value)| {
-                    let key = String::from_utf8(key)
-                        .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e)))?;
-                    Ok((key, value))
-                })
-                .collect()
-        })
+    fn raw_table_scan_range_bytes(
+        &self,
+        table: &str,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<super::RawTableRows, StorageError> {
+        let raw_prefix = raw_table_prefix(table);
+        let raw_prefix = raw_prefix.as_bytes();
+        self.tree_scan_range_raw(start, end)?
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let local_key = key.strip_prefix(raw_prefix)?;
+                Some(
+                    String::from_utf8(local_key.to_vec())
+                        .map(|local_key| (local_key, value))
+                        .map_err(|e| StorageError::IoError(format!("invalid key utf8: {}", e))),
+                )
+            })
+            .collect()
     }
 }
 
@@ -305,9 +326,10 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         prefix: &str,
     ) -> Result<super::RawTableRows, StorageError> {
-        raw_table_scan_prefix_core(table, prefix, |storage_prefix| {
-            self.tree_scan_prefix(storage_prefix)
-        })
+        let storage_prefix = raw_table_scan_prefix(table, prefix);
+        let mut end = storage_prefix.as_bytes().to_vec();
+        increment_bytes(&mut end);
+        self.raw_table_scan_range_bytes(table, storage_prefix.as_bytes(), &end)
     }
 
     fn raw_table_scan_prefix_keys(
@@ -326,9 +348,15 @@ impl Storage for OpfsBTreeStorage {
         start: Option<&str>,
         end: Option<&str>,
     ) -> Result<super::RawTableRows, StorageError> {
-        raw_table_scan_range_core(table, start, end, |start_key, end_key| {
-            self.tree_scan_range(start_key, end_key)
-        })
+        let start_key = raw_table_entry_key(table, start.unwrap_or(""));
+        let end_key = if let Some(end) = end {
+            raw_table_entry_key(table, end)
+        } else {
+            let mut table_end = raw_table_prefix(table);
+            increment_string(&mut table_end);
+            table_end
+        };
+        self.raw_table_scan_range_bytes(table, start_key.as_bytes(), end_key.as_bytes())
     }
 
     fn raw_table_scan_range_keys(
