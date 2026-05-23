@@ -9,7 +9,8 @@ use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
     ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits, raw_freelist_page,
     raw_internal_child_for_key, raw_internal_child_index_for_key, raw_leaf_delete_in_place,
-    raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind, validate_page,
+    raw_leaf_find_value, raw_leaf_scan, raw_leaf_update_hint, raw_leaf_upsert_in_place_with_hint,
+    raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 
@@ -586,31 +587,22 @@ impl<F: SyncFile> OpfsBTree<F> {
             PageKind::Leaf => {
                 self.perf.insert_leaf_calls = self.perf.insert_leaf_calls.saturating_add(1);
                 let build_value_cell_started_at = now_us();
-                let (new_value, reused_overflow_head) = if value.len()
+                let (new_value, reused_overflow_head, update_hint) = if value.len()
                     <= self.options.overflow_threshold
                 {
-                    (ValueCell::Inline(value.to_vec()), None)
+                    (ValueCell::Inline(value.to_vec()), None, None)
                 } else if value.len() < OVERFLOW_REUSE_MIN_BYTES {
-                    let existing_overflow = {
+                    let update_hint = {
                         let existing_value_lookup_started_at = now_us();
                         let raw = self.raw_page_bytes(page_id)?;
-                        let existing_value =
-                            match raw_leaf_find_value(raw, self.options.page_size, key)? {
-                                Some(ValueCellRef::Overflow {
-                                    head_page_id,
-                                    total_len,
-                                }) => Some(OverflowRef {
-                                    head_page_id,
-                                    total_len,
-                                }),
-                                _ => None,
-                            };
+                        let update_hint = raw_leaf_update_hint(raw, self.options.page_size, key)?;
                         self.perf.existing_value_lookup_us = self
                             .perf
                             .existing_value_lookup_us
                             .saturating_add(elapsed_us(existing_value_lookup_started_at));
-                        existing_value
+                        update_hint
                     };
+                    let existing_overflow = update_hint.and_then(|hint| hint.old_overflow);
                     match existing_overflow {
                         Some(existing)
                             if self.should_rewrite_medium_overflow(existing, value.len())? =>
@@ -626,6 +618,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                                     value,
                                 )?,
                                 Some(existing.head_page_id),
+                                update_hint,
                             )
                         }
                         Some(_) => {
@@ -639,32 +632,25 @@ impl<F: SyncFile> OpfsBTree<F> {
                                 self.last_medium_overflow_update_end =
                                     head_page_id.checked_add(page_count as u64);
                             }
-                            (cell, None)
+                            (cell, None, update_hint)
                         }
-                        None => (self.build_value_cell(value)?, None),
+                        None => (self.build_value_cell(value)?, None, None),
                     }
                 } else {
-                    let existing_overflow = {
+                    let update_hint = {
                         let existing_value_lookup_started_at = now_us();
                         let raw = self.raw_page_bytes(page_id)?;
-                        let existing_value =
-                            match raw_leaf_find_value(raw, self.options.page_size, key)? {
-                                Some(ValueCellRef::Overflow {
-                                    head_page_id,
-                                    total_len,
-                                }) => Some(OverflowRef {
-                                    head_page_id,
-                                    total_len,
-                                }),
-                                _ => None,
-                            };
+                        let update_hint = raw_leaf_update_hint(raw, self.options.page_size, key)?;
                         self.perf.existing_value_lookup_us = self
                             .perf
                             .existing_value_lookup_us
                             .saturating_add(elapsed_us(existing_value_lookup_started_at));
-                        existing_value
+                        update_hint
                     };
-                    self.build_value_cell_for_existing(existing_overflow, value)?
+                    let existing_overflow = update_hint.and_then(|hint| hint.old_overflow);
+                    let (cell, reused_overflow_head) =
+                        self.build_value_cell_for_existing(existing_overflow, value)?;
+                    (cell, reused_overflow_head, update_hint)
                 };
                 self.perf.build_value_cell_us = self
                     .perf
@@ -675,7 +661,13 @@ impl<F: SyncFile> OpfsBTree<F> {
                     let raw = self.pages.get_mut(&page_id).ok_or_else(|| {
                         BTreeError::Corrupt(format!("page {} missing during insert", page_id))
                     })?;
-                    raw_leaf_upsert_in_place(raw, self.options.page_size, key, &new_value)?
+                    raw_leaf_upsert_in_place_with_hint(
+                        raw,
+                        self.options.page_size,
+                        key,
+                        &new_value,
+                        update_hint,
+                    )?
                 };
                 self.perf.raw_leaf_upsert_us = self
                     .perf

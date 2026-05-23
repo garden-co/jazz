@@ -54,6 +54,16 @@ pub(crate) enum RawLeafUpsertResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RawLeafUpdateHint {
+    pub(crate) entry_count: usize,
+    pub(crate) idx: usize,
+    pub(crate) old_value_off: usize,
+    pub(crate) old_value_len: usize,
+    pub(crate) old_overflow: Option<OverflowRef>,
+    pub(crate) data_start: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RawLeafDeleteResult {
     NotFound,
     Deleted {
@@ -300,6 +310,43 @@ pub(crate) fn raw_leaf_find_value<'a>(
     Ok(None)
 }
 
+pub(crate) fn raw_leaf_update_hint(
+    raw: &[u8],
+    expected_page_size: usize,
+    key: &[u8],
+) -> Result<Option<RawLeafUpdateHint>, BTreeError> {
+    let header = parse_header(raw, expected_page_size, false)?;
+    if header.kind != PageKind::Leaf {
+        return Err(BTreeError::Corrupt("expected leaf page".to_string()));
+    }
+
+    let entry_count = header.item_count as usize;
+    let slots_bytes = leaf_slots_bytes(entry_count)?;
+    if header.payload.len() < slots_bytes {
+        return Err(BTreeError::Corrupt(
+            "leaf page payload shorter than slot directory".to_string(),
+        ));
+    }
+
+    let idx = match leaf_search_position(header.payload, entry_count, key)? {
+        Ok(idx) => idx,
+        Err(_) => return Ok(None),
+    };
+    let (_, _, old_value_off) = leaf_slot(header.payload, entry_count, idx)?;
+    let (old_value_ref, old_value_len) =
+        parse_leaf_value_cell_with_len_at(header.payload, old_value_off)?;
+    let data_start = leaf_data_start_with_hint(raw, header.payload, entry_count)?;
+
+    Ok(Some(RawLeafUpdateHint {
+        entry_count,
+        idx,
+        old_value_off,
+        old_value_len,
+        old_overflow: overflow_from_value_ref(old_value_ref),
+        data_start,
+    }))
+}
+
 /// Scan a leaf page for key-value pairs in the range [start, end).
 /// Calls the `visit` function for each key-value pair in the range.
 /// If the end of the range (or the limit of results) is reached, the function returns None.
@@ -396,16 +443,28 @@ pub(crate) fn raw_leaf_scan<'a>(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn raw_leaf_upsert_in_place(
     raw: &mut [u8],
     expected_page_size: usize,
     key: &[u8],
     value: &ValueCell,
 ) -> Result<RawLeafUpsertResult, BTreeError> {
+    raw_leaf_upsert_in_place_with_hint(raw, expected_page_size, key, value, None)
+}
+
+pub(crate) fn raw_leaf_upsert_in_place_with_hint(
+    raw: &mut [u8],
+    expected_page_size: usize,
+    key: &[u8],
+    value: &ValueCell,
+    update_hint: Option<RawLeafUpdateHint>,
+) -> Result<RawLeafUpsertResult, BTreeError> {
     let mut value_bytes = Vec::new();
     encode_leaf_value_cell_ref(value_cell_as_ref(value), &mut value_bytes)?;
 
     let mut compacted = false;
+    let mut update_hint = update_hint;
     loop {
         enum Plan {
             Update {
@@ -424,39 +483,88 @@ pub(crate) fn raw_leaf_upsert_in_place(
         }
 
         let plan = {
-            let header = parse_header(raw, expected_page_size, false)?;
-            if header.kind != PageKind::Leaf {
-                return Err(BTreeError::Corrupt("expected leaf page".to_string()));
-            }
-            let entry_count = header.item_count as usize;
-            let slots_bytes = leaf_slots_bytes(entry_count)?;
-            if header.payload.len() < slots_bytes {
-                return Err(BTreeError::Corrupt(
-                    "leaf page payload shorter than slot directory".to_string(),
-                ));
-            }
-
-            let pos = leaf_search_position(header.payload, entry_count, key)?;
-            let data_start = leaf_data_start_with_hint(raw, header.payload, entry_count)?;
-            match pos {
-                Ok(idx) => {
-                    let (_, _, old_value_off) = leaf_slot(header.payload, entry_count, idx)?;
-                    let (old_value_ref, old_value_len) =
-                        parse_leaf_value_cell_with_len_at(header.payload, old_value_off)?;
+            if !compacted {
+                if let Some(hint) = update_hint.take() {
                     Plan::Update {
-                        entry_count,
-                        idx,
-                        old_value_off,
-                        old_value_len,
-                        old_overflow: overflow_from_value_ref(old_value_ref),
-                        data_start,
+                        entry_count: hint.entry_count,
+                        idx: hint.idx,
+                        old_value_off: hint.old_value_off,
+                        old_value_len: hint.old_value_len,
+                        old_overflow: hint.old_overflow,
+                        data_start: hint.data_start,
+                    }
+                } else {
+                    let header = parse_header(raw, expected_page_size, false)?;
+                    if header.kind != PageKind::Leaf {
+                        return Err(BTreeError::Corrupt("expected leaf page".to_string()));
+                    }
+                    let entry_count = header.item_count as usize;
+                    let slots_bytes = leaf_slots_bytes(entry_count)?;
+                    if header.payload.len() < slots_bytes {
+                        return Err(BTreeError::Corrupt(
+                            "leaf page payload shorter than slot directory".to_string(),
+                        ));
+                    }
+
+                    let pos = leaf_search_position(header.payload, entry_count, key)?;
+                    let data_start = leaf_data_start_with_hint(raw, header.payload, entry_count)?;
+                    match pos {
+                        Ok(idx) => {
+                            let (_, _, old_value_off) =
+                                leaf_slot(header.payload, entry_count, idx)?;
+                            let (old_value_ref, old_value_len) =
+                                parse_leaf_value_cell_with_len_at(header.payload, old_value_off)?;
+                            Plan::Update {
+                                entry_count,
+                                idx,
+                                old_value_off,
+                                old_value_len,
+                                old_overflow: overflow_from_value_ref(old_value_ref),
+                                data_start,
+                            }
+                        }
+                        Err(insert_idx) => Plan::Insert {
+                            entry_count,
+                            insert_idx,
+                            data_start,
+                        },
                     }
                 }
-                Err(insert_idx) => Plan::Insert {
-                    entry_count,
-                    insert_idx,
-                    data_start,
-                },
+            } else {
+                let header = parse_header(raw, expected_page_size, false)?;
+                if header.kind != PageKind::Leaf {
+                    return Err(BTreeError::Corrupt("expected leaf page".to_string()));
+                }
+                let entry_count = header.item_count as usize;
+                let slots_bytes = leaf_slots_bytes(entry_count)?;
+                if header.payload.len() < slots_bytes {
+                    return Err(BTreeError::Corrupt(
+                        "leaf page payload shorter than slot directory".to_string(),
+                    ));
+                }
+
+                let pos = leaf_search_position(header.payload, entry_count, key)?;
+                let data_start = leaf_data_start_with_hint(raw, header.payload, entry_count)?;
+                match pos {
+                    Ok(idx) => {
+                        let (_, _, old_value_off) = leaf_slot(header.payload, entry_count, idx)?;
+                        let (old_value_ref, old_value_len) =
+                            parse_leaf_value_cell_with_len_at(header.payload, old_value_off)?;
+                        Plan::Update {
+                            entry_count,
+                            idx,
+                            old_value_off,
+                            old_value_len,
+                            old_overflow: overflow_from_value_ref(old_value_ref),
+                            data_start,
+                        }
+                    }
+                    Err(insert_idx) => Plan::Insert {
+                        entry_count,
+                        insert_idx,
+                        data_start,
+                    },
+                }
             }
         };
 
@@ -1535,6 +1643,64 @@ mod tests {
                 ],
                 next: Some(9),
             }
+        );
+    }
+
+    #[test]
+    fn leaf_upsert_in_place_reuses_update_hint() {
+        let mut raw = encode_page(
+            &Page::Leaf {
+                entries: vec![
+                    (b"a".to_vec(), ValueCell::Inline(b"1".to_vec())),
+                    (
+                        b"b".to_vec(),
+                        ValueCell::Overflow {
+                            head_page_id: 44,
+                            total_len: 999,
+                        },
+                    ),
+                ],
+                next: None,
+            },
+            4096,
+        )
+        .expect("encode");
+
+        let hint = raw_leaf_update_hint(&raw, 4096, b"b")
+            .expect("find hint")
+            .expect("existing key");
+        assert_eq!(
+            hint.old_overflow,
+            Some(OverflowRef {
+                head_page_id: 44,
+                total_len: 999,
+            })
+        );
+
+        let updated = raw_leaf_upsert_in_place_with_hint(
+            &mut raw,
+            4096,
+            b"b",
+            &ValueCell::Overflow {
+                head_page_id: 55,
+                total_len: 1000,
+            },
+            Some(hint),
+        )
+        .expect("update with hint");
+        assert_eq!(
+            updated,
+            RawLeafUpsertResult::Updated {
+                old_overflow: Some(OverflowRef {
+                    head_page_id: 44,
+                    total_len: 999,
+                }),
+            }
+        );
+        assert!(
+            raw_leaf_update_hint(&raw, 4096, b"missing")
+                .expect("missing hint")
+                .is_none()
         );
     }
 
