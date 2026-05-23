@@ -453,6 +453,10 @@ fn log_worker_init_phase(
 
     if phase_ms >= 250.0 || total_ms >= 8_000.0 {
         tracing::warn!(phase, phase_ms, total_ms, db_name, "jazz worker init phase");
+        web_sys::console::warn_1(&JsValue::from_str(&format!(
+            "[jazz-worker-init] phase={phase} phase_ms={phase_ms:.1} total_ms={total_ms:.1} db_name={}",
+            db_name.unwrap_or("")
+        )));
     }
 }
 
