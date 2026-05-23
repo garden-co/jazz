@@ -40,6 +40,7 @@ use super::{
 };
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
+const OPFS_OVERFLOW_THRESHOLD_BYTES: usize = 2 * 1024;
 
 #[derive(Clone, Debug)]
 pub(super) enum AnyFile {
@@ -160,6 +161,7 @@ impl OpfsBTreeStorage {
     fn options(cache_size_bytes: usize) -> BTreeOptions {
         BTreeOptions {
             cache_bytes: cache_size_bytes.max(MIN_CACHE_SIZE_BYTES),
+            overflow_threshold: OPFS_OVERFLOW_THRESHOLD_BYTES,
             pin_internal_pages: true,
             read_coalesce_pages: 4,
             ..Default::default()
