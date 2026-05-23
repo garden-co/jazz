@@ -1,5 +1,4 @@
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::BinaryHeap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
@@ -2054,11 +2053,9 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
 
         self.perf.evict_calls = self.perf.evict_calls.saturating_add(1);
-        // One pass top-k selection:
-        // Keep only the k worst eviction candidates in a bounded max heap.
         // Candidate ordering is (priority, access_epoch, page_id), where smaller
         // values are better eviction victims.
-        let mut victims: BinaryHeap<(u8, u64, PageId)> = BinaryHeap::with_capacity(target);
+        let mut victims: Vec<(u8, u64, PageId)> = Vec::new();
         for page_id in self.pages.keys() {
             self.perf.evict_scanned_pages = self.perf.evict_scanned_pages.saturating_add(1);
             if Some(*page_id) == protected_page {
@@ -2097,17 +2094,12 @@ impl<F: SyncFile> OpfsBTree<F> {
                 *page_id,
             );
 
-            if victims.len() < target {
-                victims.push(candidate);
-                continue;
-            }
+            victims.push(candidate);
+        }
 
-            if let Some(worst_kept) = victims.peek()
-                && candidate < *worst_kept
-            {
-                let _ = victims.pop();
-                victims.push(candidate);
-            }
+        if victims.len() > target {
+            victims.select_nth_unstable(target);
+            victims.truncate(target);
         }
 
         let victim_count = victims.len();
