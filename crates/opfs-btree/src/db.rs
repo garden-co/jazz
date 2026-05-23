@@ -218,6 +218,9 @@ impl<F: SyncFile> OpfsBTree<F> {
             SuperblockSlot::A,
             Superblock::new(options.page_size as u32, 0, 0, 0, 0),
         ));
+        let cache_capacity = (options.cache_bytes / options.page_size)
+            .max(1)
+            .saturating_mul(2);
 
         let mut tree = Self {
             file,
@@ -227,11 +230,14 @@ impl<F: SyncFile> OpfsBTree<F> {
             root_page_id: None,
             total_pages: 2,
             persisted_pages,
-            pages: OpfsMap::default(),
-            blob_pages: OpfsSet::default(),
-            page_access_epoch: OpfsMap::default(),
+            pages: OpfsMap::with_capacity_and_hasher(cache_capacity, Default::default()),
+            blob_pages: OpfsSet::with_capacity_and_hasher(cache_capacity / 2, Default::default()),
+            page_access_epoch: OpfsMap::with_capacity_and_hasher(
+                cache_capacity,
+                Default::default(),
+            ),
             access_epoch: 0,
-            dirty_pages: OpfsSet::default(),
+            dirty_pages: OpfsSet::with_capacity_and_hasher(cache_capacity, Default::default()),
             free_pages: Vec::new(),
             free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
