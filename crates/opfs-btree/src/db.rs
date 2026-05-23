@@ -21,6 +21,7 @@ const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
 const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
+const CACHE_EVICTION_ALLOWANCE_DIVISOR: usize = 4;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
@@ -1282,7 +1283,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let mut raw = vec![0u8; run_bytes];
         self.file.read_exact_at(offset, &mut raw)?;
-        let allowance = self.max_cached_pages() / 4;
+        let allowance = self.max_cached_pages() / CACHE_EVICTION_ALLOWANCE_DIVISOR;
 
         for i in 0..run_pages {
             let current_page_id = page_id + i as u64;
@@ -1485,7 +1486,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn cache_loaded_raw_page(&mut self, page_id: PageId, raw: Vec<u8>) {
         self.pages.insert(page_id, raw);
         self.touch_page(page_id);
-        self.evict_pages_if_needed(Some(page_id));
+        self.evict_pages_if_needed_with_read_miss_allowance(Some(page_id));
     }
 
     fn build_freelist_pages(&mut self) -> Result<(PageId, Vec<(PageId, Page)>), BTreeError> {
@@ -1689,6 +1690,11 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn evict_pages_if_needed(&mut self, protected_page: Option<PageId>) {
         self.evict_pages_if_needed_with_allowance(protected_page, 0);
+    }
+
+    fn evict_pages_if_needed_with_read_miss_allowance(&mut self, protected_page: Option<PageId>) {
+        let allowance = self.max_cached_pages() / CACHE_EVICTION_ALLOWANCE_DIVISOR;
+        self.evict_pages_if_needed_with_allowance(protected_page, allowance);
     }
 
     fn evict_pages_if_needed_after_dirty_page(&mut self) {
@@ -2591,13 +2597,14 @@ mod tests {
 
         tree.checkpoint().expect("checkpoint");
         let max_cached = tree.max_cached_pages();
+        let read_miss_trigger = max_cached + (max_cached / CACHE_EVICTION_ALLOWANCE_DIVISOR);
         let root = tree.root_page_id.expect("root exists");
         assert!(tree.pages.len() <= max_cached);
         assert!(tree.pages.contains_key(&root));
 
         for page_id in 2..tree.total_pages {
             tree.ensure_page_loaded(page_id).expect("load page");
-            assert!(tree.pages.len() <= max_cached);
+            assert!(tree.pages.len() <= read_miss_trigger);
             assert!(tree.pages.contains_key(&root));
         }
 
@@ -2662,12 +2669,13 @@ mod tests {
         tree.checkpoint().expect("checkpoint");
 
         let max_cached = tree.max_cached_pages();
+        let read_miss_trigger = max_cached + (max_cached / CACHE_EVICTION_ALLOWANCE_DIVISOR);
         let root = tree.root_page_id.expect("root exists");
 
         for page_id in 2..tree.total_pages {
             tree.ensure_page_loaded(page_id).expect("load page");
             assert!(
-                tree.pages.len() <= max_cached,
+                tree.pages.len() <= read_miss_trigger,
                 "cache exceeded budget after loading page {}",
                 page_id
             );
