@@ -1982,16 +1982,20 @@ impl<F: SyncFile> OpfsBTree<F> {
                 continue;
             }
 
-            let priority = match raw_page_kind(page, self.options.page_size) {
-                Ok(kind) => {
-                    if self.options.pin_internal_pages && kind == PageKind::Internal {
-                        self.perf.evict_internal_skips =
-                            self.perf.evict_internal_skips.saturating_add(1);
-                        continue;
+            let priority = if self.blob_pages.contains(page_id) {
+                0
+            } else {
+                match raw_page_kind(page, self.options.page_size) {
+                    Ok(kind) => {
+                        if self.options.pin_internal_pages && kind == PageKind::Internal {
+                            self.perf.evict_internal_skips =
+                                self.perf.evict_internal_skips.saturating_add(1);
+                            continue;
+                        }
+                        eviction_priority(kind)
                     }
-                    eviction_priority(kind)
+                    Err(_) => 0, // unknown raw pages are always evictable when clean
                 }
-                Err(_) => 0, // blob/raw pages are always evictable when clean
             };
             self.perf.evict_candidates = self.perf.evict_candidates.saturating_add(1);
 
