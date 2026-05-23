@@ -1509,7 +1509,17 @@ impl<F: SyncFile> OpfsBTree<F> {
                     }
                 } else {
                     stats.dirty_tree_pages = stats.dirty_tree_pages.saturating_add(1);
-                    let _ = validate_page(raw, self.options.page_size)?;
+                    // Dirty tree pages come from encode_page or raw leaf mutators,
+                    // both of which already maintain the page checksum.
+                    match raw_page_kind(raw, self.options.page_size)? {
+                        PageKind::Leaf | PageKind::Internal => {}
+                        PageKind::Overflow | PageKind::Freelist => {
+                            return Err(BTreeError::Corrupt(format!(
+                                "dirty tree page {} has invalid kind",
+                                page_id
+                            )));
+                        }
+                    }
                 }
                 encoded_pages.push((*page_id, CheckpointPage::Borrowed(raw)));
             }
