@@ -1,5 +1,5 @@
 use super::*;
-use crate::batch_fate::{LocalBatchMember, SealedBatchMember, SealedBatchSubmission};
+use crate::batch_fate::{BatchFate, LocalBatchMember, SealedBatchMember, SealedBatchSubmission};
 use crate::row_histories::{RowState, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
 use crate::sync_manager::{RowMetadata, SyncPayload};
@@ -41,6 +41,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let mut history_row_scans = 0usize;
         let mut history_rows_seen = 0usize;
         let mut broad_fallback_attempted = false;
+        let mut found_staging_pending = 0usize;
+        let mut found_superseded = 0usize;
+        let mut found_rejected = 0usize;
+        let mut found_visible_direct = 0usize;
+        let mut found_visible_transactional = 0usize;
         if let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) {
             source = "sealed_submission";
             source_members = submission.members.len();
@@ -172,6 +177,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .into_iter()
                     .filter(|row| row.batch_id == batch_id)
                 {
+                    match row.state {
+                        RowState::StagingPending => found_staging_pending += 1,
+                        RowState::Superseded => found_superseded += 1,
+                        RowState::Rejected => found_rejected += 1,
+                        RowState::VisibleDirect => found_visible_direct += 1,
+                        RowState::VisibleTransactional => found_visible_transactional += 1,
+                    }
                     let branch_name = BranchName::new(row.branch.as_str());
                     let Ok(schema_hash) =
                         self.local_batch_member_schema_hash(branch_name, object_id, batch_id)
@@ -219,14 +231,52 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             || row_locator_scans > 0
             || history_row_scans >= 100
         {
+            let fate = self
+                .storage
+                .load_authoritative_batch_fate(batch_id)
+                .ok()
+                .flatten();
+            let fate_kind = match fate.as_ref() {
+                Some(BatchFate::Missing { .. }) => "missing",
+                Some(BatchFate::Rejected { .. }) => "rejected",
+                Some(BatchFate::DurableDirect { .. }) => "durable_direct",
+                Some(BatchFate::AcceptedTransaction { .. }) => "accepted_transaction",
+                None => "none",
+            };
+            let fate_tier = fate
+                .as_ref()
+                .and_then(BatchFate::confirmed_tier)
+                .map(|tier| format!("{tier:?}"))
+                .unwrap_or_else(|| "none".to_string());
+            let sealed_submission_members = self
+                .storage
+                .load_sealed_batch_submission(batch_id)
+                .ok()
+                .flatten()
+                .map(|submission| submission.members.len());
+            let local_batch_record_members = self
+                .storage
+                .load_local_batch_record(batch_id)
+                .ok()
+                .flatten()
+                .map(|record| record.members.len());
             tracing::warn!(
                 ?batch_id,
                 source,
                 source_members,
+                fate_kind,
+                fate_tier,
+                sealed_submission_members,
+                local_batch_record_members,
                 rows = rows.len(),
                 row_locator_scans,
                 history_row_scans,
                 history_rows_seen,
+                found_staging_pending,
+                found_superseded,
+                found_rejected,
+                found_visible_direct,
+                found_visible_transactional,
                 elapsed_ms,
                 "jazz local_batch_rows resolved"
             );
