@@ -171,25 +171,7 @@ impl QueryGraph {
 
     /// Check if this graph involves a table (as index scan, array subquery inner table, or INHERITS reference).
     pub fn involves_table(&self, table: &str) -> bool {
-        self.index_scan_nodes
-            .iter()
-            .any(|(_, t, _)| t.as_str() == table)
-            || self
-                .array_subquery_tables
-                .iter()
-                .any(|(_, t)| t.as_str() == table)
-            || self
-                .policy_filter_tables
-                .iter()
-                .any(|(_, t)| t.as_str() == table)
-            || self
-                .magic_column_tables
-                .iter()
-                .any(|(_, t)| t.as_str() == table)
-            || self
-                .recursive_relation_tables
-                .iter()
-                .any(|(_, t)| t.as_str() == table)
+        self.involved_tables.contains(table)
     }
 
     /// Check if this graph uses a specific index (table + column combination).

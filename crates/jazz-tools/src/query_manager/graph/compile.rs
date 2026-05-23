@@ -528,6 +528,7 @@ impl QueryGraph {
         graph.add_edge(output_id, union_id);
         graph.output_node = output_id;
 
+        graph.rebuild_involved_tables();
         Some(graph)
     }
 
@@ -930,6 +931,7 @@ impl QueryGraph {
         graph.add_edge(output_id, phase2_input);
         graph.output_node = output_id;
 
+        graph.rebuild_involved_tables();
         Some(graph)
     }
 
@@ -1818,6 +1820,7 @@ impl QueryGraph {
         graph.add_edge(output_id, phase2_input);
         graph.output_node = output_id;
 
+        graph.rebuild_involved_tables();
         Some(graph)
     }
 }

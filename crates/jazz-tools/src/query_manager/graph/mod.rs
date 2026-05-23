@@ -119,6 +119,8 @@ pub struct QueryGraph {
     pub magic_column_tables: Vec<(NodeId, TableName)>, // (node_id, dependency_table)
     /// RecursiveRelation nodes and their step dependency tables (for marking dirty on table updates).
     pub recursive_relation_tables: Vec<(NodeId, TableName)>, // (node_id, step_table)
+    /// Unique table names that can affect this graph.
+    involved_tables: HashSet<String>,
     /// Per-table descriptors in join order (for flattening multi-element tuples).
     pub table_descriptors: Vec<RowDescriptor>,
     /// Combined descriptor for output (all columns from all tables).
@@ -155,9 +157,40 @@ impl QueryGraph {
             policy_filter_tables: Vec::new(),
             magic_column_tables: Vec::new(),
             recursive_relation_tables: Vec::new(),
+            involved_tables: HashSet::from([table.as_str().to_string()]),
             table_descriptors: vec![descriptor.clone()],
             combined_descriptor: descriptor,
         }
+    }
+
+    pub(super) fn rebuild_involved_tables(&mut self) {
+        self.involved_tables.clear();
+        self.involved_tables.insert(self.table.as_str().to_string());
+        self.involved_tables.extend(
+            self.index_scan_nodes
+                .iter()
+                .map(|(_, table, _)| table.as_str().to_string()),
+        );
+        self.involved_tables.extend(
+            self.array_subquery_tables
+                .iter()
+                .map(|(_, table)| table.as_str().to_string()),
+        );
+        self.involved_tables.extend(
+            self.policy_filter_tables
+                .iter()
+                .map(|(_, table)| table.as_str().to_string()),
+        );
+        self.involved_tables.extend(
+            self.magic_column_tables
+                .iter()
+                .map(|(_, table)| table.as_str().to_string()),
+        );
+        self.involved_tables.extend(
+            self.recursive_relation_tables
+                .iter()
+                .map(|(_, table)| table.as_str().to_string()),
+        );
     }
 
     pub(super) fn add_node(&mut self, node: GraphNode) -> NodeId {
