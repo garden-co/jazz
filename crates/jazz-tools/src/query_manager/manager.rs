@@ -823,21 +823,45 @@ impl QueryManager {
                 .unwrap_or(false)
     }
 
-    pub(super) fn local_subscription_compile_schema(&self, session: Option<&Session>) -> Schema {
+    pub(super) fn local_subscription_compile_schema(
+        &self,
+        session: Option<&Session>,
+    ) -> Arc<Schema> {
         if self.local_subscription_uses_explicit_authorization(session) {
-            self.schema
-                .iter()
-                .map(|(table_name, table_schema)| {
-                    let mut structural = table_schema.clone();
-                    structural.policies = TablePolicies::default();
-                    (*table_name, structural)
-                })
-                .collect()
+            Arc::new(
+                self.schema
+                    .iter()
+                    .map(|(table_name, table_schema)| {
+                        let mut structural = table_schema.clone();
+                        structural.policies = TablePolicies::default();
+                        (*table_name, structural)
+                    })
+                    .collect(),
+            )
         } else {
-            self.schema.as_ref().clone()
+            self.schema.clone()
         }
     }
 
+    fn local_subscription_compile_schema_for_recompile(
+        current_schema: &Arc<Schema>,
+        uses_explicit_authorization_filtering: bool,
+    ) -> Arc<Schema> {
+        if uses_explicit_authorization_filtering {
+            Arc::new(
+                current_schema
+                    .iter()
+                    .map(|(table_name, table_schema)| {
+                        let mut structural = table_schema.clone();
+                        structural.policies = TablePolicies::default();
+                        (*table_name, structural)
+                    })
+                    .collect(),
+            )
+        } else {
+            current_schema.clone()
+        }
+    }
     pub(crate) fn schema_has_any_explicit_policies(schema: &Schema) -> bool {
         schema
             .values()
@@ -947,18 +971,10 @@ impl QueryManager {
                         .as_ref()
                         .map(|auth_schema| auth_schema.as_ref() != current_schema.as_ref())
                         .unwrap_or(false);
-                let compile_schema = if uses_explicit_authorization_filtering {
-                    current_schema
-                        .iter()
-                        .map(|(table_name, table_schema)| {
-                            let mut structural = table_schema.clone();
-                            structural.policies = TablePolicies::default();
-                            (*table_name, structural)
-                        })
-                        .collect()
-                } else {
-                    current_schema.as_ref().clone()
-                };
+                let compile_schema = Self::local_subscription_compile_schema_for_recompile(
+                    &current_schema,
+                    uses_explicit_authorization_filtering,
+                );
 
                 // Recompile the graph
                 let compile_row_policy_mode = if uses_explicit_authorization_filtering {
@@ -968,7 +984,7 @@ impl QueryManager {
                 };
                 match Self::compile_graph(
                     &sub.query,
-                    &compile_schema,
+                    compile_schema.as_ref(),
                     sub.session.clone(),
                     &current_schema_context,
                     compile_row_policy_mode,
