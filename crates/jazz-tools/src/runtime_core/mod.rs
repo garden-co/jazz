@@ -28,7 +28,6 @@
 //! ```
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -78,12 +77,6 @@ pub struct QueryLocalOverlay {
     pub branch_name: BranchName,
     pub row_ids: Vec<ObjectId>,
 }
-
-pub(crate) type LocalBatchRows = Vec<(
-    crate::batch_fate::LocalBatchMember,
-    crate::storage::RowLocator,
-    crate::row_histories::StoredRowBatch,
-)>;
 
 // ============================================================================
 // Scheduler and SyncSender traits
@@ -370,10 +363,6 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// later incoming batch fate is applied to storage in apply_received_batch_fate,
     /// but the cached copy is not updated.
     local_batch_record_cache: HashMap<BatchId, crate::batch_fate::LocalBatchRecord>,
-    /// Amortizes the compatibility fallback in `local_batch_rows`. When older
-    /// stores lack explicit batch membership metadata, one broad history scan can
-    /// answer all batch ids until storage changes.
-    local_batch_rows_scan_cache: RefCell<HashMap<BatchId, LocalBatchRows>>,
 
     /// Label for tracing (e.g. "local", "edge", "client").
     tier_label: &'static str,
@@ -484,7 +473,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             rejected_batch_acknowledged_callback: None,
             acknowledged_rejected_batches,
             local_batch_record_cache: HashMap::new(),
-            local_batch_rows_scan_cache: RefCell::new(HashMap::new()),
             tier_label: "unknown",
             synthesize_direct_write_fate: true,
             sync_tracer: None,
@@ -604,7 +592,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub(crate) fn mark_storage_write_pending_flush(&mut self) {
         self.storage_write_pending_flush = true;
         self.storage_flush_retry_scheduled = false;
-        self.local_batch_rows_scan_cache.borrow_mut().clear();
     }
 
     pub(crate) fn has_storage_write_pending_flush(&self) -> bool {
