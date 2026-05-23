@@ -6,6 +6,32 @@ use crate::sync_manager::{RowMetadata, SyncPayload};
 use web_time::Instant;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    fn sort_local_batch_rows(rows: &mut crate::runtime_core::LocalBatchRows) {
+        rows.sort_by(
+            |(left_member, left_locator, left_row), (right_member, right_locator, right_row)| {
+                left_member
+                    .object_id
+                    .uuid()
+                    .as_bytes()
+                    .cmp(right_member.object_id.uuid().as_bytes())
+                    .then_with(|| {
+                        left_locator
+                            .table
+                            .as_str()
+                            .cmp(right_locator.table.as_str())
+                    })
+                    .then_with(|| left_row.branch.as_str().cmp(right_row.branch.as_str()))
+                    .then_with(|| {
+                        left_member
+                            .schema_hash
+                            .as_bytes()
+                            .cmp(right_member.schema_hash.as_bytes())
+                    })
+                    .then_with(|| left_row.batch_id.0.cmp(&right_row.batch_id.0))
+            },
+        );
+    }
+
     fn local_batch_row_was_insert(
         &self,
         table: &str,
@@ -154,11 +180,20 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
         }
         if rows.is_empty()
+            && let Some(cached_rows) = self.local_batch_rows_scan_cache.borrow().get(&batch_id)
+        {
+            source = "broad_scan_cache";
+            source_members = cached_rows.len();
+            rows = cached_rows.clone();
+        }
+        if rows.is_empty()
             && let Ok(row_locators) = self.storage.scan_row_locators()
         {
             source = "broad_row_locator_scan";
             broad_fallback_attempted = true;
             row_locator_scans = row_locators.len();
+            let mut discovered_rows: HashMap<BatchId, crate::runtime_core::LocalBatchRows> =
+                HashMap::new();
             for (object_id, row_locator) in row_locators {
                 history_row_scans += 1;
                 let Ok(history_rows) = self
@@ -168,13 +203,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     continue;
                 };
                 history_rows_seen += history_rows.len();
-                for row in history_rows
-                    .into_iter()
-                    .filter(|row| row.batch_id == batch_id)
-                {
+                for row in history_rows {
                     let branch_name = BranchName::new(row.branch.as_str());
                     let Ok(schema_hash) =
-                        self.local_batch_member_schema_hash(branch_name, object_id, batch_id)
+                        self.local_batch_member_schema_hash(branch_name, object_id, row.batch_id)
                     else {
                         continue;
                     };
@@ -185,34 +217,22 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         schema_hash,
                         row_digest: row.content_digest(),
                     };
-                    rows.push((member, row_locator.clone(), row));
+                    discovered_rows.entry(row.batch_id).or_default().push((
+                        member,
+                        row_locator.clone(),
+                        row,
+                    ));
                 }
             }
+
+            for discovered in discovered_rows.values_mut() {
+                Self::sort_local_batch_rows(discovered);
+            }
+            rows = discovered_rows.get(&batch_id).cloned().unwrap_or_default();
+            *self.local_batch_rows_scan_cache.borrow_mut() = discovered_rows;
         }
 
-        rows.sort_by(
-            |(left_member, left_locator, left_row), (right_member, right_locator, right_row)| {
-                left_member
-                    .object_id
-                    .uuid()
-                    .as_bytes()
-                    .cmp(right_member.object_id.uuid().as_bytes())
-                    .then_with(|| {
-                        left_locator
-                            .table
-                            .as_str()
-                            .cmp(right_locator.table.as_str())
-                    })
-                    .then_with(|| left_row.branch.as_str().cmp(right_row.branch.as_str()))
-                    .then_with(|| {
-                        left_member
-                            .schema_hash
-                            .as_bytes()
-                            .cmp(right_member.schema_hash.as_bytes())
-                    })
-                    .then_with(|| left_row.batch_id.0.cmp(&right_row.batch_id.0))
-            },
-        );
+        Self::sort_local_batch_rows(&mut rows);
         let elapsed_ms = started_at.elapsed().as_secs_f64() * 1_000.0;
         if broad_fallback_attempted
             || elapsed_ms >= 25.0
