@@ -10,14 +10,16 @@
 //! so server-bound traffic from drained main writes routes through the Rust
 //! transport (not into the catalogue forwarder + dropped). Order:
 //!
-//!   1. open runtime, register clients
-//!   2. attach outbox target (worker side)
-//!   3. bootstrap catalogue (`addServer` / `removeServer` while flag is set)
-//!   4. connect upstream (install Rust transport handle)
-//!   5. drain pending pre-init messages (sync, peer-sync, control)
-//!   6. sync retained local batch records + queue rejected-batch replay
-//!   7. flip state to `Ready`
-//!   8. post `init-ok`
+//!   1. open runtime
+//!   2. register the main thread as a peer client
+//!   3. attach outbox target (worker-side routing)
+//!   4. replay startup mutation errors
+//!   5. bootstrap catalogue (catalogue-only server edge while flag is set)
+//!   6. connect upstream (install Rust transport handle)
+//!   7. sync directly retained local batch records
+//!   8. flip state to `Ready`
+//!   9. drain pending pre-init messages (sync, peer-sync, control)
+//!  10. post `init-ok`
 //!
 //! ## Pre-init message buffering
 //!
@@ -223,7 +225,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     let mut phase_started_at = init_started_at;
 
     // 1. Open runtime.
-    let runtime = match WasmRuntime::open_persistent(
+    let runtime = match WasmRuntime::open_persistent_with_progress(
         &f.schema_json,
         &f.app_id,
         &f.env,
@@ -231,6 +233,14 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         &f.db_name,
         Some("local".to_string()),
         false,
+        |phase| {
+            log_worker_init_phase(
+                phase,
+                &mut phase_started_at,
+                init_started_at,
+                Some(&f.db_name),
+            );
+        },
     )
     .await
     {
@@ -330,8 +340,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     //    installed, server-bound outbox traffic routes there and bypasses
     //    the bootstrap-catalogue forwarder.
     sender.set_bootstrap_catalogue_forwarding(true);
-    let _ = runtime_rc.add_server(None, None);
-    runtime_rc.remove_server();
+    runtime_rc.bootstrap_catalogue_to_main();
     sender.set_bootstrap_catalogue_forwarding(false);
     log_worker_init_phase(
         "bootstrap_catalogue",
@@ -388,7 +397,14 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     // 7. Sync retained local batch records to main. Rejected-batch error
     //    replay already happened in step 4b; live rejections are handled by
     //    normal sync payloads reaching the main runtime.
-    sync_retained_local_batch_records(&runtime_rc);
+    //
+    //    Edge reconciliation expansion scans sealed submissions and
+    //    authoritative fates. On large server-backed OPFS datasets this work
+    //    can dominate cold worker init, while the connected upstream is already
+    //    the authority for edge/global visibility. Keep startup to the directly
+    //    retained local records so worker readiness is not blocked on a full
+    //    historical reconciliation scan.
+    sync_retained_local_batch_records(&runtime_rc, false);
     log_worker_init_phase(
         "sync_retained_local_batch_records",
         &mut phase_started_at,
@@ -451,12 +467,18 @@ fn log_worker_init_phase(
     let total_ms = now - init_started_at;
     *phase_started_at = now;
 
-    if phase_ms >= 250.0 || total_ms >= 8_000.0 {
+    let force_log = matches!(
+        phase,
+        "open_runtime.open_opfs_start" | "open_runtime.open_opfs_complete"
+    );
+    if force_log || phase_ms >= 250.0 || total_ms >= 8_000.0 {
         tracing::warn!(phase, phase_ms, total_ms, db_name, "jazz worker init phase");
-        web_sys::console::warn_1(&JsValue::from_str(&format!(
-            "[jazz-worker-init] phase={phase} phase_ms={phase_ms:.1} total_ms={total_ms:.1} db_name={}",
-            db_name.unwrap_or("")
-        )));
+        post_to_main(&WorkerToMainWire::InitProgress {
+            phase: phase.to_string(),
+            phase_ms,
+            total_ms,
+            db_name: db_name.unwrap_or("").to_string(),
+        });
     }
 }
 
@@ -545,8 +567,8 @@ fn make_peer_routing_lookup() -> Function {
 // Mutation-error replay
 // =============================================================================
 
-fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>) {
-    match retained_local_batch_records_payload(runtime) {
+fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>, include_edge_reconciliation: bool) {
+    match retained_local_batch_records_payload(runtime, include_edge_reconciliation) {
         Ok(encoded_records) => {
             post_to_main(&WorkerToMainWire::LocalBatchRecordsSync { encoded_records })
         }
@@ -554,11 +576,14 @@ fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>) {
     }
 }
 
-fn retained_local_batch_records_payload(runtime: &Rc<WasmRuntime>) -> Result<Vec<ByteBuf>, String> {
+fn retained_local_batch_records_payload(
+    runtime: &Rc<WasmRuntime>,
+    include_edge_reconciliation: bool,
+) -> Result<Vec<ByteBuf>, String> {
     let records = runtime
         .core
         .borrow()
-        .local_batch_records_for_worker_sync()
+        .local_batch_records_for_worker_sync(include_edge_reconciliation)
         .map_err(|err| format!("{err:?}"))?;
     let mut encoded_records = Vec::with_capacity(records.len());
     for record in &records {
@@ -700,8 +725,8 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 }
             }
         }
-        MainToWorkerWire::Shutdown => handle_shutdown(runtime.as_ref(), false),
-        MainToWorkerWire::SimulateCrash => handle_shutdown(runtime.as_ref(), true),
+        MainToWorkerWire::Shutdown => handle_shutdown(runtime, false),
+        MainToWorkerWire::SimulateCrash => handle_shutdown(runtime, true),
         MainToWorkerWire::AcknowledgeRejectedBatch { batch_id } => {
             if let Some(rt) = runtime.as_ref() {
                 if let Err(err) = rt.acknowledge_rejected_batch(&batch_id) {
@@ -831,7 +856,7 @@ fn update_auth(jwt: Option<String>, runtime: Option<&Rc<WasmRuntime>>) {
     }
 }
 
-fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
+fn handle_shutdown(runtime: Option<Rc<WasmRuntime>>, simulate_crash: bool) {
     HOST.with(|cell| {
         if let Some(h) = cell.borrow_mut().as_mut() {
             h.state = HostState::ShuttingDown;
@@ -840,7 +865,7 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
 
     let mut shutdown_failure = None;
 
-    if let Some(rt) = runtime {
+    if let Some(rt) = runtime.as_ref() {
         // Drain any parked main/peer sync messages so their writes reach
         // storage, then flush WAL so they survive a remount/replay. Without
         // this, pending entries delivered just before `Shutdown` /
@@ -875,6 +900,7 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
     global.set_onmessage(None);
 
     RUNTIME.with(|cell| *cell.borrow_mut() = None);
+    HOST.with(|cell| *cell.borrow_mut() = None);
     PEER_ROUTING.with(|cell| {
         let mut g = cell.borrow_mut();
         g.peer_client_by_peer_id.clear();
@@ -882,6 +908,7 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
         g.peer_terms.clear();
         g.main_client_id = None;
     });
+    drop(runtime);
 
     if let Some(message) = shutdown_failure {
         post_to_main(&WorkerToMainWire::ShutdownFailed { message });
@@ -889,7 +916,6 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
         post_to_main(&WorkerToMainWire::ShutdownOk);
     }
     global.close();
-    HOST.with(|cell| *cell.borrow_mut() = None);
 }
 
 // =============================================================================

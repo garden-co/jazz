@@ -1291,7 +1291,7 @@ fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
         .unwrap();
 
     assert_eq!(core.local_batch_record(batch_id).unwrap(), None);
-    let records = core.local_batch_records_for_worker_sync().unwrap();
+    let records = core.local_batch_records_for_worker_sync(true).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].batch_id, batch_id);
     assert!(matches!(
@@ -1320,7 +1320,7 @@ fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
         })
         .unwrap();
 
-    let records = core.local_batch_records_for_worker_sync().unwrap();
+    let records = core.local_batch_records_for_worker_sync(true).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].batch_id, batch_id);
     assert!(records[0].members.is_empty());
@@ -1331,6 +1331,25 @@ fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
             ..
         })
     ));
+}
+
+#[test]
+fn rc_worker_sync_records_can_skip_edge_reconciliation_for_local_only_runtime() {
+    let mut core = create_runtime_with_schema(
+        users_delete_denied_authorization_schema(),
+        "local-only-worker-sync-record-test",
+    );
+    let batch_id = BatchId::new();
+
+    core.storage_mut()
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        })
+        .unwrap();
+
+    let records = core.local_batch_records_for_worker_sync(false).unwrap();
+    assert!(records.is_empty());
 }
 
 #[test]
@@ -1367,7 +1386,7 @@ fn rc_worker_accepts_local_batch_replay_payloads_from_peer() {
     worker.batched_tick();
     worker.immediate_tick();
 
-    let records = worker.local_batch_records_for_worker_sync().unwrap();
+    let records = worker.local_batch_records_for_worker_sync(true).unwrap();
     assert!(
         records
             .iter()

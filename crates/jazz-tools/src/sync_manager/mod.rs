@@ -30,6 +30,8 @@ mod tests;
 // Re-export all public types
 pub use types::*;
 
+type QueryScopeDelta = (HashSet<(ObjectId, BranchName)>, Vec<(ObjectId, BranchName)>);
+
 /// How long an installed transport may sit in `pending_servers` before callers
 /// treat it as offline.
 pub const PENDING_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
@@ -435,6 +437,21 @@ impl SyncManager {
         }
     }
 
+    /// Add a temporary server edge used only to replay catalogue entries.
+    ///
+    /// Worker startup uses this for the main-thread catalogue handoff. A normal
+    /// server attach must continue through `add_server_with_storage` so row
+    /// histories, subscriptions, and batch fates are replayed.
+    pub fn add_catalogue_bootstrap_server_with_storage<H: Storage>(
+        &mut self,
+        server_id: ServerId,
+        storage: &H,
+    ) {
+        self.pending_servers.remove(&server_id);
+        self.servers.insert(server_id, ServerState::default());
+        self.queue_catalogue_sync_to_server_from_storage(server_id, storage);
+    }
+
     pub fn add_pending_server(&mut self, server_id: ServerId) {
         if self.servers.contains_key(&server_id) {
             return;
@@ -709,39 +726,8 @@ impl SyncManager {
         scope: HashSet<(ObjectId, BranchName)>,
         session: Option<Session>,
     ) {
-        let Some(client) = self.clients.get_mut(&client_id) else {
-            return;
-        };
-
-        let old_query_scope = client
-            .queries
-            .get(&query_id)
-            .map(|query| query.scope.clone())
-            .unwrap_or_default();
-        let old_scope: HashSet<(ObjectId, BranchName)> = client
-            .queries
-            .values()
-            .flat_map(|q| q.scope.iter().cloned())
-            .collect();
-
-        client.queries.insert(
-            query_id,
-            QueryScope {
-                scope: scope.clone(),
-                session,
-            },
-        );
-
-        let new_scope: HashSet<(ObjectId, BranchName)> = client
-            .queries
-            .values()
-            .flat_map(|q| q.scope.iter().cloned())
-            .collect();
-
-        let no_longer_visible: HashSet<(ObjectId, BranchName)> =
-            old_scope.difference(&new_scope).cloned().collect();
-        let newly_visible_for_query: Vec<(ObjectId, BranchName)> =
-            scope.difference(&old_query_scope).cloned().collect();
+        let (no_longer_visible, newly_visible_for_query) =
+            self.replace_client_query_scope(client_id, query_id, scope, session);
 
         self.prune_client_scope_tracking(client_id, &no_longer_visible);
 
@@ -777,43 +763,14 @@ impl SyncManager {
         scope_rows: &HashMap<(ObjectId, BranchName), ScopeRow>,
         session: Option<Session>,
     ) {
-        let Some(client) = self.clients.get_mut(&client_id) else {
-            return;
-        };
-
-        let old_query_scope = client
-            .queries
-            .get(&query_id)
-            .map(|query| query.scope.clone())
-            .unwrap_or_default();
-        let old_scope: HashSet<(ObjectId, BranchName)> = client
-            .queries
-            .values()
-            .flat_map(|q| q.scope.iter().cloned())
-            .collect();
-
-        client.queries.insert(
-            query_id,
-            QueryScope {
-                scope: scope.clone(),
-                session,
-            },
-        );
-
-        let new_scope: HashSet<(ObjectId, BranchName)> = client
-            .queries
-            .values()
-            .flat_map(|q| q.scope.iter().cloned())
-            .collect();
-
-        let no_longer_visible: HashSet<(ObjectId, BranchName)> =
-            old_scope.difference(&new_scope).cloned().collect();
-        let newly_visible_for_query: Vec<(ObjectId, BranchName)> =
-            scope.difference(&old_query_scope).cloned().collect();
+        let (no_longer_visible, newly_visible_for_query) =
+            self.replace_client_query_scope(client_id, query_id, scope, session);
 
         self.prune_client_scope_tracking(client_id, &no_longer_visible);
 
         let mut newly_visible_batch_ids = HashSet::new();
+        let mut materialized_scope_rows = 0usize;
+        let mut storage_scope_rows = 0usize;
         for (object_id, branch_name) in newly_visible_for_query {
             if let Some(scope_row) = scope_rows.get(&(object_id, branch_name)) {
                 let metadata = HashMap::from([(
@@ -833,6 +790,7 @@ impl SyncManager {
                 );
                 self.queue_row_to_client(client_id, object_id, metadata, row, true);
                 newly_visible_batch_ids.insert(scope_row.batch_id);
+                materialized_scope_rows += 1;
                 continue;
             }
 
@@ -844,7 +802,18 @@ impl SyncManager {
                 true,
             ) {
                 newly_visible_batch_ids.insert(batch_id);
+                storage_scope_rows += 1;
             }
+        }
+
+        if materialized_scope_rows > 0 || storage_scope_rows > 0 {
+            crate::query_manager::policy_counters::increment(
+                "client_query_scope_row_source",
+                format!(
+                    "client={} query={} materialized={} storage={}",
+                    client_id.0, query_id.0, materialized_scope_rows, storage_scope_rows
+                ),
+            );
         }
 
         for batch_id in newly_visible_batch_ids {
@@ -858,22 +827,8 @@ impl SyncManager {
     ///
     /// Removes per-query scope and origin tracking.
     pub fn drop_client_query_subscription(&mut self, client_id: ClientId, query_id: QueryId) {
-        if let Some(client) = self.clients.get_mut(&client_id) {
-            let old_scope: HashSet<(ObjectId, BranchName)> = client
-                .queries
-                .values()
-                .flat_map(|q| q.scope.iter().cloned())
-                .collect();
-            client.queries.remove(&query_id);
-            let new_scope: HashSet<(ObjectId, BranchName)> = client
-                .queries
-                .values()
-                .flat_map(|q| q.scope.iter().cloned())
-                .collect();
-            let no_longer_visible: HashSet<(ObjectId, BranchName)> =
-                old_scope.difference(&new_scope).cloned().collect();
-            self.prune_client_scope_tracking(client_id, &no_longer_visible);
-        }
+        let no_longer_visible = self.remove_client_query_scope(client_id, query_id);
+        self.prune_client_scope_tracking(client_id, &no_longer_visible);
 
         if let Some(clients) = self.query_origin.get_mut(&query_id) {
             clients.remove(&client_id);
@@ -881,6 +836,65 @@ impl SyncManager {
                 self.query_origin.remove(&query_id);
             }
         }
+    }
+
+    fn replace_client_query_scope(
+        &mut self,
+        client_id: ClientId,
+        query_id: QueryId,
+        scope: HashSet<(ObjectId, BranchName)>,
+        session: Option<Session>,
+    ) -> QueryScopeDelta {
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return (HashSet::new(), Vec::new());
+        };
+
+        let old_query_scope = client
+            .queries
+            .get(&query_id)
+            .map(|query| query.scope.clone())
+            .unwrap_or_default();
+
+        let no_longer_visible = old_query_scope
+            .difference(&scope)
+            .filter(|row| {
+                !client.queries.iter().any(|(other_query_id, query)| {
+                    other_query_id != &query_id && query.scope.contains(*row)
+                })
+            })
+            .cloned()
+            .collect();
+        let newly_visible_for_query = scope.difference(&old_query_scope).cloned().collect();
+
+        client
+            .queries
+            .insert(query_id, QueryScope { scope, session });
+
+        (no_longer_visible, newly_visible_for_query)
+    }
+
+    fn remove_client_query_scope(
+        &mut self,
+        client_id: ClientId,
+        query_id: QueryId,
+    ) -> HashSet<(ObjectId, BranchName)> {
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return HashSet::new();
+        };
+        let Some(removed_query) = client.queries.remove(&query_id) else {
+            return HashSet::new();
+        };
+
+        removed_query
+            .scope
+            .into_iter()
+            .filter(|row| {
+                !client
+                    .queries
+                    .values()
+                    .any(|query| query.scope.contains(row))
+            })
+            .collect()
     }
 
     fn prune_client_scope_tracking(

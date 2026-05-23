@@ -610,8 +610,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// upstream fate before rendering locally durable optimistic rows.
     pub fn local_batch_records_for_worker_sync(
         &self,
+        include_edge_reconciliation: bool,
     ) -> Result<Vec<LocalBatchRecord>, RuntimeError> {
         let mut records = self.local_batch_records()?;
+        if !include_edge_reconciliation {
+            records.sort_by_key(|record| record.batch_id);
+            return Ok(records);
+        }
+
         let retained_batch_ids: std::collections::HashSet<_> =
             records.iter().map(|record| record.batch_id).collect();
         let submissions = self

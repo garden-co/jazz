@@ -127,6 +127,12 @@ pub enum WorkerToMainWire {
     InitOk {
         client_id: String,
     },
+    InitProgress {
+        phase: String,
+        phase_ms: f64,
+        total_ms: f64,
+        db_name: String,
+    },
     UpstreamConnected,
     UpstreamDisconnected,
     Sync {
@@ -520,6 +526,12 @@ mod tests {
     fn worker_to_main_round_trips() {
         rt_worker(&WorkerToMainWire::InitOk {
             client_id: "c1".into(),
+        });
+        rt_worker(&WorkerToMainWire::InitProgress {
+            phase: "open_runtime".into(),
+            phase_ms: 123.0,
+            total_ms: 456.0,
+            db_name: "bench-db".into(),
         });
         rt_worker(&WorkerToMainWire::UpstreamConnected);
         rt_worker(&WorkerToMainWire::UpstreamDisconnected);

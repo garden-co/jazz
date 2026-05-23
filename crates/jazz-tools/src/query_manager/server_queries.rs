@@ -2181,13 +2181,16 @@ impl QueryManager {
                 if scope_changed {
                     let scope_install_started_at = Instant::now();
                     let scope_len = scope.len();
-                    self.sync_manager.set_client_query_scope_with_storage(
-                        storage_ref,
-                        sub.client_id,
-                        sub.query_id,
-                        scope.clone(),
-                        session_for_policy.clone(),
-                    );
+                    let scope_rows = graph.sync_scope_rows();
+                    self.sync_manager
+                        .set_client_query_scope_with_rows_and_storage(
+                            storage_ref,
+                            sub.client_id,
+                            sub.query_id,
+                            scope.clone(),
+                            &scope_rows,
+                            session_for_policy.clone(),
+                        );
                     crate::query_manager::policy_counters::observe_duration(
                         "set_client_query_scope_duration",
                         format!(
@@ -2447,13 +2450,16 @@ impl QueryManager {
                     let owned_scope = new_scope.into_owned();
                     let scope_install_started_at = Instant::now();
                     let scope_len = owned_scope.len();
-                    self.sync_manager.set_client_query_scope_with_storage(
-                        storage,
-                        client_id,
-                        query_id,
-                        owned_scope.clone(),
-                        sub.session.clone(),
-                    );
+                    let scope_rows = sub.graph.sync_scope_rows();
+                    self.sync_manager
+                        .set_client_query_scope_with_rows_and_storage(
+                            storage,
+                            client_id,
+                            query_id,
+                            owned_scope.clone(),
+                            &scope_rows,
+                            sub.session.clone(),
+                        );
                     crate::query_manager::policy_counters::observe_duration(
                         "set_client_query_scope_duration",
                         format!(
