@@ -110,8 +110,8 @@ function parseArgs(argv) {
 
     if (arg === "--profile") {
       const next = String(argv[i + 1] || "").trim();
-      if (!["basic", "mixed", "range", "app", "all"].includes(next)) {
-        throw new Error("`--profile` must be one of: basic, mixed, range, app, all");
+      if (!["basic", "mixed", "range", "app", "app-sync", "all"].includes(next)) {
+        throw new Error("`--profile` must be one of: basic, mixed, range, app, app-sync, all");
       }
       out.profile = next;
       i += 1;
@@ -246,6 +246,8 @@ import init, {
   bench_opfs_range_seq_window,
   bench_opfs_range_random_window,
   bench_opfs_app_parent_child_load,
+  bench_opfs_app_sync_apply,
+  bench_opfs_app_sync_apply_sorted,
   bench_set_cache_bytes,
   bench_set_overflow_threshold_bytes,
   bench_set_pin_internal_pages,
@@ -366,6 +368,27 @@ async function runRequest(payload) {
           phase_times_ms: result.phase_times_ms || []
         });
         self.postMessage({ type: "result", result });
+      }
+
+      if (profile === "app-sync" || profile === "all") {
+        for (const [name, fn] of [
+          ["app_sync_apply", bench_opfs_app_sync_apply],
+          ["app_sync_apply_sorted", bench_opfs_app_sync_apply_sorted]
+        ]) {
+          const startedAt = performance.now();
+          self.postMessage({ type: "progress", event: "start", operation: name, value_size: valueSize });
+          const result = await fn(count, valueSize);
+          out.push(result);
+          self.postMessage({
+            type: "progress",
+            event: "end",
+            operation: name,
+            value_size: valueSize,
+            elapsed_ms: performance.now() - startedAt,
+            phase_times_ms: result.phase_times_ms || []
+          });
+          self.postMessage({ type: "result", result });
+        }
       }
 
       if (includeColdRead) {

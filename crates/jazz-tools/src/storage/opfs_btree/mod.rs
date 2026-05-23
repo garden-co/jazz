@@ -30,12 +30,12 @@ use crate::sync_manager::DurabilityTier;
 
 use super::{
     HistoryRowBytes, RawTableMutation, Storage, StorageError, VisibleRowBytes,
-    key_codec::increment_bytes,
+    key_codec::{
+        history_row_raw_table_key, increment_bytes, raw_table_entry_key, visible_row_raw_table_key,
+    },
     storage_core::{
-        append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core,
-        upsert_visible_region_row_bytes_core,
+        raw_table_delete_core, raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
     },
 };
 
@@ -336,7 +336,28 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         rows: &[HistoryRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        append_history_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+        let _ = table;
+        let mut staged: Vec<(String, usize, &[u8])> = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                let local_key = history_row_raw_table_key(row.row_id, row.branch, row.batch_id);
+                (
+                    raw_table_entry_key(row.row_raw_table, &local_key),
+                    idx,
+                    row.bytes,
+                )
+            })
+            .collect();
+        staged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        self.with_tree_mut(|tree| {
+            for (storage_key, _, bytes) in staged {
+                tree.put(storage_key.as_bytes(), bytes)
+                    .map_err(map_storage_err)?;
+            }
+            Ok(())
+        })
     }
 
     fn upsert_visible_region_row_bytes(
@@ -344,7 +365,28 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         rows: &[VisibleRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        upsert_visible_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+        let _ = table;
+        let mut staged: Vec<(String, usize, &[u8])> = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                let local_key = visible_row_raw_table_key(row.branch, row.row_id);
+                (
+                    raw_table_entry_key(row.row_raw_table, &local_key),
+                    idx,
+                    row.bytes,
+                )
+            })
+            .collect();
+        staged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        self.with_tree_mut(|tree| {
+            for (storage_key, _, bytes) in staged {
+                tree.put(storage_key.as_bytes(), bytes)
+                    .map_err(map_storage_err)?;
+            }
+            Ok(())
+        })
     }
 
     fn patch_row_region_rows_by_batch(
@@ -757,6 +799,34 @@ mod tests {
                 .unwrap()
                 .and_then(|row| row.confirmed_tier),
             Some(DurabilityTier::EdgeServer)
+        );
+    }
+
+    #[test]
+    fn opfs_btree_sorted_visible_writes_preserve_duplicate_order() {
+        let mut storage = test_storage();
+        let row_id = ObjectId::new();
+        let first = VisibleRowBytes {
+            row_raw_table: "visible_rows",
+            branch: "main",
+            row_id,
+            bytes: b"first",
+        };
+        let second = VisibleRowBytes {
+            row_raw_table: "visible_rows",
+            branch: "main",
+            row_id,
+            bytes: b"second",
+        };
+
+        storage
+            .upsert_visible_region_row_bytes("users", &[first, second])
+            .unwrap();
+
+        let local_key = visible_row_raw_table_key("main", row_id);
+        assert_eq!(
+            storage.raw_table_get("visible_rows", &local_key).unwrap(),
+            Some(b"second".to_vec())
         );
     }
 
