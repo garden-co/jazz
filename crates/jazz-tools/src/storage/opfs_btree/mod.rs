@@ -300,7 +300,7 @@ impl Storage for OpfsBTreeStorage {
                 }
             })
             .collect::<Vec<_>>();
-        staged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        staged.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
         self.with_tree_mut(|tree| {
             for (storage_key, _, value) in staged {
@@ -388,7 +388,7 @@ impl Storage for OpfsBTreeStorage {
                 )
             })
             .collect();
-        staged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        staged.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
         self.with_tree_mut(|tree| {
             for (storage_key, _, bytes) in staged {
@@ -417,7 +417,7 @@ impl Storage for OpfsBTreeStorage {
                 )
             })
             .collect();
-        staged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        staged.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
         self.with_tree_mut(|tree| {
             for (storage_key, _, bytes) in staged {
