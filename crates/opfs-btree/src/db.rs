@@ -1704,12 +1704,13 @@ impl<F: SyncFile> OpfsBTree<F> {
                 BTreeError::Io("checkpoint run write offset overflow".to_string())
             })?;
             let run_write_started_at = now_us();
-            self.file.write_all_at(offset, &run)?;
+            let written_runs =
+                write_checkpoint_run_with_retry(&self.file, offset, &run, page_size)?;
             stats.run_write_us = stats
                 .run_write_us
                 .saturating_add(elapsed_us(run_write_started_at));
             stats.pages = stats.pages.saturating_add(run_len);
-            stats.runs = stats.runs.saturating_add(1);
+            stats.runs = stats.runs.saturating_add(written_runs);
             stats.bytes = stats.bytes.saturating_add(run.len());
 
             idx = end;
@@ -2349,6 +2350,38 @@ fn page_kind_for_page(page: &Page) -> PageKind {
     }
 }
 
+fn write_checkpoint_run_with_retry<F: SyncFile>(
+    file: &F,
+    offset: u64,
+    buf: &[u8],
+    page_size: usize,
+) -> Result<usize, BTreeError> {
+    match file.write_all_at(offset, buf) {
+        Ok(()) => Ok(1),
+        Err(err) if should_split_checkpoint_write(&err, buf, page_size) => {
+            let page_count = buf.len() / page_size;
+            let left_pages = page_count / 2;
+            let left_bytes = left_pages * page_size;
+            let right_offset = offset.checked_add(left_bytes as u64).ok_or_else(|| {
+                BTreeError::Io("checkpoint split write offset overflow".to_string())
+            })?;
+            let left =
+                write_checkpoint_run_with_retry(file, offset, &buf[..left_bytes], page_size)?;
+            let right =
+                write_checkpoint_run_with_retry(file, right_offset, &buf[left_bytes..], page_size)?;
+            Ok(left.saturating_add(right))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn should_split_checkpoint_write(err: &BTreeError, buf: &[u8], page_size: usize) -> bool {
+    matches!(err, BTreeError::Io(message) if message.contains("opfs write failed"))
+        && page_size > 0
+        && buf.len() > page_size
+        && buf.len().is_multiple_of(page_size)
+}
+
 fn read_slot<F: SyncFile>(
     file: &F,
     slot: SuperblockSlot,
@@ -2512,6 +2545,56 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct FailFirstLargeWriteFile {
+        inner: MemoryFile,
+        attempts: Rc<RefCell<Vec<(u64, usize)>>>,
+        failed: Rc<RefCell<bool>>,
+        fail_len: usize,
+    }
+
+    impl FailFirstLargeWriteFile {
+        fn new(fail_len: usize) -> Self {
+            Self {
+                inner: MemoryFile::new(),
+                attempts: Rc::new(RefCell::new(Vec::new())),
+                failed: Rc::new(RefCell::new(false)),
+                fail_len,
+            }
+        }
+    }
+
+    impl SyncFile for FailFirstLargeWriteFile {
+        fn len(&self) -> Result<u64, BTreeError> {
+            self.inner.len()
+        }
+
+        fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
+            self.inner.read_exact_at(offset, buf)
+        }
+
+        fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError> {
+            self.attempts.borrow_mut().push((offset, buf.len()));
+            let mut failed = self.failed.borrow_mut();
+            if !*failed && buf.len() >= self.fail_len {
+                *failed = true;
+                return Err(BTreeError::Io(format!(
+                    "opfs write failed with code -8 for {} bytes",
+                    buf.len()
+                )));
+            }
+            self.inner.write_all_at(offset, buf)
+        }
+
+        fn truncate(&self, len: u64) -> Result<(), BTreeError> {
+            self.inner.truncate(len)
+        }
+
+        fn flush(&self) -> Result<(), BTreeError> {
+            self.inner.flush()
+        }
+    }
+
     fn corrupt_slot(file: &MemoryFile, slot: SuperblockSlot, page_size: usize) {
         let offset = slot.byte_offset(page_size) + 8;
         file.write_all_at(offset, &[0xFF, 0x00, 0xAA, 0x55])
@@ -2542,6 +2625,26 @@ mod tests {
         assert_eq!(after.root_page_id, 7);
         assert_eq!(after.freelist_head_page_id, 11);
         assert_eq!(after.total_pages, 42);
+    }
+
+    #[test]
+    fn checkpoint_write_retry_splits_failed_opfs_run() {
+        let page_size = 4096;
+        let file = FailFirstLargeWriteFile::new(page_size * 4);
+        let buf = vec![7u8; page_size * 4];
+
+        let writes = write_checkpoint_run_with_retry(&file, page_size as u64 * 2, &buf, page_size)
+            .expect("retry write");
+
+        assert_eq!(writes, 2);
+        assert_eq!(
+            file.attempts.borrow().as_slice(),
+            &[
+                (page_size as u64 * 2, page_size * 4),
+                (page_size as u64 * 2, page_size * 2),
+                (page_size as u64 * 4, page_size * 2),
+            ]
+        );
     }
 
     #[test]
