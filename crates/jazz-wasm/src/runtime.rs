@@ -2077,7 +2077,10 @@ impl WasmRuntime {
             db_name
         )
         .entered();
-        info!("opening persistent OPFS runtime");
+        info!(
+            opfs_cache_bytes = DEFAULT_OPFS_CACHE_SIZE,
+            "opening persistent OPFS runtime"
+        );
 
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
         let mut schema_manager =
