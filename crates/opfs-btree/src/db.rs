@@ -108,6 +108,7 @@ pub struct OpfsBTree<F: SyncFile> {
     free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
     last_medium_overflow_update_end: Option<PageId>,
+    eviction_blocked_by_dirty_pressure: bool,
     perf: BTreePerfCounters,
 }
 
@@ -218,6 +219,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
             last_medium_overflow_update_end: None,
+            eviction_blocked_by_dirty_pressure: false,
             perf: BTreePerfCounters::default(),
         };
 
@@ -467,6 +469,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         let superblock_us = elapsed_us(superblock_started_at);
         self.dirty_pages.clear();
         self.last_medium_overflow_update_end = None;
+        self.eviction_blocked_by_dirty_pressure = false;
         let evict_started_at = now_us();
         self.evict_pages_if_needed(None);
         let post_checkpoint_evict_us = elapsed_us(evict_started_at);
@@ -1944,7 +1947,15 @@ impl<F: SyncFile> OpfsBTree<F> {
             return;
         }
 
+        let dirty_pressure_escape = max_cached_pages.saturating_mul(4).max(trigger);
+        if self.eviction_blocked_by_dirty_pressure && self.pages.len() <= dirty_pressure_escape {
+            self.perf.evict_deferred_dirty_pressure =
+                self.perf.evict_deferred_dirty_pressure.saturating_add(1);
+            return;
+        }
+
         if self.dirty_pages.len() >= steady_cached_pages {
+            self.eviction_blocked_by_dirty_pressure = true;
             self.perf.evict_deferred_dirty_pressure =
                 self.perf.evict_deferred_dirty_pressure.saturating_add(1);
             return;
@@ -2003,6 +2014,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             }
         }
 
+        let victim_count = victims.len();
+        self.eviction_blocked_by_dirty_pressure = victim_count < target;
         for (_, _, page_id) in victims {
             self.pages.remove(&page_id);
             self.page_access_epoch.remove(&page_id);
@@ -3041,6 +3054,13 @@ mod tests {
             "dirty-pressure eviction should defer instead of scanning"
         );
         assert_eq!(tree.perf.evict_deferred_dirty_pressure, deferred_before + 1);
+
+        tree.evict_pages_if_needed(None);
+        assert_eq!(
+            tree.perf.evict_calls, evict_calls_before,
+            "repeated dirty-pressure eviction should keep deferring"
+        );
+        assert_eq!(tree.perf.evict_deferred_dirty_pressure, deferred_before + 2);
 
         for page_id in dirty_ids {
             assert!(
