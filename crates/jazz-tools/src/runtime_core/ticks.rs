@@ -3,6 +3,7 @@ use crate::batch_fate::{LocalBatchMember, SealedBatchMember, SealedBatchSubmissi
 use crate::row_histories::{RowState, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
 use crate::sync_manager::{RowMetadata, SyncPayload};
+use web_time::Instant;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn local_batch_row_was_insert(
@@ -32,18 +33,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         crate::storage::RowLocator,
         crate::row_histories::StoredRowBatch,
     )> {
+        let started_at = Instant::now();
         let mut rows = Vec::new();
+        let mut source = "none";
+        let mut source_members = 0usize;
+        let mut row_locator_scans = 0usize;
+        let mut history_row_scans = 0usize;
+        let mut history_rows_seen = 0usize;
+        let mut broad_fallback_attempted = false;
         if let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) {
+            source = "sealed_submission";
+            source_members = submission.members.len();
             for sealed_member in submission.members {
                 let Ok(Some(row_locator)) = self.storage.load_row_locator(sealed_member.object_id)
                 else {
                     continue;
                 };
+                history_row_scans += 1;
                 let Some(row) = self
                     .storage
                     .scan_history_row_batches(row_locator.table.as_str(), sealed_member.object_id)
                     .ok()
                     .and_then(|rows| {
+                        history_rows_seen += rows.len();
                         rows.into_iter().find(|row| {
                             row.batch_id == batch_id
                                 && row.branch.as_str() == submission.target_branch_name.as_str()
@@ -74,6 +86,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         if rows.is_empty()
             && let Some(record) = self.local_batch_record_cache.get(&batch_id)
         {
+            source = "memory_record";
+            source_members = record.members.len();
             for member in record.members.clone() {
                 let row_locator = self
                     .storage
@@ -91,11 +105,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     member.object_id,
                     batch_id,
                 ) else {
+                    history_row_scans += 1;
                     let Some(row) = self
                         .storage
                         .scan_history_row_batches(member.table_name.as_str(), member.object_id)
                         .ok()
                         .and_then(|rows| {
+                            history_rows_seen += rows.len();
                             rows.into_iter().find(|row| {
                                 row.batch_id == batch_id
                                     && row.branch.as_str() == member.branch_name.as_str()
@@ -113,6 +129,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         if rows.is_empty()
             && let Ok(Some(record)) = self.storage.load_local_batch_record(batch_id)
         {
+            source = "persisted_record";
+            source_members = record.members.len();
             for member in record.members {
                 let row_locator = self
                     .storage
@@ -138,13 +156,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         if rows.is_empty()
             && let Ok(row_locators) = self.storage.scan_row_locators()
         {
+            source = "broad_row_locator_scan";
+            broad_fallback_attempted = true;
+            row_locator_scans = row_locators.len();
             for (object_id, row_locator) in row_locators {
+                history_row_scans += 1;
                 let Ok(history_rows) = self
                     .storage
                     .scan_history_row_batches(row_locator.table.as_str(), object_id)
                 else {
                     continue;
                 };
+                history_rows_seen += history_rows.len();
                 for row in history_rows
                     .into_iter()
                     .filter(|row| row.batch_id == batch_id)
@@ -190,6 +213,24 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .then_with(|| left_row.batch_id.0.cmp(&right_row.batch_id.0))
             },
         );
+        let elapsed_ms = started_at.elapsed().as_secs_f64() * 1_000.0;
+        if broad_fallback_attempted
+            || elapsed_ms >= 25.0
+            || row_locator_scans > 0
+            || history_row_scans >= 100
+        {
+            tracing::warn!(
+                ?batch_id,
+                source,
+                source_members,
+                rows = rows.len(),
+                row_locator_scans,
+                history_row_scans,
+                history_rows_seen,
+                elapsed_ms,
+                "jazz local_batch_rows resolved"
+            );
+        }
         rows
     }
 
