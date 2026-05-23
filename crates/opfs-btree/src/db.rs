@@ -689,10 +689,12 @@ impl<F: SyncFile> OpfsBTree<F> {
                 }
 
                 let leaf_decode_started_at = now_us();
-                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
-                    BTreeError::Corrupt(format!("page {} missing during insert", page_id))
-                })?;
-                let page = decode_page(&page_raw, self.options.page_size)?;
+                let page = {
+                    let page_raw = self.pages.get(&page_id).ok_or_else(|| {
+                        BTreeError::Corrupt(format!("page {} missing during insert", page_id))
+                    })?;
+                    decode_page(page_raw, self.options.page_size)?
+                };
                 self.perf.leaf_decode_us = self
                     .perf
                     .leaf_decode_us
@@ -767,10 +769,12 @@ impl<F: SyncFile> OpfsBTree<F> {
                 };
 
                 let internal_decode_started_at = now_us();
-                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
-                    BTreeError::Corrupt(format!("page {} missing during insert", page_id))
-                })?;
-                let page = decode_page(&page_raw, self.options.page_size)?;
+                let page = {
+                    let page_raw = self.pages.get(&page_id).ok_or_else(|| {
+                        BTreeError::Corrupt(format!("page {} missing during insert", page_id))
+                    })?;
+                    decode_page(page_raw, self.options.page_size)?
+                };
                 self.perf.internal_decode_us = self
                     .perf
                     .internal_decode_us
@@ -879,10 +883,12 @@ impl<F: SyncFile> OpfsBTree<F> {
                 }
             }
             PageKind::Internal => {
-                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
-                    BTreeError::Corrupt(format!("page {} missing during delete", page_id))
-                })?;
-                let page = decode_page(&page_raw, self.options.page_size)?;
+                let page = {
+                    let page_raw = self.pages.get(&page_id).ok_or_else(|| {
+                        BTreeError::Corrupt(format!("page {} missing during delete", page_id))
+                    })?;
+                    decode_page(page_raw, self.options.page_size)?
+                };
                 let Page::Internal { keys, children } = page else {
                     return Err(BTreeError::Corrupt(format!(
                         "expected internal page {}, found non-internal during delete",
