@@ -105,6 +105,35 @@ struct UpdatePermissionRequest<'a> {
 }
 
 impl QueryManager {
+    fn structural_authorization_schema_for(&mut self, schema: &Arc<Schema>) -> Arc<Schema> {
+        if let Some((source, structural)) = &self.structural_authorization_schema_cache
+            && Arc::ptr_eq(source, schema)
+        {
+            crate::query_manager::policy_counters::increment(
+                "structural_authorization_schema_cache",
+                "hit",
+            );
+            return structural.clone();
+        }
+
+        crate::query_manager::policy_counters::increment(
+            "structural_authorization_schema_cache",
+            "miss",
+        );
+        let structural: Arc<Schema> = Arc::new(
+            schema
+                .iter()
+                .map(|(table_name, table_schema)| {
+                    let mut structural = table_schema.clone();
+                    structural.policies = super::types::TablePolicies::default();
+                    (*table_name, structural)
+                })
+                .collect(),
+        );
+        self.structural_authorization_schema_cache = Some((schema.clone(), structural.clone()));
+        structural
+    }
+
     fn should_emit_query_settled_to_downstream(
         required_tier: Option<DurabilityTier>,
         tier: DurabilityTier,
@@ -477,7 +506,7 @@ impl QueryManager {
         object_id: ObjectId,
         branch_name: BranchName,
         session: Option<&Session>,
-        auth_schema: &Schema,
+        auth_schema: &Arc<Schema>,
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         phase: &'static str,
@@ -628,7 +657,7 @@ impl QueryManager {
         storage: &dyn Storage,
         settlement_eval_cache: &mut SettlementEvalCache,
         graph: &super::graph::QueryGraph,
-        auth_schema: &Schema,
+        auth_schema: &Arc<Schema>,
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
@@ -806,7 +835,7 @@ impl QueryManager {
         storage: &dyn Storage,
         settlement_eval_cache: &mut SettlementEvalCache,
         graph: &super::graph::QueryGraph,
-        auth_schema: &Schema,
+        auth_schema: &Arc<Schema>,
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
@@ -883,9 +912,12 @@ impl QueryManager {
                 let empty_outer_descriptor = RowDescriptor::new(Vec::new());
                 let bound_rel =
                     bind_relation_refs(&plan.rel, &[], &empty_outer_descriptor, session, None)?;
-                let Some(mut policy_graph) = PolicyGraph::for_exists_rel(
+                let structural_schema = evaluates_resource_ids
+                    .then(|| self.structural_authorization_schema_for(auth_schema));
+                let Some(mut policy_graph) = PolicyGraph::for_exists_rel_with_structural_schema(
                     &bound_rel,
                     auth_schema,
+                    structural_schema.as_deref(),
                     branch,
                     Some(session.clone()),
                     self.row_policy_mode,
@@ -987,7 +1019,7 @@ impl QueryManager {
         &mut self,
         storage: &dyn Storage,
         settlement_eval_cache: &mut SettlementEvalCache,
-        auth_schema: &Schema,
+        auth_schema: &Arc<Schema>,
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
@@ -1037,9 +1069,11 @@ impl QueryManager {
                 let empty_outer_descriptor = RowDescriptor::new(Vec::new());
                 let bound_rel =
                     bind_relation_refs(&plan.rel, &[], &empty_outer_descriptor, session, None)?;
-                let Some(mut policy_graph) = PolicyGraph::for_exists_rel(
+                let structural_schema = self.structural_authorization_schema_for(auth_schema);
+                let Some(mut policy_graph) = PolicyGraph::for_exists_rel_with_structural_schema(
                     &bound_rel,
                     auth_schema,
+                    Some(structural_schema.as_ref()),
                     branch,
                     Some(session.clone()),
                     self.row_policy_mode,
@@ -1202,7 +1236,7 @@ impl QueryManager {
             storage,
             settlement_eval_cache,
             graph,
-            auth_schema.as_ref(),
+            &auth_schema,
             &auth_context,
             source_branch_schema_map,
             session,
@@ -1226,7 +1260,7 @@ impl QueryManager {
             storage,
             settlement_eval_cache,
             graph,
-            auth_schema.as_ref(),
+            &auth_schema,
             &auth_context,
             source_branch_schema_map,
             session,
@@ -1296,7 +1330,7 @@ impl QueryManager {
         storage: &dyn Storage,
         settlement_eval_cache: &mut SettlementEvalCache,
         graph: &super::graph::QueryGraph,
-        auth_schema: &Schema,
+        auth_schema: &Arc<Schema>,
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
@@ -1433,7 +1467,7 @@ impl QueryManager {
         storage: &dyn Storage,
         settlement_eval_cache: &mut SettlementEvalCache,
         graph: &super::graph::QueryGraph,
-        auth_schema: &Schema,
+        auth_schema: &Arc<Schema>,
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
@@ -1488,9 +1522,12 @@ impl QueryManager {
             let empty_outer_descriptor = RowDescriptor::new(Vec::new());
             let bound_rel =
                 bind_relation_refs(&plan.rel, &[], &empty_outer_descriptor, session, None)?;
-            let Some(mut policy_graph) = PolicyGraph::for_exists_rel(
+            let structural_schema = evaluates_resource_ids
+                .then(|| self.structural_authorization_schema_for(auth_schema));
+            let Some(mut policy_graph) = PolicyGraph::for_exists_rel_with_structural_schema(
                 &bound_rel,
                 auth_schema,
+                structural_schema.as_deref(),
                 branch,
                 Some(session.clone()),
                 self.row_policy_mode,

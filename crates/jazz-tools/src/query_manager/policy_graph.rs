@@ -291,6 +291,31 @@ impl PolicyGraph {
         structural_scans: bool,
         schema_context: Option<Arc<SchemaContext>>,
     ) -> Option<Self> {
+        Self::for_exists_rel_with_structural_schema(
+            rel,
+            schema,
+            None,
+            branch,
+            session,
+            row_policy_mode,
+            current_table,
+            structural_scans,
+            schema_context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_exists_rel_with_structural_schema(
+        rel: &RelExpr,
+        schema: &Schema,
+        structural_schema: Option<&Schema>,
+        branch: &str,
+        session: Option<Session>,
+        row_policy_mode: RowPolicyMode,
+        current_table: Option<&TableName>,
+        structural_scans: bool,
+        schema_context: Option<Arc<SchemaContext>>,
+    ) -> Option<Self> {
         let use_structural_rows = structural_scans
             || current_table
                 .map(|table| {
@@ -304,15 +329,19 @@ impl PolicyGraph {
             // Same-table relation closures and explicitly structural policy
             // checks must inspect raw relation rows rather than re-running
             // SELECT policies on the scanned tables.
-            structural_compile_schema = schema
-                .iter()
-                .map(|(table_name, table_schema)| {
-                    let mut structural = table_schema.clone();
-                    structural.policies = crate::query_manager::types::TablePolicies::default();
-                    (*table_name, structural)
-                })
-                .collect();
-            &structural_compile_schema
+            if let Some(structural_schema) = structural_schema {
+                structural_schema
+            } else {
+                structural_compile_schema = schema
+                    .iter()
+                    .map(|(table_name, table_schema)| {
+                        let mut structural = table_schema.clone();
+                        structural.policies = crate::query_manager::types::TablePolicies::default();
+                        (*table_name, structural)
+                    })
+                    .collect();
+                &structural_compile_schema
+            }
         } else {
             schema
         };

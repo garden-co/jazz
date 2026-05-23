@@ -490,6 +490,7 @@ pub struct QueryManager {
     pub(super) authorization_schema: Option<Arc<Schema>>,
     pub(super) authorization_schema_required: bool,
     pub(super) authorization_context_cache: HashMap<(String, String), Arc<SchemaContext>>,
+    pub(super) structural_authorization_schema_cache: Option<(Arc<Schema>, Arc<Schema>)>,
 
     /// Pending catalogue updates (schemas/lenses received via sync).
     /// SchemaManager should call take_pending_catalogue_updates() to process these.
@@ -643,6 +644,7 @@ impl QueryManager {
             authorization_schema: None,
             authorization_schema_required: false,
             authorization_context_cache: HashMap::new(),
+            structural_authorization_schema_cache: None,
             pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
@@ -700,6 +702,7 @@ impl QueryManager {
             None
         };
         self.authorization_context_cache.clear();
+        self.structural_authorization_schema_cache = None;
         self.authorization_schema_required = false;
         self.write_table_cache.clear();
 
@@ -716,6 +719,7 @@ impl QueryManager {
     pub fn set_authorization_schema(&mut self, schema: Schema) {
         self.authorization_schema = Some(Arc::new(schema));
         self.authorization_context_cache.clear();
+        self.structural_authorization_schema_cache = None;
         self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
         self.mark_subscriptions_for_recompile();
@@ -725,6 +729,7 @@ impl QueryManager {
         self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
         self.authorization_context_cache.clear();
+        self.structural_authorization_schema_cache = None;
     }
 
     /// Add a live schema (one we can read from but don't write to).
