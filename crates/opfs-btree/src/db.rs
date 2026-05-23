@@ -688,6 +688,16 @@ impl<F: SyncFile> OpfsBTree<F> {
             }
             PageKind::Internal => {
                 self.perf.insert_internal_calls = self.perf.insert_internal_calls.saturating_add(1);
+                let child_page_id = {
+                    let raw = self.raw_page_bytes(page_id)?;
+                    raw_internal_child_for_key(raw, self.options.page_size, key)?
+                };
+
+                let split = self.insert_recursive(child_page_id, key, value)?;
+                let Some(split) = split else {
+                    return Ok(None);
+                };
+
                 let internal_decode_started_at = now_us();
                 let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
                     BTreeError::Corrupt(format!("page {} missing during insert", page_id))
@@ -708,17 +718,18 @@ impl<F: SyncFile> OpfsBTree<F> {
                     )));
                 };
                 let child_idx = child_index(&keys, key);
-                let child_page_id = *children.get(child_idx).ok_or_else(|| {
+                let expected_child_page_id = *children.get(child_idx).ok_or_else(|| {
                     BTreeError::Corrupt(format!(
                         "internal page {} missing child {}",
                         page_id, child_idx
                     ))
                 })?;
-
-                let split = self.insert_recursive(child_page_id, key, value)?;
-                let Some(split) = split else {
-                    return Ok(None);
-                };
+                if expected_child_page_id != child_page_id {
+                    return Err(BTreeError::Corrupt(format!(
+                        "raw and decoded internal lookup disagreed on page {} for child {}",
+                        page_id, child_idx
+                    )));
+                }
 
                 keys.insert(child_idx, split.separator);
                 children.insert(child_idx + 1, split.right_page_id);
