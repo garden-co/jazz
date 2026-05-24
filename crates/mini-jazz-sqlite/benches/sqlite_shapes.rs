@@ -206,6 +206,20 @@ fn create_snapshot_schema(conn: &Connection) {
           ON todos__schema_v1_base_current(done, "$createdAt" DESC);
         CREATE INDEX todos_branch_delta_done_created
           ON todos__schema_v1_branch_delta("$branchId", done, "$createdAt" DESC);
+
+        CREATE TABLE todos__schema_v1_branch_current (
+          "$branchId" TEXT NOT NULL,
+          "$rowId" INTEGER NOT NULL,
+          "$visibleTxId" INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          done INTEGER NOT NULL,
+          "$createdAt" INTEGER NOT NULL,
+          "$isDeleted" INTEGER NOT NULL,
+          PRIMARY KEY ("$branchId", "$rowId")
+        );
+
+        CREATE INDEX todos_branch_current_done_created
+          ON todos__schema_v1_branch_current("$branchId", done, "$createdAt" DESC);
         "#,
     )
     .unwrap();
@@ -333,6 +347,51 @@ fn snapshot_db(rows: i64, branches: i64, overrides_per_branch: i64) -> Connectio
     configure(&conn);
     create_snapshot_schema(&conn);
     seed_snapshot(&mut conn, rows, branches, overrides_per_branch);
+    conn
+}
+
+fn seed_one_branch_current(conn: &mut Connection, branch_id: &str, rows: i64) {
+    let tx = conn.transaction().unwrap();
+    tx.execute(
+        r#"
+        INSERT INTO todos__schema_v1_branch_current (
+          "$branchId", "$rowId", "$visibleTxId", title, done, "$createdAt", "$isDeleted"
+        )
+        SELECT
+          ?1 AS "$branchId",
+          base."$rowId",
+          COALESCE(delta."$visibleTxId", base."$visibleTxId") AS "$visibleTxId",
+          COALESCE(delta.title, base.title) AS title,
+          COALESCE(delta.done, base.done) AS done,
+          COALESCE(delta."$createdAt", base."$createdAt") AS "$createdAt",
+          COALESCE(delta."$isDeleted", base."$isDeleted") AS "$isDeleted"
+        FROM todos__schema_v1_base_current base
+        LEFT JOIN todos__schema_v1_branch_delta delta
+          ON delta."$branchId" = ?1
+         AND delta."$rowId" = base."$rowId";
+        "#,
+        params![branch_id],
+    )
+    .unwrap();
+    let count: i64 = tx
+        .query_row(
+            r#"SELECT COUNT(*) FROM todos__schema_v1_branch_current WHERE "$branchId" = ?1"#,
+            params![branch_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, rows);
+    tx.commit().unwrap();
+}
+
+fn one_branch_current_db(
+    rows: i64,
+    branches: i64,
+    overrides_per_branch: i64,
+    branch_id: &str,
+) -> Connection {
+    let mut conn = snapshot_db(rows, branches, overrides_per_branch);
+    seed_one_branch_current(&mut conn, branch_id, rows);
     conn
 }
 
@@ -610,6 +669,31 @@ fn query_sparse_branch_overlay(conn: &Connection, branch_id: &str, limit: i64) -
     count
 }
 
+fn query_full_branch_current(conn: &Connection, branch_id: &str, limit: i64) -> usize {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT "$rowId", "$visibleTxId", title, done, "$createdAt"
+            FROM todos__schema_v1_branch_current
+            WHERE "$branchId" = ?1
+              AND "$isDeleted" = 0
+              AND done = 0
+            ORDER BY "$createdAt" DESC
+            LIMIT ?2
+            "#,
+        )
+        .unwrap();
+    let mut rows = stmt.query(params![branch_id, limit]).unwrap();
+    let mut count = 0;
+    while let Some(row) = rows.next().unwrap() {
+        let row_id: i64 = row.get(0).unwrap();
+        let tx_id: i64 = row.get(1).unwrap();
+        black_box((row_id, tx_id));
+        count += 1;
+    }
+    count
+}
+
 fn bench_current_reads(c: &mut Criterion) {
     let conn = current_db(ROWS);
     let since = ROWS - 20_000;
@@ -719,6 +803,50 @@ fn bench_branch_seed(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    group.bench_function(
+        "seed_one_branch_current_100k_rows_out_of_1k_branches",
+        |b| {
+            b.iter_batched(
+                || (),
+                |_| one_branch_current_db(ROWS, BRANCHES, OVERRIDES_PER_BRANCH, "branch_777"),
+                BatchSize::SmallInput,
+            );
+        },
+    );
+    group.finish();
+}
+
+fn bench_full_branch_current(c: &mut Criterion) {
+    let branch_id = "branch_777";
+    let conn = one_branch_current_db(ROWS, BRANCHES, OVERRIDES_PER_BRANCH, branch_id);
+    assert_eq!(
+        query_full_branch_current(&conn, branch_id, PAGE_SIZE),
+        PAGE_SIZE as usize
+    );
+
+    let row_count: i64 = conn
+        .query_row(
+            r#"SELECT COUNT(*) FROM todos__schema_v1_branch_current"#,
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(row_count, ROWS);
+
+    let mut group = c.benchmark_group("sqlite_shapes/full_branch_current");
+    group.measurement_time(Duration::from_secs(8));
+    group.bench_function(
+        "query_one_branch_current_100k_projection_rows_limit_50",
+        |b| {
+            b.iter(|| {
+                query_full_branch_current(
+                    black_box(&conn),
+                    black_box(branch_id),
+                    black_box(PAGE_SIZE),
+                )
+            });
+        },
+    );
     group.finish();
 }
 
@@ -726,6 +854,7 @@ criterion_group!(
     benches,
     bench_current_reads,
     bench_branch_snapshots,
+    bench_full_branch_current,
     bench_branch_seed
 );
 criterion_main!(benches);

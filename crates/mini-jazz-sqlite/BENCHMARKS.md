@@ -69,3 +69,33 @@ Initial read:
 - Raw-history query-only reads may be reasonable for cold/time-travel/admin
   paths, but hot branch subscriptions probably want at least a sparse overlay or
   shared snapshot projection.
+
+## 2026-05-24 one-branch current projection
+
+The first full branch-current attempt tried to materialize all 1k branches,
+which would create 100 million projection rows for this dataset. That is not the
+client/hot-server use case. The useful variant materializes one opened/hot
+branch out of the 1k available branches.
+
+Shape:
+
+- existing base/current/history/delta dataset: 100k base rows, 1k branches, 100
+  overrides per branch
+- materialized branch current rows for selected branch: 100k
+
+Results:
+
+| benchmark                                      | time             | note                                     |
+| ---------------------------------------------- | ---------------- | ---------------------------------------- |
+| query one branch current, limit 50             | 18.319-18.469 us | same order as `main` current projection  |
+| seed one branch current from base + delta rows | 885.81-893.49 ms | creates 100k branch-current rows/indexes |
+
+Initial read:
+
+- Once a branch-current projection exists, reads are as fast as ordinary current
+  projection reads.
+- Creating the projection is expensive enough that it should be lazy and
+  reserved for opened/hot branches, or built incrementally/backgrounded.
+- This is a different point in the design space from sparse overlays: branch
+  current gives fastest reads, sparse overlay avoids the up-front 100k-row
+  materialization cost.
