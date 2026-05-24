@@ -177,6 +177,8 @@ fn create_snapshot_schema(conn: &Connection) {
           ON todos__schema_v1_history("$txId", "$rowId");
         CREATE INDEX todos_history_row_tx
           ON todos__schema_v1_history("$rowId", "$txId" DESC);
+        CREATE INDEX todos_history_done_created_tx_row
+          ON todos__schema_v1_history(done, "$createdAt" DESC, "$txId", "$rowId");
         CREATE INDEX tx_global_epoch
           ON jazz_tx("$globalEpoch", "$txId");
 
@@ -436,6 +438,120 @@ fn query_snapshot_not_exists(conn: &Connection, branch_id: &str, limit: i64) -> 
     count
 }
 
+fn query_snapshot_candidate_index(conn: &Connection, branch_id: &str, limit: i64) -> usize {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            WITH branch AS (
+              SELECT "$baseGlobalEpoch" AS base FROM jazz_branch WHERE "$branchId" = ?1
+            )
+            SELECT h."$rowId", h."$txId", h.title, h.done, h."$createdAt"
+            FROM todos__schema_v1_history h INDEXED BY todos_history_done_created_tx_row
+            JOIN jazz_tx tx ON tx."$txId" = h."$txId"
+            CROSS JOIN branch b
+            WHERE h.done = 0
+              AND h."$isDeleted" = 0
+              AND (
+                tx."$globalEpoch" <= b.base
+                OR EXISTS (
+                  SELECT 1 FROM jazz_branch_tx bt
+                  WHERE bt."$branchId" = ?1 AND bt."$txId" = h."$txId"
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM todos__schema_v1_history newer INDEXED BY todos_history_row_tx
+                JOIN jazz_tx newer_tx ON newer_tx."$txId" = newer."$txId"
+                WHERE newer."$rowId" = h."$rowId"
+                  AND newer."$txId" > h."$txId"
+                  AND (
+                    newer_tx."$globalEpoch" <= b.base
+                    OR EXISTS (
+                      SELECT 1 FROM jazz_branch_tx newer_bt
+                      WHERE newer_bt."$branchId" = ?1
+                        AND newer_bt."$txId" = newer."$txId"
+                    )
+                  )
+              )
+            ORDER BY h."$createdAt" DESC
+            LIMIT ?2
+            "#,
+        )
+        .unwrap();
+    let mut rows = stmt.query(params![branch_id, limit]).unwrap();
+    let mut count = 0;
+    while let Some(row) = rows.next().unwrap() {
+        let row_id: i64 = row.get(0).unwrap();
+        let tx_id: i64 = row.get(1).unwrap();
+        black_box((row_id, tx_id));
+        count += 1;
+    }
+    count
+}
+
+fn query_snapshot_candidate_index_overfetch(
+    conn: &Connection,
+    branch_id: &str,
+    limit: i64,
+) -> usize {
+    let overfetch = limit * 20;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            WITH branch AS (
+              SELECT "$baseGlobalEpoch" AS base FROM jazz_branch WHERE "$branchId" = ?1
+            ),
+            candidates AS (
+              SELECT h."$rowId", h."$txId", h.title, h.done, h."$createdAt", h."$isDeleted"
+              FROM todos__schema_v1_history h INDEXED BY todos_history_done_created_tx_row
+              JOIN jazz_tx tx ON tx."$txId" = h."$txId"
+              CROSS JOIN branch b
+              WHERE h.done = 0
+                AND h."$isDeleted" = 0
+                AND (
+                  tx."$globalEpoch" <= b.base
+                  OR EXISTS (
+                    SELECT 1 FROM jazz_branch_tx bt
+                    WHERE bt."$branchId" = ?1 AND bt."$txId" = h."$txId"
+                  )
+                )
+              ORDER BY h."$createdAt" DESC
+              LIMIT ?2
+            )
+            SELECT c."$rowId", c."$txId", c.title, c.done, c."$createdAt"
+            FROM candidates c
+            CROSS JOIN branch b
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM todos__schema_v1_history newer INDEXED BY todos_history_row_tx
+              JOIN jazz_tx newer_tx ON newer_tx."$txId" = newer."$txId"
+              WHERE newer."$rowId" = c."$rowId"
+                AND newer."$txId" > c."$txId"
+                AND (
+                  newer_tx."$globalEpoch" <= b.base
+                  OR EXISTS (
+                    SELECT 1 FROM jazz_branch_tx newer_bt
+                    WHERE newer_bt."$branchId" = ?1
+                      AND newer_bt."$txId" = newer."$txId"
+                  )
+                )
+            )
+            ORDER BY c."$createdAt" DESC
+            LIMIT ?3
+            "#,
+        )
+        .unwrap();
+    let mut rows = stmt.query(params![branch_id, overfetch, limit]).unwrap();
+    let mut count = 0;
+    while let Some(row) = rows.next().unwrap() {
+        let row_id: i64 = row.get(0).unwrap();
+        let tx_id: i64 = row.get(1).unwrap();
+        black_box((row_id, tx_id));
+        count += 1;
+    }
+    count
+}
+
 fn query_sparse_branch_overlay(conn: &Connection, branch_id: &str, limit: i64) -> usize {
     let mut stmt = conn
         .prepare(
@@ -531,6 +647,14 @@ fn bench_branch_snapshots(c: &mut Criterion) {
         PAGE_SIZE as usize
     );
     assert_eq!(
+        query_snapshot_candidate_index(&conn, branch_id, PAGE_SIZE),
+        PAGE_SIZE as usize
+    );
+    assert_eq!(
+        query_snapshot_candidate_index_overfetch(&conn, branch_id, PAGE_SIZE),
+        PAGE_SIZE as usize
+    );
+    assert_eq!(
         query_sparse_branch_overlay(&conn, branch_id, PAGE_SIZE),
         PAGE_SIZE as usize
     );
@@ -548,6 +672,30 @@ fn bench_branch_snapshots(c: &mut Criterion) {
             query_snapshot_not_exists(black_box(&conn), black_box(branch_id), black_box(PAGE_SIZE))
         });
     });
+    group.bench_function(
+        "history_candidate_index_100k_rows_1k_branches_limit_50",
+        |b| {
+            b.iter(|| {
+                query_snapshot_candidate_index(
+                    black_box(&conn),
+                    black_box(branch_id),
+                    black_box(PAGE_SIZE),
+                )
+            });
+        },
+    );
+    group.bench_function(
+        "history_candidate_index_overfetch_100k_rows_1k_branches_limit_50",
+        |b| {
+            b.iter(|| {
+                query_snapshot_candidate_index_overfetch(
+                    black_box(&conn),
+                    black_box(branch_id),
+                    black_box(PAGE_SIZE),
+                )
+            });
+        },
+    );
     group.bench_function("sparse_overlay_100k_rows_1k_branches_limit_50", |b| {
         b.iter(|| {
             query_sparse_branch_overlay(
