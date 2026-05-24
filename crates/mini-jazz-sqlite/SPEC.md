@@ -240,7 +240,7 @@ CREATE TABLE todos__schema_v1_history (
 );
 ```
 
-Current-state projection table:
+Optional current-state projection table:
 
 ```sql
 CREATE TABLE todos__schema_v1_current (
@@ -265,13 +265,14 @@ CREATE INDEX todos__schema_v1_current_done_created_at
   ON todos__schema_v1_current($branchId, done, $createdAt DESC);
 ```
 
-The current table is the replacement for today's visible-row region. It is not
-the source of truth; it is a transactionally maintained projection over history
-for a particular branch/schema view.
+The current table is a serving optimization, not a semantic requirement. The
+simplest implementation can answer ordinary reads, branch reads, and time-travel
+reads directly from history using snapshot predicates. Benchmarks suggest that
+pure-query snapshot reads are acceptable for the row counts we expect early on.
 
-Open question: should current-state projection be a table we maintain eagerly,
-a materialized view-like table, or a covering index table whose columns are
-chosen from query/index declarations?
+We should therefore start with history as the only required row store. Current
+tables, sparse branch overlays, and per-hot-branch projections can be introduced
+later as serving indexes for hot paths without changing the logical model.
 
 #### Insert lowering
 
@@ -799,13 +800,26 @@ WHERE h.$branchId = :branchId
   );
 ```
 
-This is likely too slow as the normal path. The practical version probably keeps
-current projection tables per important branch/snapshot head and uses history
-queries only when creating a branch, time-traveling, or resolving conflicts.
+For the first implementation, this pure-query shape is the intended baseline.
+It keeps branch creation cheap, avoids per-branch projection management, and
+lets the exact snapshot semantics stay visible in SQL. Early benchmarks over
+100k base rows, 1k branches, and 200k total history versions put indexed
+history snapshot reads in the tens of milliseconds. That is acceptable for the
+row counts we are targeting initially.
 
 Open question: can dotted-version-vector visibility be compiled into ordinary
 range predicates over `($globalEpoch, $siteId, $siteTx)` often enough, or does it
 require custom SQLite functions / side tables?
+
+Later optimization options:
+
+- query-shaped history indexes for common filters/orders
+- sparse branch overlays: one shared base-current table plus per-branch changed
+  rows
+- per-hot-branch current projections for opened or server-hot branches
+
+These should be treated as serving indexes. They must not be required for
+correctness.
 
 ## Parity ladder
 
@@ -819,7 +833,8 @@ Rather than trying to match all of Jazz at once, use the examples as a ladder:
 6. Upstream query forwarding with result sync scope.
 7. Reconnect/replay from durable tx/history tables.
 8. Simple policies with separate policy scope.
-9. Branch snapshots.
+9. Pure-query branch/time-travel snapshots.
 10. Schema lenses.
 11. Transactional batches and conflict reconciliation.
-12. Recursive/inherited policies and complex sync scopes.
+12. Optional serving indexes for hot snapshot/branch reads.
+13. Recursive/inherited policies and complex sync scopes.
