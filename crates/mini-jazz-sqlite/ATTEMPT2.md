@@ -1275,3 +1275,60 @@ Discovery:
   slightly smaller in this run (14.98 MB vs 17.00 MB) because the interned
   layout also stores map indexes, and blob ids avoid lookup joins. This deserves a more apples-to-apples follow
   up if public ids have a binary canonical form.
+
+### 2026-05-25 13:32 PDT
+
+Added a rough memory representation experiment.
+
+Command:
+
+- `cargo run -p mini-jazz-sqlite --example memory_repr_layouts --release`
+
+Question:
+
+- Disk numbers are useful, but what do different id representations imply for
+  SQLite allocator/cache memory and Rust-side representation size?
+
+What it measures:
+
+- Same 40,000 row / 8,000 update workload as the id experiments.
+- Long text ids, inline 16-byte blob ids, and interned integer ids.
+- SQLite process memory via `sqlite3_status64(SQLITE_STATUS_MEMORY_USED)`.
+- SQLite db cache memory via `sqlite3_db_status(SQLITE_DBSTATUS_CACHE_USED)`.
+- Rough Rust-side key sizes via `std::mem::size_of`.
+
+Latest run:
+
+- `long_text_ids`: file 24,543,232 bytes, SQLite memory after load 10,222,032,
+  peak 40,998,752, db cache 8,626,432, current 2.476 ms, snapshot 11.173 ms.
+- `blob16_ids`: file 14,983,168 bytes, SQLite memory after load 10,222,032,
+  peak 29,016,928, db cache 8,626,432, current 2.155 ms, snapshot 11.720 ms.
+- `interned_int_ids`: file 16,998,400 bytes, SQLite memory after load
+  10,222,032, peak 31,570,688, db cache 8,626,432, current 2.236 ms,
+  snapshot 8.629 ms.
+
+Ratios:
+
+- Blob ids: 0.61x text disk, 0.71x text SQLite memory peak, same steady cache
+  after load under the configured 8 MB cache cap.
+- Interned integer ids: 0.69x text disk, 0.77x text SQLite memory peak, same
+  steady cache after load under the configured 8 MB cache cap.
+
+Rust-side rough sizes:
+
+- `String`: 24 bytes in the struct plus heap bytes for the id.
+- `Vec<u8>`: 24 bytes in the struct plus heap bytes for the id.
+- `[u8; 16]`: 16 bytes inline.
+- `i64`/`u64`: 8 bytes inline.
+
+Discovery:
+
+- With a fixed SQLite page cache cap, steady db cache memory equalizes across
+  layouts; representation mostly shows up in file size and peak allocator memory
+  while building/querying.
+- Compact ids reduce SQLite peak memory materially in this run.
+- On the Rust side, interned integer ids or fixed `[u8; 16]` ids avoid per-key
+  heap allocations in hot maps/sets, while `String` and `Vec<u8>` keys carry a
+  24-byte header plus allocation. This strengthens the case for keeping public
+  string ids at API/protocol edges and using compact ids in hot in-memory and
+  SQLite structures.
