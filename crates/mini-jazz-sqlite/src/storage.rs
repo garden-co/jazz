@@ -584,7 +584,7 @@ impl MiniJazzSqlite {
         Ok(())
     }
 
-    pub fn reject_tx(&self, input: RejectTx) -> rusqlite::Result<()> {
+    pub fn reject_tx(&mut self, input: RejectTx) -> rusqlite::Result<()> {
         let changed = self.conn.execute(
             r#"
             UPDATE jazz_tx
@@ -599,7 +599,7 @@ impl MiniJazzSqlite {
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        Ok(())
+        self.rebuild_main_current_from_history()
     }
 
     pub fn open_todos_since(
@@ -934,11 +934,23 @@ impl MiniJazzSqlite {
         {
             let mut stmt = sql_tx.prepare(
                 r#"
-                SELECT row_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
-                       created_by, created_at, updated_by, updated_at, edit_metadata_json
+                SELECT todos__schema_v1_history.row_id,
+                       todos__schema_v1_history.tx_id,
+                       todos__schema_v1_history.op,
+                       todos__schema_v1_history.title,
+                       todos__schema_v1_history.done,
+                       todos__schema_v1_history.conflict_tx_ids_jsonb,
+                       todos__schema_v1_history.created_by,
+                       todos__schema_v1_history.created_at,
+                       todos__schema_v1_history.updated_by,
+                       todos__schema_v1_history.updated_at,
+                       todos__schema_v1_history.edit_metadata_json
                 FROM todos__schema_v1_history
-                WHERE branch_id = 'main'
-                ORDER BY updated_at ASC, tx_id ASC
+                JOIN jazz_tx ON jazz_tx.tx_id = todos__schema_v1_history.tx_id
+                WHERE todos__schema_v1_history.branch_id = 'main'
+                  AND jazz_tx.status != 'rejected'
+                ORDER BY todos__schema_v1_history.updated_at ASC,
+                         todos__schema_v1_history.tx_id ASC
                 "#,
             )?;
             let mut rows = stmt.query([])?;
@@ -1473,6 +1485,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(history_count, 1);
+    }
+
+    #[test]
+    fn rejecting_local_insert_repairs_main_current_projection() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-1".into(),
+            node_id: "alice-device".into(),
+            title: "Optimistic".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        assert!(db.get_todo("main", "todo-1").unwrap().is_some());
+
+        db.reject_tx(RejectTx {
+            tx_id: "tx-1".into(),
+            reason_json: r#"{"code":"permission_denied"}"#.into(),
+        })
+        .unwrap();
+
+        assert!(db.get_todo("main", "todo-1").unwrap().is_none());
+        assert_eq!(
+            db.current_projection_fingerprint().unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

@@ -248,3 +248,19 @@ branch visibility source like:
 ```
 
 for each base/provenance component, plus the branch's own head vector.
+
+### 2026-05-24 22:50 PDT
+
+Made rejected local inserts repair `main` current by rebuilding the current
+projection from non-rejected history after `reject_tx`.
+
+Discovery: full projection rebuild is the cleanest first implementation for
+rejection repair. It is obviously too broad for a hot path, but it keeps the
+semantic invariant simple:
+
+```text
+main current = fold(non-rejected main history rows in deterministic order)
+```
+
+That invariant is more valuable right now than incremental cleverness. Later,
+rejection repair can be narrowed to affected rows using write sets.
