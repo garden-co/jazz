@@ -621,6 +621,21 @@ planner evidence in tests, not that the plan is good. The next useful step is
 to make plan assertions or measurements meaningful for realistic row counts and
 page boundaries.
 
+### 2026-05-24 23:06 PDT
+
+Added a tiny snapshot-query ballpark test:
+
+- 2,000 inserted rows
+- 1,333 rows match `open_since(0)`
+- current projection query: about 2.4 ms in this debug test run
+- temp-table snapshot query: about 603 ms in this debug test run
+
+Discovery: the naive temp-table snapshot query is semantically helpful but not
+yet performant. The `NOT EXISTS` latest-visible-version shape is likely doing
+too much work per candidate row. This is the clearest performance warning so
+far: pure-query snapshots may be acceptable for small branch reads, but the
+lowering needs serious planner attention before we rely on it for hot paths.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

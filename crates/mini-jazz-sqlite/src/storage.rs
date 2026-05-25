@@ -2787,6 +2787,7 @@ fn now_millis() -> i64 {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::Instant;
 
     #[test]
     fn insert_and_query_open_todos_by_system_column() {
@@ -4093,6 +4094,44 @@ mod tests {
 
         assert!(plan.iter().any(|step| step.contains("todos")));
         assert!(plan.iter().any(|step| step.contains("projects")));
+    }
+
+    #[test]
+    fn snapshot_query_ballpark_on_thousands_of_rows() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        for index in 0..2_000 {
+            db.insert_todo(InsertTodo {
+                row_id: format!("todo-{index:04}"),
+                tx_id: format!("tx-{index:04}"),
+                node_id: "alice-device".into(),
+                title: format!("Todo {index}"),
+                done: index % 3 == 0,
+                actor_id: "alice".into(),
+                now: index,
+            })
+            .unwrap();
+        }
+        let query = TodoQuery::open_since(0);
+        let current_start = Instant::now();
+        let current = db.query_todos(&query).unwrap();
+        let current_elapsed = current_start.elapsed();
+
+        let snapshot = SnapshotVector::new(0).with_local_base("alice-device", 2_000);
+        let snapshot_start = Instant::now();
+        let historical = db
+            .query_todos_at_snapshot_with_temp_table(&query, &snapshot)
+            .unwrap();
+        let snapshot_elapsed = snapshot_start.elapsed();
+
+        println!(
+            "snapshot_query_ballpark rows={} current={current_elapsed:?} snapshot={snapshot_elapsed:?}",
+            current.rows.len()
+        );
+        assert_eq!(current.rows.len(), historical.rows.len());
+        assert!(
+            snapshot_elapsed.as_millis() < 2_000,
+            "snapshot query was unexpectedly slow: {snapshot_elapsed:?}, current: {current_elapsed:?}"
+        );
     }
 
     #[test]
