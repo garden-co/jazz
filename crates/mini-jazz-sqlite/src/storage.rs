@@ -63,6 +63,18 @@ pub struct UpdateTodo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateTodoAtBase {
+    pub row_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub base_tx_id: String,
+    pub title: Option<String>,
+    pub done: Option<bool>,
+    pub actor_id: String,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteTodo {
     pub row_id: String,
     pub tx_id: String,
@@ -744,6 +756,100 @@ impl MiniJazzSqlite {
         )?;
 
         sql_tx.commit()
+    }
+
+    pub fn update_todo_at_base(&mut self, input: UpdateTodoAtBase) -> rusqlite::Result<()> {
+        let previous = self
+            .get_todo("main", &input.row_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let title = input.title.unwrap_or_else(|| previous.title.clone());
+        let done = input.done.unwrap_or(previous.done);
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let done_sql = bool_to_sql(done);
+        let conflict_tx_ids = if previous.visible_tx_id == input.base_tx_id {
+            format!(r#"["{}"]"#, input.tx_id)
+        } else {
+            format!(r#"["{}","{}"]"#, previous.visible_tx_id, input.tx_id)
+        };
+        let read_set = format!(
+            r#"[{{"kind":"row","table":"todos","rowId":"{}","visibleTxId":"{}","reason":"write_base"}}]"#,
+            input.row_id, input.base_tx_id
+        );
+        let write_set = format!(
+            r#"[{{"table":"todos","rowId":"{}","op":"update","columns":["title","done","updated_at"]}}]"#,
+            input.row_id
+        );
+
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'data', 0, '[]', '[]', ?4, ?5, 'local_pending', ?6, ?6, '{}')
+            "#,
+            params![
+                input.tx_id,
+                node_num,
+                local_epoch,
+                read_set,
+                write_set,
+                input.now
+            ],
+        )?;
+
+        sql_tx.execute(
+            r#"
+            INSERT INTO todos__schema_v1_history (
+              row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
+              created_by, created_at, updated_by, updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 'update', ?3, ?4, ?5, ?6, ?7, ?6, ?8, '{}')
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                title,
+                done_sql,
+                conflict_tx_ids,
+                input.actor_id,
+                previous.created_at,
+                input.now
+            ],
+        )?;
+
+        sql_tx.execute(
+            r#"
+            UPDATE todos__schema_v1_current
+            SET visible_tx_id = ?2,
+                title = ?3,
+                done = ?4,
+                conflict_tx_ids_jsonb = ?5,
+                updated_by = ?6,
+                updated_at = ?7
+            WHERE branch_id = 'main' AND row_id = ?1
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                title,
+                done_sql,
+                conflict_tx_ids,
+                input.actor_id,
+                input.now
+            ],
+        )?;
+
+        sql_tx.commit()
+    }
+
+    pub fn current_conflict_tx_ids(&self, row_id: &str) -> rusqlite::Result<String> {
+        self.conn.query_row(
+            "SELECT conflict_tx_ids_jsonb FROM todos__schema_v1_current WHERE branch_id = 'main' AND row_id = ?1",
+            params![row_id],
+            |row| row.get(0),
+        )
     }
 
     pub fn delete_todo(&mut self, input: DeleteTodo) -> rusqlite::Result<()> {
@@ -2159,6 +2265,61 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["todo-1", "todo-2"]
         );
+    }
+
+    #[test]
+    fn concurrent_updates_from_same_base_leave_conflict_candidates_in_current() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-base".into(),
+            node_id: "alice-device".into(),
+            title: "Base".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+
+        db.update_todo_at_base(UpdateTodoAtBase {
+            row_id: "todo-1".into(),
+            tx_id: "tx-alice-title".into(),
+            node_id: "alice-device".into(),
+            base_tx_id: "tx-base".into(),
+            title: Some("Alice title".into()),
+            done: None,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.update_todo_at_base(UpdateTodoAtBase {
+            row_id: "todo-1".into(),
+            tx_id: "tx-bob-title".into(),
+            node_id: "bob-phone".into(),
+            base_tx_id: "tx-base".into(),
+            title: Some("Bob title".into()),
+            done: None,
+            actor_id: "bob".into(),
+            now: 210,
+        })
+        .unwrap();
+
+        let row = db.get_todo("main", "todo-1").unwrap().unwrap();
+        assert_eq!(row.title, "Bob title");
+        assert_eq!(
+            db.current_conflict_tx_ids("todo-1").unwrap(),
+            r#"["tx-alice-title","tx-bob-title"]"#
+        );
+
+        let read_set: String = db
+            .conn
+            .query_row(
+                "SELECT read_set_jsonb FROM jazz_tx WHERE tx_id = 'tx-bob-title'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(read_set.contains(r#""visibleTxId":"tx-base""#));
     }
 
     #[test]

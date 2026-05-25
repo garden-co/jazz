@@ -347,3 +347,19 @@ Export/import naturally carries multiple history rows under one transaction.
 This also reinforces that write sets should be transaction-level metadata, not
 row metadata; row history can stay simple as long as the transaction row
 contains the durable read/write contract.
+
+### 2026-05-24 23:30 PDT
+
+Added a tiny conflict-candidate spike:
+
+- two updates both declare `tx-base` as their read/write base
+- current row stores one resolved value
+- current row also stores multiple visible conflict candidate tx ids
+- the later transaction's read set still records `tx-base`, not the optimistic
+  current value it overwrote
+
+Discovery: read sets are not the same thing as parent pointers, but they are
+enough to recover the important concurrency fact here: both writes depended on
+the same previous row version. That supports the "no explicit parents for now"
+decision. A real merge layer still needs per-column candidate metadata rather
+than one row-level `conflict_tx_ids_jsonb` array.
