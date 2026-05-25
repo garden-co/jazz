@@ -1464,6 +1464,45 @@ impl MiniJazzSqlite {
         Ok(())
     }
 
+    pub fn accept_todo_tx_validating_reads(&mut self, input: AcceptTx) -> rusqlite::Result<()> {
+        let read_set: String = self.conn.query_row(
+            "SELECT read_set_jsonb FROM jazz_tx WHERE tx_id = ?1",
+            params![input.tx_id],
+            |row| row.get(0),
+        )?;
+        if let Some((row_id, expected_tx_id)) = parse_first_row_read(&read_set) {
+            let actual_tx_id: Option<String> = self
+                .conn
+                .query_row(
+                    r#"
+                    SELECT h.tx_id
+                    FROM todos__schema_v1_history h
+                    JOIN jazz_tx tx ON tx.tx_id = h.tx_id
+                    WHERE h.branch_id = 'main'
+                      AND h.row_id = ?1
+                      AND tx.status = 'global_durable_accepted'
+                    ORDER BY tx.global_epoch DESC
+                    LIMIT 1
+                    "#,
+                    params![row_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if actual_tx_id.as_deref() != Some(expected_tx_id.as_str()) {
+                return self.reject_tx(RejectTx {
+                    tx_id: input.tx_id,
+                    reason_json: format!(
+                        r#"{{"code":"stale_read","rowId":"{row_id}","expected":"{expected_tx_id}","actual":{}}}"#,
+                        actual_tx_id
+                            .map(|tx_id| format!(r#""{tx_id}""#))
+                            .unwrap_or_else(|| "null".to_owned())
+                    ),
+                });
+            }
+        }
+        self.accept_tx(input)
+    }
+
     pub fn reject_tx(&mut self, input: RejectTx) -> rusqlite::Result<()> {
         let changed = self.conn.execute(
             r#"
@@ -2408,6 +2447,19 @@ fn placeholders(count: usize) -> String {
         .join(", ")
 }
 
+fn parse_first_row_read(read_set_json: &str) -> Option<(String, String)> {
+    let row_id = value_after(read_set_json, r#""rowId":""#)?;
+    let visible_tx_id = value_after(read_set_json, r#""visibleTxId":""#)?;
+    Some((row_id, visible_tx_id))
+}
+
+fn value_after(input: &str, marker: &str) -> Option<String> {
+    let start = input.find(marker)? + marker.len();
+    let rest = &input[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3314,6 +3366,72 @@ mod tests {
             )
             .unwrap();
         assert!(read_set.contains(r#""visibleTxId":"tx-base""#));
+    }
+
+    #[test]
+    fn validated_acceptance_rejects_stale_row_read_sets() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-base".into(),
+            node_id: "alice-device".into(),
+            title: "Base".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-base".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+        db.update_todo_at_base(UpdateTodoAtBase {
+            row_id: "todo-1".into(),
+            tx_id: "tx-alice-title".into(),
+            node_id: "alice-device".into(),
+            base_tx_id: "tx-base".into(),
+            title: Some("Alice title".into()),
+            done: None,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-alice-title".into(),
+            global_epoch: 2,
+        })
+        .unwrap();
+        db.update_todo_at_base(UpdateTodoAtBase {
+            row_id: "todo-1".into(),
+            tx_id: "tx-bob-title".into(),
+            node_id: "bob-phone".into(),
+            base_tx_id: "tx-base".into(),
+            title: Some("Bob title".into()),
+            done: None,
+            actor_id: "bob".into(),
+            now: 210,
+        })
+        .unwrap();
+
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-bob-title".into(),
+            global_epoch: 3,
+        })
+        .unwrap();
+
+        let row = db.get_todo("main", "todo-1").unwrap().unwrap();
+        assert_eq!(row.title, "Alice title");
+        let rejection: String = db
+            .conn
+            .query_row(
+                "SELECT rejection_reason_json FROM jazz_tx WHERE tx_id = 'tx-bob-title'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(rejection.contains("stale_read"));
+        assert!(rejection.contains("tx-alice-title"));
     }
 
     #[test]

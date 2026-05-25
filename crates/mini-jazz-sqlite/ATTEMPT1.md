@@ -518,6 +518,20 @@ authority whether the transaction was based on stale data. Parent pointers may
 still be useful for graph traversal or debugging, but the correctness check can
 start from read sets.
 
+### 2026-05-24 22:57 PDT
+
+Connected read-set validation to storage acceptance for `todos`:
+
+- accepted base row establishes latest global visible version
+- first update based on that version accepts
+- second concurrent update with the same stale base rejects
+- rejection repairs current back to the accepted update
+
+Discovery: this is the first concrete exclusive/global-consistent validation
+path. The implementation uses a brittle prototype parser for read-set JSON, but
+the semantic flow is promising: validate declared row bases against authority
+visible state, then either assign a global epoch or reject with a reason.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
