@@ -205,3 +205,47 @@ Remaining architecture debt before sync/authority:
   `WritePlan`, `QueryPlan`, and `ProjectionPlan` shapes as pressure increases.
 - relation intent still leaks through `include_required(alias, fk_column)`.
 - no explicit `EffectLog` yet.
+
+### 2026-05-25 11:24 PDT
+
+Starting sync slice with a red query-scope bundle test:
+
+- Alice writes joined todo/project data.
+- Alice runs the joined query and gets result/dependency scope.
+- Alice exports the scope.
+- Bob imports it into an empty store with the same schema.
+- Bob reproduces the joined query locally.
+
+This is the first pressure on scope-to-bundle expansion and semantic import.
+The intended first shape is full row history for scoped rows, deduped
+transaction records, then projection rebuild on import.
+
+### 2026-05-25 11:25 PDT
+
+First query-scope sync test is green.
+
+Implementation shape:
+
+- `export_query_scope(scope)` deduplicates scoped `(table, row_id)` pairs.
+- For each scoped row, it exports all `main` branch history versions for that
+  row.
+- Transaction records are deduped by `tx_id` and export stable `node_id`
+  instead of local `node_num`.
+- `import_query_scope(bundle)` hydrates `node_num`, upserts `jazz_tx`, inserts
+  missing history rows, then rebuilds current projections.
+
+Discovery: full-history scope is a natural first sync shape. It is not compact,
+but it lets the receiver reproduce the current joined query without a separate
+result payload and keeps semantic history available for later diff/time-travel
+tests.
+
+Discovery: `TablePlan` immediately helped the sync slice: export/import could
+reuse physical history names and user columns instead of inventing another
+table-specific path.
+
+Open debt:
+
+- Bundles are Rust structs only; no canonical wire encoding yet.
+- Import does a broad projection rebuild.
+- Only concrete row scope is handled; predicate/absence scope is still missing.
+- Only `main` branch history is exported.

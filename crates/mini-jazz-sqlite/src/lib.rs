@@ -617,6 +617,214 @@ impl Client {
         Ok(diff)
     }
 
+    pub fn export_query_scope(&self, scope: &QueryScope) -> Result<QueryScopeBundle> {
+        let mut txs = BTreeMap::new();
+        let mut rows = Vec::new();
+        let mut scoped_rows = BTreeMap::new();
+
+        for locator in scope.result_rows.iter().chain(&scope.dependency_rows) {
+            scoped_rows.insert((locator.table.clone(), locator.row_id.clone()), ());
+        }
+
+        for ((table_name, row_id), ()) in scoped_rows {
+            let table = self.schema.table_def(&table_name)?;
+            let plan = TablePlan::new(table);
+            let mut select_cols = vec![
+                "h.j_row_id".to_owned(),
+                "h.j_branch_id".to_owned(),
+                "h.j_tx_id".to_owned(),
+                "h.j_op".to_owned(),
+                "h.j_conflicts_json".to_owned(),
+                "h.j_created_at".to_owned(),
+                "h.j_updated_at".to_owned(),
+                "tx.node_num".to_owned(),
+                "node.node_id".to_owned(),
+                "tx.local_epoch".to_owned(),
+                "tx.global_epoch".to_owned(),
+                "tx.kind".to_owned(),
+                "tx.status".to_owned(),
+                "tx.rejection_reason_json".to_owned(),
+                "tx.created_at".to_owned(),
+                "tx.metadata_json".to_owned(),
+            ];
+            select_cols.extend(plan.user_columns.iter().map(|column| format!("h.{column}")));
+
+            let mut stmt = self.conn.prepare(&format!(
+                "
+                SELECT {}
+                FROM {} h
+                JOIN jazz_tx tx ON tx.tx_id = h.j_tx_id
+                JOIN jazz_node node ON node.node_num = tx.node_num
+                WHERE h.j_branch_id = 'main' AND h.j_row_id = ?
+                ORDER BY h.j_updated_at, h.j_tx_id
+                ",
+                select_cols.join(", "),
+                plan.history
+            ))?;
+            let history_rows = stmt.query_map(params![row_id], |row| {
+                let mut idx = 0;
+                let row_id: String = row.get(idx)?;
+                idx += 1;
+                let branch_id: String = row.get(idx)?;
+                idx += 1;
+                let tx_id: String = row.get(idx)?;
+                idx += 1;
+                let op: String = row.get(idx)?;
+                idx += 1;
+                let conflicts_json: String = row.get(idx)?;
+                idx += 1;
+                let created_at: i64 = row.get(idx)?;
+                idx += 1;
+                let updated_at: i64 = row.get(idx)?;
+                idx += 1;
+                let _node_num: i64 = row.get(idx)?;
+                idx += 1;
+                let node_id: String = row.get(idx)?;
+                idx += 1;
+                let local_epoch: i64 = row.get(idx)?;
+                idx += 1;
+                let global_epoch: Option<i64> = row.get(idx)?;
+                idx += 1;
+                let kind: String = row.get(idx)?;
+                idx += 1;
+                let status: String = row.get(idx)?;
+                idx += 1;
+                let rejection_reason_json: Option<String> = row.get(idx)?;
+                idx += 1;
+                let tx_created_at: i64 = row.get(idx)?;
+                idx += 1;
+                let metadata_json: String = row.get(idx)?;
+                idx += 1;
+
+                let mut values = BTreeMap::new();
+                for field in &table.fields {
+                    values.insert(field.name.clone(), read_field(row, idx, field)?);
+                    idx += 1;
+                }
+
+                Ok((
+                    TxRecord {
+                        tx_id: tx_id.clone(),
+                        node_id,
+                        local_epoch,
+                        global_epoch,
+                        kind,
+                        status,
+                        rejection_reason_json,
+                        created_at: tx_created_at,
+                        metadata_json,
+                    },
+                    HistoryRecord {
+                        table: table.name.clone(),
+                        row_id,
+                        branch_id,
+                        tx_id,
+                        op,
+                        values,
+                        conflicts_json,
+                        created_at,
+                        updated_at,
+                    },
+                ))
+            })?;
+
+            for row in history_rows {
+                let (tx, history) = row?;
+                txs.entry(tx.tx_id.clone()).or_insert(tx);
+                rows.push(history);
+            }
+        }
+
+        Ok(QueryScopeBundle {
+            txs: txs.into_values().collect(),
+            history_rows: rows,
+        })
+    }
+
+    pub fn import_query_scope(&mut self, bundle: &QueryScopeBundle) -> Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        for tx in &bundle.txs {
+            sql_tx.execute(
+                "INSERT OR IGNORE INTO jazz_node (node_id) VALUES (?1)",
+                params![tx.node_id],
+            )?;
+            let node_num: i64 = sql_tx.query_row(
+                "SELECT node_num FROM jazz_node WHERE node_id = ?1",
+                params![tx.node_id],
+                |row| row.get(0),
+            )?;
+            sql_tx.execute(
+                "
+                INSERT INTO jazz_tx (
+                  tx_id, node_num, local_epoch, global_epoch, kind, status,
+                  rejection_reason_json, created_at, metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                ON CONFLICT(tx_id) DO UPDATE SET
+                  global_epoch = excluded.global_epoch,
+                  status = excluded.status,
+                  rejection_reason_json = excluded.rejection_reason_json
+                ",
+                params![
+                    tx.tx_id,
+                    node_num,
+                    tx.local_epoch,
+                    tx.global_epoch,
+                    tx.kind,
+                    tx.status,
+                    tx.rejection_reason_json,
+                    tx.created_at,
+                    tx.metadata_json
+                ],
+            )?;
+        }
+
+        for history in &bundle.history_rows {
+            let table = self.schema.table_def(&history.table)?;
+            let plan = TablePlan::new(table);
+            let mut cols = vec![
+                "j_row_id".to_owned(),
+                "j_branch_id".to_owned(),
+                "j_tx_id".to_owned(),
+                "j_op".to_owned(),
+            ];
+            cols.extend(plan.user_columns.iter().cloned());
+            cols.push("j_conflicts_json".to_owned());
+            cols.push("j_created_at".to_owned());
+            cols.push("j_updated_at".to_owned());
+
+            let mut values = vec![
+                SqlValue::Text(history.row_id.clone()),
+                SqlValue::Text(history.branch_id.clone()),
+                SqlValue::Text(history.tx_id.clone()),
+                SqlValue::Text(history.op.clone()),
+            ];
+            for field in &table.fields {
+                let value = history.values.get(&field.name).ok_or_else(|| {
+                    Error::new(format!(
+                        "missing bundled field {}.{}",
+                        table.name, field.name
+                    ))
+                })?;
+                values.push(json_to_sql(value, &field.kind)?);
+            }
+            values.push(SqlValue::Text(history.conflicts_json.clone()));
+            values.push(SqlValue::Integer(history.created_at));
+            values.push(SqlValue::Integer(history.updated_at));
+
+            sql_tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {} ({}) VALUES ({})",
+                    plan.history,
+                    cols.join(", "),
+                    placeholders(cols.len())
+                ),
+                params_from_iter(values),
+            )?;
+        }
+        sql_tx.commit()?;
+        self.rebuild_current_projections()
+    }
+
     fn lower_include<'a>(
         &'a self,
         base: &'a TableDef,
@@ -1093,6 +1301,35 @@ pub struct SubscriptionDiff {
 pub struct QueryScope {
     pub result_rows: Vec<ScopeRow>,
     pub dependency_rows: Vec<ScopeRow>,
+}
+
+pub struct QueryScopeBundle {
+    pub txs: Vec<TxRecord>,
+    pub history_rows: Vec<HistoryRecord>,
+}
+
+pub struct TxRecord {
+    pub tx_id: String,
+    pub node_id: String,
+    pub local_epoch: i64,
+    pub global_epoch: Option<i64>,
+    pub kind: String,
+    pub status: String,
+    pub rejection_reason_json: Option<String>,
+    pub created_at: i64,
+    pub metadata_json: String,
+}
+
+pub struct HistoryRecord {
+    pub table: String,
+    pub row_id: String,
+    pub branch_id: String,
+    pub tx_id: String,
+    pub op: String,
+    pub values: BTreeMap<String, JsonValue>,
+    pub conflicts_json: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 pub struct ScopeRow {
