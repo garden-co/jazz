@@ -956,6 +956,18 @@ detail is that resolution history rows must carry both the chosen value and the
 cleared candidate metadata, otherwise rebuilds would resurrect stale conflict
 state.
 
+### 2026-05-24 23:44 PDT
+
+Deduplicated concrete transaction bundles in query-scope export:
+
+- multiple result rows can depend on the same project transaction
+- scope locators may contain that project tx more than once
+- exported query bundles now send each tx only once
+
+Discovery: scope locators and wire bundles want different cardinalities. Keeping
+locators literal is useful for explaining/replaying each result row, while the
+wire path should dedupe by transaction id before exporting history.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

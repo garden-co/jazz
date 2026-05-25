@@ -1483,9 +1483,16 @@ impl MiniJazzSqlite {
         row_scope: &[RowVersionLocator],
         predicate_scope: &[PredicateScope],
     ) -> rusqlite::Result<QueryScopeBundle> {
+        let mut tx_ids = row_scope
+            .iter()
+            .map(|locator| locator.tx_id.clone())
+            .collect::<Vec<_>>();
+        tx_ids.sort();
+        tx_ids.dedup();
+
         let mut row_bundles = Vec::new();
-        for locator in row_scope {
-            row_bundles.push(self.export_tx(&locator.tx_id)?);
+        for tx_id in tx_ids {
+            row_bundles.push(self.export_tx(&tx_id)?);
         }
         Ok(QueryScopeBundle {
             row_bundles,
@@ -6164,6 +6171,51 @@ mod tests {
                 .map(|locator| (locator.table.as_str(), locator.row_id.as_str()))
                 .collect::<Vec<_>>(),
             vec![("todos", "todo-1"), ("projects", "project-1")]
+        );
+    }
+
+    #[test]
+    fn query_scope_export_deduplicates_shared_dependency_transactions() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "alice-device".into(),
+            name: "Shared".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        for (row_id, tx_id) in [("todo-1", "tx-todo-1"), ("todo-2", "tx-todo-2")] {
+            db.insert_todo_for_project(InsertTodoForProject {
+                row_id: row_id.into(),
+                tx_id: tx_id.into(),
+                node_id: "alice-device".into(),
+                project_id: "project-1".into(),
+                title: row_id.into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            })
+            .unwrap();
+        }
+
+        let (_, scope) = db.query_open_todos_with_projects("main").unwrap();
+        assert_eq!(
+            scope
+                .iter()
+                .filter(|locator| locator.tx_id == "tx-project-1")
+                .count(),
+            2
+        );
+        let bundle = db.export_query_scope(&scope, &[]).unwrap();
+        assert_eq!(
+            bundle
+                .row_bundles
+                .iter()
+                .map(|bundle| bundle.tx.tx_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tx-project-1", "tx-todo-1", "tx-todo-2"]
         );
     }
 
