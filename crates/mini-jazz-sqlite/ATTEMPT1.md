@@ -867,6 +867,20 @@ lean on denormalized columns, while audit/replay can lean on append-only fate
 events. The unresolved production question is how to order competing authority
 receipts if sharding or retries ever produce duplicate-looking observations.
 
+### 2026-05-24 23:37 PDT
+
+Made storage read-set validation check multiple row reads:
+
+- the tiny codec can encode/decode multiple row-read entries
+- authority acceptance now loops over every decoded row read
+- a transaction can be rejected because a non-written policy dependency went
+  stale, not only because its direct write base went stale
+
+Discovery: precise read sets really can stand in for parent pointers for
+acceptance correctness, but only if validation treats them as a set. The first
+single-entry decoder was too easy to accidentally accept a transaction whose
+second dependency had changed.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

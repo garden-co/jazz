@@ -14,40 +14,90 @@ pub struct EncodedAbsenceRead {
 }
 
 pub fn encode_row_read(read: &EncodedRowRead) -> String {
-    format!(
-        r#"[{{"kind":"row","table":"{}","rowId":"{}","visibleTxId":"{}","reason":"{}"}}]"#,
-        read.table, read.row_id, read.visible_tx_id, read.reason
-    )
+    encode_row_reads(std::slice::from_ref(read))
+}
+
+pub fn encode_row_reads(reads: &[EncodedRowRead]) -> String {
+    let entries = reads
+        .iter()
+        .map(|read| {
+            format!(
+                r#"{{"kind":"row","table":"{}","rowId":"{}","visibleTxId":"{}","reason":"{}"}}"#,
+                read.table, read.row_id, read.visible_tx_id, read.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{entries}]")
+}
+
+pub fn encode_mixed_reads(
+    row_reads: &[EncodedRowRead],
+    absence_reads: &[EncodedAbsenceRead],
+) -> String {
+    let mut entries = Vec::new();
+    for read in row_reads {
+        entries.push(format!(
+            r#"{{"kind":"row","table":"{}","rowId":"{}","visibleTxId":"{}","reason":"{}"}}"#,
+            read.table, read.row_id, read.visible_tx_id, read.reason
+        ));
+    }
+    for read in absence_reads {
+        entries.push(format!(
+            r#"{{"kind":"range","table":"{}","index":"{}_by_row_id_deleted","predicate":{{"rowId":"{}","isDeleted":false}},"reason":"{}"}}"#,
+            read.table, read.table, read.row_id, read.reason
+        ));
+    }
+    format!("[{}]", entries.join(","))
 }
 
 pub fn encode_absence_read(read: &EncodedAbsenceRead) -> String {
     format!(
-        r#"[{{"kind":"range","table":"{}","index":"{}_by_row_id_deleted","predicate":{{"rowId":"{}","isDeleted":false}},"reason":"{}"}}]"#,
-        read.table, read.table, read.row_id, read.reason
+        "[{}]",
+        encode_mixed_reads(&[], std::slice::from_ref(read))
+            .trim_start_matches('[')
+            .trim_end_matches(']')
     )
 }
 
 pub fn decode_first_row_read(input: &str) -> Option<EncodedRowRead> {
-    if !input.contains(r#""kind":"row""#) {
-        return None;
-    }
-    Some(EncodedRowRead {
-        table: value_after(input, r#""table":""#)?,
-        row_id: value_after(input, r#""rowId":""#)?,
-        visible_tx_id: value_after(input, r#""visibleTxId":""#)?,
-        reason: value_after(input, r#""reason":""#)?,
-    })
+    decode_row_reads(input).into_iter().next()
+}
+
+pub fn decode_row_reads(input: &str) -> Vec<EncodedRowRead> {
+    input
+        .split(r#"{"kind":"row""#)
+        .skip(1)
+        .filter_map(|entry| {
+            let entry = format!(r#"{{"kind":"row"{entry}"#);
+            Some(EncodedRowRead {
+                table: value_after(&entry, r#""table":""#)?,
+                row_id: value_after(&entry, r#""rowId":""#)?,
+                visible_tx_id: value_after(&entry, r#""visibleTxId":""#)?,
+                reason: value_after(&entry, r#""reason":""#)?,
+            })
+        })
+        .collect()
 }
 
 pub fn decode_first_absence_read(input: &str) -> Option<EncodedAbsenceRead> {
-    if !input.contains(r#""kind":"range""#) || !input.contains(r#""isDeleted":false"#) {
-        return None;
-    }
-    Some(EncodedAbsenceRead {
-        table: value_after(input, r#""table":""#)?,
-        row_id: value_after(input, r#""rowId":""#)?,
-        reason: value_after(input, r#""reason":""#)?,
-    })
+    decode_absence_reads(input).into_iter().next()
+}
+
+pub fn decode_absence_reads(input: &str) -> Vec<EncodedAbsenceRead> {
+    input
+        .split(r#"{"kind":"range""#)
+        .skip(1)
+        .filter(|entry| entry.contains(r#""isDeleted":false"#))
+        .filter_map(|entry| {
+            let entry = format!(r#"{{"kind":"range"{entry}"#);
+            Some(EncodedAbsenceRead {
+                table: value_after(&entry, r#""table":""#)?,
+                row_id: value_after(&entry, r#""rowId":""#)?,
+                reason: value_after(&entry, r#""reason":""#)?,
+            })
+        })
+        .collect()
 }
 
 fn value_after(input: &str, marker: &str) -> Option<String> {
@@ -71,6 +121,26 @@ mod tests {
         };
 
         assert_eq!(decode_first_row_read(&encode_row_read(&read)), Some(read));
+    }
+
+    #[test]
+    fn multiple_row_reads_round_trip_through_the_tiny_codec() {
+        let reads = vec![
+            EncodedRowRead {
+                table: "todos".into(),
+                row_id: "todo-1".into(),
+                visible_tx_id: "tx-base-1".into(),
+                reason: "write_base".into(),
+            },
+            EncodedRowRead {
+                table: "projects".into(),
+                row_id: "project-1".into(),
+                visible_tx_id: "tx-base-2".into(),
+                reason: "policy_dependency".into(),
+            },
+        ];
+
+        assert_eq!(decode_row_reads(&encode_row_reads(&reads)), reads);
     }
 
     #[test]

@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::codec::{
-    EncodedAbsenceRead, EncodedRowRead, decode_first_absence_read, decode_first_row_read,
-    encode_row_read,
+    EncodedAbsenceRead, EncodedRowRead, decode_absence_reads, decode_row_reads, encode_row_read,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -1963,7 +1962,7 @@ impl MiniJazzSqlite {
             params![input.tx_id],
             |row| row.get(0),
         )?;
-        if let Some(row_read) = decode_first_row_read(&read_set) {
+        for row_read in decode_row_reads(&read_set) {
             let row_id = row_read.row_id;
             let expected_tx_id = row_read.visible_tx_id;
             let actual_tx_id: Option<String> = self
@@ -1995,16 +1994,16 @@ impl MiniJazzSqlite {
                 });
             }
         }
-        if let Some(absence_read) = decode_first_absence_read(&read_set)
-            && let Some(visible_tx_id) = self.visible_current_tx_for_absence_read(&absence_read)?
-        {
-            return self.reject_tx(RejectTx {
-                tx_id: input.tx_id,
-                reason_json: format!(
-                    r#"{{"code":"stale_range","table":"{}","rowId":"{}","actual":"{}"}}"#,
-                    absence_read.table, absence_read.row_id, visible_tx_id
-                ),
-            });
+        for absence_read in decode_absence_reads(&read_set) {
+            if let Some(visible_tx_id) = self.visible_current_tx_for_absence_read(&absence_read)? {
+                return self.reject_tx(RejectTx {
+                    tx_id: input.tx_id,
+                    reason_json: format!(
+                        r#"{{"code":"stale_range","table":"{}","rowId":"{}","actual":"{}"}}"#,
+                        absence_read.table, absence_read.row_id, visible_tx_id
+                    ),
+                });
+            }
         }
         self.accept_tx(input)
     }
@@ -3530,7 +3529,7 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::encode_absence_read;
+    use crate::codec::{encode_absence_read, encode_row_reads};
     use std::fs;
     use std::time::Instant;
 
@@ -4948,6 +4947,107 @@ mod tests {
             .unwrap();
         assert!(rejection.contains("stale_read"));
         assert!(rejection.contains("tx-alice-title"));
+    }
+
+    #[test]
+    fn validated_acceptance_checks_every_row_read_set_entry() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-base-1".into(),
+            node_id: "alice-device".into(),
+            title: "First".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-2".into(),
+            tx_id: "tx-base-2".into(),
+            node_id: "alice-device".into(),
+            title: "Second".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 110,
+        })
+        .unwrap();
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-base-1".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-base-2".into(),
+            global_epoch: 2,
+        })
+        .unwrap();
+        db.update_todo_at_base(UpdateTodoAtBase {
+            row_id: "todo-2".into(),
+            tx_id: "tx-newer-2".into(),
+            node_id: "carol-tablet".into(),
+            base_tx_id: "tx-base-2".into(),
+            title: Some("Second newer".into()),
+            done: None,
+            actor_id: "carol".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-newer-2".into(),
+            global_epoch: 3,
+        })
+        .unwrap();
+        db.update_todo_at_base(UpdateTodoAtBase {
+            row_id: "todo-1".into(),
+            tx_id: "tx-multi-read".into(),
+            node_id: "bob-phone".into(),
+            base_tx_id: "tx-base-1".into(),
+            title: Some("First edit".into()),
+            done: None,
+            actor_id: "bob".into(),
+            now: 210,
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE jazz_tx SET read_set_jsonb = ?2 WHERE tx_id = ?1",
+                params![
+                    "tx-multi-read",
+                    encode_row_reads(&[
+                        EncodedRowRead {
+                            table: "todos".into(),
+                            row_id: "todo-1".into(),
+                            visible_tx_id: "tx-base-1".into(),
+                            reason: "write_base".into(),
+                        },
+                        EncodedRowRead {
+                            table: "todos".into(),
+                            row_id: "todo-2".into(),
+                            visible_tx_id: "tx-base-2".into(),
+                            reason: "policy_dependency".into(),
+                        },
+                    ])
+                ],
+            )
+            .unwrap();
+
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-multi-read".into(),
+            global_epoch: 4,
+        })
+        .unwrap();
+
+        let rejection: String = db
+            .conn
+            .query_row(
+                "SELECT rejection_reason_json FROM jazz_tx WHERE tx_id = 'tx-multi-read'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(rejection.contains("todo-2"));
+        assert!(rejection.contains("tx-newer-2"));
     }
 
     #[test]
