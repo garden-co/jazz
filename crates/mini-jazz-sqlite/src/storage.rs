@@ -483,6 +483,9 @@ impl MiniJazzSqlite {
               UNIQUE (global_epoch)
             );
 
+            CREATE INDEX IF NOT EXISTS jazz_tx_status_global_epoch
+              ON jazz_tx(status, global_epoch, tx_id);
+
             CREATE TABLE IF NOT EXISTS jazz_tx_fate (
               tx_id TEXT NOT NULL,
               fate TEXT NOT NULL,
@@ -565,6 +568,9 @@ impl MiniJazzSqlite {
             CREATE INDEX IF NOT EXISTS todos__schema_v1_history_branch_row_updated
               ON todos__schema_v1_history(branch_id, row_id, updated_at DESC, tx_id);
 
+            CREATE INDEX IF NOT EXISTS todos__schema_v1_history_branch_tx
+              ON todos__schema_v1_history(branch_id, tx_id, row_id);
+
             CREATE TABLE IF NOT EXISTS projects__schema_v1_history (
               row_id TEXT NOT NULL,
               branch_id TEXT NOT NULL,
@@ -598,6 +604,9 @@ impl MiniJazzSqlite {
 
             CREATE INDEX IF NOT EXISTS projects__schema_v1_current_branch_name
               ON projects__schema_v1_current(branch_id, name, row_id);
+
+            CREATE INDEX IF NOT EXISTS projects__schema_v1_history_branch_row_updated
+              ON projects__schema_v1_history(branch_id, row_id, updated_at DESC, tx_id);
             "#,
         )
     }

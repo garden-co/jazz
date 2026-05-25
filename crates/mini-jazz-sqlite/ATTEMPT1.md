@@ -908,6 +908,27 @@ spike. Data-copy merge is still useful for one concrete strategy, but
 metadata-only visibility through branch sources keeps global history isolated
 while letting merge transactions define cross-branch visibility.
 
+### 2026-05-24 23:40 PDT
+
+Added a few obvious history/transaction indexes:
+
+- `jazz_tx(status, global_epoch, tx_id)`
+- `todos` history by branch/tx and branch/row/update
+- `projects` history by branch/row/update
+
+Ballpark after the index pass, still in debug test mode:
+
+- 2,000 inserted rows
+- 1,333 matching open rows
+- current projection query: about 2.47 ms
+- temp-table snapshot query: about 17.24 ms
+
+Discovery: these indexes do not materially change the current 2k-row snapshot
+ballpark, which suggests the grouped CTE shape is the bigger win and the
+remaining cost is probably the history/grouping work itself. The indexes still
+match the access paths we keep using and should matter more as branch/source
+queries diversify.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
