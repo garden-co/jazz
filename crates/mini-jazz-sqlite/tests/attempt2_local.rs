@@ -357,3 +357,54 @@ fn authority_acceptance_enriches_existing_transaction_identity() -> mini_jazz_sq
 
     Ok(())
 }
+
+#[test]
+fn authority_rejection_repairs_optimistic_current_projection() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new()
+        .table("projects", |t| {
+            t.text("name");
+        })
+        .table("todos", |t| {
+            t.text("title");
+            t.bool("done");
+            t.ref_("project_id", "projects");
+        });
+
+    let mut alice = Harness::new()
+        .client("alice", schema.clone())
+        .durable_in_memory()?;
+    let mut core = Harness::new()
+        .authority("core", schema)
+        .durable_in_memory()?;
+
+    alice.write(|tx| {
+        let project = tx.insert("projects", json!({ "name": "Rejected Project" }))?;
+        tx.insert(
+            "todos",
+            json!({
+                "title": "Reject me",
+                "done": false,
+                "project_id": project.id()
+            }),
+        )?;
+        Ok(())
+    })?;
+
+    let open_todos = query("todos")
+        .filter(eq("done", false))
+        .include_required("project", "project_id");
+    let optimistic = alice.all(open_todos.clone())?;
+    assert_eq!(optimistic.rows.len(), 1);
+    let tx_id = optimistic.scope.result_rows[0].tx_id.clone();
+
+    core.import_query_scope(&alice.export_query_scope(&optimistic.scope)?)?;
+    core.reject_transaction(&tx_id, json!({ "code": "stale_read" }))?;
+
+    let rejected = core.export_transaction(&tx_id)?;
+    alice.import_query_scope(&rejected)?;
+
+    assert_eq!(alice.transaction_status(&tx_id)?, "rejected");
+    assert_eq!(alice.all(open_todos)?.rows.len(), 0);
+
+    Ok(())
+}

@@ -843,6 +843,106 @@ impl Client {
         Ok(())
     }
 
+    pub fn reject_transaction(&self, tx_id: &str, reason: JsonValue) -> Result<()> {
+        self.conn.execute(
+            "
+            UPDATE jazz_tx
+            SET status = 'rejected',
+                rejection_reason_json = ?2
+            WHERE tx_id = ?1
+            ",
+            params![tx_id, reason.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn export_transaction(&self, tx_id: &str) -> Result<QueryScopeBundle> {
+        let tx = self.conn.query_row(
+            "
+            SELECT node.node_id, tx.local_epoch, tx.global_epoch, tx.kind, tx.status,
+                   tx.rejection_reason_json, tx.created_at, tx.metadata_json
+            FROM jazz_tx tx
+            JOIN jazz_node node ON node.node_num = tx.node_num
+            WHERE tx.tx_id = ?1
+            ",
+            params![tx_id],
+            |row| {
+                Ok(TxRecord {
+                    tx_id: tx_id.to_owned(),
+                    node_id: row.get(0)?,
+                    local_epoch: row.get(1)?,
+                    global_epoch: row.get(2)?,
+                    kind: row.get(3)?,
+                    status: row.get(4)?,
+                    rejection_reason_json: row.get(5)?,
+                    created_at: row.get(6)?,
+                    metadata_json: row.get(7)?,
+                })
+            },
+        )?;
+
+        let mut history_rows = Vec::new();
+        for table in self.schema.tables.values() {
+            let plan = TablePlan::new(table);
+            let mut select_cols = vec![
+                "j_row_id".to_owned(),
+                "j_branch_id".to_owned(),
+                "j_tx_id".to_owned(),
+                "j_op".to_owned(),
+                "j_conflicts_json".to_owned(),
+                "j_created_at".to_owned(),
+                "j_updated_at".to_owned(),
+            ];
+            select_cols.extend(plan.user_columns.iter().cloned());
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {} FROM {} WHERE j_tx_id = ? ORDER BY j_row_id",
+                select_cols.join(", "),
+                plan.history
+            ))?;
+            let rows = stmt.query_map(params![tx_id], |row| {
+                let mut idx = 0;
+                let row_id: String = row.get(idx)?;
+                idx += 1;
+                let branch_id: String = row.get(idx)?;
+                idx += 1;
+                let tx_id: String = row.get(idx)?;
+                idx += 1;
+                let op: String = row.get(idx)?;
+                idx += 1;
+                let conflicts_json: String = row.get(idx)?;
+                idx += 1;
+                let created_at: i64 = row.get(idx)?;
+                idx += 1;
+                let updated_at: i64 = row.get(idx)?;
+                idx += 1;
+                let mut values = BTreeMap::new();
+                for field in &table.fields {
+                    values.insert(field.name.clone(), read_field(row, idx, field)?);
+                    idx += 1;
+                }
+                Ok(HistoryRecord {
+                    table: table.name.clone(),
+                    row_id,
+                    branch_id,
+                    tx_id,
+                    op,
+                    values,
+                    conflicts_json,
+                    created_at,
+                    updated_at,
+                })
+            })?;
+            for row in rows {
+                history_rows.push(row?);
+            }
+        }
+
+        Ok(QueryScopeBundle {
+            txs: vec![tx],
+            history_rows,
+        })
+    }
+
     pub fn transaction_status(&self, tx_id: &str) -> Result<String> {
         self.conn
             .query_row(

@@ -289,3 +289,41 @@ Open debt:
 - `authority` is not a distinct role yet.
 - Proposal-vs-authority-observation is only conceptual; there is no separate
   observation payload beyond the updated tx record.
+
+### 2026-05-25 11:27 PDT
+
+Starting authority rejection repair test:
+
+- Alice writes optimistically and sees the joined row locally.
+- Core imports the same scoped bundle.
+- Core rejects the tx with a machine-readable reason.
+- Alice imports the rejected tx bundle.
+- Alice repairs current projections and no longer sees the optimistic row.
+
+This tests mutable fate plus import side effects in the negative direction.
+
+### 2026-05-25 11:29 PDT
+
+Authority rejection repair is green.
+
+Implementation shape:
+
+- `reject_transaction(tx_id, reason)` mutates `jazz_tx.status` to `rejected`
+  and stores machine-readable reason JSON.
+- `export_transaction(tx_id)` exports one tx record plus all history rows
+  written by that tx across schema tables.
+- `import_query_scope` upserts the rejected fate and rebuilds current
+  projections.
+- Visibility queries filter rejected txs through current projection rebuild.
+
+Discovery: broad projection rebuild makes rejection repair almost trivial and
+keeps the invariant obvious. This is absolutely not the final hot path, but it
+is the right first semantics path.
+
+Discovery: exporting by tx id is a distinct protocol primitive from exporting a
+query scope. Query scope export is result/dependency-shaped; fate propagation
+sometimes needs to send a transaction even after it no longer appears in a
+query result.
+
+Open debt: transaction export currently scans every schema table for rows with
+that tx id. A generated write-set/table membership index should replace that.
