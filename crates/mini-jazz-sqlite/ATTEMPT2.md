@@ -327,3 +327,58 @@ query result.
 
 Open debt: transaction export currently scans every schema table for rows with
 that tx id. A generated write-set/table membership index should replace that.
+
+### 2026-05-25 11:30 PDT
+
+Starting first read-set validation test:
+
+- Core creates and accepts a base todo.
+- Alice and Bob both import the base.
+- Alice updates the row and core accepts her transaction.
+- Bob updates from the stale base.
+- Core should reject Bob because his row read set points at the old visible tx.
+
+This is the first real exclusive/global-consistent validation path. It should
+force update writes to record previous visible row versions.
+
+### 2026-05-25 11:34 PDT
+
+Split the prototype before continuing the validation slice:
+
+- `src/lib.rs` is now a thin public surface over `src/store.rs`.
+- Authority tests moved to `tests/authority.rs`; local/query/subscription
+  coverage remains in `tests/attempt2_local.rs` for now.
+
+This is still a coarse split, but it stops the single-file prototype from
+growing further while the architecture is becoming clearer.
+
+Read-set validation is green.
+
+Implementation shape:
+
+- Write transactions collect row read-set entries when `update` or `delete`
+  reads from the current projection.
+- The read set is stored in `jazz_tx.metadata_json` and therefore moves through
+  existing query-scope export/import without adding a new table yet.
+- `accept_transaction_validating_reads(tx_id, global_epoch)` parses metadata
+  and checks each observed row version against accepted authority history.
+- Validation deliberately excludes the candidate tx from the authority lookup,
+  because importing a proposal currently updates local current projections
+  optimistically before the authority has accepted it.
+- On mismatch, authority mutates the tx fate to `rejected`, records structured
+  reason JSON, rebuilds current projections, and returns a `stale row read`
+  error.
+
+Discovery: validation should be based on authority history, not current
+projection, unless the authority has a separate proposal quarantine. The
+current projection can be polluted by pending imported proposals.
+
+Open debt:
+
+- Read sets only cover direct row reads from update/delete, not predicate/range
+  reads from query execution.
+- The read-set JSON shape is a prototype metadata payload. We still need to
+  compare JSONB metadata against normalized read-set tables once query read
+  sets exist.
+- `accept_transaction_validating_reads` validates only accepted global history;
+  mergeable/local-pending semantics are still outside this path.
