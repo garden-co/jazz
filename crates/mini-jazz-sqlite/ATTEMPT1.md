@@ -611,6 +611,16 @@ rerun+diff. A dependency row can change page membership without changing the
 result row itself. Page subscriptions need to retain enough boundary scope to
 know when off-page rows can enter the page.
 
+### 2026-05-24 23:06 PDT
+
+Added first `EXPLAIN QUERY PLAN` hook for the paginated joined query and an
+index on `(branch_id, name, row_id)` for project current rows.
+
+Discovery: this is only a smoke test so far; it proves the prototype can expose
+planner evidence in tests, not that the plan is good. The next useful step is
+to make plan assertions or measurements meaningful for realistic row counts and
+page boundaries.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

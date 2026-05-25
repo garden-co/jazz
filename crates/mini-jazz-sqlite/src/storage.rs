@@ -507,6 +507,9 @@ impl MiniJazzSqlite {
               edit_metadata_json TEXT NOT NULL,
               PRIMARY KEY (row_id, branch_id)
             );
+
+            CREATE INDEX IF NOT EXISTS projects__schema_v1_current_branch_name
+              ON projects__schema_v1_current(branch_id, name, row_id);
             "#,
         )
     }
@@ -2013,6 +2016,31 @@ impl MiniJazzSqlite {
             })
         })?
         .collect()
+    }
+
+    pub fn explain_top_open_todos_by_project_name(
+        &self,
+        branch_id: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            EXPLAIN QUERY PLAN
+            SELECT t.row_id
+            FROM todos__schema_v1_current t
+            JOIN projects__schema_v1_current p
+              ON p.branch_id = t.branch_id
+             AND p.row_id = t.project_id
+             AND p.is_deleted = 0
+            WHERE t.branch_id = ?1
+              AND t.is_deleted = 0
+              AND t.done = 0
+            ORDER BY p.name ASC, t.row_id ASC
+            LIMIT ?2
+            "#,
+        )?;
+        stmt.query_map(params![branch_id, limit], |row| row.get(3))?
+            .collect()
     }
 
     pub fn query_todos_at_local_epoch(
@@ -4054,6 +4082,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["todo-a", "todo-c"]
         );
+    }
+
+    #[test]
+    fn explains_top_joined_query_plan() {
+        let db = MiniJazzSqlite::in_memory().unwrap();
+        let plan = db
+            .explain_top_open_todos_by_project_name("main", 2)
+            .unwrap();
+
+        assert!(plan.iter().any(|step| step.contains("todos")));
+        assert!(plan.iter().any(|step| step.contains("projects")));
     }
 
     #[test]
