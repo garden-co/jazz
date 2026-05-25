@@ -25,6 +25,17 @@ pub struct InsertTodo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateBranch {
+    pub branch_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub name: String,
+    pub head_global_epoch: i64,
+    pub base_provenance_json: String,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateTodo {
     pub row_id: String,
     pub tx_id: String,
@@ -200,6 +211,28 @@ impl MiniJazzSqlite {
               UNIQUE (global_epoch)
             );
 
+            CREATE TABLE IF NOT EXISTS jazz_branch (
+              branch_id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              head_global_epoch INTEGER NOT NULL,
+              head_local_jsonb BLOB NOT NULL,
+              head_include_jsonb BLOB NOT NULL,
+              base_provenance_jsonb BLOB NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS jazz_branch_history (
+              branch_id TEXT NOT NULL,
+              tx_id TEXT NOT NULL,
+              op TEXT NOT NULL,
+              head_global_epoch INTEGER NOT NULL,
+              head_local_jsonb BLOB NOT NULL,
+              head_include_jsonb BLOB NOT NULL,
+              base_provenance_jsonb BLOB NOT NULL,
+              metadata_json TEXT NOT NULL,
+              PRIMARY KEY (branch_id, tx_id),
+              FOREIGN KEY (tx_id) REFERENCES jazz_tx(tx_id)
+            );
+
             CREATE TABLE IF NOT EXISTS todos__schema_v1_history (
               row_id TEXT NOT NULL,
               branch_id TEXT NOT NULL,
@@ -243,6 +276,22 @@ impl MiniJazzSqlite {
     }
 
     pub fn insert_todo(&mut self, input: InsertTodo) -> rusqlite::Result<()> {
+        self.insert_todo_on_branch("main", input)
+    }
+
+    pub fn insert_todo_in_branch(
+        &mut self,
+        branch_id: &str,
+        input: InsertTodo,
+    ) -> rusqlite::Result<()> {
+        self.insert_todo_on_branch(branch_id, input)
+    }
+
+    fn insert_todo_on_branch(
+        &mut self,
+        branch_id: &str,
+        input: InsertTodo,
+    ) -> rusqlite::Result<()> {
         let sql_tx = self.conn.transaction()?;
         let node_num = ensure_node(&sql_tx, &input.node_id)?;
         let local_epoch = next_local_epoch(&sql_tx, node_num)?;
@@ -269,10 +318,11 @@ impl MiniJazzSqlite {
             INSERT INTO todos__schema_v1_history (
               row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
               created_by, created_at, updated_by, updated_at, edit_metadata_json
-            ) VALUES (?1, 'main', ?2, 'insert', ?3, ?4, ?5, ?6, ?7, ?6, ?7, '{}')
+            ) VALUES (?1, ?2, ?3, 'insert', ?4, ?5, ?6, ?7, ?8, ?7, ?8, '{}')
             "#,
             params![
                 input.row_id,
+                branch_id,
                 input.tx_id,
                 input.title,
                 done,
@@ -282,25 +332,79 @@ impl MiniJazzSqlite {
             ],
         )?;
 
+        if branch_id == "main" {
+            sql_tx.execute(
+                r#"
+                INSERT INTO todos__schema_v1_current (
+                  row_id, branch_id, visible_tx_id, is_deleted, title, done,
+                  conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+                  edit_metadata_json
+                ) VALUES (?1, 'main', ?2, 0, ?3, ?4, ?5, ?6, ?7, ?6, ?7, '{}')
+                "#,
+                params![
+                    input.row_id,
+                    input.tx_id,
+                    input.title,
+                    done,
+                    conflict_tx_ids,
+                    input.actor_id,
+                    input.now
+                ],
+            )?;
+        }
+
+        sql_tx.commit()
+    }
+
+    pub fn create_branch(&mut self, input: CreateBranch) -> rusqlite::Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
         sql_tx.execute(
             r#"
-            INSERT INTO todos__schema_v1_current (
-              row_id, branch_id, visible_tx_id, is_deleted, title, done,
-              conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
-              edit_metadata_json
-            ) VALUES (?1, 'main', ?2, 0, ?3, ?4, ?5, ?6, ?7, ?6, ?7, '{}')
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'branch_metadata', ?4, '[]', '[]', '[]', '[]',
+                     'local_pending', ?5, ?5, '{}')
             "#,
             params![
-                input.row_id,
                 input.tx_id,
-                input.title,
-                done,
-                conflict_tx_ids,
-                input.actor_id,
+                node_num,
+                local_epoch,
+                input.head_global_epoch,
                 input.now
             ],
         )?;
-
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_branch (
+              branch_id, name, head_global_epoch, head_local_jsonb, head_include_jsonb,
+              base_provenance_jsonb
+            ) VALUES (?1, ?2, ?3, '[]', '[]', ?4)
+            "#,
+            params![
+                input.branch_id,
+                input.name,
+                input.head_global_epoch,
+                input.base_provenance_json
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_branch_history (
+              branch_id, tx_id, op, head_global_epoch, head_local_jsonb, head_include_jsonb,
+              base_provenance_jsonb, metadata_json
+            ) VALUES (?1, ?2, 'create', ?3, '[]', '[]', ?4, '{}')
+            "#,
+            params![
+                input.branch_id,
+                input.tx_id,
+                input.head_global_epoch,
+                input.base_provenance_json
+            ],
+        )?;
         sql_tx.commit()
     }
 
@@ -1443,6 +1547,94 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["tx-include", "tx-local", "tx-global"]
         );
+    }
+
+    #[test]
+    fn branch_local_write_is_global_history_but_not_main_visibility() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+
+        db.insert_todo(InsertTodo {
+            row_id: "todo-main".into(),
+            tx_id: "tx-main".into(),
+            node_id: "alice-device".into(),
+            title: "Main row".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-main".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+        db.create_branch(CreateBranch {
+            branch_id: "draft".into(),
+            tx_id: "tx-create-draft".into(),
+            node_id: "alice-device".into(),
+            name: "Alice draft".into(),
+            head_global_epoch: 1,
+            base_provenance_json: r#"[{"branch":"main","globalBase":1}]"#.into(),
+            now: 150,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-create-draft".into(),
+            global_epoch: 2,
+        })
+        .unwrap();
+        db.insert_todo_in_branch(
+            "draft",
+            InsertTodo {
+                row_id: "todo-draft".into(),
+                tx_id: "tx-draft-row".into(),
+                node_id: "alice-device".into(),
+                title: "Draft row".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            },
+        )
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-draft-row".into(),
+            global_epoch: 3,
+        })
+        .unwrap();
+
+        let main_rows = db
+            .query_todos_at_global_epoch(&TodoQuery::open_since(0), 3)
+            .unwrap();
+        assert_eq!(
+            main_rows
+                .rows
+                .iter()
+                .map(|row| row.row_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo-main"]
+        );
+
+        let draft_rows = db
+            .query_todos_at_global_epoch(
+                &TodoQuery {
+                    branch_id: "draft".into(),
+                    done: Some(false),
+                    created_after: Some(0),
+                },
+                3,
+            )
+            .unwrap();
+        assert_eq!(draft_rows.rows[0].row_id, "todo-draft");
+
+        let branch_history_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM jazz_branch_history WHERE branch_id = 'draft'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(branch_history_count, 1);
     }
 
     #[test]

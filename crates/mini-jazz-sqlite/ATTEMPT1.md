@@ -223,3 +223,28 @@ Open fuzziness: ordering concurrent visible versions of the same row is not
 solved. The prototype only suppresses older versions from the same node. If two
 visible transactions from different nodes both write the same row, this should
 become conflict-candidate output rather than "pick one latest row".
+
+### 2026-05-24 22:45 PDT
+
+Added the smallest branch metadata slice:
+
+- `jazz_branch`
+- `jazz_branch_history`
+- `create_branch`
+- `insert_todo_in_branch`
+
+Validated that a branch-local data transaction can be globally accepted while
+remaining isolated from `main`. This matches the important rule: global history
+is not the same as visibility on every branch.
+
+Major semantic gap: branch reads do not yet inherit rows from their base
+branches. A branch created at `main@globalBase=1` should see main rows at that
+base plus branch-local rows. The current spike only proves branch id isolation
+for branch-local writes. To model real branch reads, a query probably needs a
+branch visibility source like:
+
+```text
+(source_branch_id, snapshot_vector)
+```
+
+for each base/provenance component, plus the branch's own head vector.
