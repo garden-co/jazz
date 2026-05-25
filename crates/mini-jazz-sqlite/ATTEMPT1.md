@@ -655,6 +655,21 @@ better. Pure-query snapshots are still slower than current projections, but the
 difference between "obviously too slow" and "plausibly acceptable for cold
 branches/snapshots" may be mostly query shape, not the whole SQLite approach.
 
+### 2026-05-24 23:09 PDT
+
+Added conflict metadata for joined dependency rows:
+
+- projects now carry row-level conflict candidate tx ids
+- concurrent project name updates from the same base produce multiple
+  candidates
+- joined todo/project query can expose resolved project value plus dependency
+  conflict metadata
+
+Discovery: joined conflict exposure should probably live on the nested
+dependency object, not just the top-level result row. A todo can be perfectly
+unconflicted while its displayed project is conflicted, and sync/listener
+semantics need to preserve that distinction.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

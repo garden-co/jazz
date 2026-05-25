@@ -22,9 +22,21 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectWithConflictMeta {
+    pub row: Project,
+    pub conflict_tx_ids_jsonb: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoWithProject {
     pub todo: Todo,
     pub project: Project,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoWithProjectConflictMeta {
+    pub todo: Todo,
+    pub project: ProjectWithConflictMeta,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +71,7 @@ pub struct UpdateProject {
     pub row_id: String,
     pub tx_id: String,
     pub node_id: String,
+    pub base_tx_id: Option<String>,
     pub name: String,
     pub actor_id: String,
     pub now: i64,
@@ -250,6 +263,7 @@ pub struct ProjectHistoryRecord {
     pub tx_id: String,
     pub op: String,
     pub name: Option<String>,
+    pub conflict_tx_ids_jsonb: String,
     pub created_by: Option<String>,
     pub created_at: i64,
     pub updated_by: Option<String>,
@@ -485,6 +499,7 @@ impl MiniJazzSqlite {
               tx_id TEXT NOT NULL,
               op TEXT NOT NULL,
               name TEXT,
+              conflict_tx_ids_jsonb BLOB NOT NULL DEFAULT '[]',
               created_by TEXT,
               created_at INTEGER NOT NULL,
               updated_by TEXT,
@@ -500,6 +515,7 @@ impl MiniJazzSqlite {
               visible_tx_id TEXT NOT NULL,
               is_deleted INTEGER NOT NULL,
               name TEXT,
+              conflict_tx_ids_jsonb BLOB NOT NULL DEFAULT '[]',
               created_by TEXT,
               created_at INTEGER NOT NULL,
               updated_by TEXT,
@@ -687,14 +703,15 @@ impl MiniJazzSqlite {
         sql_tx.execute(
             r#"
             INSERT INTO projects__schema_v1_history (
-              row_id, branch_id, tx_id, op, name, created_by, created_at, updated_by,
-              updated_at, edit_metadata_json
-            ) VALUES (?1, 'main', ?2, 'insert', ?3, ?4, ?5, ?4, ?5, '{}')
+              row_id, branch_id, tx_id, op, name, conflict_tx_ids_jsonb, created_by,
+              created_at, updated_by, updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 'insert', ?3, ?4, ?5, ?6, ?5, ?6, '{}')
             "#,
             params![
                 input.row_id,
                 input.tx_id,
                 input.name,
+                format!(r#"["{}"]"#, input.tx_id),
                 input.actor_id,
                 input.now
             ],
@@ -702,14 +719,15 @@ impl MiniJazzSqlite {
         sql_tx.execute(
             r#"
             INSERT INTO projects__schema_v1_current (
-              row_id, branch_id, visible_tx_id, is_deleted, name, created_by, created_at,
-              updated_by, updated_at, edit_metadata_json
-            ) VALUES (?1, 'main', ?2, 0, ?3, ?4, ?5, ?4, ?5, '{}')
+              row_id, branch_id, visible_tx_id, is_deleted, name, conflict_tx_ids_jsonb,
+              created_by, created_at, updated_by, updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 0, ?3, ?4, ?5, ?6, ?5, ?6, '{}')
             "#,
             params![
                 input.row_id,
                 input.tx_id,
                 input.name,
+                format!(r#"["{}"]"#, input.tx_id),
                 input.actor_id,
                 input.now
             ],
@@ -720,12 +738,18 @@ impl MiniJazzSqlite {
     pub fn update_project(&mut self, input: UpdateProject) -> rusqlite::Result<()> {
         let previous = self.conn.query_row(
             r#"
-            SELECT visible_tx_id, created_at
+            SELECT visible_tx_id, created_at, conflict_tx_ids_jsonb
             FROM projects__schema_v1_current
             WHERE branch_id = 'main' AND row_id = ?1 AND is_deleted = 0
             "#,
             params![input.row_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )?;
         let sql_tx = self.conn.transaction()?;
         let node_num = ensure_node(&sql_tx, &input.node_id)?;
@@ -733,9 +757,18 @@ impl MiniJazzSqlite {
         let read_set = encode_row_read(&EncodedRowRead {
             table: "projects".to_owned(),
             row_id: input.row_id.clone(),
-            visible_tx_id: previous.0.clone(),
+            visible_tx_id: input
+                .base_tx_id
+                .clone()
+                .unwrap_or_else(|| previous.0.clone()),
             reason: "write_base".to_owned(),
         });
+        let conflict_tx_ids = match input.base_tx_id.as_deref() {
+            Some(base_tx_id) if base_tx_id != previous.0 => {
+                format!(r#"["{}","{}"]"#, previous.0, input.tx_id)
+            }
+            _ => format!(r#"["{}"]"#, input.tx_id),
+        };
         let write_set = format!(
             r#"[{{"table":"projects","rowId":"{}","op":"update","columns":["name","updated_at"]}}]"#,
             input.row_id
@@ -760,14 +793,15 @@ impl MiniJazzSqlite {
         sql_tx.execute(
             r#"
             INSERT INTO projects__schema_v1_history (
-              row_id, branch_id, tx_id, op, name, created_by, created_at, updated_by,
-              updated_at, edit_metadata_json
-            ) VALUES (?1, 'main', ?2, 'update', ?3, ?4, ?5, ?4, ?6, '{}')
+              row_id, branch_id, tx_id, op, name, conflict_tx_ids_jsonb, created_by,
+              created_at, updated_by, updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 'update', ?3, ?4, ?5, ?6, ?5, ?7, '{}')
             "#,
             params![
                 input.row_id,
                 input.tx_id,
                 input.name,
+                conflict_tx_ids,
                 input.actor_id,
                 previous.1,
                 input.now
@@ -778,14 +812,16 @@ impl MiniJazzSqlite {
             UPDATE projects__schema_v1_current
             SET visible_tx_id = ?2,
                 name = ?3,
-                updated_by = ?4,
-                updated_at = ?5
+                conflict_tx_ids_jsonb = ?4,
+                updated_by = ?5,
+                updated_at = ?6
             WHERE branch_id = 'main' AND row_id = ?1
             "#,
             params![
                 input.row_id,
                 input.tx_id,
                 input.name,
+                conflict_tx_ids,
                 input.actor_id,
                 input.now
             ],
@@ -1177,7 +1213,8 @@ impl MiniJazzSqlite {
             .collect::<rusqlite::Result<_>>()?;
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT row_id, branch_id, tx_id, op, name, created_by, created_at, updated_by,
+            SELECT row_id, branch_id, tx_id, op, name, conflict_tx_ids_jsonb,
+                   created_by, created_at, updated_by,
                    updated_at, edit_metadata_json
             FROM projects__schema_v1_history
             WHERE tx_id = ?1
@@ -1192,11 +1229,12 @@ impl MiniJazzSqlite {
                     tx_id: row.get(2)?,
                     op: row.get(3)?,
                     name: row.get(4)?,
-                    created_by: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_by: row.get(7)?,
-                    updated_at: row.get(8)?,
-                    edit_metadata_json: row.get(9)?,
+                    conflict_tx_ids_jsonb: row.get(5)?,
+                    created_by: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_by: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    edit_metadata_json: row.get(10)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -1310,9 +1348,9 @@ impl MiniJazzSqlite {
             sql_tx.execute(
                 r#"
                 INSERT OR IGNORE INTO projects__schema_v1_history (
-                  row_id, branch_id, tx_id, op, name, created_by, created_at, updated_by,
-                  updated_at, edit_metadata_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                  row_id, branch_id, tx_id, op, name, conflict_tx_ids_jsonb, created_by,
+                  created_at, updated_by, updated_at, edit_metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 "#,
                 params![
                     history.row_id,
@@ -1320,6 +1358,7 @@ impl MiniJazzSqlite {
                     history.tx_id,
                     history.op,
                     history.name,
+                    history.conflict_tx_ids_jsonb,
                     history.created_by,
                     history.created_at,
                     history.updated_by,
@@ -1332,13 +1371,15 @@ impl MiniJazzSqlite {
                 sql_tx.execute(
                     r#"
                     INSERT INTO projects__schema_v1_current (
-                      row_id, branch_id, visible_tx_id, is_deleted, name, created_by,
-                      created_at, updated_by, updated_at, edit_metadata_json
-                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                      row_id, branch_id, visible_tx_id, is_deleted, name,
+                      conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+                      edit_metadata_json
+                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                     ON CONFLICT(row_id, branch_id) DO UPDATE SET
                       visible_tx_id = excluded.visible_tx_id,
                       is_deleted = excluded.is_deleted,
                       name = excluded.name,
+                      conflict_tx_ids_jsonb = excluded.conflict_tx_ids_jsonb,
                       created_by = excluded.created_by,
                       created_at = excluded.created_at,
                       updated_by = excluded.updated_by,
@@ -1350,6 +1391,7 @@ impl MiniJazzSqlite {
                         history.tx_id,
                         is_deleted,
                         history.name,
+                        history.conflict_tx_ids_jsonb,
                         history.created_by,
                         history.created_at,
                         history.updated_by,
@@ -1879,6 +1921,49 @@ impl MiniJazzSqlite {
             });
         }
         Ok((rows, scope))
+    }
+
+    pub fn query_open_todos_with_project_conflict_meta(
+        &self,
+        branch_id: &str,
+    ) -> rusqlite::Result<Vec<TodoWithProjectConflictMeta>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+              t.row_id, t.title, t.done, t.created_at, t.updated_at, t.visible_tx_id,
+              p.row_id, p.name, p.visible_tx_id, p.conflict_tx_ids_jsonb
+            FROM todos__schema_v1_current t
+            JOIN projects__schema_v1_current p
+              ON p.branch_id = t.branch_id
+             AND p.row_id = t.project_id
+             AND p.is_deleted = 0
+            WHERE t.branch_id = ?1
+              AND t.is_deleted = 0
+              AND t.done = 0
+            ORDER BY t.created_at DESC, t.row_id ASC
+            "#,
+        )?;
+        stmt.query_map(params![branch_id], |row| {
+            Ok(TodoWithProjectConflictMeta {
+                todo: Todo {
+                    row_id: row.get(0)?,
+                    title: row.get(1)?,
+                    done: sql_to_bool(row.get(2)?),
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    visible_tx_id: row.get(5)?,
+                },
+                project: ProjectWithConflictMeta {
+                    row: Project {
+                        row_id: row.get(6)?,
+                        name: row.get(7)?,
+                        visible_tx_id: row.get(8)?,
+                    },
+                    conflict_tx_ids_jsonb: row.get(9)?,
+                },
+            })
+        })?
+        .collect()
     }
 
     pub fn query_open_todos_with_optional_projects(
@@ -2549,6 +2634,7 @@ impl MiniJazzSqlite {
                        projects__schema_v1_history.tx_id,
                        projects__schema_v1_history.op,
                        projects__schema_v1_history.name,
+                       projects__schema_v1_history.conflict_tx_ids_jsonb,
                        projects__schema_v1_history.created_by,
                        projects__schema_v1_history.created_at,
                        projects__schema_v1_history.updated_by,
@@ -2568,23 +2654,26 @@ impl MiniJazzSqlite {
                 let tx_id: String = row.get(1)?;
                 let op: String = row.get(2)?;
                 let name: String = row.get(3)?;
-                let created_by: String = row.get(4)?;
-                let created_at: i64 = row.get(5)?;
-                let updated_by: String = row.get(6)?;
-                let updated_at: i64 = row.get(7)?;
-                let edit_metadata: String = row.get(8)?;
+                let conflict_tx_ids: String = row.get(4)?;
+                let created_by: String = row.get(5)?;
+                let created_at: i64 = row.get(6)?;
+                let updated_by: String = row.get(7)?;
+                let updated_at: i64 = row.get(8)?;
+                let edit_metadata: String = row.get(9)?;
                 let is_deleted = if op == "delete" { 1 } else { 0 };
 
                 sql_tx.execute(
                     r#"
                     INSERT INTO projects__schema_v1_current (
-                      row_id, branch_id, visible_tx_id, is_deleted, name, created_by,
-                      created_at, updated_by, updated_at, edit_metadata_json
-                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                      row_id, branch_id, visible_tx_id, is_deleted, name,
+                      conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+                      edit_metadata_json
+                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                     ON CONFLICT(row_id, branch_id) DO UPDATE SET
                       visible_tx_id = excluded.visible_tx_id,
                       is_deleted = excluded.is_deleted,
                       name = excluded.name,
+                      conflict_tx_ids_jsonb = excluded.conflict_tx_ids_jsonb,
                       created_by = excluded.created_by,
                       created_at = excluded.created_at,
                       updated_by = excluded.updated_by,
@@ -2596,6 +2685,7 @@ impl MiniJazzSqlite {
                         tx_id,
                         is_deleted,
                         name,
+                        conflict_tx_ids,
                         created_by,
                         created_at,
                         updated_by,
@@ -2642,7 +2732,8 @@ impl MiniJazzSqlite {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT row_id, branch_id, visible_tx_id, is_deleted, name,
-                   created_by, created_at, updated_by, updated_at, edit_metadata_json
+                   conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+                   edit_metadata_json
             FROM projects__schema_v1_current
             ORDER BY branch_id, row_id
             "#,
@@ -2655,10 +2746,11 @@ impl MiniJazzSqlite {
                 row.get::<_, i64>(3)?.to_string(),
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, i64>(6)?.to_string(),
-                row.get::<_, String>(7)?,
-                row.get::<_, i64>(8)?.to_string(),
-                row.get::<_, String>(9)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?.to_string(),
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?.to_string(),
+                row.get::<_, String>(10)?,
             ];
             Ok(fields.join("|"))
         })?
@@ -3913,6 +4005,61 @@ mod tests {
     }
 
     #[test]
+    fn joined_dependency_conflict_candidates_are_exposed_with_project() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-base".into(),
+            node_id: "alice-device".into(),
+            name: "Base".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-1".into(),
+            title: "Shows project".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 150,
+        })
+        .unwrap();
+        db.update_project(UpdateProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-alice".into(),
+            node_id: "alice-device".into(),
+            base_tx_id: Some("tx-project-base".into()),
+            name: "Alice name".into(),
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.update_project(UpdateProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-bob".into(),
+            node_id: "bob-phone".into(),
+            base_tx_id: Some("tx-project-base".into()),
+            name: "Bob name".into(),
+            actor_id: "bob".into(),
+            now: 210,
+        })
+        .unwrap();
+
+        let rows = db
+            .query_open_todos_with_project_conflict_meta("main")
+            .unwrap();
+
+        assert_eq!(rows[0].project.row.name, "Bob name");
+        assert_eq!(
+            rows[0].project.conflict_tx_ids_jsonb,
+            r#"["tx-project-alice","tx-project-bob"]"#
+        );
+    }
+
+    #[test]
     fn joined_subscription_updates_when_dependency_row_changes() {
         let mut db = MiniJazzSqlite::in_memory().unwrap();
         db.insert_project(InsertProject {
@@ -3947,6 +4094,7 @@ mod tests {
             row_id: "project-1".into(),
             tx_id: "tx-project-2".into(),
             node_id: "alice-device".into(),
+            base_tx_id: None,
             name: "Launch renamed".into(),
             actor_id: "alice".into(),
             now: 300,
@@ -4070,6 +4218,7 @@ mod tests {
             row_id: "project-c".into(),
             tx_id: "tx-project-c-rename".into(),
             node_id: "alice-device".into(),
+            base_tx_id: None,
             name: "Aardwolf".into(),
             actor_id: "alice".into(),
             now: 300,
@@ -4369,6 +4518,7 @@ mod tests {
             row_id: "project-1".into(),
             tx_id: "tx-project-2".into(),
             node_id: "alice-device".into(),
+            base_tx_id: None,
             name: "Launch renamed".into(),
             actor_id: "alice".into(),
             now: 200,
