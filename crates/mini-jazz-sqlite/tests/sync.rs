@@ -106,7 +106,11 @@ fn query_scope_bundle_import_reproduces_optional_missing_include() -> mini_jazz_
     })?;
 
     let after_delete = alice.all(open_todos.clone())?;
-    assert_eq!(after_delete.scope.predicate_scopes.len(), 1);
+    assert!(after_delete
+        .scope
+        .predicate_scopes
+        .iter()
+        .any(|scope| scope.table == "projects" && scope.row_id == project_id));
 
     bob.import_query_scope(&alice.export_query_scope(&after_delete.scope)?)?;
     let bob_result = bob.all(open_todos)?;
@@ -114,6 +118,130 @@ fn query_scope_bundle_import_reproduces_optional_missing_include() -> mini_jazz_
     assert_eq!(bob_result.rows.len(), 1);
     assert_eq!(bob_result.rows[0].get("title").unwrap(), "Sync absence");
     assert!(bob_result.rows[0].include("project").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn query_scope_records_filter_predicates() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+        t.index("open_by_created", ["done", "$createdAt"]);
+    });
+
+    let mut alice = Harness::new().client("alice", schema).durable_in_memory()?;
+
+    alice.write(|tx| {
+        tx.insert("todos", json!({ "title": "Visible", "done": false }))?;
+        tx.insert("todos", json!({ "title": "Filtered out", "done": true }))?;
+        Ok(())
+    })?;
+
+    let open_todos = query("todos")
+        .filter(eq("done", false))
+        .order_by("$createdAt", Desc)
+        .limit(20);
+
+    let result = alice.all(open_todos)?;
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.scope.predicate_scopes.len(), 1);
+    assert_eq!(result.scope.predicate_scopes[0].table, "todos");
+    assert_eq!(result.scope.predicate_scopes[0].column, "done");
+    assert_eq!(result.scope.predicate_scopes[0].value, "false");
+
+    Ok(())
+}
+
+#[test]
+fn query_scope_bundle_import_reproduces_row_entering_filter() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+        t.index("open_by_created", ["done", "$createdAt"]);
+    });
+
+    let mut alice = Harness::new()
+        .client("alice", schema.clone())
+        .durable_in_memory()?;
+    let mut bob = Harness::new().client("bob", schema).durable_in_memory()?;
+    let mut hidden_id = String::new();
+
+    alice.write(|tx| {
+        tx.insert(
+            "todos",
+            json!({ "title": "Already visible", "done": false }),
+        )?;
+        let hidden = tx.insert("todos", json!({ "title": "Enters later", "done": true }))?;
+        hidden_id = hidden.id().to_owned();
+        Ok(())
+    })?;
+
+    let open_todos = query("todos")
+        .filter(eq("done", false))
+        .order_by("$createdAt", Desc);
+
+    let initial = alice.all(open_todos.clone())?;
+    bob.import_query_scope(&alice.export_query_scope(&initial.scope)?)?;
+    assert_eq!(bob.all(open_todos.clone())?.rows.len(), 1);
+
+    alice.write(|tx| {
+        tx.update("todos", &hidden_id, json!({ "done": false }))?;
+        Ok(())
+    })?;
+
+    let after_update = alice.all(open_todos.clone())?;
+    assert_eq!(after_update.rows.len(), 2);
+
+    bob.import_query_scope(&alice.export_query_scope(&after_update.scope)?)?;
+    let bob_result = bob.all(open_todos)?;
+
+    assert_eq!(bob_result.rows.len(), 2);
+    assert_eq!(bob_result.rows[0].get("title").unwrap(), "Enters later");
+
+    Ok(())
+}
+
+#[test]
+fn query_scope_bundle_import_reproduces_row_leaving_filter() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+        t.index("open_by_created", ["done", "$createdAt"]);
+    });
+
+    let mut alice = Harness::new()
+        .client("alice", schema.clone())
+        .durable_in_memory()?;
+    let mut bob = Harness::new().client("bob", schema).durable_in_memory()?;
+    let mut row_id = String::new();
+
+    alice.write(|tx| {
+        let row = tx.insert("todos", json!({ "title": "Leaves later", "done": false }))?;
+        row_id = row.id().to_owned();
+        Ok(())
+    })?;
+
+    let open_todos = query("todos")
+        .filter(eq("done", false))
+        .order_by("$createdAt", Desc);
+
+    let initial = alice.all(open_todos.clone())?;
+    bob.import_query_scope(&alice.export_query_scope(&initial.scope)?)?;
+    assert_eq!(bob.all(open_todos.clone())?.rows.len(), 1);
+
+    alice.write(|tx| {
+        tx.update("todos", &row_id, json!({ "done": true }))?;
+        Ok(())
+    })?;
+
+    let after_update = alice.all(open_todos.clone())?;
+    assert_eq!(after_update.rows.len(), 0);
+    assert_eq!(after_update.scope.predicate_scopes.len(), 1);
+
+    bob.import_query_scope(&alice.export_query_scope(&after_update.scope)?)?;
+    assert_eq!(bob.all(open_todos)?.rows.len(), 0);
 
     Ok(())
 }

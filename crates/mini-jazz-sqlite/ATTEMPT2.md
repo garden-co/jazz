@@ -412,6 +412,37 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 11:51 PDT
+
+Added first filter predicate scope and made it affect sync closure.
+
+Shape:
+
+- Query filters now emit `PredicateScope { table, column, op, value }`.
+- Filter predicate scopes currently have an empty `row_id`.
+- Empty `row_id` means broad table predicate closure during export: include all
+  row histories for that table.
+
+Red/green discovery:
+
+- A row entering a filtered result is already handled by result-row scope,
+  because the row appears in the new result.
+- A row leaving a filtered result is the important failure. The new result can
+  be empty, so result-row scope alone sends no history and the receiver keeps a
+  stale row.
+- Broad table predicate closure fixes correctness for that case, at obvious
+  overfetch cost.
+
+Next optimization target: replace broad table predicate closure with indexed
+old/new key ranges or a query-aware delta protocol, while preserving the
+row-leaving-filter test.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 11:45 PDT
 
 Made absence scope affect sync bundles.

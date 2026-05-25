@@ -165,6 +165,19 @@ pub(crate) fn filter_sql(alias: &str, filter: &Filter) -> String {
     format!("{} {op} ?", aliased_column(alias, &filter.column))
 }
 
+pub(crate) fn filter_scope_parts(filter: &Filter) -> (&str, &str, String) {
+    let op = match filter.op {
+        FilterOp::Eq => "=",
+        FilterOp::Gt => ">",
+    };
+    let value = match &filter.value {
+        FilterValue::Bool(value) => value.to_string(),
+        FilterValue::Int(value) => value.to_string(),
+        FilterValue::Text(value) => value.clone(),
+    };
+    (&filter.column, op, value)
+}
+
 fn aliased_column(alias: &str, column: &str) -> String {
     let col = system_column(column)
         .map(str::to_owned)

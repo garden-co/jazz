@@ -62,10 +62,14 @@ pub enum ScopeReason {
 pub struct PredicateScope {
     pub table: String,
     pub row_id: String,
+    pub column: String,
+    pub op: String,
+    pub value: String,
     pub reason: PredicateReason,
 }
 
 pub enum PredicateReason {
+    Filter,
     OptionalIncludeMissing,
 }
 

@@ -171,9 +171,11 @@ fn optional_subscription_nulls_deleted_dependency() -> mini_jazz_sqlite::Result<
 
     let after_delete = alice.all(open_todos)?;
     assert_eq!(after_delete.scope.dependency_rows.len(), 0);
-    assert_eq!(after_delete.scope.predicate_scopes.len(), 1);
-    assert_eq!(after_delete.scope.predicate_scopes[0].table, "projects");
-    assert_eq!(after_delete.scope.predicate_scopes[0].row_id, project_id);
+    assert!(after_delete
+        .scope
+        .predicate_scopes
+        .iter()
+        .any(|scope| scope.table == "projects" && scope.row_id == project_id));
 
     Ok(())
 }

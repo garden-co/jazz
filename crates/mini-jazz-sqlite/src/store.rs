@@ -1,5 +1,5 @@
 use crate::layout::{json_to_sql, placeholders, quote_ident, read_field, TablePlan};
-use crate::query::{filter_sql, Include, LoweredInclude, Query, SortDirection};
+use crate::query::{filter_scope_parts, filter_sql, Include, LoweredInclude, Query, SortDirection};
 use crate::schema::{FieldKind, Schema, TableDef};
 use crate::scope::{
     diff_rows, HistoryRecord, PredicateReason, PredicateScope, QueryResult, QueryScope,
@@ -401,6 +401,9 @@ impl Client {
                         predicate_scopes.push(PredicateScope {
                             table: include.table.name.clone(),
                             row_id,
+                            column: include.fk_field.name.clone(),
+                            op: "missing".to_owned(),
+                            value: String::new(),
                             reason: PredicateReason::OptionalIncludeMissing,
                         });
                     }
@@ -423,7 +426,21 @@ impl Client {
         let mut result_rows = Vec::new();
         let mut result_scope = Vec::new();
         let mut dependency_scope = Vec::new();
-        let mut predicate_scopes = Vec::new();
+        let mut predicate_scopes = query
+            .filters
+            .iter()
+            .map(|filter| {
+                let (column, op, value) = filter_scope_parts(filter);
+                PredicateScope {
+                    table: table.name.clone(),
+                    row_id: String::new(),
+                    column: column.to_owned(),
+                    op: op.to_owned(),
+                    value,
+                    reason: PredicateReason::Filter,
+                }
+            })
+            .collect::<Vec<_>>();
         for row in rows {
             let (view, result_locator, dependencies, predicates) = row?;
             result_rows.push(view);
@@ -482,7 +499,13 @@ impl Client {
             scoped_rows.insert((locator.table.clone(), locator.row_id.clone()), ());
         }
         for predicate in &scope.predicate_scopes {
-            scoped_rows.insert((predicate.table.clone(), predicate.row_id.clone()), ());
+            if predicate.row_id.is_empty() {
+                for row_id in self.table_row_ids(&predicate.table)? {
+                    scoped_rows.insert((predicate.table.clone(), row_id), ());
+                }
+            } else {
+                scoped_rows.insert((predicate.table.clone(), predicate.row_id.clone()), ());
+            }
         }
 
         for ((table_name, row_id), ()) in scoped_rows {
@@ -598,6 +621,21 @@ impl Client {
             txs: txs.into_values().collect(),
             history_rows: rows,
         })
+    }
+
+    fn table_row_ids(&self, table_name: &str) -> Result<Vec<String>> {
+        let table = self.schema.table_def(table_name)?;
+        let plan = TablePlan::new(table);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT j_row_id FROM {} WHERE j_branch_id = 'main' ORDER BY j_row_id",
+            plan.history
+        ))?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut row_ids = Vec::new();
+        for row in rows {
+            row_ids.push(row?);
+        }
+        Ok(row_ids)
     }
 
     pub fn import_query_scope(&mut self, bundle: &QueryScopeBundle) -> Result<()> {
