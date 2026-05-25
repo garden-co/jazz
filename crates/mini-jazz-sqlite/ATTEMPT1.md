@@ -758,6 +758,21 @@ which off-page boundary rows were watched. This keeps the correctness story
 alive while pointing at the next performance/scope problem: page boundary
 dependencies.
 
+### 2026-05-24 23:24 PDT
+
+Added explicit page-boundary scope for top-N joined queries:
+
+- top joined pages now expose concrete todo/project row locators
+- they also expose a boundary predicate like
+  `done=false AND projectName <= lastVisibleProjectName LIMIT N`
+
+Discovery: this is a useful but incomplete scope shape. It describes the
+current page boundary well enough to reproduce/debug the page, but by itself it
+does not catch a row whose old sort key was outside the boundary and whose new
+sort key moves inside it. Efficient subscriptions probably need either index
+maintenance that can invalidate on old/new sort keys or a broader ordered-index
+watch primitive.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

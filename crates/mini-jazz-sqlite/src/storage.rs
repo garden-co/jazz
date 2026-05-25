@@ -341,6 +341,13 @@ pub struct QueryScopeBundle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopJoinedPage {
+    pub rows: Vec<TodoWithProject>,
+    pub row_scope: Vec<RowVersionLocator>,
+    pub predicate_scope: Vec<PredicateScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryResult {
     pub rows: Vec<Todo>,
     pub scope: Vec<RowVersionLocator>,
@@ -2176,6 +2183,54 @@ impl MiniJazzSqlite {
             })
         })?
         .collect()
+    }
+
+    pub fn query_top_open_todos_by_project_name_with_scope(
+        &self,
+        branch_id: &str,
+        limit: i64,
+    ) -> rusqlite::Result<TopJoinedPage> {
+        let rows = self.query_top_open_todos_by_project_name(branch_id, limit)?;
+        let mut row_scope = Vec::new();
+        for row in &rows {
+            row_scope.push(RowVersionLocator {
+                table: "todos".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: branch_id.to_owned(),
+                row_id: row.todo.row_id.clone(),
+                tx_id: row.todo.visible_tx_id.clone(),
+                reason: "result".to_owned(),
+            });
+            row_scope.push(RowVersionLocator {
+                table: "projects".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: branch_id.to_owned(),
+                row_id: row.project.row_id.clone(),
+                tx_id: row.project.visible_tx_id.clone(),
+                reason: "dependency".to_owned(),
+            });
+        }
+
+        let mut predicate_scope = Vec::new();
+        if let Some(last_row) = rows.last() {
+            predicate_scope.push(PredicateScope {
+                table: "todos".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: branch_id.to_owned(),
+                index: "todos_done_project_name".to_owned(),
+                predicate: format!(
+                    r#"{{"done":false,"projectNameLte":"{}","limit":{limit}}}"#,
+                    last_row.project.name
+                ),
+                reason: "page_boundary".to_owned(),
+            });
+        }
+
+        Ok(TopJoinedPage {
+            rows,
+            row_scope,
+            predicate_scope,
+        })
     }
 
     pub fn explain_top_open_todos_by_project_name(
@@ -4720,6 +4775,90 @@ mod tests {
                     && added.project.name == "Aardwolf"
                     && removed.todo.row_id == "todo-b"
         ));
+    }
+
+    #[test]
+    fn top_joined_query_exposes_page_boundary_scope() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        for (project_id, tx_id, name, todo_id, todo_tx) in [
+            (
+                "project-a",
+                "tx-project-a",
+                "Aardvark",
+                "todo-a",
+                "tx-todo-a",
+            ),
+            (
+                "project-b",
+                "tx-project-b",
+                "Beehive",
+                "todo-b",
+                "tx-todo-b",
+            ),
+            (
+                "project-c",
+                "tx-project-c",
+                "Catapult",
+                "todo-c",
+                "tx-todo-c",
+            ),
+        ] {
+            db.insert_project(InsertProject {
+                row_id: project_id.into(),
+                tx_id: tx_id.into(),
+                node_id: "alice-device".into(),
+                name: name.into(),
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+            db.insert_todo_for_project(InsertTodoForProject {
+                row_id: todo_id.into(),
+                tx_id: todo_tx.into(),
+                node_id: "alice-device".into(),
+                project_id: project_id.into(),
+                title: format!("Todo for {name}"),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            })
+            .unwrap();
+        }
+
+        let page = db
+            .query_top_open_todos_by_project_name_with_scope("main", 2)
+            .unwrap();
+
+        assert_eq!(
+            page.rows
+                .iter()
+                .map(|row| row.todo.row_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo-a", "todo-b"]
+        );
+        assert_eq!(
+            page.row_scope
+                .iter()
+                .map(|locator| (locator.table.as_str(), locator.row_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("todos", "todo-a"),
+                ("projects", "project-a"),
+                ("todos", "todo-b"),
+                ("projects", "project-b")
+            ]
+        );
+        assert_eq!(
+            page.predicate_scope,
+            vec![PredicateScope {
+                table: "todos".into(),
+                schema: "schema_v1".into(),
+                branch_id: "main".into(),
+                index: "todos_done_project_name".into(),
+                predicate: r#"{"done":false,"projectNameLte":"Beehive","limit":2}"#.into(),
+                reason: "page_boundary".into(),
+            }]
+        );
     }
 
     #[test]
