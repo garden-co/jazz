@@ -813,6 +813,19 @@ shape from the earlier one-branch-plus-main source table. The hard part is not
 the SQL precedence rule; it is deriving the exact source list from durable
 branch provenance and conflict rules.
 
+### 2026-05-24 23:30 PDT
+
+Added a durable `jazz_branch_base` source table:
+
+- `create_branch` records its main base as precise provenance
+- tests can replace a branch's base list with multiple source branches
+- recorded sources can feed the same SQL source-list query path
+
+Discovery: preserving precise provenance and querying a flattened effective
+source list can coexist. The prototype stores the precise list directly as
+queryable rows; a later branch metadata layer can derive flattened effective
+sources from this table plus merge/conflict rules.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

@@ -498,6 +498,15 @@ impl MiniJazzSqlite {
               FOREIGN KEY (tx_id) REFERENCES jazz_tx(tx_id)
             );
 
+            CREATE TABLE IF NOT EXISTS jazz_branch_base (
+              branch_id TEXT NOT NULL,
+              source_branch_id TEXT NOT NULL,
+              source_global_epoch INTEGER NOT NULL,
+              precedence INTEGER NOT NULL,
+              PRIMARY KEY (branch_id, source_branch_id, precedence),
+              FOREIGN KEY (branch_id) REFERENCES jazz_branch(branch_id)
+            );
+
             CREATE TABLE IF NOT EXISTS todos__schema_v1_history (
               row_id TEXT NOT NULL,
               branch_id TEXT NOT NULL,
@@ -1160,6 +1169,14 @@ impl MiniJazzSqlite {
                 input.head_global_epoch,
                 input.base_provenance_json
             ],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_branch_base (
+              branch_id, source_branch_id, source_global_epoch, precedence
+            ) VALUES (?1, 'main', ?2, 0)
+            "#,
+            params![input.branch_id, input.head_global_epoch],
         )?;
         sql_tx.commit()
     }
@@ -2825,6 +2842,62 @@ impl MiniJazzSqlite {
         Ok(QueryResult { rows, scope })
     }
 
+    pub fn branch_base_sources(&self, branch_id: &str) -> rusqlite::Result<Vec<BranchSource>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT source_branch_id, source_global_epoch, precedence
+            FROM jazz_branch_base
+            WHERE branch_id = ?1
+            ORDER BY precedence ASC, source_branch_id ASC
+            "#,
+        )?;
+        stmt.query_map(params![branch_id], |row| {
+            Ok(BranchSource {
+                branch_id: row.get(0)?,
+                global_epoch: row.get(1)?,
+                precedence: row.get(2)?,
+            })
+        })?
+        .collect()
+    }
+
+    pub fn replace_branch_base_sources(
+        &mut self,
+        branch_id: &str,
+        sources: &[BranchSource],
+    ) -> rusqlite::Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        sql_tx.execute(
+            "DELETE FROM jazz_branch_base WHERE branch_id = ?1",
+            params![branch_id],
+        )?;
+        for source in sources {
+            sql_tx.execute(
+                r#"
+                INSERT INTO jazz_branch_base (
+                  branch_id, source_branch_id, source_global_epoch, precedence
+                ) VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![
+                    branch_id,
+                    source.branch_id,
+                    source.global_epoch,
+                    source.precedence
+                ],
+            )?;
+        }
+        sql_tx.commit()
+    }
+
+    pub fn query_todos_on_recorded_branch_bases(
+        &self,
+        query: &TodoQuery,
+        branch_id: &str,
+    ) -> rusqlite::Result<QueryResult> {
+        let sources = self.branch_base_sources(branch_id)?;
+        self.query_todos_with_branch_sources(query, &sources)
+    }
+
     fn visible_tx_ids(&self, snapshot: &SnapshotVector) -> rusqlite::Result<Vec<String>> {
         let mut tx_ids = Vec::new();
         {
@@ -4238,6 +4311,105 @@ mod tests {
                 .map(|locator| (locator.row_id.as_str(), locator.branch_id.as_str()))
                 .collect::<Vec<_>>(),
             vec![("todo-shared", "draft-b"), ("todo-main", "main")]
+        );
+    }
+
+    #[test]
+    fn branch_base_table_preserves_precise_sources_for_querying() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-main".into(),
+            tx_id: "tx-main".into(),
+            node_id: "alice-device".into(),
+            title: "Main base".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-main".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+        db.create_branch(CreateBranch {
+            branch_id: "draft".into(),
+            tx_id: "tx-create-draft".into(),
+            node_id: "alice-device".into(),
+            name: "Draft".into(),
+            head_global_epoch: 1,
+            base_provenance_json: r#"[{"branch":"main","globalBase":1}]"#.into(),
+            now: 150,
+        })
+        .unwrap();
+        db.insert_todo_in_branch(
+            "other-draft",
+            InsertTodo {
+                row_id: "todo-other".into(),
+                tx_id: "tx-other".into(),
+                node_id: "bob-device".into(),
+                title: "Other branch base".into(),
+                done: false,
+                actor_id: "bob".into(),
+                now: 200,
+            },
+        )
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-other".into(),
+            global_epoch: 2,
+        })
+        .unwrap();
+
+        db.replace_branch_base_sources(
+            "draft",
+            &[
+                BranchSource {
+                    branch_id: "other-draft".into(),
+                    global_epoch: 2,
+                    precedence: 0,
+                },
+                BranchSource {
+                    branch_id: "main".into(),
+                    global_epoch: 1,
+                    precedence: 1,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.branch_base_sources("draft").unwrap(),
+            vec![
+                BranchSource {
+                    branch_id: "other-draft".into(),
+                    global_epoch: 2,
+                    precedence: 0,
+                },
+                BranchSource {
+                    branch_id: "main".into(),
+                    global_epoch: 1,
+                    precedence: 1,
+                }
+            ]
+        );
+        let result = db
+            .query_todos_on_recorded_branch_bases(
+                &TodoQuery {
+                    branch_id: "draft".into(),
+                    done: Some(false),
+                    created_after: Some(0),
+                },
+                "draft",
+            )
+            .unwrap();
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| row.row_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo-other", "todo-main"]
         );
     }
 
