@@ -335,6 +335,12 @@ pub struct PredicateScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryScopeBundle {
+    pub row_bundles: Vec<TxBundle>,
+    pub predicate_scope: Vec<PredicateScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryResult {
     pub rows: Vec<Todo>,
     pub scope: Vec<RowVersionLocator>,
@@ -1258,6 +1264,28 @@ impl MiniJazzSqlite {
             todo_history,
             project_history,
         })
+    }
+
+    pub fn export_query_scope(
+        &self,
+        row_scope: &[RowVersionLocator],
+        predicate_scope: &[PredicateScope],
+    ) -> rusqlite::Result<QueryScopeBundle> {
+        let mut row_bundles = Vec::new();
+        for locator in row_scope {
+            row_bundles.push(self.export_tx(&locator.tx_id)?);
+        }
+        Ok(QueryScopeBundle {
+            row_bundles,
+            predicate_scope: predicate_scope.to_vec(),
+        })
+    }
+
+    pub fn import_query_scope(&mut self, bundle: &QueryScopeBundle) -> rusqlite::Result<()> {
+        for tx in &bundle.row_bundles {
+            self.import_tx(tx)?;
+        }
+        Ok(())
     }
 
     pub fn import_tx(&mut self, bundle: &TxBundle) -> rusqlite::Result<()> {
@@ -2471,6 +2499,125 @@ impl MiniJazzSqlite {
         });
         branch.scope.extend(base.scope);
         Ok(branch)
+    }
+
+    pub fn query_todos_on_branch_with_source_table(
+        &self,
+        query: &TodoQuery,
+        branch_id: &str,
+        global_epoch: i64,
+    ) -> rusqlite::Result<QueryResult> {
+        let base_global_epoch: i64 = self.conn.query_row(
+            "SELECT head_global_epoch FROM jazz_branch WHERE branch_id = ?1",
+            params![branch_id],
+            |row| row.get(0),
+        )?;
+        self.conn.execute_batch(
+            r#"
+            CREATE TEMP TABLE IF NOT EXISTS temp_branch_todo_sources (
+              source_branch_id TEXT NOT NULL,
+              source_global_epoch INTEGER NOT NULL,
+              precedence INTEGER NOT NULL,
+              PRIMARY KEY (source_branch_id, precedence)
+            );
+            DELETE FROM temp_branch_todo_sources;
+            "#,
+        )?;
+        self.conn.execute(
+            r#"
+            INSERT INTO temp_branch_todo_sources (
+              source_branch_id, source_global_epoch, precedence
+            ) VALUES
+              (?1, ?2, 0),
+              ('main', ?3, 1)
+            "#,
+            params![branch_id, global_epoch, base_global_epoch],
+        )?;
+
+        let done = query.done.map(bool_to_sql);
+        let created_after = query.created_after;
+        let rows = {
+            let mut stmt = self.conn.prepare(
+                r#"
+                WITH source_visible AS (
+                  SELECT
+                    h.row_id,
+                    h.branch_id,
+                    h.tx_id,
+                    h.op,
+                    h.title,
+                    h.done,
+                    h.created_at,
+                    h.updated_at,
+                    sources.precedence
+                  FROM temp_branch_todo_sources AS sources
+                  JOIN todos__schema_v1_history AS h
+                    ON h.branch_id = sources.source_branch_id
+                  JOIN jazz_tx AS tx
+                    ON tx.tx_id = h.tx_id
+                  WHERE tx.status = 'global_durable_accepted'
+                    AND tx.global_epoch <= sources.source_global_epoch
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM todos__schema_v1_history AS newer_h
+                      JOIN jazz_tx AS newer_tx
+                        ON newer_tx.tx_id = newer_h.tx_id
+                      WHERE newer_h.branch_id = h.branch_id
+                        AND newer_h.row_id = h.row_id
+                        AND newer_tx.status = 'global_durable_accepted'
+                        AND newer_tx.global_epoch <= sources.source_global_epoch
+                        AND newer_tx.global_epoch > tx.global_epoch
+                    )
+                ),
+                chosen AS (
+                  SELECT
+                    row_id,
+                    branch_id,
+                    tx_id,
+                    op,
+                    title,
+                    done,
+                    created_at,
+                    updated_at,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY row_id
+                      ORDER BY precedence ASC
+                    ) AS source_rank
+                  FROM source_visible
+                )
+                SELECT row_id, title, done, created_at, updated_at, tx_id, branch_id
+                FROM chosen
+                WHERE source_rank = 1
+                  AND op != 'delete'
+                  AND (?1 IS NULL OR done = ?1)
+                  AND (?2 IS NULL OR created_at > ?2)
+                ORDER BY created_at DESC, row_id ASC
+                "#,
+            )?;
+            stmt.query_map(params![done, created_after], |row| {
+                Ok((
+                    Todo {
+                        row_id: row.get(0)?,
+                        title: row.get(1)?,
+                        done: sql_to_bool(row.get(2)?),
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        visible_tx_id: row.get(5)?,
+                    },
+                    RowVersionLocator {
+                        table: "todos".to_owned(),
+                        schema: "schema_v1".to_owned(),
+                        branch_id: row.get(6)?,
+                        row_id: row.get(0)?,
+                        tx_id: row.get(5)?,
+                        reason: "result".to_owned(),
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let (rows, scope): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+        Ok(QueryResult { rows, scope })
     }
 
     fn visible_tx_ids(&self, snapshot: &SnapshotVector) -> rusqlite::Result<Vec<String>> {
@@ -4569,6 +4716,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("todos", "todo-1"), ("projects", "project-1")]
         );
+    }
+
+    #[test]
+    fn optional_absence_scope_survives_query_scope_sync() {
+        let mut alice = MiniJazzSqlite::in_memory().unwrap();
+        let mut bob = MiniJazzSqlite::in_memory().unwrap();
+
+        alice
+            .insert_todo_for_project(InsertTodoForProject {
+                row_id: "todo-1".into(),
+                tx_id: "tx-todo-1".into(),
+                node_id: "alice-device".into(),
+                project_id: "missing-project".into(),
+                title: "Render null project elsewhere".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            })
+            .unwrap();
+
+        let (_, row_scope, predicate_scope) = alice
+            .query_open_todos_with_optional_projects_and_scope("main")
+            .unwrap();
+        let scope_bundle = alice
+            .export_query_scope(&row_scope, &predicate_scope)
+            .unwrap();
+        assert_eq!(scope_bundle.row_bundles.len(), 1);
+        assert_eq!(scope_bundle.predicate_scope, predicate_scope);
+
+        bob.import_query_scope(&scope_bundle).unwrap();
+
+        let (rows, received_row_scope, received_predicate_scope) = bob
+            .query_open_todos_with_optional_projects_and_scope("main")
+            .unwrap();
+        assert_eq!(rows[0].project, None);
+        assert_eq!(
+            received_row_scope
+                .iter()
+                .map(|locator| (locator.table.as_str(), locator.row_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("todos", "todo-1")]
+        );
+        assert_eq!(received_predicate_scope, scope_bundle.predicate_scope);
     }
 
     #[test]

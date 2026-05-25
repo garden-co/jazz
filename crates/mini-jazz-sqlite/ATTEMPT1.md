@@ -716,6 +716,20 @@ dependencies, and uniqueness-like checks. The prototype is still table-specific
 and only recognizes project absence, but it proves where the validation hook
 lives.
 
+### 2026-05-24 23:20 PDT
+
+Added a first query-scope bundle:
+
+- row scope expands to normal transaction bundles
+- predicate scope is carried alongside row bundles
+- optional missing-project results can be synced to another store and still
+  reproduce both `project = None` and the absence predicate scope
+
+Discovery: predicate scope does not necessarily need a row bundle to be useful.
+For the first protocol shape, it can ride alongside concrete history bundles as
+declarative evidence/revalidation material. The receiver can reproduce the
+result from row bundles, then retain or recompute the same predicate scope.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
