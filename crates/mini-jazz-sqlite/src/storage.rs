@@ -570,7 +570,11 @@ impl MiniJazzSqlite {
                 ],
             )?;
         }
-        sql_tx.commit()
+        sql_tx.commit()?;
+        if bundle.tx.status == "rejected" {
+            self.rebuild_main_current_from_history()?;
+        }
+        Ok(())
     }
 
     pub fn update_todo(&mut self, input: UpdateTodo) -> rusqlite::Result<()> {
@@ -1973,6 +1977,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, ("global_durable_accepted".into(), 1));
+    }
+
+    #[test]
+    fn authority_rejection_bundle_repairs_existing_client_current() {
+        let mut alice = MiniJazzSqlite::in_memory().unwrap();
+        let mut authority = MiniJazzSqlite::in_memory().unwrap();
+
+        alice
+            .insert_todo(InsertTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-alice-1".into(),
+                node_id: "alice-device".into(),
+                title: "Reject me remotely".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+        assert!(alice.get_todo("main", "todo-1").unwrap().is_some());
+
+        authority
+            .import_tx(&alice.export_tx("tx-alice-1").unwrap())
+            .unwrap();
+        authority
+            .reject_tx(RejectTx {
+                tx_id: "tx-alice-1".into(),
+                reason_json: r#"{"code":"permission_denied"}"#.into(),
+            })
+            .unwrap();
+
+        alice
+            .import_tx(&authority.export_tx("tx-alice-1").unwrap())
+            .unwrap();
+
+        assert!(alice.get_todo("main", "todo-1").unwrap().is_none());
+        let status: (String, String) = alice
+            .conn
+            .query_row(
+                "SELECT status, rejection_reason_json FROM jazz_tx WHERE tx_id = 'tx-alice-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            status,
+            ("rejected".into(), r#"{"code":"permission_denied"}"#.into())
+        );
     }
 
     #[test]

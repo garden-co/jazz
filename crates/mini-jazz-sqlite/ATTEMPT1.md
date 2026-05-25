@@ -317,3 +317,18 @@ fields (`status`, `global_epoch`, rejection reason, etc.) while keeping the
 stable local identity. This is where "local versions turn into global ones"
 starts to become concrete: the row version's public `$txid` stays fixed, but
 its coordinate metadata is enriched when the authority response arrives.
+
+### 2026-05-24 23:15 PDT
+
+Added remote rejection propagation:
+
+```text
+client optimistic write -> authority imports/rejects -> authority exports same tx
+-> client imports fate -> client repairs main current
+```
+
+Discovery: import needs side effects, not just row insertion. If an incoming
+bundle marks an existing transaction rejected, the recipient has to repair any
+derived projections that may have included that optimistic transaction. The
+prototype uses full `main` rebuild again; write-set-driven repair remains the
+obvious optimization path.
