@@ -355,6 +355,7 @@ impl Client {
             "base.j_row_id".to_owned(),
             "base.j_visible_tx_id".to_owned(),
             "base.j_created_at".to_owned(),
+            "base.j_conflicts_json".to_owned(),
         ];
         for field in &table.fields {
             select_cols.push(format!("base.{}", quote_ident(&field.name)));
@@ -432,11 +433,14 @@ impl Client {
             idx += 1;
             let created_at: i64 = row.get(idx)?;
             idx += 1;
+            let conflicts_json: String = row.get(idx)?;
+            idx += 1;
 
             let mut values = BTreeMap::new();
             values.insert("$rowId".to_owned(), JsonValue::String(row_id.clone()));
             values.insert("$txId".to_owned(), JsonValue::String(visible_tx_id.clone()));
             values.insert("$createdAt".to_owned(), JsonValue::from(created_at));
+            values.insert("$conflicts".to_owned(), JsonValue::String(conflicts_json));
             for field in &table.fields {
                 values.insert(field.name.clone(), read_field(row, idx, field)?);
                 idx += 1;
@@ -1525,6 +1529,63 @@ impl Client {
             )?;
         }
         sql_tx.commit()?;
+        self.recompute_current_conflicts()?;
+        Ok(())
+    }
+
+    fn recompute_current_conflicts(&self) -> Result<()> {
+        for table in self.schema.tables.values() {
+            let plan = TablePlan::new(table);
+            self.conn.execute(
+                &format!("UPDATE {} SET j_conflicts_json = '{{}}'", plan.current),
+                [],
+            )?;
+
+            let mut stmt = self.conn.prepare(&format!(
+                "
+                SELECT h.j_row_id, h.j_branch_id, h.j_tx_id
+                FROM {} h
+                JOIN jazz_tx tx ON tx.tx_id = h.j_tx_id
+                WHERE tx.status = 'local_pending'
+                ORDER BY h.j_branch_id, h.j_row_id, h.j_tx_id
+                ",
+                plan.history
+            ))?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+
+            let mut candidates = BTreeMap::<(String, String), Vec<String>>::new();
+            for row in rows {
+                let (row_id, branch_id, tx_id) = row?;
+                candidates
+                    .entry((row_id, branch_id))
+                    .or_default()
+                    .push(tx_id);
+            }
+
+            for ((row_id, branch_id), tx_ids) in candidates {
+                if tx_ids.len() > 1 {
+                    self.conn.execute(
+                        &format!(
+                            "UPDATE {} SET j_conflicts_json = ?3 \
+                             WHERE j_row_id = ?1 AND j_branch_id = ?2",
+                            plan.current
+                        ),
+                        params![
+                            row_id,
+                            branch_id,
+                            serde_json::json!({ "candidates": tx_ids }).to_string()
+                        ],
+                    )?;
+                }
+            }
+        }
+
         Ok(())
     }
 

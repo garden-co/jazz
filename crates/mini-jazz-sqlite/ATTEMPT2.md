@@ -412,6 +412,45 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 12:10 PDT
+
+Added first conflict candidate projection.
+
+Red/green test:
+
+- Core creates and accepts a base row.
+- Alice and Bob both import the base and update the same row independently.
+- Core imports both pending updates without validating/rejecting either.
+- Query returns one resolved current row, while `$conflicts` contains both
+  pending candidate tx ids.
+
+Implementation shape:
+
+- Current row views now expose `$conflicts` from `j_conflicts_json`.
+- Current projection rebuild resets conflict metadata, then detects rows with
+  multiple local-pending candidates on the same branch/row id.
+- For those rows, current projection stores:
+  `{ "candidates": [tx_id, ...] }`
+
+Discovery: this is enough to prove the "resolved current value plus conflict
+meta" shape, but the candidate detection is intentionally naive. It uses
+multiple local-pending versions as the conflict signal, not true causality from
+read/write sets.
+
+Open debt:
+
+- Conflict candidate detection should use causality/read-write sets.
+- Conflict metadata should include per-column masks and candidate values, not
+  only tx ids.
+- Resolved value policy is currently whatever current projection selected
+  deterministically; it is not a real merge resolver.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 12:08 PDT
 
 Added a persistent write-set index.
