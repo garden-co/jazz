@@ -1229,3 +1229,49 @@ Discovery:
   pays an extra mapping-table hop. This suggests a good physical design may keep
   stable public ids at the edge and use local integer ids in every hot internal
   table/index.
+
+### 2026-05-25 13:13 PDT
+
+Added an inline BLOB id layout experiment.
+
+Command:
+
+- `cargo run -p mini-jazz-sqlite --example blob_id_layouts --release`
+
+Question:
+
+- If stable public ids can be decoded into fixed-width binary ids, can inline
+  `BLOB(16)`-style keys capture much of the integer/internal-id win without a
+  mapping-table lookup?
+
+Synthetic workload:
+
+- 40,000 rows.
+- 8,000 updates.
+- Long text ids vs 16-byte blob ids stored directly in tx/current/history keys.
+- Same indexes and query mechanics.
+
+Latest run:
+
+- `long_text_ids`: 24,543,232 bytes, insert 423.933 ms, current 2.253 ms,
+  snapshot 11.350 ms, public lookup 1.769 ms.
+- `blob16_ids`: 14,983,168 bytes, insert 391.095 ms, current 2.158 ms,
+  snapshot 11.867 ms, public lookup 1.618 ms.
+
+Ratios:
+
+- Blob ids use 0.61x text-id disk.
+- Insert is 0.92x text.
+- Current page is 0.96x text.
+- Snapshot page is 1.05x text in this run.
+- Public lookup is 0.92x text.
+
+Discovery:
+
+- Inline fixed-width binary ids are attractive if the external id format can be
+  losslessly decoded to compact bytes. They avoid the extra mapping-table hop of
+  interned integer ids while saving a lot of disk versus long text ids.
+- Compared with interned integer ids from the previous experiment, blob ids were
+  slightly smaller in this run (14.98 MB vs 17.00 MB) because the interned
+  layout also stores map indexes, and blob ids avoid lookup joins. This deserves a more apples-to-apples follow
+  up if public ids have a binary canonical form.
