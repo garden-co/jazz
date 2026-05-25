@@ -1332,3 +1332,25 @@ Discovery:
   24-byte header plus allocation. This strengthens the case for keeping public
   string ids at API/protocol edges and using compact ids in hot in-memory and
   SQLite structures.
+
+### 2026-05-25 13:36 PDT
+
+Decision: use integer enums for physical SQLite storage.
+
+Rationale:
+
+- Prior layout experiments compared compact integer system representations
+  against stringly system representations as a package, and integer system
+  representations consistently won on disk and usually on speed.
+- Enum strings are unlikely to dominate as much as row/tx ids, but they are hot
+  system values repeated across every transaction/history row.
+- Integer enums keep hot tables and indexes narrower, especially for `status`,
+  `kind`, `op`, conflict state, branch kind, and future transaction mode/fate
+  fields.
+
+Design note:
+
+- Public/debug names can be mapped at API, protocol, diagnostics, or inspection
+  boundaries.
+- The physical schema should reserve stable integer discriminants and document
+  them, rather than storing text enum labels on hot paths.
