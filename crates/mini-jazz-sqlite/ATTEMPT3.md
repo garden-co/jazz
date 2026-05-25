@@ -86,3 +86,30 @@ Added/proved:
 Important early catch: public tx ids cannot be based on local physical
 `node_num`, because two replicas may both assign the writer physical node `1`.
 Attempt 3 tx ids now include the public node id plus local epoch.
+
+## 2026-05-25 16:52 PDT
+
+Next target: start authority/scope semantics.
+
+Planned tests:
+
+- query-scoped sync is not table replication
+- authority acceptance enriches an existing public transaction id with global
+  epoch/receipt instead of replacing it
+
+## 2026-05-25 16:53 PDT
+
+Authority/scope slice is green: 11 whole-system tests pass.
+
+Added/proved:
+
+- open-todo query scope exports only referenced projects, not unrelated table
+  rows
+- global authority acceptance mutates/enriches the existing tx row with
+  `global_epoch`
+- global receipt state is separate from transaction identity and observable
+  through transaction info
+
+Learning: query-scoped export already forced us to stop treating "all history"
+as the easy sync payload. The test is tiny, but it protects the core product
+claim that Jazz syncs query scope rather than tables.

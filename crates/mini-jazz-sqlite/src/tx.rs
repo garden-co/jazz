@@ -4,7 +4,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub(crate) const KIND_DATA: i64 = 1;
 pub(crate) const MODE_MERGEABLE: i64 = 1;
 pub(crate) const OUTCOME_PENDING: i64 = 1;
+pub(crate) const OUTCOME_ACCEPTED: i64 = 2;
 pub(crate) const OUTCOME_REJECTED: i64 = 3;
+pub(crate) const TIER_GLOBAL: i64 = 3;
 
 pub(crate) fn ensure_node(conn: &Connection, node_id: &str) -> Result<i64> {
     conn.execute(
@@ -70,6 +72,21 @@ pub(crate) fn reject(conn: &Connection, tx_id: &str, code: &str) -> Result<i64> 
         "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
          VALUES (?, ?, '{}')",
         params![tx_num, code],
+    )?;
+    Ok(tx_num)
+}
+
+pub(crate) fn accept_global(conn: &Connection, tx_id: &str, global_epoch: i64) -> Result<i64> {
+    let tx_num = tx_num(conn, tx_id)?;
+    conn.execute(
+        "UPDATE jazz_tx SET outcome = ?, global_epoch = ? WHERE tx_num = ?",
+        params![OUTCOME_ACCEPTED, global_epoch, tx_num],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO jazz_tx_receipt
+         (tx_num, tier, observed_at, receipt_json)
+         VALUES (?, ?, ?, '{}')",
+        params![tx_num, TIER_GLOBAL, global_epoch],
     )?;
     Ok(tx_num)
 }

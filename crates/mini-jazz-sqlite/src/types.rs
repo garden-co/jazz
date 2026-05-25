@@ -19,6 +19,13 @@ pub struct StorageStats {
     tx_nums_by_id: BTreeMap<String, i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransactionInfo {
+    pub tx_id: String,
+    pub global_epoch: Option<i64>,
+    pub receipt_tiers: Vec<String>,
+}
+
 impl StorageStats {
     pub(crate) fn new(
         history_rows: i64,

@@ -186,3 +186,48 @@ fn replicas_may_use_different_physical_ids_for_same_public_ids() {
         bob.physical_row_num_for("project-1").unwrap()
     );
 }
+
+#[test]
+fn query_scope_is_not_table_replication() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+
+    alice
+        .create_project("project-1", "Visible project")
+        .unwrap();
+    alice
+        .create_todo("todo-1", "In query scope", false, "project-1")
+        .unwrap();
+    alice
+        .create_project("project-2", "Unrelated project")
+        .unwrap();
+
+    let bundle = alice.export_query_scope_open_todos().unwrap();
+    bob.apply_bundle(&bundle).unwrap();
+
+    assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
+    assert!(bob.physical_row_num_for("project-1").is_ok());
+    assert!(bob.physical_row_num_for("project-2").is_err());
+}
+
+#[test]
+fn authority_acceptance_enriches_existing_transaction() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Accept me", false, "project-1")
+        .unwrap();
+    let before = alice.transaction_info(&tx).unwrap();
+
+    alice.accept_transaction_at_global(&tx, 7).unwrap();
+
+    let after = alice.transaction_info(&tx).unwrap();
+    assert_eq!(after.tx_id, before.tx_id);
+    assert_eq!(after.global_epoch, Some(7));
+    assert!(after.receipt_tiers.contains(&"global".to_owned()));
+    assert_eq!(
+        alice.storage_stats().unwrap().physical_tx_num_for(&tx),
+        Some(alice.transaction_physical_num_for(&tx).unwrap())
+    );
+}

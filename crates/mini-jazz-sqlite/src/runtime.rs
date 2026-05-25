@@ -1,5 +1,5 @@
 use crate::sync::{Bundle, ProjectRecord, TodoRecord, TxRecord};
-use crate::types::{StorageStats, TodoView};
+use crate::types::{StorageStats, TodoView, TransactionInfo};
 use crate::{schema, storage, tx, Result, Storage};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
@@ -257,6 +257,37 @@ impl Runtime {
         )?;
         db.commit()?;
         Ok(())
+    }
+
+    pub fn accept_transaction_at_global(&mut self, tx_id: &str, global_epoch: i64) -> Result<()> {
+        tx::accept_global(&self.conn, tx_id, global_epoch)?;
+        Ok(())
+    }
+
+    pub fn transaction_info(&self, tx_id: &str) -> Result<TransactionInfo> {
+        let (tx_id, global_epoch) = self.conn.query_row(
+            "SELECT tx_id, global_epoch FROM jazz_tx WHERE tx_id = ?",
+            params![tx_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT tier FROM jazz_tx_receipt receipt
+             JOIN jazz_tx tx ON tx.tx_num = receipt.tx_num
+             WHERE tx.tx_id = ?
+             ORDER BY tier",
+        )?;
+        let receipt_tiers = stmt
+            .query_map(params![tx_id], |row| tier_name(row.get::<_, i64>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(TransactionInfo {
+            tx_id,
+            global_epoch,
+            receipt_tiers,
+        })
+    }
+
+    pub fn transaction_physical_num_for(&self, tx_id: &str) -> Result<i64> {
+        tx::tx_num(&self.conn, tx_id)
     }
 
     pub fn transaction(&mut self) -> TransactionBuilder<'_> {
@@ -641,9 +672,17 @@ fn export_projects(conn: &Connection) -> Result<Vec<ProjectRecord>> {
          FROM projects__schema_v1_history h
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.row_num IN (
+           SELECT DISTINCT project_row_num
+           FROM todos__schema_v1_current todo
+           JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
+           WHERE todo.is_deleted = 0
+             AND todo.done = 0
+             AND todo_tx.outcome != ?
+         )
          ORDER BY h.row_num, h.tx_num",
     )?;
-    let records = stmt.query_map([], |row| {
+    let records = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
         Ok(ProjectRecord {
             row_id: row.get(0)?,
             tx_id: row.get(1)?,
@@ -699,4 +738,12 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn tier_name(tier: i64) -> rusqlite::Result<String> {
+    Ok(match tier {
+        tx::TIER_GLOBAL => "global",
+        _ => "unknown",
+    }
+    .to_owned())
 }
