@@ -168,6 +168,7 @@ pub struct SnapshotVector {
 pub struct TxBundle {
     pub tx: TxBundleRecord,
     pub todo_history: Vec<TodoHistoryRecord>,
+    pub project_history: Vec<ProjectHistoryRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,9 +196,24 @@ pub struct TodoHistoryRecord {
     pub branch_id: String,
     pub tx_id: String,
     pub op: String,
+    pub project_id: String,
     pub title: Option<String>,
     pub done: Option<i64>,
     pub conflict_tx_ids_jsonb: String,
+    pub created_by: Option<String>,
+    pub created_at: i64,
+    pub updated_by: Option<String>,
+    pub updated_at: i64,
+    pub edit_metadata_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectHistoryRecord {
+    pub row_id: String,
+    pub branch_id: String,
+    pub tx_id: String,
+    pub op: String,
+    pub name: Option<String>,
     pub created_by: Option<String>,
     pub created_at: i64,
     pub updated_by: Option<String>,
@@ -862,7 +878,7 @@ impl MiniJazzSqlite {
         )?;
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
+            SELECT row_id, branch_id, tx_id, op, project_id, title, done, conflict_tx_ids_jsonb,
                    created_by, created_at, updated_by, updated_at, edit_metadata_json
             FROM todos__schema_v1_history
             WHERE tx_id = ?1
@@ -876,18 +892,48 @@ impl MiniJazzSqlite {
                     branch_id: row.get(1)?,
                     tx_id: row.get(2)?,
                     op: row.get(3)?,
-                    title: row.get(4)?,
-                    done: row.get(5)?,
-                    conflict_tx_ids_jsonb: row.get(6)?,
-                    created_by: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_by: row.get(9)?,
-                    updated_at: row.get(10)?,
-                    edit_metadata_json: row.get(11)?,
+                    project_id: row.get(4)?,
+                    title: row.get(5)?,
+                    done: row.get(6)?,
+                    conflict_tx_ids_jsonb: row.get(7)?,
+                    created_by: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_by: row.get(10)?,
+                    updated_at: row.get(11)?,
+                    edit_metadata_json: row.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(TxBundle { tx, todo_history })
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT row_id, branch_id, tx_id, op, name, created_by, created_at, updated_by,
+                   updated_at, edit_metadata_json
+            FROM projects__schema_v1_history
+            WHERE tx_id = ?1
+            ORDER BY branch_id, row_id
+            "#,
+        )?;
+        let project_history = stmt
+            .query_map(params![tx_id], |row| {
+                Ok(ProjectHistoryRecord {
+                    row_id: row.get(0)?,
+                    branch_id: row.get(1)?,
+                    tx_id: row.get(2)?,
+                    op: row.get(3)?,
+                    name: row.get(4)?,
+                    created_by: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_by: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    edit_metadata_json: row.get(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(TxBundle {
+            tx,
+            todo_history,
+            project_history,
+        })
     }
 
     pub fn import_tx(&mut self, bundle: &TxBundle) -> rusqlite::Result<()> {
@@ -929,15 +975,16 @@ impl MiniJazzSqlite {
             sql_tx.execute(
                 r#"
                 INSERT OR IGNORE INTO todos__schema_v1_history (
-                  row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
+                  row_id, branch_id, tx_id, op, project_id, title, done, conflict_tx_ids_jsonb,
                   created_by, created_at, updated_by, updated_at, edit_metadata_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 "#,
                 params![
                     history.row_id,
                     history.branch_id,
                     history.tx_id,
                     history.op,
+                    history.project_id,
                     history.title,
                     history.done,
                     history.conflict_tx_ids_jsonb,
@@ -948,6 +995,97 @@ impl MiniJazzSqlite {
                     history.edit_metadata_json
                 ],
             )?;
+            if bundle.tx.status != "rejected" && history.branch_id == "main" {
+                let is_deleted = if history.op == "delete" { 1 } else { 0 };
+                sql_tx.execute(
+                    r#"
+                    INSERT INTO todos__schema_v1_current (
+                      row_id, branch_id, visible_tx_id, is_deleted, project_id, title, done,
+                      conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+                      edit_metadata_json
+                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    ON CONFLICT(row_id, branch_id) DO UPDATE SET
+                      visible_tx_id = excluded.visible_tx_id,
+                      is_deleted = excluded.is_deleted,
+                      project_id = excluded.project_id,
+                      title = excluded.title,
+                      done = excluded.done,
+                      conflict_tx_ids_jsonb = excluded.conflict_tx_ids_jsonb,
+                      created_by = excluded.created_by,
+                      created_at = excluded.created_at,
+                      updated_by = excluded.updated_by,
+                      updated_at = excluded.updated_at,
+                      edit_metadata_json = excluded.edit_metadata_json
+                    "#,
+                    params![
+                        history.row_id,
+                        history.tx_id,
+                        is_deleted,
+                        history.project_id,
+                        history.title,
+                        history.done,
+                        history.conflict_tx_ids_jsonb,
+                        history.created_by,
+                        history.created_at,
+                        history.updated_by,
+                        history.updated_at,
+                        history.edit_metadata_json
+                    ],
+                )?;
+            }
+        }
+        for history in &bundle.project_history {
+            sql_tx.execute(
+                r#"
+                INSERT OR IGNORE INTO projects__schema_v1_history (
+                  row_id, branch_id, tx_id, op, name, created_by, created_at, updated_by,
+                  updated_at, edit_metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+                params![
+                    history.row_id,
+                    history.branch_id,
+                    history.tx_id,
+                    history.op,
+                    history.name,
+                    history.created_by,
+                    history.created_at,
+                    history.updated_by,
+                    history.updated_at,
+                    history.edit_metadata_json
+                ],
+            )?;
+            if bundle.tx.status != "rejected" && history.branch_id == "main" {
+                let is_deleted = if history.op == "delete" { 1 } else { 0 };
+                sql_tx.execute(
+                    r#"
+                    INSERT INTO projects__schema_v1_current (
+                      row_id, branch_id, visible_tx_id, is_deleted, name, created_by,
+                      created_at, updated_by, updated_at, edit_metadata_json
+                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    ON CONFLICT(row_id, branch_id) DO UPDATE SET
+                      visible_tx_id = excluded.visible_tx_id,
+                      is_deleted = excluded.is_deleted,
+                      name = excluded.name,
+                      created_by = excluded.created_by,
+                      created_at = excluded.created_at,
+                      updated_by = excluded.updated_by,
+                      updated_at = excluded.updated_at,
+                      edit_metadata_json = excluded.edit_metadata_json
+                    "#,
+                    params![
+                        history.row_id,
+                        history.tx_id,
+                        is_deleted,
+                        history.name,
+                        history.created_by,
+                        history.created_at,
+                        history.updated_by,
+                        history.updated_at,
+                        history.edit_metadata_json
+                    ],
+                )?;
+            }
         }
         sql_tx.commit()?;
         if bundle.tx.status == "rejected" {
@@ -2937,6 +3075,51 @@ mod tests {
                     && after.project.name == "Launch renamed"
                     && before.todo.visible_tx_id == after.todo.visible_tx_id
         ));
+    }
+
+    #[test]
+    fn scoped_join_dependencies_can_sync_as_project_and_todo_bundles() {
+        let mut alice = MiniJazzSqlite::in_memory().unwrap();
+        let mut bob = MiniJazzSqlite::in_memory().unwrap();
+
+        alice
+            .insert_project(InsertProject {
+                row_id: "project-1".into(),
+                tx_id: "tx-project-1".into(),
+                node_id: "alice-device".into(),
+                name: "Launch".into(),
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+        alice
+            .insert_todo_for_project(InsertTodoForProject {
+                row_id: "todo-1".into(),
+                tx_id: "tx-todo-1".into(),
+                node_id: "alice-device".into(),
+                project_id: "project-1".into(),
+                title: "Wire sync scope".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            })
+            .unwrap();
+
+        let (_, scope) = alice.query_open_todos_with_projects("main").unwrap();
+        for locator in scope {
+            bob.import_tx(&alice.export_tx(&locator.tx_id).unwrap())
+                .unwrap();
+        }
+
+        let (rows, received_scope) = bob.query_open_todos_with_projects("main").unwrap();
+        assert_eq!(rows[0].project.name, "Launch");
+        assert_eq!(
+            received_scope
+                .iter()
+                .map(|locator| (locator.table.as_str(), locator.row_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("todos", "todo-1"), ("projects", "project-1")]
+        );
     }
 
     #[test]

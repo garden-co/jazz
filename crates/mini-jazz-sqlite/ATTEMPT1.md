@@ -413,6 +413,25 @@ visibility relation inspectable. The tradeoff is lifecycle management for temp
 tables during nested reads/subscriptions, but that seems more tractable than
 generating huge `IN (...)` predicates for large read sets.
 
+### 2026-05-24 22:49 PDT
+
+Extended transaction bundles to carry `projects` history as well as `todos`
+history, and made import update main current projections for imported
+non-rejected rows.
+
+Validated a scoped join sync path:
+
+```text
+alice joined query -> scope has todo tx + project tx
+-> bob imports both scoped bundles -> bob can reproduce joined query
+```
+
+Discovery: scope expansion immediately forces bundles to be table-polymorphic.
+The first bundle shape was accidentally `todos`-centric; joins make that wrong.
+The sync sender should expand locators into all relevant history rows by table
+and schema, while the receiver updates enough projections to answer ordinary
+current queries after import.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
