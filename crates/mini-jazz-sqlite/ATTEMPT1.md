@@ -302,3 +302,18 @@ SQLite database, stable string identities on the wire.
 Open fuzziness: authority acceptance is still a direct mutation of the imported
 `jazz_tx` row. If acceptance receipts become append-only, import/export needs to
 carry both proposed local transaction state and authority fate events.
+
+### 2026-05-24 23:10 PDT
+
+Added authority fate propagation back to a client:
+
+```text
+client exports local tx -> authority imports/accepts -> authority exports same tx
+-> client imports fate -> client global snapshot sees accepted tx
+```
+
+Discovery: `import_tx` cannot be insert-only. It has to upsert transaction fate
+fields (`status`, `global_epoch`, rejection reason, etc.) while keeping the
+stable local identity. This is where "local versions turn into global ones"
+starts to become concrete: the row version's public `$txid` stays fixed, but
+its coordinate metadata is enriched when the authority response arrives.

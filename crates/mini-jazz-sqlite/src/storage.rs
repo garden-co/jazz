@@ -516,11 +516,17 @@ impl MiniJazzSqlite {
         let node_num = ensure_node(&sql_tx, &bundle.tx.node_id)?;
         sql_tx.execute(
             r#"
-            INSERT OR IGNORE INTO jazz_tx (
+            INSERT INTO jazz_tx (
               tx_id, node_num, local_epoch, global_epoch, kind, base_global_epoch,
               base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
               status, rejection_reason_json, created_at, sealed_at, metadata_json
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            ON CONFLICT(tx_id) DO UPDATE SET
+              global_epoch = excluded.global_epoch,
+              status = excluded.status,
+              rejection_reason_json = excluded.rejection_reason_json,
+              sealed_at = excluded.sealed_at,
+              metadata_json = excluded.metadata_json
             "#,
             params![
                 bundle.tx.tx_id,
@@ -1921,6 +1927,52 @@ mod tests {
             .unwrap();
         assert_eq!(accepted.rows[0].title, "Sync me");
         assert_eq!(accepted.rows[0].visible_tx_id, "tx-alice-1");
+    }
+
+    #[test]
+    fn authority_fate_bundle_upgrades_existing_client_transaction() {
+        let mut alice = MiniJazzSqlite::in_memory().unwrap();
+        let mut authority = MiniJazzSqlite::in_memory().unwrap();
+
+        alice
+            .insert_todo(InsertTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-alice-1".into(),
+                node_id: "alice-device".into(),
+                title: "Sync me back".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+        authority
+            .import_tx(&alice.export_tx("tx-alice-1").unwrap())
+            .unwrap();
+        authority
+            .accept_tx(AcceptTx {
+                tx_id: "tx-alice-1".into(),
+                global_epoch: 1,
+            })
+            .unwrap();
+
+        alice
+            .import_tx(&authority.export_tx("tx-alice-1").unwrap())
+            .unwrap();
+
+        let global_rows = alice
+            .query_todos_at_global_epoch(&TodoQuery::open_since(0), 1)
+            .unwrap();
+        assert_eq!(global_rows.rows[0].title, "Sync me back");
+
+        let status: (String, i64) = alice
+            .conn
+            .query_row(
+                "SELECT status, global_epoch FROM jazz_tx WHERE tx_id = 'tx-alice-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, ("global_durable_accepted".into(), 1));
     }
 
     #[test]
