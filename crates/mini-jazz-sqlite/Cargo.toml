@@ -3,11 +3,3 @@ name = "mini-jazz-sqlite"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
-[dev-dependencies]
-criterion = "0.5"
-rusqlite = { version = "0.34", features = ["bundled"] }
-
-[[bench]]
-name = "sqlite_shapes"
-harness = false
