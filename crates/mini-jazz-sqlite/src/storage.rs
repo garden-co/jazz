@@ -92,6 +92,47 @@ pub struct SnapshotVector {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxBundle {
+    pub tx: TxBundleRecord,
+    pub todo_history: Vec<TodoHistoryRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxBundleRecord {
+    pub tx_id: String,
+    pub node_id: String,
+    pub local_epoch: i64,
+    pub global_epoch: Option<i64>,
+    pub kind: String,
+    pub base_global_epoch: i64,
+    pub base_local_jsonb: String,
+    pub base_include_jsonb: String,
+    pub read_set_jsonb: String,
+    pub write_set_jsonb: String,
+    pub status: String,
+    pub rejection_reason_json: Option<String>,
+    pub created_at: i64,
+    pub sealed_at: Option<i64>,
+    pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoHistoryRecord {
+    pub row_id: String,
+    pub branch_id: String,
+    pub tx_id: String,
+    pub op: String,
+    pub title: Option<String>,
+    pub done: Option<i64>,
+    pub conflict_tx_ids_jsonb: String,
+    pub created_by: Option<String>,
+    pub created_at: i64,
+    pub updated_by: Option<String>,
+    pub updated_at: i64,
+    pub edit_metadata_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSnapshotBase {
     pub node_id: String,
     pub local_epoch: i64,
@@ -405,6 +446,124 @@ impl MiniJazzSqlite {
                 input.base_provenance_json
             ],
         )?;
+        sql_tx.commit()
+    }
+
+    pub fn export_tx(&self, tx_id: &str) -> rusqlite::Result<TxBundle> {
+        let tx = self.conn.query_row(
+            r#"
+            SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.kind,
+                   tx.base_global_epoch, tx.base_local_jsonb, tx.base_include_jsonb,
+                   tx.read_set_jsonb, tx.write_set_jsonb, tx.status,
+                   tx.rejection_reason_json, tx.created_at, tx.sealed_at, tx.metadata_json
+            FROM jazz_tx tx
+            JOIN jazz_node node ON node.node_num = tx.node_num
+            WHERE tx.tx_id = ?1
+            "#,
+            params![tx_id],
+            |row| {
+                Ok(TxBundleRecord {
+                    tx_id: row.get(0)?,
+                    node_id: row.get(1)?,
+                    local_epoch: row.get(2)?,
+                    global_epoch: row.get(3)?,
+                    kind: row.get(4)?,
+                    base_global_epoch: row.get(5)?,
+                    base_local_jsonb: row.get(6)?,
+                    base_include_jsonb: row.get(7)?,
+                    read_set_jsonb: row.get(8)?,
+                    write_set_jsonb: row.get(9)?,
+                    status: row.get(10)?,
+                    rejection_reason_json: row.get(11)?,
+                    created_at: row.get(12)?,
+                    sealed_at: row.get(13)?,
+                    metadata_json: row.get(14)?,
+                })
+            },
+        )?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
+                   created_by, created_at, updated_by, updated_at, edit_metadata_json
+            FROM todos__schema_v1_history
+            WHERE tx_id = ?1
+            ORDER BY branch_id, row_id
+            "#,
+        )?;
+        let todo_history = stmt
+            .query_map(params![tx_id], |row| {
+                Ok(TodoHistoryRecord {
+                    row_id: row.get(0)?,
+                    branch_id: row.get(1)?,
+                    tx_id: row.get(2)?,
+                    op: row.get(3)?,
+                    title: row.get(4)?,
+                    done: row.get(5)?,
+                    conflict_tx_ids_jsonb: row.get(6)?,
+                    created_by: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_by: row.get(9)?,
+                    updated_at: row.get(10)?,
+                    edit_metadata_json: row.get(11)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(TxBundle { tx, todo_history })
+    }
+
+    pub fn import_tx(&mut self, bundle: &TxBundle) -> rusqlite::Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &bundle.tx.node_id)?;
+        sql_tx.execute(
+            r#"
+            INSERT OR IGNORE INTO jazz_tx (
+              tx_id, node_num, local_epoch, global_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, rejection_reason_json, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            "#,
+            params![
+                bundle.tx.tx_id,
+                node_num,
+                bundle.tx.local_epoch,
+                bundle.tx.global_epoch,
+                bundle.tx.kind,
+                bundle.tx.base_global_epoch,
+                bundle.tx.base_local_jsonb,
+                bundle.tx.base_include_jsonb,
+                bundle.tx.read_set_jsonb,
+                bundle.tx.write_set_jsonb,
+                bundle.tx.status,
+                bundle.tx.rejection_reason_json,
+                bundle.tx.created_at,
+                bundle.tx.sealed_at,
+                bundle.tx.metadata_json
+            ],
+        )?;
+        for history in &bundle.todo_history {
+            sql_tx.execute(
+                r#"
+                INSERT OR IGNORE INTO todos__schema_v1_history (
+                  row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
+                  created_by, created_at, updated_by, updated_at, edit_metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "#,
+                params![
+                    history.row_id,
+                    history.branch_id,
+                    history.tx_id,
+                    history.op,
+                    history.title,
+                    history.done,
+                    history.conflict_tx_ids_jsonb,
+                    history.created_by,
+                    history.created_at,
+                    history.updated_by,
+                    history.updated_at,
+                    history.edit_metadata_json
+                ],
+            )?;
+        }
         sql_tx.commit()
     }
 
@@ -1729,6 +1888,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(branch_history_count, 1);
+    }
+
+    #[test]
+    fn transaction_bundle_import_can_be_accepted_by_an_authority_store() {
+        let mut alice = MiniJazzSqlite::in_memory().unwrap();
+        let mut authority = MiniJazzSqlite::in_memory().unwrap();
+
+        alice
+            .insert_todo(InsertTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-alice-1".into(),
+                node_id: "alice-device".into(),
+                title: "Sync me".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+
+        let bundle = alice.export_tx("tx-alice-1").unwrap();
+        authority.import_tx(&bundle).unwrap();
+        authority
+            .accept_tx(AcceptTx {
+                tx_id: "tx-alice-1".into(),
+                global_epoch: 1,
+            })
+            .unwrap();
+
+        let accepted = authority
+            .query_todos_at_global_epoch(&TodoQuery::open_since(0), 1)
+            .unwrap();
+        assert_eq!(accepted.rows[0].title, "Sync me");
+        assert_eq!(accepted.rows[0].visible_tx_id, "tx-alice-1");
     }
 
     #[test]

@@ -278,3 +278,27 @@ is not just a single vector; it is a set of source branch/vector components plus
 local branch history. The current implementation hard-codes "one main base plus
 branch-local rows" in Rust. The real lowering probably needs a SQL-visible
 branch source relation before joins, pagination, and sync scopes can be correct.
+
+### 2026-05-24 23:04 PDT
+
+Added first sync bundle shape:
+
+- `export_tx(tx_id)`
+- `import_tx(bundle)`
+- bundle includes one `jazz_tx` row with stable `node_id/local_epoch`
+- bundle includes associated `todos` history rows
+
+Validated a client-to-authority path:
+
+```text
+alice local write -> export bundle -> authority import -> authority accept -> global snapshot read
+```
+
+Discovery: storing `node_num` as a local surrogate is fine as long as every sync
+boundary exports stable `node_id` and rehydrates the local surrogate on import.
+This mirrors the likely production shape: compact local integer keys inside one
+SQLite database, stable string identities on the wire.
+
+Open fuzziness: authority acceptance is still a direct mutation of the imported
+`jazz_tx` row. If acceptance receipts become append-only, import/export needs to
+carry both proposed local transaction state and authority fate events.
