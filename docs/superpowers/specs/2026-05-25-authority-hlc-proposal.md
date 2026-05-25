@@ -1,7 +1,8 @@
 # Proposal: Authority HLC Row Stamps
 
-Add one nullable global stamp to each row-batch member, while keeping the
-existing client timestamp exactly what it is today: human-facing provenance.
+Add one nullable global batch stamp, copied into each row-batch member, while
+keeping the existing client timestamp exactly what it is today: human-facing
+provenance.
 
 The point is not to change conflict resolution now. The point is to make future
 deterministic global snapshots possible.
@@ -46,7 +47,7 @@ updated_at:
   "When did the writer say this happened?"
 
 authority_hlc:
-  "Where did the global authority place this row-batch member
+  "Where did the global authority place this batch
    in the durable global sequence?"
 ```
 
@@ -75,12 +76,12 @@ StoredRowBatch
   parents
   updated_at        unchanged
   created_at        unchanged
-  authority_hlc     new, nullable
+  authority_hlc     new, nullable copy of the batch stamp
   data
 ```
 
 `authority_hlc = null` is normal. It means the row exists locally or at the
-edge, but the global authority has not stamped that row-batch member yet.
+edge, but the global authority has not stamped its batch yet.
 
 ## Write Flow
 
@@ -94,10 +95,10 @@ Client or edge writes
           | sync upstream
           v
 
-Global authority records the row-batch member
+Global authority records the batch
 
   updated_at    = unchanged
-  authority_hlc = next global HLC
+  authority_hlc = next global HLC for the batch
 
           |
           | sync downstream
@@ -113,17 +114,19 @@ relay a stamp they received, but they do not invent one.
 
 ## Multi-Row Batches
 
-The stamp is per row-batch member, not per batch:
+The stamp is per batch, but stored inside every row member:
 
 ```text
-batch A
-  row 1 -> authority_hlc = HLC 100
-  row 2 -> authority_hlc = HLC 101
-  row 3 -> authority_hlc = HLC 102
+batch A -> authority_hlc = HLC 100
+
+  row 1 stores authority_hlc = HLC 100
+  row 2 stores authority_hlc = HLC 100
+  row 3 stores authority_hlc = HLC 100
 ```
 
-This keeps future row scans simple. A snapshot scan can inspect row history
-directly instead of joining through batch metadata.
+This gives the batch one place in the global sequence while still keeping
+future row scans simple. A snapshot scan can inspect row history directly
+instead of joining through batch metadata.
 
 ## What Does Not Change
 

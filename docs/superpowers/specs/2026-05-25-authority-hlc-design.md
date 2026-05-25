@@ -5,9 +5,10 @@
 Approved design for an additive row-history metadata change.
 
 This design keeps existing wall-clock provenance timestamps and adds a separate
-global-authority Hybrid Logical Clock stamp per row-batch member. The first
-implementation is greenfield: storage and sync formats may change without
-supporting old persisted rows or mixed-version peers.
+global-authority Hybrid Logical Clock stamp per batch, copied into each
+row-batch member for direct row scans. The first implementation is greenfield:
+storage and sync formats may change without supporting old persisted rows or
+mixed-version peers.
 
 ## Context
 
@@ -24,13 +25,15 @@ global snapshots.
 ## Goals
 
 - Persist the writer's wall-clock provenance separately from global sequencing.
-- Add a nullable, immutable `authority_hlc` to each concrete row-batch member.
-- Allow only the single global authority to assign `authority_hlc`.
+- Add a nullable, immutable `authority_hlc` copy to each concrete row-batch
+  member.
+- Allow only the single global authority to assign one `authority_hlc` per
+  logical batch.
 - Keep local-first writes visible without waiting for a global stamp.
 - Preserve current query visibility, LWW ordering, merge behavior, and public
   timestamp APIs.
 - Make future row scans for deterministic global snapshots simple by storing the
-  stamp directly on each row-batch member.
+  batch stamp directly on each row-batch member.
 
 ## Non-Goals
 
@@ -55,17 +58,18 @@ global snapshots.
 
 - It is nullable.
 - It is stamped only by the global authority.
-- It is scoped to one concrete `(row_id, branch_name, batch_id)` row-batch
-  member.
+- It is scoped to one logical `batch_id`.
+- Every row-batch member with that `batch_id` stores the same stamp.
 - It is intended for future deterministic global snapshots.
 
-### 2. Stamp Per Row-Batch Member
+### 2. Stamp Per Batch, Store Per Row-Batch Member
 
-Each row-batch member gets its own `authority_hlc`. A multi-row batch therefore
-receives one HLC value per touched row.
+Each logical batch gets one `authority_hlc`. A multi-row batch therefore
+receives one HLC value, and every touched row stores a copy of that same value.
 
-This is intentionally row-local. Future snapshot scans can read, filter, and
-order row history without joining through batch fate or another side table.
+This keeps the global sequence batch-scoped while making future row scans
+simple. Snapshot scans can read, filter, and order row history without joining
+through batch fate or another side table.
 
 ### 3. Leave Optimistic Rows Unstamped
 
@@ -152,16 +156,19 @@ is copied from the coarse metadata row already chosen for `batch_id`,
 
 ## Stamping Flow
 
-1. A client or edge creates a row-batch member with `authority_hlc = None`.
-2. The row syncs upstream through the existing row-batch payload path.
-3. The global authority accepts or durably records the row-batch member.
-4. The global authority stamps that member with the next `AuthorityHlc`.
-5. The stamped row is persisted in history and the visible-row copy is refreshed
-   if the row remains current.
-6. Normal row sync carries the stamped row back to edges and clients.
+1. A client or edge creates row-batch members with `authority_hlc = None`.
+2. The rows sync upstream through the existing row-batch payload path.
+3. The global authority accepts or durably records the logical batch.
+4. The global authority stamps the batch with the next `AuthorityHlc`.
+5. The same stamp is persisted into every known row-batch member for that
+   `batch_id`, and visible-row copies are refreshed for stamped rows that remain
+   current.
+6. If the authority later learns another member of an already-stamped batch, it
+   applies the existing batch stamp rather than allocating a new one.
+7. Normal row sync carries stamped rows back to edges and clients.
 
-The stamp is immutable once assigned. Restamping the same row-batch member with
-a different value is protocol corruption.
+The stamp is immutable once assigned to the batch. Restamping the same
+`batch_id` with a different value is protocol corruption.
 
 ## Sync Semantics
 
@@ -179,35 +186,38 @@ Sync replay rules:
 - Receiving a stamped row stores and relays the stamp.
 - Receiving the same row-batch member with the same stamp is idempotent.
 - Receiving the same row-batch member with a different stamp is an error.
+- Receiving two row-batch members for the same `batch_id` with different stamps
+  is an error.
 - Non-authority runtimes must not assign missing stamps while relaying.
 
 If the global authority receives a row from a non-authority peer with an
 already-populated `authority_hlc`, it should accept it only when it matches the
-authority's existing record for that row-batch member. If the authority has no
-record of assigning that stamp, or the stamp differs, reject the payload rather
-than silently overwrite it. This keeps legitimate replay idempotent while making
+authority's existing record for that batch. If the authority has no record of
+assigning that stamp, or the stamp differs, reject the payload rather than
+silently overwrite it. This keeps legitimate replay idempotent while making
 authority-boundary bugs and malicious clients visible.
 
 ## Storage API Shape
 
-The global authority needs a narrow patch path for stamping an existing
-row-batch member:
+The global authority needs a narrow patch path for stamping known row-batch
+members of an existing batch:
 
 ```text
-stamp_row_batch_authority_hlc(table, branch, row_id, batch_id, authority_hlc)
+stamp_batch_authority_hlc(batch_id, authority_hlc)
 ```
 
 The operation must:
 
-- load the exact row-batch member
-- fail if the row already has a different stamp
-- no-op if the row already has the same stamp
+- find known row-batch members with that `batch_id`
+- fail if any member already has a different stamp
+- no-op for members already carrying the same stamp
 - write only the stamp metadata, not app data or wall-clock provenance
-- rebuild the visible-row entry when the stamped row is the current visible row
+- rebuild visible-row entries when stamped rows are current visible rows
 - update any digest or sync freshness bookkeeping that includes the stamp
 
-This can be implemented as a storage-level patch or as an existing row mutation
-path with a stamp-only operation, but the public behavior should stay narrow.
+The implementation may also expose a member-level helper for replaying a single
+stamped row, but it must enforce the batch-scoped invariant: all local rows with
+the same `batch_id` have the same `authority_hlc`.
 
 ## Error Handling
 
@@ -215,8 +225,8 @@ Use explicit failures for protocol violations:
 
 - Non-authority payload includes an unrecognized or conflicting
   `authority_hlc`: reject at the authority.
-- Same row-batch member receives conflicting stamps: reject the incoming row and
-  emit diagnostics.
+- Same batch receives conflicting stamps: reject the incoming row and emit
+  diagnostics.
 - Authority clock logical counter overflows: return an authority clock error and
   retry after physical time advances.
 - Malformed encoded HLC: treat as row-format corruption and fail closed.
@@ -230,12 +240,15 @@ Prefer black-box integration coverage where possible:
 
 - Local write persists with no `authority_hlc`.
 - Edge or client syncs an unstamped write to the global authority.
-- Global authority stamps each row-batch member separately.
+- Global authority stamps a batch once and writes that stamp into each known
+  row-batch member.
 - Stamped rows sync back to clients and survive storage reload.
-- Multi-row batches receive per-member stamps.
+- Multi-row batches store the same stamp on every member.
+- A later-arriving member of an already-stamped batch receives the existing
+  batch stamp.
 - Current query ordering and `$updatedAt` behavior remain unchanged after rows
   are stamped.
-- A conflicting stamp for the same row-batch member is rejected.
+- A conflicting stamp for the same batch is rejected.
 - An unrecognized non-authority-supplied stamp is rejected by the global
   authority.
 
@@ -249,7 +262,8 @@ scan boundary:
 
 - include only rows with `authority_hlc <= snapshot_hlc`
 - ignore unstamped rows by default
-- order row-history entries by `authority_hlc` for deterministic replay
+- order row-history entries by `authority_hlc`, with a stable tie-breaker such
+  as `(batch_id, row_id)` when a total order is needed
 
 That future work can decide whether to add snapshot query APIs, historical
 indices, or global-tier-only read modes. This design only persists the metadata
