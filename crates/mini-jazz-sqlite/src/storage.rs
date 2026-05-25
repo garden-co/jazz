@@ -849,6 +849,51 @@ impl MiniJazzSqlite {
         })
     }
 
+    pub fn query_todos_on_branch(
+        &self,
+        query: &TodoQuery,
+        branch_id: &str,
+        global_epoch: i64,
+    ) -> rusqlite::Result<QueryResult> {
+        let base_global_epoch: i64 = self.conn.query_row(
+            "SELECT head_global_epoch FROM jazz_branch WHERE branch_id = ?1",
+            params![branch_id],
+            |row| row.get(0),
+        )?;
+        let base_query = TodoQuery {
+            branch_id: "main".to_owned(),
+            done: query.done,
+            created_after: query.created_after,
+        };
+        let branch_query = TodoQuery {
+            branch_id: branch_id.to_owned(),
+            done: query.done,
+            created_after: query.created_after,
+        };
+        let mut base = self.query_todos_at_global_epoch(&base_query, base_global_epoch)?;
+        let mut branch = self.query_todos_at_global_epoch(&branch_query, global_epoch)?;
+
+        let branch_row_ids = branch
+            .rows
+            .iter()
+            .map(|row| row.row_id.as_str())
+            .collect::<Vec<_>>();
+        base.rows
+            .retain(|row| !branch_row_ids.contains(&row.row_id.as_str()));
+        base.scope
+            .retain(|locator| !branch_row_ids.contains(&locator.row_id.as_str()));
+
+        branch.rows.extend(base.rows);
+        branch.rows.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.row_id.cmp(&right.row_id))
+        });
+        branch.scope.extend(base.scope);
+        Ok(branch)
+    }
+
     fn visible_tx_ids(&self, snapshot: &SnapshotVector) -> rusqlite::Result<Vec<String>> {
         let mut tx_ids = Vec::new();
         {
@@ -1656,16 +1701,24 @@ mod tests {
         );
 
         let draft_rows = db
-            .query_todos_at_global_epoch(
+            .query_todos_on_branch(
                 &TodoQuery {
                     branch_id: "draft".into(),
                     done: Some(false),
                     created_after: Some(0),
                 },
+                "draft",
                 3,
             )
             .unwrap();
-        assert_eq!(draft_rows.rows[0].row_id, "todo-draft");
+        assert_eq!(
+            draft_rows
+                .rows
+                .iter()
+                .map(|row| row.row_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo-draft", "todo-main"]
+        );
 
         let branch_history_count: i64 = db
             .conn

@@ -264,3 +264,17 @@ main current = fold(non-rejected main history rows in deterministic order)
 
 That invariant is more valuable right now than incremental cleverness. Later,
 rejection repair can be narrowed to affected rows using write sets.
+
+### 2026-05-24 22:56 PDT
+
+Closed the first branch-read gap crudely with `query_todos_on_branch`:
+
+- reads base rows from `main` at the branch's stored `head_global_epoch`
+- reads branch-local rows from the branch at the requested global epoch
+- lets branch-local rows shadow same-row base rows
+
+Discovery: this shape makes branch provenance matter immediately. A branch head
+is not just a single vector; it is a set of source branch/vector components plus
+local branch history. The current implementation hard-codes "one main base plus
+branch-local rows" in Rust. The real lowering probably needs a SQL-visible
+branch source relation before joins, pagination, and sync scopes can be correct.
