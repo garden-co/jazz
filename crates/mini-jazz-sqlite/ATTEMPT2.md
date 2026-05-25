@@ -412,6 +412,22 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 11:44 PDT
+
+Split integration tests by behavior:
+
+- `attempt2_local.rs`: local storage/query/reopen.
+- `subscriptions.rs`: dependency-driven subscription diffs and optional
+  absence scope.
+- `sync.rs`: scoped bundle export/import reproduction.
+- `authority.rs`: acceptance, rejection, and read-set validation.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 11:42 PDT
 
 Added the first explicit predicate/absence scope fact.
