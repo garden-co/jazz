@@ -1,32 +1,25 @@
 import { join } from "node:path";
-import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
-import { ADMIN_SECRET, APP_ID, TEST_PORT } from "./test-constants.js";
+import { pushSchemaCatalogue, startLocalJazzServer } from "jazz-tools/testing";
+import type { TestProject } from "vitest/node";
+import { ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
-let server: Promise<TestingServer> | null = null;
-
-export async function setup(): Promise<void> {
-  if (server) {
-    await server;
-    return;
-  }
-
-  server = TestingServer.start({
+export async function setup(project: TestProject): Promise<() => Promise<void>> {
+  const handle = await startLocalJazzServer({
     appId: APP_ID,
-    port: TEST_PORT,
     adminSecret: ADMIN_SECRET,
+    inMemory: true,
   });
-
-  const handle = await server;
 
   await pushSchemaCatalogue({
     serverUrl: handle.url,
     appId: handle.appId,
-    adminSecret: handle.adminSecret,
+    adminSecret: ADMIN_SECRET,
     schemaDir: join(import.meta.dirname, "../.."),
   });
-}
 
-export async function teardown(): Promise<void> {
-  const s = await server;
-  await s?.stop();
+  project.provide("worldTourJazzServerUrl", handle.url);
+
+  return async () => {
+    await handle.stop();
+  };
 }
