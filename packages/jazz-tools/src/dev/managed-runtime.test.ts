@@ -11,6 +11,7 @@ const tempRoots = createTempRootTracker();
 const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
 const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
 const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
+const originalStdoutIsTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 
 function makeRuntime(): ManagedDevRuntime {
   return new ManagedDevRuntime({
@@ -29,6 +30,13 @@ function makeFetchFailedError(code: string): TypeError & { cause?: unknown } {
   return error;
 }
 
+function setStdoutIsTTY(isTTY: boolean): void {
+  Object.defineProperty(process.stdout, "isTTY", {
+    configurable: true,
+    value: isTTY,
+  });
+}
+
 beforeEach(() => {
   delete process.env.VITE_JAZZ_APP_ID;
   delete process.env.VITE_JAZZ_SERVER_URL;
@@ -38,6 +46,12 @@ beforeEach(() => {
 afterEach(async () => {
   await tempRoots.cleanup();
   vi.restoreAllMocks();
+
+  if (originalStdoutIsTTYDescriptor) {
+    Object.defineProperty(process.stdout, "isTTY", originalStdoutIsTTYDescriptor);
+  } else {
+    delete (process.stdout as { isTTY?: boolean }).isTTY;
+  }
 
   if (originalJazzAppId === undefined) {
     delete process.env.VITE_JAZZ_APP_ID;
@@ -59,6 +73,37 @@ afterEach(async () => {
 });
 
 describe("ManagedDevRuntime", () => {
+  it("does not print the local server banner when stdout is not interactive", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-noninteractive-banner-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    setStdoutIsTTY(false);
+
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000123",
+      port: 19883,
+      url: "http://127.0.0.1:19883",
+      dataDir: join(schemaDir, "node_modules", ".cache", "jazz-dev-server"),
+      adminSecret: "noninteractive-admin",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const runtime = makeRuntime();
+    try {
+      await runtime.initialize({
+        schemaDir,
+        server: { port: 19883, adminSecret: "noninteractive-admin" },
+      });
+
+      expect(log).not.toHaveBeenCalledWith(expect.stringContaining("Running a local jazz server"));
+      expect(log).toHaveBeenCalledWith("[jazz] schema published");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it("keeps env-driven Cloud startup alive when the initial schema push cannot reach the server", async () => {
     const schemaDir = await tempRoots.create("jazz-managed-offline-cloud-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
