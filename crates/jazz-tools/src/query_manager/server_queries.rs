@@ -20,8 +20,8 @@ use super::policy_graph::{PolicyGraph, PolicyGraphBuildOptions};
 use super::session::Session;
 use super::settlement_eval_cache::SettlementEvalCache;
 use super::types::{
-    ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName, TableSchema,
-    Tuple, TupleElement, TupleProvenance, Value,
+    ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName,
+    TablePolicies, TableSchema, Tuple, TupleElement, TupleProvenance, Value,
 };
 
 const MAX_INITIAL_QUERY_REPLAY_OUTBOX_PER_PASS: usize = 32;
@@ -90,6 +90,40 @@ struct BranchScopedPolicyInput<'a> {
     source_branch_schema_map: &'a HashMap<String, SchemaHash>,
     operation: Operation,
     update_check: bool,
+}
+
+struct ResolvedBranchPolicyBacking {
+    backing_table: TableName,
+    policy: Option<PolicyExpr>,
+    has_explicit_update_policy: bool,
+    row_id: ObjectId,
+    descriptor: RowDescriptor,
+    content: Vec<u8>,
+    provenance: RowProvenance,
+}
+
+enum BranchPolicyDecision {
+    NotBranchScoped,
+    Allowed,
+    Denied,
+}
+
+fn branch_policy_scope(branch_name: &BranchName) -> Option<ComposedBranchName> {
+    ComposedBranchName::parse_non_main(branch_name)
+}
+
+fn branch_policy_for_operation(
+    policies: &TablePolicies,
+    operation: Operation,
+    update_check: bool,
+) -> Option<&PolicyExpr> {
+    match (operation, update_check) {
+        (Operation::Insert, _) => policies.insert_policy(),
+        (Operation::Update, false) => policies.update_using_policy(),
+        (Operation::Update, true) => policies.update_check_policy(),
+        (Operation::Delete, _) => policies.effective_delete_using(),
+        (Operation::Select, _) => policies.select_policy(),
+    }
 }
 
 impl QueryManager {
@@ -450,7 +484,7 @@ impl QueryManager {
         &mut self,
         storage: &dyn Storage,
         input: BranchScopedPolicyInput<'_>,
-    ) -> Option<bool> {
+    ) -> BranchPolicyDecision {
         let BranchScopedPolicyInput {
             object_id,
             branch_name,
@@ -464,16 +498,90 @@ impl QueryManager {
             operation,
             update_check,
         } = input;
-        let composed = ComposedBranchName::parse(&branch_name)?;
-        if composed.user_branch == "main" {
-            return None;
-        }
-        let target_schema = auth_schema.get(&table_name)?;
+        let Some(composed) = branch_policy_scope(&branch_name) else {
+            return BranchPolicyDecision::NotBranchScoped;
+        };
+        let Some(target_schema) = auth_schema.get(&table_name) else {
+            return BranchPolicyDecision::NotBranchScoped;
+        };
         if target_schema.policies.for_branch.is_empty() {
-            return Some(!self.row_policy_mode.denies_missing_explicit_policy());
+            return if self.row_policy_mode.denies_missing_explicit_policy() {
+                BranchPolicyDecision::Denied
+            } else {
+                BranchPolicyDecision::Allowed
+            };
         }
+
+        let Some(backing) = self.resolve_branch_policy_backing(
+            storage,
+            &composed,
+            target_schema,
+            session,
+            auth_schema,
+            auth_context,
+            source_branch_schema_map,
+            operation,
+            update_check,
+        ) else {
+            return BranchPolicyDecision::Denied;
+        };
+
+        let Some(policy) = backing.policy.as_ref() else {
+            return if operation == Operation::Update && backing.has_explicit_update_policy {
+                BranchPolicyDecision::Allowed
+            } else if self.row_policy_mode.denies_missing_explicit_policy() {
+                BranchPolicyDecision::Denied
+            } else {
+                BranchPolicyDecision::Allowed
+            };
+        };
+
+        let branch_context = BranchPolicyContext {
+            table_name: &backing.backing_table,
+            row_id: backing.row_id,
+            descriptor: &backing.descriptor,
+            content: &backing.content,
+            provenance: &backing.provenance,
+        };
+        if self.evaluate_authorization_policy(
+            storage,
+            AuthorizationPolicyRequest {
+                object_id,
+                branch_name,
+                table_name,
+                policy,
+                content,
+                provenance,
+                session,
+                auth_schema,
+                auth_context,
+                source_branch_schema_map,
+                operation,
+                settlement_eval_cache: None,
+                branch_context: Some(&branch_context),
+            },
+        ) {
+            BranchPolicyDecision::Allowed
+        } else {
+            BranchPolicyDecision::Denied
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_branch_policy_backing(
+        &mut self,
+        storage: &dyn Storage,
+        composed: &ComposedBranchName,
+        target_schema: &TableSchema,
+        session: &Session,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &HashMap<String, SchemaHash>,
+        operation: Operation,
+        update_check: bool,
+    ) -> Option<ResolvedBranchPolicyBacking> {
         let Ok(branch_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
-            return Some(false);
+            return None;
         };
         let branch_object_id = ObjectId::from_uuid(branch_uuid);
         let current_branch =
@@ -488,22 +596,18 @@ impl QueryManager {
                 continue;
             };
             if backing_row.is_hard_deleted() {
-                return Some(false);
+                return None;
             }
-            let Some(backing_schema) = auth_schema.get(backing_table) else {
-                return Some(false);
-            };
+            let backing_schema = auth_schema.get(backing_table)?;
             let backing_provenance = backing_row.row_provenance();
-            let Some(transformed_backing_content) = self.transform_content_to_authorization_schema(
+            let transformed_backing_content = self.transform_content_to_authorization_schema(
                 backing_table.as_str(),
                 &backing_row.data,
                 backing_row.batch_id,
                 current_branch,
                 source_branch_schema_map,
                 auth_context,
-            ) else {
-                return Some(false);
-            };
+            )?;
             if let Some(backing_select) = backing_schema.policies.select_policy() {
                 if !self.evaluate_authorization_policy(
                     storage,
@@ -523,54 +627,25 @@ impl QueryManager {
                         branch_context: None,
                     },
                 ) {
-                    return Some(false);
+                    return None;
                 }
             } else if self.row_policy_mode.denies_missing_explicit_policy() {
-                return Some(false);
+                return None;
             }
 
-            let policy = match (operation, update_check) {
-                (Operation::Insert, _) => branch_policies.insert_policy(),
-                (Operation::Update, false) => branch_policies.update_using_policy(),
-                (Operation::Update, true) => branch_policies.update_check_policy(),
-                (Operation::Delete, _) => branch_policies.effective_delete_using(),
-                (Operation::Select, _) => branch_policies.select_policy(),
-            };
-            let Some(policy) = policy else {
-                if operation == Operation::Update && branch_policies.has_explicit_update_policy() {
-                    return Some(true);
-                }
-                return Some(!self.row_policy_mode.denies_missing_explicit_policy());
-            };
-
-            let branch_context = BranchPolicyContext {
-                table_name: backing_table,
+            return Some(ResolvedBranchPolicyBacking {
+                backing_table: *backing_table,
+                policy: branch_policy_for_operation(branch_policies, operation, update_check)
+                    .cloned(),
+                has_explicit_update_policy: branch_policies.has_explicit_update_policy(),
                 row_id: branch_object_id,
-                descriptor: &backing_schema.columns,
-                content: &transformed_backing_content,
-                provenance: &backing_provenance,
-            };
-            return Some(self.evaluate_authorization_policy(
-                storage,
-                AuthorizationPolicyRequest {
-                    object_id,
-                    branch_name,
-                    table_name,
-                    policy,
-                    content,
-                    provenance,
-                    session,
-                    auth_schema,
-                    auth_context,
-                    source_branch_schema_map,
-                    operation,
-                    settlement_eval_cache: None,
-                    branch_context: Some(&branch_context),
-                },
-            ));
+                descriptor: backing_schema.columns.clone(),
+                content: transformed_backing_content,
+                provenance: backing_provenance,
+            });
         }
 
-        Some(false)
+        None
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -604,13 +679,11 @@ impl QueryManager {
         let tip_provenance = row.row_provenance();
 
         let table_name = TableName::new(&table);
-        if ComposedBranchName::parse(&branch_name)
-            .is_some_and(|composed| composed.user_branch != "main")
-        {
+        if branch_policy_scope(&branch_name).is_some() {
             let Some(session) = session else {
                 return false;
             };
-            if let Some(allowed) = self.evaluate_branch_scoped_authorization_policy(
+            match self.evaluate_branch_scoped_authorization_policy(
                 storage,
                 BranchScopedPolicyInput {
                     object_id,
@@ -626,7 +699,9 @@ impl QueryManager {
                     update_check: false,
                 },
             ) {
-                return allowed;
+                BranchPolicyDecision::Allowed => return true,
+                BranchPolicyDecision::Denied => return false,
+                BranchPolicyDecision::NotBranchScoped => {}
             }
         }
 
@@ -1927,7 +2002,7 @@ impl QueryManager {
         };
         let source_branch_schema_map = self.branch_schema_map.clone();
 
-        if let Some(allowed) = self.evaluate_branch_scoped_authorization_policy(
+        match self.evaluate_branch_scoped_authorization_policy(
             storage,
             BranchScopedPolicyInput {
                 object_id,
@@ -1943,7 +2018,7 @@ impl QueryManager {
                 update_check: false,
             },
         ) {
-            if !allowed {
+            BranchPolicyDecision::Denied => {
                 let reason = format!(
                     "{:?} denied by branch policy on table {}",
                     check.operation, table_name.0
@@ -1952,9 +2027,11 @@ impl QueryManager {
                     .reject_permission_check(storage, check, reason);
                 return;
             }
-
-            self.sync_manager.approve_permission_check(storage, check);
-            return;
+            BranchPolicyDecision::Allowed => {
+                self.sync_manager.approve_permission_check(storage, check);
+                return;
+            }
+            BranchPolicyDecision::NotBranchScoped => {}
         }
 
         let policy = match check.operation {
@@ -2012,6 +2089,105 @@ impl QueryManager {
         }
 
         self.sync_manager.approve_permission_check(storage, check);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_branch_update_policy(
+        &mut self,
+        storage: &dyn Storage,
+        check: &PendingPermissionCheck,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        table_name: TableName,
+        old_provenance: Option<&RowProvenance>,
+        new_provenance: Option<&RowProvenance>,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &HashMap<String, SchemaHash>,
+    ) -> Result<BranchPolicyDecision, String> {
+        if branch_policy_scope(&branch_name).is_none() {
+            return Ok(BranchPolicyDecision::NotBranchScoped);
+        }
+
+        let old_content = check
+            .old_content
+            .as_ref()
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "Update denied by branch policy on table {} - no old content",
+                    table_name.0
+                )
+            })?;
+        let old_provenance = old_provenance.ok_or_else(|| {
+            format!(
+                "Update denied by branch policy on table {} - missing old provenance",
+                table_name.0
+            )
+        })?;
+        if !matches!(
+            self.evaluate_branch_scoped_authorization_policy(
+                storage,
+                BranchScopedPolicyInput {
+                    object_id,
+                    branch_name,
+                    table_name,
+                    content: old_content,
+                    provenance: old_provenance,
+                    session: &check.session,
+                    auth_schema,
+                    auth_context,
+                    source_branch_schema_map,
+                    operation: Operation::Update,
+                    update_check: false,
+                },
+            ),
+            BranchPolicyDecision::Allowed
+        ) {
+            return Err(format!(
+                "Update denied by branch USING policy on table {}",
+                table_name.0
+            ));
+        }
+
+        let new_content = check.new_content.as_ref().ok_or_else(|| {
+            format!(
+                "Update denied by branch policy on table {} - missing new content",
+                table_name.0
+            )
+        })?;
+        let new_provenance = new_provenance.ok_or_else(|| {
+            format!(
+                "Update denied by branch policy on table {} - missing new provenance",
+                table_name.0
+            )
+        })?;
+        if !matches!(
+            self.evaluate_branch_scoped_authorization_policy(
+                storage,
+                BranchScopedPolicyInput {
+                    object_id,
+                    branch_name,
+                    table_name,
+                    content: new_content,
+                    provenance: new_provenance,
+                    session: &check.session,
+                    auth_schema,
+                    auth_context,
+                    source_branch_schema_map,
+                    operation: Operation::Update,
+                    update_check: true,
+                },
+            ),
+            BranchPolicyDecision::Allowed
+        ) {
+            return Err(format!(
+                "Update denied by branch WITH CHECK policy on table {}",
+                table_name.0
+            ));
+        }
+
+        Ok(BranchPolicyDecision::Allowed)
     }
 
     /// Evaluate UPDATE permission with both USING (old row) and WITH CHECK (new row).
@@ -2075,121 +2251,36 @@ impl QueryManager {
         let old_provenance = self.current_row_provenance(storage, object_id, branch_name);
         let new_provenance = Self::payload_row_provenance(&check.payload);
 
-        if ComposedBranchName::parse(&branch_name)
-            .is_some_and(|composed| composed.user_branch != "main")
-        {
-            let old_content = match check.old_content.as_ref() {
-                Some(c) if !c.is_empty() => c,
-                _ => {
-                    self.sync_manager.reject_permission_check(
-                        storage,
-                        check,
-                        format!(
-                            "Update denied by branch policy on table {} - no old content",
-                            table_name.0
-                        ),
-                    );
-                    return;
-                }
-            };
-            let Some(old_provenance) = old_provenance.as_ref() else {
-                self.sync_manager.reject_permission_check(
-                    storage,
-                    check,
-                    format!(
-                        "Update denied by branch policy on table {} - missing old provenance",
-                        table_name.0
-                    ),
-                );
+        match self.evaluate_branch_update_policy(
+            storage,
+            &check,
+            object_id,
+            branch_name,
+            table_name,
+            old_provenance.as_ref(),
+            new_provenance.as_ref(),
+            auth_schema,
+            auth_context,
+            &source_branch_schema_map,
+        ) {
+            Ok(BranchPolicyDecision::Allowed) => {
+                self.sync_manager.approve_permission_check(storage, check);
                 return;
-            };
-            if !self
-                .evaluate_branch_scoped_authorization_policy(
-                    storage,
-                    BranchScopedPolicyInput {
-                        object_id,
-                        branch_name,
-                        table_name,
-                        content: old_content,
-                        provenance: old_provenance,
-                        session: &check.session,
-                        auth_schema,
-                        auth_context,
-                        source_branch_schema_map: &source_branch_schema_map,
-                        operation: Operation::Update,
-                        update_check: false,
-                    },
-                )
-                .unwrap_or(false)
-            {
+            }
+            Ok(BranchPolicyDecision::Denied) => {
                 self.sync_manager.reject_permission_check(
                     storage,
                     check,
-                    format!(
-                        "Update denied by branch USING policy on table {}",
-                        table_name.0
-                    ),
+                    format!("Update denied by branch policy on table {}", table_name.0),
                 );
                 return;
             }
-
-            let new_content = match check.new_content.as_ref() {
-                Some(c) => c,
-                None => {
-                    self.sync_manager.reject_permission_check(
-                        storage,
-                        check,
-                        format!(
-                            "Update denied by branch policy on table {} - missing new content",
-                            table_name.0
-                        ),
-                    );
-                    return;
-                }
-            };
-            let Some(new_provenance) = new_provenance.as_ref() else {
-                self.sync_manager.reject_permission_check(
-                    storage,
-                    check,
-                    format!(
-                        "Update denied by branch policy on table {} - missing new provenance",
-                        table_name.0
-                    ),
-                );
-                return;
-            };
-            if !self
-                .evaluate_branch_scoped_authorization_policy(
-                    storage,
-                    BranchScopedPolicyInput {
-                        object_id,
-                        branch_name,
-                        table_name,
-                        content: new_content,
-                        provenance: new_provenance,
-                        session: &check.session,
-                        auth_schema,
-                        auth_context,
-                        source_branch_schema_map: &source_branch_schema_map,
-                        operation: Operation::Update,
-                        update_check: true,
-                    },
-                )
-                .unwrap_or(false)
-            {
-                self.sync_manager.reject_permission_check(
-                    storage,
-                    check,
-                    format!(
-                        "Update denied by branch WITH CHECK policy on table {}",
-                        table_name.0
-                    ),
-                );
+            Ok(BranchPolicyDecision::NotBranchScoped) => {}
+            Err(reason) => {
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
-
-            self.sync_manager.approve_permission_check(storage, check);
-            return;
         }
 
         if using_policy.is_none() && check_policy.is_none() {

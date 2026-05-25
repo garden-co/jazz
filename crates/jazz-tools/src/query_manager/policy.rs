@@ -36,12 +36,20 @@ pub enum PolicyValue {
     BranchRef(ColumnName),
 }
 
-pub struct BranchPolicyContext<'a> {
+pub struct ResolvedBranchRow<'a> {
     pub table_name: &'a TableName,
     pub row_id: ObjectId,
     pub descriptor: &'a RowDescriptor,
     pub content: &'a [u8],
     pub provenance: &'a RowProvenance,
+}
+
+pub type BranchPolicyContext<'a> = ResolvedBranchRow<'a>;
+
+#[derive(Clone, Copy, Default)]
+pub struct PolicyEvalRefs<'a> {
+    pub row_id: Option<ObjectId>,
+    pub branch: Option<&'a ResolvedBranchRow<'a>>,
 }
 
 /// Reserved session path prefix used to encode outer-row references in correlated EXISTS clauses.
@@ -1178,17 +1186,22 @@ fn resolve_policy_value(
     match value {
         PolicyValue::Literal(v) => Some(v.clone()),
         PolicyValue::SessionRef(path) => resolve_session_value(path, session),
-        PolicyValue::BranchRef(column) => {
-            let context = branch_context?;
-            decode_policy_column_value(
-                column.as_str(),
-                context.provenance,
-                context.content,
-                context.descriptor,
-                Some(context.row_id),
-            )
-        }
+        PolicyValue::BranchRef(column) => resolve_branch_ref(column.as_str(), branch_context),
     }
+}
+
+fn resolve_branch_ref(
+    column: &str,
+    branch_context: Option<&BranchPolicyContext<'_>>,
+) -> Option<Value> {
+    let context = branch_context?;
+    decode_policy_column_value(
+        column,
+        context.provenance,
+        context.content,
+        context.descriptor,
+        Some(context.row_id),
+    )
 }
 
 /// Resolve an outer-row column reference to a literal `Value`.
@@ -1225,170 +1238,21 @@ pub fn bind_outer_row_refs(
     outer_descriptor: &RowDescriptor,
     outer_row_id: Option<ObjectId>,
 ) -> Option<PolicyExpr> {
-    match expr {
-        PolicyExpr::Cmp { column, op, value } => {
-            let bound_value = match value {
-                PolicyValue::Literal(v) => PolicyValue::Literal(v.clone()),
-                PolicyValue::SessionRef(path) => {
-                    if let Some(outer_col) = outer_row_ref_column(path) {
-                        let resolved = resolve_outer_col(
-                            outer_col,
-                            outer_content,
-                            outer_descriptor,
-                            outer_row_id,
-                        )?;
-                        PolicyValue::Literal(resolved)
-                    } else {
-                        PolicyValue::SessionRef(path.clone())
-                    }
-                }
-                PolicyValue::BranchRef(column) => PolicyValue::BranchRef(*column),
-            };
-
-            Some(PolicyExpr::Cmp {
-                column: column.clone(),
-                op: op.clone(),
-                value: bound_value,
-            })
-        }
-        PolicyExpr::SessionCmp { path, op, value } => Some(PolicyExpr::SessionCmp {
-            path: path.clone(),
-            op: op.clone(),
-            value: value.clone(),
-        }),
-        PolicyExpr::IsNull { column } => Some(PolicyExpr::IsNull {
-            column: column.clone(),
-        }),
-        PolicyExpr::SessionIsNull { path } => {
-            Some(PolicyExpr::SessionIsNull { path: path.clone() })
-        }
-        PolicyExpr::IsNotNull { column } => Some(PolicyExpr::IsNotNull {
-            column: column.clone(),
-        }),
-        PolicyExpr::SessionIsNotNull { path } => {
-            Some(PolicyExpr::SessionIsNotNull { path: path.clone() })
-        }
-        PolicyExpr::Contains { column, value } => {
-            let bound_value = match value {
-                PolicyValue::Literal(v) => PolicyValue::Literal(v.clone()),
-                PolicyValue::SessionRef(path) => {
-                    if let Some(outer_col) = outer_row_ref_column(path) {
-                        let resolved = resolve_outer_col(
-                            outer_col,
-                            outer_content,
-                            outer_descriptor,
-                            outer_row_id,
-                        )?;
-                        PolicyValue::Literal(resolved)
-                    } else {
-                        PolicyValue::SessionRef(path.clone())
-                    }
-                }
-                PolicyValue::BranchRef(column) => PolicyValue::BranchRef(*column),
-            };
-            Some(PolicyExpr::Contains {
-                column: column.clone(),
-                value: bound_value,
-            })
-        }
-        PolicyExpr::SessionContains { path, value } => Some(PolicyExpr::SessionContains {
-            path: path.clone(),
-            value: value.clone(),
-        }),
-        PolicyExpr::In {
-            column,
-            session_path,
-        } => {
-            if outer_row_ref_column(session_path).is_some() {
-                return None;
+    bind_policy_values(expr, true, false, &mut |value| match value {
+        PolicyValue::SessionRef(path) => {
+            if let Some(outer_col) = outer_row_ref_column(path) {
+                Some(PolicyValue::Literal(resolve_outer_col(
+                    outer_col,
+                    outer_content,
+                    outer_descriptor,
+                    outer_row_id,
+                )?))
+            } else {
+                Some(value.clone())
             }
-            Some(PolicyExpr::In {
-                column: column.clone(),
-                session_path: session_path.clone(),
-            })
         }
-        PolicyExpr::InList { column, values } => {
-            let bound_values = values
-                .iter()
-                .map(|value| match value {
-                    PolicyValue::Literal(v) => Some(PolicyValue::Literal(v.clone())),
-                    PolicyValue::SessionRef(path) => {
-                        if let Some(outer_col) = outer_row_ref_column(path) {
-                            let resolved = resolve_outer_col(
-                                outer_col,
-                                outer_content,
-                                outer_descriptor,
-                                outer_row_id,
-                            )?;
-                            Some(PolicyValue::Literal(resolved))
-                        } else {
-                            Some(PolicyValue::SessionRef(path.clone()))
-                        }
-                    }
-                    PolicyValue::BranchRef(column) => Some(PolicyValue::BranchRef(*column)),
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(PolicyExpr::InList {
-                column: column.clone(),
-                values: bound_values,
-            })
-        }
-        PolicyExpr::SessionInList { path, values } => Some(PolicyExpr::SessionInList {
-            path: path.clone(),
-            values: values.clone(),
-        }),
-        PolicyExpr::Exists { table, condition } => Some(PolicyExpr::Exists {
-            table: table.clone(),
-            // Keep nested EXISTS conditions unbound at this level so they can be
-            // correlated against their immediate outer row when evaluated.
-            condition: condition.clone(),
-        }),
-        PolicyExpr::ExistsRel { rel } => Some(PolicyExpr::ExistsRel { rel: rel.clone() }),
-        PolicyExpr::Inherits {
-            operation,
-            via_column,
-            max_depth,
-        } => Some(PolicyExpr::Inherits {
-            operation: *operation,
-            via_column: via_column.clone(),
-            max_depth: *max_depth,
-        }),
-        PolicyExpr::InheritsReferencing {
-            operation,
-            source_table,
-            via_column,
-            max_depth,
-        } => Some(PolicyExpr::InheritsReferencing {
-            operation: *operation,
-            source_table: source_table.clone(),
-            via_column: via_column.clone(),
-            max_depth: *max_depth,
-        }),
-        PolicyExpr::And(exprs) => Some(PolicyExpr::And(
-            exprs
-                .iter()
-                .map(|expr| {
-                    bind_outer_row_refs(expr, outer_content, outer_descriptor, outer_row_id)
-                })
-                .collect::<Option<Vec<_>>>()?,
-        )),
-        PolicyExpr::Or(exprs) => Some(PolicyExpr::Or(
-            exprs
-                .iter()
-                .map(|expr| {
-                    bind_outer_row_refs(expr, outer_content, outer_descriptor, outer_row_id)
-                })
-                .collect::<Option<Vec<_>>>()?,
-        )),
-        PolicyExpr::Not(expr) => Some(PolicyExpr::Not(Box::new(bind_outer_row_refs(
-            expr,
-            outer_content,
-            outer_descriptor,
-            outer_row_id,
-        )?))),
-        PolicyExpr::True => Some(PolicyExpr::True),
-        PolicyExpr::False => Some(PolicyExpr::False),
-    }
+        _ => Some(value.clone()),
+    })
 }
 
 fn outer_row_ref_column(path: &[String]) -> Option<&str> {
@@ -1401,32 +1265,17 @@ fn outer_row_ref_column(path: &[String]) -> Option<&str> {
     Some(path[1].as_str())
 }
 
-fn bind_branch_value_ref(
-    value: &PolicyValue,
-    branch_context: &BranchPolicyContext<'_>,
-) -> Option<PolicyValue> {
-    match value {
-        PolicyValue::Literal(value) => Some(PolicyValue::Literal(value.clone())),
-        PolicyValue::SessionRef(path) => Some(PolicyValue::SessionRef(path.clone())),
-        PolicyValue::BranchRef(column) => Some(PolicyValue::Literal(decode_policy_column_value(
-            column.as_str(),
-            branch_context.provenance,
-            branch_context.content,
-            branch_context.descriptor,
-            Some(branch_context.row_id),
-        )?)),
-    }
-}
-
-pub fn bind_branch_refs(
+fn bind_policy_values(
     expr: &PolicyExpr,
-    branch_context: &BranchPolicyContext<'_>,
+    reject_outer_row_in_path: bool,
+    bind_nested_exists: bool,
+    bind_value: &mut impl FnMut(&PolicyValue) -> Option<PolicyValue>,
 ) -> Option<PolicyExpr> {
     match expr {
         PolicyExpr::Cmp { column, op, value } => Some(PolicyExpr::Cmp {
             column: column.clone(),
             op: op.clone(),
-            value: bind_branch_value_ref(value, branch_context)?,
+            value: bind_value(value)?,
         }),
         PolicyExpr::SessionCmp { path, op, value } => Some(PolicyExpr::SessionCmp {
             path: path.clone(),
@@ -1447,7 +1296,7 @@ pub fn bind_branch_refs(
         }
         PolicyExpr::Contains { column, value } => Some(PolicyExpr::Contains {
             column: column.clone(),
-            value: bind_branch_value_ref(value, branch_context)?,
+            value: bind_value(value)?,
         }),
         PolicyExpr::SessionContains { path, value } => Some(PolicyExpr::SessionContains {
             path: path.clone(),
@@ -1456,16 +1305,18 @@ pub fn bind_branch_refs(
         PolicyExpr::In {
             column,
             session_path,
-        } => Some(PolicyExpr::In {
-            column: column.clone(),
-            session_path: session_path.clone(),
-        }),
+        } => {
+            if reject_outer_row_in_path && outer_row_ref_column(session_path).is_some() {
+                return None;
+            }
+            Some(PolicyExpr::In {
+                column: column.clone(),
+                session_path: session_path.clone(),
+            })
+        }
         PolicyExpr::InList { column, values } => Some(PolicyExpr::InList {
             column: column.clone(),
-            values: values
-                .iter()
-                .map(|value| bind_branch_value_ref(value, branch_context))
-                .collect::<Option<Vec<_>>>()?,
+            values: values.iter().map(bind_value).collect::<Option<Vec<_>>>()?,
         }),
         PolicyExpr::SessionInList { path, values } => Some(PolicyExpr::SessionInList {
             path: path.clone(),
@@ -1473,7 +1324,16 @@ pub fn bind_branch_refs(
         }),
         PolicyExpr::Exists { table, condition } => Some(PolicyExpr::Exists {
             table: table.clone(),
-            condition: Box::new(bind_branch_refs(condition, branch_context)?),
+            condition: if bind_nested_exists {
+                Box::new(bind_policy_values(
+                    condition,
+                    reject_outer_row_in_path,
+                    bind_nested_exists,
+                    bind_value,
+                )?)
+            } else {
+                condition.clone()
+            },
         }),
         PolicyExpr::ExistsRel { rel } => Some(PolicyExpr::ExistsRel { rel: rel.clone() }),
         PolicyExpr::Inherits {
@@ -1499,22 +1359,61 @@ pub fn bind_branch_refs(
         PolicyExpr::And(exprs) => Some(PolicyExpr::And(
             exprs
                 .iter()
-                .map(|expr| bind_branch_refs(expr, branch_context))
+                .map(|expr| {
+                    bind_policy_values(
+                        expr,
+                        reject_outer_row_in_path,
+                        bind_nested_exists,
+                        bind_value,
+                    )
+                })
                 .collect::<Option<Vec<_>>>()?,
         )),
         PolicyExpr::Or(exprs) => Some(PolicyExpr::Or(
             exprs
                 .iter()
-                .map(|expr| bind_branch_refs(expr, branch_context))
+                .map(|expr| {
+                    bind_policy_values(
+                        expr,
+                        reject_outer_row_in_path,
+                        bind_nested_exists,
+                        bind_value,
+                    )
+                })
                 .collect::<Option<Vec<_>>>()?,
         )),
-        PolicyExpr::Not(expr) => Some(PolicyExpr::Not(Box::new(bind_branch_refs(
+        PolicyExpr::Not(expr) => Some(PolicyExpr::Not(Box::new(bind_policy_values(
             expr,
-            branch_context,
+            reject_outer_row_in_path,
+            bind_nested_exists,
+            bind_value,
         )?))),
         PolicyExpr::True => Some(PolicyExpr::True),
         PolicyExpr::False => Some(PolicyExpr::False),
     }
+}
+
+fn bind_branch_value_ref(
+    value: &PolicyValue,
+    branch_context: &BranchPolicyContext<'_>,
+) -> Option<PolicyValue> {
+    match value {
+        PolicyValue::Literal(value) => Some(PolicyValue::Literal(value.clone())),
+        PolicyValue::SessionRef(path) => Some(PolicyValue::SessionRef(path.clone())),
+        PolicyValue::BranchRef(column) => Some(PolicyValue::Literal(resolve_branch_ref(
+            column.as_str(),
+            Some(branch_context),
+        )?)),
+    }
+}
+
+pub fn bind_branch_refs(
+    expr: &PolicyExpr,
+    branch_context: &BranchPolicyContext<'_>,
+) -> Option<PolicyExpr> {
+    bind_policy_values(expr, false, true, &mut |value| {
+        bind_branch_value_ref(value, branch_context)
+    })
 }
 
 /// Bind relation references that depend on session or outer-row context.
@@ -1549,14 +1448,7 @@ pub fn bind_relation_refs(
                 Some(ValueRef::Literal(resolved))
             }
             ValueRef::BranchRef(column) => {
-                let context = branch_context?;
-                let resolved = decode_policy_column_value(
-                    column,
-                    context.provenance,
-                    context.content,
-                    context.descriptor,
-                    Some(context.row_id),
-                )?;
+                let resolved = resolve_branch_ref(column, branch_context)?;
                 Some(ValueRef::Literal(resolved))
             }
             ValueRef::OuterColumn(column) => {
@@ -2178,19 +2070,26 @@ pub fn evaluate_simple_parts_with_row_id(
     session: &Session,
     row_id: Option<ObjectId>,
 ) -> SimpleEvalResult {
-    evaluate_simple_recursive(
-        expr, content, provenance, descriptor, session, row_id, None, 0,
+    evaluate_simple_parts_with_context(
+        expr,
+        content,
+        provenance,
+        descriptor,
+        session,
+        PolicyEvalRefs {
+            row_id,
+            branch: None,
+        },
     )
 }
 
-pub fn evaluate_simple_parts_with_branch_context(
+pub fn evaluate_simple_parts_with_context(
     expr: &PolicyExpr,
     content: &[u8],
     provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
-    row_id: Option<ObjectId>,
-    branch_context: &BranchPolicyContext<'_>,
+    refs: PolicyEvalRefs<'_>,
 ) -> SimpleEvalResult {
     evaluate_simple_recursive(
         expr,
@@ -2198,8 +2097,8 @@ pub fn evaluate_simple_parts_with_branch_context(
         provenance,
         descriptor,
         session,
-        row_id,
-        Some(branch_context),
+        refs.row_id,
+        refs.branch,
         0,
     )
 }

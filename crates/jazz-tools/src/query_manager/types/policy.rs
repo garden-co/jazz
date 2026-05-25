@@ -125,6 +125,33 @@ impl TablePolicies {
         self.select.using.as_ref()
     }
 
+    pub fn select_policy_for_branch_scope(
+        &self,
+        branch_scoped: bool,
+        row_policy_mode: RowPolicyMode,
+    ) -> Option<PolicyExpr> {
+        if branch_scoped {
+            let branch_policies: Vec<_> = self
+                .for_branch
+                .values()
+                .filter_map(|policies| policies.select_policy().cloned())
+                .collect();
+            return match branch_policies.len() {
+                0 => row_policy_mode
+                    .denies_missing_explicit_policy()
+                    .then_some(PolicyExpr::False),
+                1 => branch_policies.into_iter().next(),
+                _ => Some(PolicyExpr::Or(branch_policies)),
+            };
+        }
+
+        self.select_policy().cloned().or_else(|| {
+            row_policy_mode
+                .denies_missing_explicit_policy()
+                .then_some(PolicyExpr::False)
+        })
+    }
+
     pub fn insert_policy(&self) -> Option<&PolicyExpr> {
         self.insert.with_check.as_ref()
     }

@@ -111,8 +111,7 @@ struct BranchPolicyBacking<'a> {
 }
 
 fn branch_policy_scope(branch: &str) -> Option<ComposedBranchName> {
-    let composed = ComposedBranchName::parse(&BranchName::new(branch))?;
-    (composed.user_branch != "main").then_some(composed)
+    ComposedBranchName::parse_non_main(&BranchName::new(branch))
 }
 
 impl PolicyFilterNode {
