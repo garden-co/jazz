@@ -6,6 +6,11 @@ Goal: implement as much of the parity ladder as possible from the current spec,
 prioritizing learning over polish. When the spec is fuzzy, make a local
 decision, write it down here, and keep moving.
 
+Timing note: headings after the initial entries were corrected against commit
+timestamps, not intuition. The first burst from `Refine SQLite core transaction
+model` at 22:10:42 to `Add conflict candidate spike` at 22:35:15 covered about
+25 minutes of wall-clock time.
+
 ## Ground Rules
 
 - Keep commits at meaningful checkpoints.
@@ -81,7 +86,7 @@ uses the write actor as `created_by` on update/delete history rows because the
 read model does not expose `created_by` yet; that should be corrected before
 this becomes a real projection invariant.
 
-### 2026-05-24 22:32 PDT
+### 2026-05-24 22:22 PDT
 
 Added model-level acceptance mapping:
 
@@ -107,7 +112,7 @@ explicit tx includes. The SQL shape is useful, though: "latest visible version
 per row" can be expressed with history joins and `NOT EXISTS`, and the next
 step is to replace the same-node predicate with a visibility relation.
 
-### 2026-05-24 22:25 PDT
+### 2026-05-24 22:23 PDT
 
 Added storage-level global acceptance:
 
@@ -140,7 +145,7 @@ Rejected txs can remain in history and simply fail the visibility predicate.
 The hard remaining problem is not historical visibility; it is repairing the
 optimistic current projection after a local write is later rejected.
 
-### 2026-05-24 23:05 PDT
+### 2026-05-24 22:25 PDT
 
 Recommended next five rungs after the CRUD/query/subscription/snapshot basics,
 ordered for learning value:
@@ -198,7 +203,7 @@ Uncertainties to settle while implementing:
   minimum is exact previous visible row version for writes plus column masks;
   range reads can wait until exclusive validation is being modeled.
 
-### 2026-05-24 22:36 PDT
+### 2026-05-24 22:26 PDT
 
 Added a first storage `SnapshotVector`:
 
@@ -224,7 +229,7 @@ solved. The prototype only suppresses older versions from the same node. If two
 visible transactions from different nodes both write the same row, this should
 become conflict-candidate output rather than "pick one latest row".
 
-### 2026-05-24 22:45 PDT
+### 2026-05-24 22:27 PDT
 
 Added the smallest branch metadata slice:
 
@@ -249,7 +254,7 @@ branch visibility source like:
 
 for each base/provenance component, plus the branch's own head vector.
 
-### 2026-05-24 22:50 PDT
+### 2026-05-24 22:28 PDT
 
 Made rejected local inserts repair `main` current by rebuilding the current
 projection from non-rejected history after `reject_tx`.
@@ -265,7 +270,7 @@ main current = fold(non-rejected main history rows in deterministic order)
 That invariant is more valuable right now than incremental cleverness. Later,
 rejection repair can be narrowed to affected rows using write sets.
 
-### 2026-05-24 22:56 PDT
+### 2026-05-24 22:29 PDT
 
 Closed the first branch-read gap crudely with `query_todos_on_branch`:
 
@@ -279,7 +284,7 @@ local branch history. The current implementation hard-codes "one main base plus
 branch-local rows" in Rust. The real lowering probably needs a SQL-visible
 branch source relation before joins, pagination, and sync scopes can be correct.
 
-### 2026-05-24 23:04 PDT
+### 2026-05-24 22:30 PDT
 
 Added first sync bundle shape:
 
@@ -303,7 +308,7 @@ Open fuzziness: authority acceptance is still a direct mutation of the imported
 `jazz_tx` row. If acceptance receipts become append-only, import/export needs to
 carry both proposed local transaction state and authority fate events.
 
-### 2026-05-24 23:10 PDT
+### 2026-05-24 22:31 PDT
 
 Added authority fate propagation back to a client:
 
@@ -318,7 +323,7 @@ stable local identity. This is where "local versions turn into global ones"
 starts to become concrete: the row version's public `$txid` stays fixed, but
 its coordinate metadata is enriched when the authority response arrives.
 
-### 2026-05-24 23:15 PDT
+### 2026-05-24 22:32 PDT
 
 Added remote rejection propagation:
 
@@ -333,7 +338,7 @@ derived projections that may have included that optimistic transaction. The
 prototype uses full `main` rebuild again; write-set-driven repair remains the
 obvious optimization path.
 
-### 2026-05-24 23:22 PDT
+### 2026-05-24 22:34 PDT
 
 Added a first multi-write transaction:
 
@@ -348,7 +353,7 @@ This also reinforces that write sets should be transaction-level metadata, not
 row metadata; row history can stay simple as long as the transaction row
 contains the durable read/write contract.
 
-### 2026-05-24 23:30 PDT
+### 2026-05-24 22:35 PDT
 
 Added a tiny conflict-candidate spike:
 
