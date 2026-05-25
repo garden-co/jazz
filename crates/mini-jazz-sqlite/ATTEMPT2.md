@@ -412,6 +412,36 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 11:54 PDT
+
+Made imported scope bundles emit effects.
+
+Red test: Alice subscribes to an optimistic row, authority rejects the tx, Alice
+imports the rejected tx bundle, and then polls the subscription. Before this
+change, projection repair happened but the subscription skipped rerun because
+import emitted no effects.
+
+Fix: `import_query_scope` records write effects for bundled history rows after
+rebuilding projections. This is broad and can over-invalidate, but it makes
+remote sync/fate changes participate in the same subscription invalidation path
+as local writes.
+
+Discovery: projection repair and import are effectful verbs. Treating effects
+as only local write output misses exactly the sync cases listeners care about.
+
+Open debt:
+
+- Imported effects should probably be based on projection deltas, not every
+  bundled history row.
+- Fate-only tx imports without bundled history still need a principled effect
+  story.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 11:53 PDT
 
 Added the first in-memory effect log for subscription invalidation.

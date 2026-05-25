@@ -705,6 +705,14 @@ impl Client {
     }
 
     pub fn import_query_scope(&mut self, bundle: &QueryScopeBundle) -> Result<()> {
+        let write_effects = bundle
+            .history_rows
+            .iter()
+            .map(|history| WriteEffect {
+                table: history.table.clone(),
+                row_id: history.row_id.clone(),
+            })
+            .collect::<Vec<_>>();
         let sql_tx = self.conn.transaction()?;
         for tx in &bundle.txs {
             sql_tx.execute(
@@ -785,7 +793,9 @@ impl Client {
             )?;
         }
         sql_tx.commit()?;
-        self.rebuild_current_projections()
+        self.rebuild_current_projections()?;
+        self.record_write_effects(write_effects);
+        Ok(())
     }
 
     pub fn accept_transaction(&self, tx_id: &str, global_epoch: i64) -> Result<()> {

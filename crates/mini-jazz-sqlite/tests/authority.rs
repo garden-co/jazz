@@ -106,6 +106,44 @@ fn authority_rejection_repairs_optimistic_current_projection() -> mini_jazz_sqli
 }
 
 #[test]
+fn imported_rejection_invalidates_subscription() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+    });
+
+    let mut alice = Harness::new()
+        .client("alice", schema.clone())
+        .durable_in_memory()?;
+    let mut core = Harness::new()
+        .authority("core", schema)
+        .durable_in_memory()?;
+
+    alice.write(|tx| {
+        tx.insert("todos", json!({ "title": "Reject me", "done": false }))?;
+        Ok(())
+    })?;
+
+    let open_todos = query("todos").filter(eq("done", false));
+    let optimistic = alice.all(open_todos.clone())?;
+    let tx_id = optimistic.scope.result_rows[0].tx_id.clone();
+    let subscription = alice.subscribe(open_todos)?;
+
+    core.import_query_scope(&alice.export_query_scope(&optimistic.scope)?)?;
+    core.reject_transaction(&tx_id, json!({ "code": "policy_denied" }))?;
+
+    alice.import_query_scope(&core.export_transaction(&tx_id)?)?;
+    let diff = alice.poll_subscription(subscription)?;
+
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.updated.len(), 0);
+    assert_eq!(diff.removed.len(), 1);
+    assert_eq!(diff.removed[0].get("title").unwrap(), "Reject me");
+
+    Ok(())
+}
+
+#[test]
 fn authority_rejects_stale_row_read_set() -> mini_jazz_sqlite::Result<()> {
     let schema = Schema::new().table("todos", |t| {
         t.text("title");
