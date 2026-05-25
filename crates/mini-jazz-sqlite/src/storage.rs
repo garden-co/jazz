@@ -25,6 +25,22 @@ pub struct InsertTodo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertTodos {
+    pub tx_id: String,
+    pub node_id: String,
+    pub rows: Vec<NewTodoRow>,
+    pub actor_id: String,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTodoRow {
+    pub row_id: String,
+    pub title: String,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateBranch {
     pub branch_id: String,
     pub tx_id: String,
@@ -386,6 +402,77 @@ impl MiniJazzSqlite {
                     input.row_id,
                     input.tx_id,
                     input.title,
+                    done,
+                    conflict_tx_ids,
+                    input.actor_id,
+                    input.now
+                ],
+            )?;
+        }
+
+        sql_tx.commit()
+    }
+
+    pub fn insert_todos(&mut self, input: InsertTodos) -> rusqlite::Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let write_set_entries = input
+            .rows
+            .iter()
+            .map(|row| {
+                format!(
+                    r#"{{"table":"todos","rowId":"{}","op":"insert","columns":["title","done","created_at","updated_at"]}}"#,
+                    row.row_id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let write_set = format!("[{write_set_entries}]");
+
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'data', 0, '[]', '[]', '[]', ?4, 'local_pending', ?5, ?5, '{}')
+            "#,
+            params![input.tx_id, node_num, local_epoch, write_set, input.now],
+        )?;
+
+        for row in &input.rows {
+            let done = bool_to_sql(row.done);
+            let conflict_tx_ids = format!(r#"["{}"]"#, input.tx_id);
+            sql_tx.execute(
+                r#"
+                INSERT INTO todos__schema_v1_history (
+                  row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
+                  created_by, created_at, updated_by, updated_at, edit_metadata_json
+                ) VALUES (?1, 'main', ?2, 'insert', ?3, ?4, ?5, ?6, ?7, ?6, ?7, '{}')
+                "#,
+                params![
+                    row.row_id,
+                    input.tx_id,
+                    row.title,
+                    done,
+                    conflict_tx_ids,
+                    input.actor_id,
+                    input.now
+                ],
+            )?;
+            sql_tx.execute(
+                r#"
+                INSERT INTO todos__schema_v1_current (
+                  row_id, branch_id, visible_tx_id, is_deleted, title, done,
+                  conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+                  edit_metadata_json
+                ) VALUES (?1, 'main', ?2, 0, ?3, ?4, ?5, ?6, ?7, ?6, ?7, '{}')
+                "#,
+                params![
+                    row.row_id,
+                    input.tx_id,
+                    row.title,
                     done,
                     conflict_tx_ids,
                     input.actor_id,
@@ -2023,6 +2110,54 @@ mod tests {
         assert_eq!(
             status,
             ("rejected".into(), r#"{"code":"permission_denied"}"#.into())
+        );
+    }
+
+    #[test]
+    fn one_transaction_can_write_multiple_rows_and_sync_as_one_bundle() {
+        let mut alice = MiniJazzSqlite::in_memory().unwrap();
+        let mut authority = MiniJazzSqlite::in_memory().unwrap();
+
+        alice
+            .insert_todos(InsertTodos {
+                tx_id: "tx-two-rows".into(),
+                node_id: "alice-device".into(),
+                rows: vec![
+                    NewTodoRow {
+                        row_id: "todo-1".into(),
+                        title: "First".into(),
+                        done: false,
+                    },
+                    NewTodoRow {
+                        row_id: "todo-2".into(),
+                        title: "Second".into(),
+                        done: false,
+                    },
+                ],
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+
+        let bundle = alice.export_tx("tx-two-rows").unwrap();
+        assert_eq!(bundle.todo_history.len(), 2);
+        authority.import_tx(&bundle).unwrap();
+        authority
+            .accept_tx(AcceptTx {
+                tx_id: "tx-two-rows".into(),
+                global_epoch: 1,
+            })
+            .unwrap();
+
+        let rows = authority
+            .query_todos_at_global_epoch(&TodoQuery::open_since(0), 1)
+            .unwrap()
+            .rows;
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.row_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo-1", "todo-2"]
         );
     }
 

@@ -332,3 +332,18 @@ bundle marks an existing transaction rejected, the recipient has to repair any
 derived projections that may have included that optimistic transaction. The
 prototype uses full `main` rebuild again; write-set-driven repair remains the
 obvious optimization path.
+
+### 2026-05-24 23:22 PDT
+
+Added a first multi-write transaction:
+
+- one `jazz_tx`
+- two `todos` history rows
+- one exported/imported bundle
+- one authority acceptance
+
+Discovery: the schema shape is genuinely transaction-shaped enough for this.
+Export/import naturally carries multiple history rows under one transaction.
+This also reinforces that write sets should be transaction-level metadata, not
+row metadata; row history can stay simple as long as the transaction row
+contains the durable read/write contract.
