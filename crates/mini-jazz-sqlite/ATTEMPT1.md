@@ -532,6 +532,15 @@ path. The implementation uses a brittle prototype parser for read-set JSON, but
 the semantic flow is promising: validate declared row bases against authority
 visible state, then either assign a global epoch or reject with a reason.
 
+### 2026-05-24 22:59 PDT
+
+Added byte-for-byte rebuild coverage for `projects` current projection.
+
+Discovery: once a second table exists, every projection invariant needs to be
+table-polymorphic too. The project rebuild test caught no new bug, but it makes
+the earlier rejection-repair broadening much less hand-wavy: both result tables
+can now prove current is derivable from non-rejected history.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

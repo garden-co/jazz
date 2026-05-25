@@ -2336,6 +2336,33 @@ impl MiniJazzSqlite {
         })?
         .collect()
     }
+
+    pub fn project_projection_fingerprint(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT row_id, branch_id, visible_tx_id, is_deleted, name,
+                   created_by, created_at, updated_by, updated_at, edit_metadata_json
+            FROM projects__schema_v1_current
+            ORDER BY branch_id, row_id
+            "#,
+        )?;
+        stmt.query_map([], |row| {
+            let fields = [
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?.to_string(),
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?.to_string(),
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)?.to_string(),
+                row.get::<_, String>(9)?,
+            ];
+            Ok(fields.join("|"))
+        })?
+        .collect()
+    }
 }
 
 fn diff_rows(previous: &[Todo], next: &[Todo]) -> Vec<SubscriptionChange> {
@@ -3795,5 +3822,34 @@ mod tests {
         assert_eq!(before, after);
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn project_projection_rebuild_is_byte_identical() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "alice-device".into(),
+            name: "Launch".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.update_project(UpdateProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-2".into(),
+            node_id: "alice-device".into(),
+            name: "Launch renamed".into(),
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+
+        let before = db.project_projection_fingerprint().unwrap();
+        db.rebuild_projects_current_from_history().unwrap();
+        let after = db.project_projection_fingerprint().unwrap();
+
+        assert_eq!(before, after);
     }
 }
