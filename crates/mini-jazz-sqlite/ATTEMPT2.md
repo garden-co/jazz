@@ -1182,3 +1182,50 @@ Compression note:
   a custom VFS/extension or file-level compression layer. Given the compact-id
   wins above, reducing stringly system columns seems like the lower-risk first
   move.
+
+### 2026-05-25 13:11 PDT
+
+Added an interned-id layout experiment.
+
+Command:
+
+- `cargo run -p mini-jazz-sqlite --example interned_id_layouts --release`
+
+Question:
+
+- Integer system ids look good, but public Jazz ids are still strings. Does
+  storing public ids once in mapping tables and using integers in hot
+  current/history tables still help once mapping-table overhead is counted?
+
+Synthetic workload:
+
+- 40,000 rows.
+- 8,000 updates.
+- Long globally-unique-ish row ids and tx ids.
+- Compare text ids stored directly in current/history/tx tables vs `row_id_map`
+  and `tx_id_map` with integer ids in hot tables.
+- Measure current page, snapshot page, and public row-id lookup.
+
+Latest run:
+
+- `text_everywhere`: 24,543,232 bytes, insert 453.512 ms, current 2.276 ms,
+  snapshot 11.787 ms, public lookup 1.577 ms.
+- `interned_ids`: 16,998,400 bytes, insert 471.739 ms, current 2.092 ms,
+  snapshot 9.050 ms, public lookup 2.154 ms.
+
+Ratios:
+
+- Interned ids use 0.69x the disk of text-everywhere with long ids.
+- Insert is 1.04x text, because inserts also maintain mapping tables.
+- Current page is 0.92x text.
+- Snapshot page is 0.77x text.
+- Public lookup by string row id is 1.37x text, but still only about 2 ms for
+  200 lookups in this synthetic run.
+
+Discovery:
+
+- Interning is not worth much for short ids, but becomes attractive for realistic
+  long public ids. The hot tables get smaller and faster, while public-id lookup
+  pays an extra mapping-table hop. This suggests a good physical design may keep
+  stable public ids at the edge and use local integer ids in every hot internal
+  table/index.
