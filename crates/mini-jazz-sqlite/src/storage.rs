@@ -3591,7 +3591,7 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::{encode_absence_read, encode_row_reads};
+    use crate::codec::{encode_absence_read, encode_mixed_reads, encode_row_reads};
     use std::fs;
     use std::time::Instant;
 
@@ -5230,6 +5230,84 @@ mod tests {
             .unwrap();
         assert!(rejection.contains("stale_range"));
         assert_eq!(db.get_todo("main", "todo-1").unwrap(), None);
+    }
+
+    #[test]
+    fn validated_acceptance_checks_mixed_row_and_absence_reads() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-base".into(),
+            node_id: "alice-device".into(),
+            title: "Base".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-base".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+        db.update_todo_at_base(UpdateTodoAtBase {
+            row_id: "todo-1".into(),
+            tx_id: "tx-mixed-read".into(),
+            node_id: "bob-phone".into(),
+            base_tx_id: "tx-base".into(),
+            title: Some("Mixed read edit".into()),
+            done: None,
+            actor_id: "bob".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE jazz_tx SET read_set_jsonb = ?2 WHERE tx_id = ?1",
+                params![
+                    "tx-mixed-read",
+                    encode_mixed_reads(
+                        &[EncodedRowRead {
+                            table: "todos".into(),
+                            row_id: "todo-1".into(),
+                            visible_tx_id: "tx-base".into(),
+                            reason: "write_base".into(),
+                        }],
+                        &[EncodedAbsenceRead {
+                            table: "projects".into(),
+                            row_id: "missing-project".into(),
+                            reason: "optional_join_absence".into(),
+                        }],
+                    )
+                ],
+            )
+            .unwrap();
+        db.insert_project(InsertProject {
+            row_id: "missing-project".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "carol-tablet".into(),
+            name: "Appeared".into(),
+            actor_id: "carol".into(),
+            now: 210,
+        })
+        .unwrap();
+
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-mixed-read".into(),
+            global_epoch: 2,
+        })
+        .unwrap();
+
+        let rejection: String = db
+            .conn
+            .query_row(
+                "SELECT rejection_reason_json FROM jazz_tx WHERE tx_id = 'tx-mixed-read'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(rejection.contains("stale_range"));
+        assert!(rejection.contains("missing-project"));
     }
 
     #[test]

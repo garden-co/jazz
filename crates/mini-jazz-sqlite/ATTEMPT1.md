@@ -929,6 +929,20 @@ remaining cost is probably the history/grouping work itself. The indexes still
 match the access paths we keep using and should matter more as branch/source
 queries diversify.
 
+### 2026-05-24 23:41 PDT
+
+Validated mixed read-set acceptance:
+
+- one transaction can carry row-version reads and absence/range reads together
+- authority validation checks both kinds before accepting
+- a stale absence dependency rejects the transaction even when the row write
+  base is still current
+
+Discovery: mixed read sets are the realistic case for policy-gated writes. This
+also reinforces that row dependencies, absence dependencies, and policy
+dependencies need typed entries even if their first durable encoding is still
+JSON-shaped.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
