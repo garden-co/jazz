@@ -5540,6 +5540,58 @@ mod tests {
     }
 
     #[test]
+    fn resolved_project_conflict_rebuild_is_byte_identical() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-base".into(),
+            node_id: "alice-device".into(),
+            name: "Base".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.update_project(UpdateProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-alice".into(),
+            node_id: "alice-device".into(),
+            base_tx_id: Some("tx-project-base".into()),
+            name: "Alice name".into(),
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.update_project(UpdateProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-bob".into(),
+            node_id: "bob-phone".into(),
+            base_tx_id: Some("tx-project-base".into()),
+            name: "Bob name".into(),
+            actor_id: "bob".into(),
+            now: 210,
+        })
+        .unwrap();
+        db.resolve_project_conflict(ResolveProjectConflict {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-resolution".into(),
+            node_id: "alice-device".into(),
+            resolved_name: "Human-chosen name".into(),
+            resolved_candidate_tx_ids: vec!["tx-project-alice".into(), "tx-project-bob".into()],
+            actor_id: "alice".into(),
+            now: 300,
+        })
+        .unwrap();
+
+        let before = db.project_projection_fingerprint().unwrap();
+        db.rebuild_projects_current_from_history().unwrap();
+        let after = db.project_projection_fingerprint().unwrap();
+
+        assert_eq!(before, after);
+        assert!(after[0].contains("Human-chosen name"));
+        assert!(after[0].contains("[]"));
+    }
+
+    #[test]
     fn joined_subscription_updates_when_dependency_row_changes() {
         let mut db = MiniJazzSqlite::in_memory().unwrap();
         db.insert_project(InsertProject {

@@ -943,6 +943,19 @@ also reinforces that row dependencies, absence dependencies, and policy
 dependencies need typed entries even if their first durable encoding is still
 JSON-shaped.
 
+### 2026-05-24 23:42 PDT
+
+Added byte-for-byte rebuild coverage after conflict resolution:
+
+- project current projection can be rebuilt after concurrent candidates
+- resolution rows clear conflict metadata deterministically
+- rebuilt projection still exposes the chosen value and empty candidate set
+
+Discovery: conflict resolution fits the projection invariant. The important
+detail is that resolution history rows must carry both the chosen value and the
+cleared candidate metadata, otherwise rebuilds would resurrect stale conflict
+state.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
