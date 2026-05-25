@@ -262,6 +262,8 @@ impl Harness {
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::{AcceptTx, InsertTodo, MiniJazzSqlite, TodoQuery};
+
     use super::*;
 
     fn alice() -> NodeId {
@@ -455,5 +457,91 @@ mod tests {
                 dropped: 1,
             }
         );
+    }
+
+    #[test]
+    fn propagates_tx_fate_from_client_through_authority_to_clients() -> rusqlite::Result<()> {
+        let authority = carol();
+        let mut harness = Harness::new();
+        harness.add_node(alice(), NodeRole::Client);
+        harness.add_node(bob(), NodeRole::Client);
+        harness.add_node(authority, NodeRole::Coordinator);
+
+        let mut alice_store = MiniJazzSqlite::in_memory()?;
+        let mut bob_store = MiniJazzSqlite::in_memory()?;
+        let mut authority_store = MiniJazzSqlite::in_memory()?;
+
+        alice_store.insert_todo(InsertTodo {
+            row_id: "todo_read_launch_notes".to_owned(),
+            tx_id: "tx_alice_read_launch_notes".to_owned(),
+            node_id: "alice_device".to_owned(),
+            title: "Read launch notes".to_owned(),
+            done: false,
+            actor_id: "alice".to_owned(),
+            now: 1_700_000_000,
+        })?;
+
+        let pending_bundle = alice_store.export_tx("tx_alice_read_launch_notes")?;
+        assert_eq!(pending_bundle.tx.status, "local_pending");
+
+        let proposed = harness.send(alice(), authority, pending_bundle.tx.tx_id.as_bytes());
+        assert_eq!(
+            harness.deliver_next(),
+            Some(Delivery::Delivered(proposed.clone()))
+        );
+        assert_eq!(
+            harness
+                .node_mut(authority)
+                .expect("authority exists")
+                .take_inbox(),
+            vec![proposed]
+        );
+
+        authority_store.import_tx(&pending_bundle)?;
+        authority_store.accept_tx(AcceptTx {
+            tx_id: "tx_alice_read_launch_notes".to_owned(),
+            global_epoch: 7,
+        })?;
+        let accepted_bundle = authority_store.export_tx("tx_alice_read_launch_notes")?;
+        assert_eq!(accepted_bundle.tx.status, "global_durable_accepted");
+        assert_eq!(accepted_bundle.tx.global_epoch, Some(7));
+
+        let ack_to_alice = harness.send(authority, alice(), accepted_bundle.tx.tx_id.as_bytes());
+        let ack_to_bob = harness.send(authority, bob(), accepted_bundle.tx.tx_id.as_bytes());
+        assert_eq!(
+            harness.deliver_all(),
+            vec![
+                Delivery::Delivered(ack_to_alice.clone()),
+                Delivery::Delivered(ack_to_bob.clone()),
+            ]
+        );
+        assert_eq!(
+            harness
+                .node_mut(alice())
+                .expect("alice exists")
+                .take_inbox(),
+            vec![ack_to_alice]
+        );
+        assert_eq!(
+            harness.node_mut(bob()).expect("bob exists").take_inbox(),
+            vec![ack_to_bob]
+        );
+
+        alice_store.import_tx(&accepted_bundle)?;
+        bob_store.import_tx(&accepted_bundle)?;
+
+        let alice_bundle = alice_store.export_tx("tx_alice_read_launch_notes")?;
+        let bob_bundle = bob_store.export_tx("tx_alice_read_launch_notes")?;
+        assert_eq!(alice_bundle.tx.status, "global_durable_accepted");
+        assert_eq!(alice_bundle.tx.global_epoch, Some(7));
+        assert_eq!(bob_bundle.tx.status, "global_durable_accepted");
+        assert_eq!(bob_bundle.tx.global_epoch, Some(7));
+
+        let bob_rows = bob_store.query_todos(&TodoQuery::open_since(0))?.rows;
+        assert_eq!(bob_rows.len(), 1);
+        assert_eq!(bob_rows[0].row_id, "todo_read_launch_notes");
+        assert_eq!(bob_rows[0].visible_tx_id, "tx_alice_read_launch_notes");
+
+        Ok(())
     }
 }

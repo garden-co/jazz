@@ -112,6 +112,16 @@ pub struct CreateBranch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeBranchTodosIntoMain {
+    pub source_branch_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub actor_id: String,
+    pub source_global_epoch: i64,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateTodo {
     pub row_id: String,
     pub tx_id: String,
@@ -940,6 +950,121 @@ impl MiniJazzSqlite {
                 input.base_provenance_json
             ],
         )?;
+        sql_tx.commit()
+    }
+
+    pub fn merge_branch_todos_into_main(
+        &mut self,
+        input: MergeBranchTodosIntoMain,
+    ) -> rusqlite::Result<()> {
+        let source_query = TodoQuery {
+            branch_id: input.source_branch_id.clone(),
+            done: None,
+            created_after: None,
+        };
+        let source_rows = self
+            .query_todos_at_global_epoch(&source_query, input.source_global_epoch)?
+            .rows;
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let write_set_entries = source_rows
+            .iter()
+            .map(|row| {
+                format!(
+                    r#"{{"table":"todos","rowId":"{}","op":"merge","columns":["title","done","updated_at"]}}"#,
+                    row.row_id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let write_set = format!("[{write_set_entries}]");
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'data', ?4, '[]', '[]', '[]', ?5, 'local_pending', ?6, ?6, '{}')
+            "#,
+            params![
+                input.tx_id,
+                node_num,
+                local_epoch,
+                input.source_global_epoch,
+                write_set,
+                input.now
+            ],
+        )?;
+        for row in source_rows {
+            let main_previous: Option<(i64, i64)> = sql_tx
+                .query_row(
+                    r#"
+                    SELECT created_at, done
+                    FROM todos__schema_v1_current
+                    WHERE branch_id = 'main' AND row_id = ?1
+                    "#,
+                    params![row.row_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let op = if main_previous.is_some() {
+                "update"
+            } else {
+                "insert"
+            };
+            let created_at = main_previous
+                .map(|previous| previous.0)
+                .unwrap_or(row.created_at);
+            let done = bool_to_sql(row.done);
+            let conflict_tx_ids = format!(r#"["{}"]"#, input.tx_id);
+            sql_tx.execute(
+                r#"
+                INSERT INTO todos__schema_v1_history (
+                  row_id, branch_id, tx_id, op, project_id, title, done, conflict_tx_ids_jsonb,
+                  created_by, created_at, updated_by, updated_at, edit_metadata_json
+                ) VALUES (?1, 'main', ?2, ?3, '', ?4, ?5, ?6, ?7, ?8, ?7, ?9, '{}')
+                "#,
+                params![
+                    row.row_id,
+                    input.tx_id,
+                    op,
+                    row.title,
+                    done,
+                    conflict_tx_ids,
+                    input.actor_id,
+                    created_at,
+                    input.now
+                ],
+            )?;
+            sql_tx.execute(
+                r#"
+                INSERT INTO todos__schema_v1_current (
+                  row_id, branch_id, visible_tx_id, is_deleted, project_id, title, done,
+                  conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+                  edit_metadata_json
+                ) VALUES (?1, 'main', ?2, 0, '', ?3, ?4, ?5, ?6, ?7, ?6, ?8, '{}')
+                ON CONFLICT(row_id, branch_id) DO UPDATE SET
+                  visible_tx_id = excluded.visible_tx_id,
+                  is_deleted = excluded.is_deleted,
+                  title = excluded.title,
+                  done = excluded.done,
+                  conflict_tx_ids_jsonb = excluded.conflict_tx_ids_jsonb,
+                  updated_by = excluded.updated_by,
+                  updated_at = excluded.updated_at
+                "#,
+                params![
+                    row.row_id,
+                    input.tx_id,
+                    row.title,
+                    done,
+                    conflict_tx_ids,
+                    input.actor_id,
+                    created_at,
+                    input.now
+                ],
+            )?;
+        }
         sql_tx.commit()
     }
 
@@ -3164,6 +3289,60 @@ mod tests {
         assert_eq!(draft_rows.rows.len(), 1);
         assert_eq!(draft_rows.rows[0].title, "Draft title");
         assert_eq!(draft_rows.rows[0].visible_tx_id, "tx-draft-shadow");
+    }
+
+    #[test]
+    fn branch_data_merge_makes_branch_rows_visible_on_main() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.create_branch(CreateBranch {
+            branch_id: "draft".into(),
+            tx_id: "tx-create-draft".into(),
+            node_id: "alice-device".into(),
+            name: "Alice draft".into(),
+            head_global_epoch: 0,
+            base_provenance_json: r#"[{"branch":"main","globalBase":0}]"#.into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_in_branch(
+            "draft",
+            InsertTodo {
+                row_id: "todo-draft".into(),
+                tx_id: "tx-draft-row".into(),
+                node_id: "alice-device".into(),
+                title: "Draft row".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            },
+        )
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-draft-row".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+
+        assert!(
+            db.query_todos_at_global_epoch(&TodoQuery::open_since(0), 1)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+
+        db.merge_branch_todos_into_main(MergeBranchTodosIntoMain {
+            source_branch_id: "draft".into(),
+            tx_id: "tx-merge-draft".into(),
+            node_id: "alice-device".into(),
+            actor_id: "alice".into(),
+            source_global_epoch: 1,
+            now: 300,
+        })
+        .unwrap();
+
+        let main_current = db.query_todos(&TodoQuery::open_since(0)).unwrap();
+        assert_eq!(main_current.rows[0].row_id, "todo-draft");
+        assert_eq!(main_current.rows[0].visible_tx_id, "tx-merge-draft");
     }
 
     #[test]

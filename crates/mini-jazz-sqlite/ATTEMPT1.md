@@ -541,6 +541,19 @@ table-polymorphic too. The project rebuild test caught no new bug, but it makes
 the earlier rejection-repair broadening much less hand-wavy: both result tables
 can now prove current is derivable from non-rejected history.
 
+### 2026-05-24 23:00 PDT
+
+Added first branch data merge:
+
+- branch-local todo row stays invisible on `main`
+- merge transaction copies visible branch rows into `main`
+- main current then exposes the merge transaction as the visible version
+
+Discovery: this is intentionally a data-merge spike, not the final
+metadata-only merge path. It shows the visibility boundary clearly: accepted
+branch history is global history but still not main visibility until an explicit
+merge transaction writes or exposes it on main.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
@@ -597,3 +610,51 @@ that the joined answer is reproducible, subscribable, and syncable.
    surface, create one test with concurrent project-name updates and decide
    whether query results expose conflict metadata, resolved values only, or both
    plus scope entries for every candidate tx.
+
+## Semantic gaps spotted at 23:00
+
+Concrete next experiments after the first speedrun:
+
+1. Replace ad-hoc read/write-set JSON parsing with a tiny typed codec.
+   The authority validation path is semantically important now, but it depends
+   on brittle string extraction. Keep the schema JSON-shaped, add typed encode /
+   decode helpers, then rerun the stale-read acceptance tests through the codec.
+
+2. Validate range and absence reads at authority acceptance.
+   Optional joins now emit predicate scope for missing dependencies, but
+   `ReadSet::validate_against` rejects all ranges as unsupported. Add one
+   transaction that depends on "project row absent" and prove a concurrent
+   project insert rejects it.
+
+3. Make branch source provenance SQL-visible.
+   `query_todos_on_branch` still combines main-base and branch-local rows in
+   Rust. Materialize a temporary source relation with branch id, vector, and
+   precedence, then use it for one todo/project joined query with branch-local
+   shadowing on both sides.
+
+4. Exercise conflict candidates across joins, not just single todo rows.
+   Create concurrent project name updates from the same base, join todos to the
+   project, and decide whether the joined result exposes candidate tx ids on the
+   dependency, the projected nested object, or both.
+
+5. Prove scoped sync for optional absence.
+   Current scoped sync expands concrete row locators into bundles, but an
+   optional missing project has no row bundle to send. Add a sender/receiver
+   scenario where Bob can reproduce `project = None` only if predicate scope is
+   transmitted or intentionally revalidated.
+
+6. Turn projection rebuild into a table registry experiment.
+   Rejection and import repair now manually rebuild todos and projects. Add a
+   tiny registry/list of projection rebuilders and require all fate transitions
+   to call through it, so the next hard-coded table cannot silently skip repair.
+
+7. Split durable transaction state from authority fate receipts.
+   `accept_tx` and `reject_tx` mutate `jazz_tx` directly. Try an append-only
+   `jazz_tx_fate` table plus a current fate view/projection, then export/import
+   both proposal and fate events for the same stable tx id.
+
+8. Add a top-N joined subscription with dependency sort-key churn.
+   Required and optional joins rerun correctly, but pagination/order stability
+   is still untouched. Query the first N open todos ordered by project name,
+   rename a project across the page boundary, and compare fresh query output to
+   subscription diff output.
