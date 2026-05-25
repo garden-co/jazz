@@ -103,10 +103,14 @@ CREATE TABLE jazz_tx (
   $nodeNum INTEGER NOT NULL,
   $localEpoch INTEGER NOT NULL,
   $globalEpoch INTEGER,
+  $kind TEXT NOT NULL, -- data | branch_metadata | schema_metadata | permission_metadata
   $baseGlobalEpoch INTEGER NOT NULL,
   $baseLocalJsonb BLOB NOT NULL,
   $baseIncludeJsonb BLOB NOT NULL,
-  $status TEXT NOT NULL, -- local_pending | edge_durable | global_durable | rejected
+  $readSetJsonb BLOB NOT NULL,
+  $writeSetJsonb BLOB NOT NULL,
+  $status TEXT NOT NULL, -- local_pending | edge_durable | global_durable_accepted | rejected
+  $rejectionReasonJson TEXT,
   $createdAt INTEGER NOT NULL,
   $sealedAt INTEGER,
   $metadataJson TEXT NOT NULL,
@@ -121,6 +125,19 @@ CREATE TABLE jazz_branch (
   $headLocalJsonb BLOB NOT NULL,
   $headIncludeJsonb BLOB NOT NULL,
   $baseProvenanceJsonb BLOB NOT NULL
+);
+
+CREATE TABLE jazz_branch_history (
+  $branchId TEXT NOT NULL,
+  $txId TEXT NOT NULL,
+  $op TEXT NOT NULL, -- create | update_head | merge
+  $headGlobalEpoch INTEGER NOT NULL,
+  $headLocalJsonb BLOB NOT NULL,
+  $headIncludeJsonb BLOB NOT NULL,
+  $baseProvenanceJsonb BLOB NOT NULL,
+  $metadataJson TEXT NOT NULL,
+  PRIMARY KEY ($branchId, $txId),
+  FOREIGN KEY ($txId) REFERENCES jazz_tx($txId)
 );
 
 CREATE TABLE jazz_schema (
@@ -143,6 +160,10 @@ CREATE INDEX jazz_tx_status_idx
 ON jazz_tx($status);
 ```
 
+`$kind` makes metadata-only transactions explicit. A branch metadata merge is a
+`branch_metadata` transaction with a `jazz_branch_history` row and no user-table
+history rows.
+
 ## User Tables
 
 History table sketch:
@@ -153,11 +174,11 @@ CREATE TABLE todos__schema_v1_history (
   $branchId TEXT NOT NULL,
   $txId TEXT NOT NULL,
   $op TEXT NOT NULL, -- insert | update | delete
-  $parentTxIdsJson TEXT NOT NULL,
 
   title TEXT,
   done INTEGER,
 
+  $conflictTxIdsJsonb BLOB NOT NULL,
   $createdBy TEXT,
   $createdAt INTEGER NOT NULL,
   $updatedBy TEXT,
@@ -181,6 +202,7 @@ CREATE TABLE todos__schema_v1_current (
   title TEXT,
   done INTEGER,
 
+  $conflictTxIdsJsonb BLOB NOT NULL,
   $createdBy TEXT,
   $createdAt INTEGER NOT NULL,
   $updatedBy TEXT,
@@ -220,6 +242,11 @@ Transaction identity has two layers:
 - `$globalEpoch` is assigned later by the authority when the transaction becomes
   globally known.
 
+`$globalEpoch` is a simple number in the logical model. The first
+implementation has one authority, so this is one global order. Future sharding
+should remain implicit beneath the logical epoch model rather than surfacing
+authority ids in ordinary vectors or queries.
+
 When the authority accepts a local transaction, it broadcasts a fate/mapping
 event:
 
@@ -234,17 +261,42 @@ TxAccepted {
 }
 ```
 
-Receivers update `jazz_tx.$globalEpoch` for the existing transaction row.
-References do not need to rename from local to global; compact vectors can
-simply prefer global coordinates after the mapping is known.
+Receivers update `jazz_tx.$globalEpoch` and `$status` for the existing
+transaction row. References do not need to rename from local to global; compact
+vectors can simply prefer global coordinates after the mapping is known.
+
+The status state machine is central and intentionally small:
+
+```text
+local_pending -> edge_durable -> global_durable_accepted
+local_pending -> global_durable_accepted
+local_pending -> rejected
+edge_durable -> rejected
+```
+
+The direct `local_pending -> global_durable_accepted` transition is expected
+when there is no edge tier.
 
 Rejected transactions are marked rejected. Visibility predicates must check
 transaction fate/status so rejected transactions are not made visible merely
-because they are below a local vector base.
+because they are below a local vector base. Rejected transactions store a
+machine-readable error reason in `$rejectionReasonJson`. Rejected transactions
+are retained in history for now.
+
+Branch-local accepted transactions also receive normal global epochs. They are
+globally known history, but remain invisible to `main`
+unless a merge-commit transaction makes them visible across branches.
 
 For v0, merge resolution may be last-writer-wins, but it should already be
 per-column. History may contain multiple visible candidates; current
 projections store derived merge resolution for the branch/snapshot they serve.
+Current projections store the resolved value plus conflict metadata, not one
+projection row per visible candidate. For v0, conflict metadata is just the
+candidate `$txId`s. Reads that need conflict detail load candidate row versions
+from history on demand.
+
+Conflict candidate `$txId`s are ordered by `$updatedAt`, with global epoch as
+the tie breaker. This ordering is part of the byte-for-byte rebuild contract.
 
 Insert lowering sketch:
 
@@ -252,32 +304,36 @@ Insert lowering sketch:
 BEGIN IMMEDIATE;
 
 INSERT INTO jazz_tx (
-  $txId, $nodeNum, $localEpoch, $baseGlobalEpoch, $baseLocalJsonb,
-  $baseIncludeJsonb, $status,
+  $txId, $nodeNum, $localEpoch, $kind, $baseGlobalEpoch, $baseLocalJsonb,
+  $baseIncludeJsonb, $readSetJsonb, $writeSetJsonb, $status,
   $createdAt, $sealedAt, $metadataJson
 ) VALUES (
-  :txId, :nodeNum, :localEpoch, :baseGlobalEpoch, :baseLocalJsonb,
-  :baseIncludeJsonb, 'local_pending',
+  :txId, :nodeNum, :localEpoch, 'data', :baseGlobalEpoch, :baseLocalJsonb,
+  :baseIncludeJsonb, :readSetJsonb, :writeSetJsonb, 'local_pending',
   :now, :now, :metadataJson
 );
 
 INSERT INTO todos__schema_v1_history (
-  $rowId, $branchId, $txId, $op, $parentTxIdsJson,
+  $rowId, $branchId, $txId, $op,
   title, done,
+  $conflictTxIdsJsonb,
   $createdBy, $createdAt, $updatedBy, $updatedAt, $editMetadataJson
 ) VALUES (
-  :rowId, 'main', :txId, 'insert', '[]',
+  :rowId, 'main', :txId, 'insert',
   :title, 0,
+  jsonb_array(:txId),
   :actorId, :now, :actorId, :now, :editMetadataJson
 );
 
 INSERT INTO todos__schema_v1_current (
   $rowId, $branchId, $visibleTxId, $isDeleted,
   title, done,
+  $conflictTxIdsJsonb,
   $createdBy, $createdAt, $updatedBy, $updatedAt, $editMetadataJson
 ) VALUES (
   :rowId, 'main', :txId, 0,
   :title, 0,
+  jsonb_array(:txId),
   :actorId, :now, :actorId, :now, :editMetadataJson
 );
 
@@ -307,6 +363,8 @@ Semantics:
 - `include` contains sparse positive dots beyond the bases.
 - There is no `exclude` in v0.
 - Vectors are closed: they do not point to other vectors/snapshots.
+- If a local base includes rejected local transactions, visibility filters them
+  out by status. This keeps vectors additive and avoids negative holes.
 
 Vectors are stored inline where they are owned:
 
@@ -324,6 +382,20 @@ for uncommon vector parts:
 local bases: [[nodeNum, localBaseEpoch], ...]
 include dots: [{ "txId": "..." }, { "global": 45 }, { "node": 7, "local": 21 }]
 ```
+
+The durable/protocol representation for `include` dots is still experimental.
+The tradeoff is:
+
+- `$txId`: long but stable and never needs rewriting
+- global epoch: compact, but only available after acceptance
+- node-local coordinate: compact for local work, but should be upgraded or
+  compacted after global mapping is known
+
+Durable vector JSONB must be emitted canonically so derived projections can be
+rebuilt byte-for-byte. Local bases are sorted by `nodeNum`. Include dots need a
+canonical coordinate sort. Branch provenance either preserves input order with
+explicit ordinals or uses a canonical key; this remains a representation
+choice.
 
 The hot path should not run `json_each()` over vector JSONB for every candidate
 history row. Query execution decodes the one snapshot vector once into scalar
@@ -354,10 +426,87 @@ Read sets use the same vector shape. They may over-approximate, but must not
 omit any transaction whose visible row version or policy dependency affected
 the result.
 
+Transactions also store precise inline JSONB read/write sets:
+
+```text
+readSet:
+  [
+    {
+      "kind": "row",
+      "table": "todos",
+      "rowId": "...",
+      "visibleTxId": "...",
+      "reason": "direct"
+    },
+    {
+      "kind": "range",
+      "table": "todos",
+      "index": "todos_done_created_at",
+      "predicate": { "done": false, "$createdAt": { "gt": 123 } },
+      "snapshot": { "globalBase": 1057 }
+    }
+  ]
+
+writeSet:
+  [
+    {
+      "table": "todos",
+      "rowId": "...",
+      "op": "update",
+      "columns": ["title", "$updatedAt"]
+    }
+  ]
+```
+
+Read sets include directly used row versions and predicate/index/range reads
+needed to validate exclusive transactions. If a transaction writes a row, its
+read set includes the exact previous visible version of that row even when the
+application did not explicitly read it first. Write sets are both row-granular
+and column-granular: row ids support coarse invalidation/sync, while column
+masks support merge, policy checks, and subscription filtering.
+
+Policy dependencies are not part of local transaction causality for v0. Policies
+are authoritatively evaluated when the transaction is received at the global
+tier.
+
+Global epochs alone do not encode true causality or concurrency. They give an
+authority order after acceptance. Causality comes from the transaction's base
+vector plus precise read/write sets. Flattening local transactions into global
+epochs must not discard the original local coordinates or read/base vector
+needed to answer whether two transactions were concurrent.
+
+The core model does not use explicit parent pointers. Merges that need a common
+ancestor derive it by walking history with the relevant read/write sets and
+snapshot vectors. That can be slower than a parent-pointer lookup; correctness
+and a cleaner model matter more for v0.
+
 ## Branches
 
 A branch's visible content is defined by an effective closed version vector, not
 by copying the whole database.
+
+Branch metadata should be user-visible data. The recommended app model is an
+ordinary table such as `branches`, whose row id is also the branch id:
+
+```ts
+const branch = await db.insert(app.branches, {
+  projectId,
+  name: "Alice's draft",
+  ownerId: session.user_id,
+});
+
+const draft = db.branch(branch.id);
+```
+
+That row is the permission anchor for using the branch. Branch reads require
+read permission on the branch metadata row. Branch writes require update
+permission on that row. Normal table/row policies still apply to data accessed
+through the branch.
+
+The system still keeps `jazz_branch` and `jazz_branch_history` for effective
+visibility vectors and provenance. Those tables are engine metadata derived
+from branch operations, while app-level branch rows provide naming, lifecycle,
+product metadata, and natural permissions.
 
 Accepted branch transactions become global history but remain isolated to their
 branch. Global history is not equivalent to visibility on `main`; content
@@ -378,9 +527,25 @@ The stored branch keeps both:
 - precise base provenance in `$baseProvenanceJsonb`
 - a flattened effective head vector used for query-time visibility
 
+Branch head changes are append-only. `jazz_branch` stores the current branch
+head as a projection; `jazz_branch_history` stores every branch create/head
+update/merge operation keyed by the transaction that made the change.
+
+`$baseProvenanceJsonb` records the branch creation/merge inputs that produced
+the effective vector. Its exact JSON shape is still open, but it must preserve
+enough information for UI/debugging and byte-for-byte rebuilds.
+
 Base conflicts are a to-be-tried decision: represent conflicts between bases as
 multiple visible candidates until a later merge-resolution transaction, rather
 than resolving them immediately during branch creation/flattening.
+
+Merge commits can take two shapes:
+
+- metadata-only visibility change: update branch visibility/effective vector
+  when no conflicting row values need to be resolved; this is still a normal
+  `jazz_tx` row, with a `jazz_branch_history` row and no user-table history rows
+- ordinary data transaction: write translated/resolved row versions on the
+  target branch when conflicts require explicit resolution
 
 ## Query Execution
 
@@ -550,6 +715,17 @@ WHERE h.$branchId = :branchId
 
 Pure-query history snapshots are the correctness baseline. Optional serving
 indexes are reserved for hot branch/snapshot paths.
+
+Snapshot query performance should be measured both ways:
+
+- normalized: history rows join `jazz_tx` for `$nodeNum`, `$localEpoch`,
+  `$globalEpoch`, and `$status`
+- denormalized: history rows copy those transaction coordinates/status so
+  snapshot predicates can avoid the join
+
+This is an explicit space-vs-compute experiment. The normalized shape is simpler
+and avoids duplicated metadata; the denormalized shape may be substantially
+faster for history-heavy snapshot reads.
 
 ## Subscriptions
 
@@ -820,7 +996,8 @@ Development should proceed as vertical slices through this harness:
 Each slice should include invariants over the whole simulated system:
 
 - every visible row version has an accepted/non-rejected transaction
-- current projections can be rebuilt from history
+- current projections can be rebuilt byte-for-byte from history
+- vector/provenance JSONB arrays are emitted in canonical order
 - a synced query result is reproducible from the receiver's local rows
 - subscription diffs match rerunning the query from scratch
 - branch visibility is explainable by the branch effective vector
@@ -839,8 +1016,11 @@ when a scenario identifies a concrete hot path.
 - What are the exact canonical compaction rules for durable vectors?
 - When can a local dot/base be rewritten or omitted after a global epoch mapping
   is known?
-- Should `include` dots be normalized to `$txId`, global epoch, or node-local
-  coordinate in storage and on the wire?
+- What canonical sort should include dots use across `$txId`, global epoch, and
+  node-local coordinate forms?
+- Experiment with `include` dot representations: `$txId`s are stable but long;
+  epoch indexes are compact, while local epoch indexes need upgrading after
+  global mapping.
 - Is `JSONB` acceptable for all targets, especially browser/WASM SQLite, or do
   we need a fallback representation?
 - Can most visibility checks compile to indexed range predicates, or do we need
@@ -848,10 +1028,16 @@ when a scenario identifies a concrete hot path.
 - Do broadcasts need both `$nodeId/$localEpoch` and `$txId`, or can peers always
   resolve one from the other before applying the mapping?
 
+### Read/Write Sets
+
+- What exact JSONB schema should range predicates use so they are stable,
+  canonical, and SQL-lowerable?
+- How large can inline read/write JSONB become before we need side tables?
+
 ### Snapshot Query Performance
 
-- Should history rows denormalize `$nodeNum`, `$localEpoch`, `$globalEpoch`, and
-  `$txStatus` to avoid joining `jazz_tx` for every candidate row?
+- Measure normalized history rows vs denormalized transaction coordinates/status
+  on history rows, and decide based on the space-vs-compute tradeoff.
 - What is the best SQL shape for "latest visible version per row": `NOT EXISTS`,
   window functions, grouped max keys, or another shape?
 - What native sort order/indexes should history tables use for snapshot reads?
@@ -866,10 +1052,6 @@ when a scenario identifies a concrete hot path.
 - What is the precise `$baseProvenanceJsonb` shape?
 - How do multiple visible candidates flow through reads, subscriptions, and sync
   before a merge-resolution transaction exists?
-- What does a merge-commit transaction contain when it makes content visible
-  across branches?
-- How does branch-local isolated global history interact with authority ordering
-  and global epoch assignment?
 
 ### Transactions and Conflict Resolution
 
@@ -877,17 +1059,17 @@ when a scenario identifies a concrete hot path.
 - How is last-writer-wins ordered: global epoch, local epoch, created time, or
   explicit merge metadata?
 - What is the exact acceptance flow for mergeable vs exclusive transactions?
-- How are rejected local transactions removed from current projections and
-  subscription results?
+- Rejected transactions are retained in history. How are rejected local
+  transactions removed from current projections and subscription results?
 - Can one sealed transaction touch multiple tables and schema versions in v0?
+- What schema should `$rejectionReasonJson` use?
 
 ### Current Projections
 
 - Is the main current projection one table per schema version only, or does it
   also need per-branch columns/rows for `main` sub-branches?
-- How are current projections repaired/rebuilt after crash or corruption?
-- Should current projections store only resolved visible rows, or also conflict
-  candidate metadata?
+- What other canonical ordering rules are required to guarantee byte-for-byte
+  current projection rebuilds?
 
 ### Sync Scope
 
