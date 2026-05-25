@@ -21,6 +21,17 @@ pub struct Project {
     pub visible_tx_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurrentProjection {
+    TodosSchemaV1Main,
+    ProjectsSchemaV1Main,
+}
+
+const CURRENT_PROJECTIONS: &[CurrentProjection] = &[
+    CurrentProjection::TodosSchemaV1Main,
+    CurrentProjection::ProjectsSchemaV1Main,
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectWithConflictMeta {
     pub row: Project,
@@ -1419,8 +1430,7 @@ impl MiniJazzSqlite {
         }
         sql_tx.commit()?;
         if bundle.tx.status == "rejected" {
-            self.rebuild_main_current_from_history()?;
-            self.rebuild_projects_current_from_history()?;
+            self.rebuild_all_current_projections()?;
         }
         Ok(())
     }
@@ -1773,8 +1783,7 @@ impl MiniJazzSqlite {
             "#,
             params![input.tx_id, input.reason_json, now_millis()],
         )?;
-        self.rebuild_main_current_from_history()?;
-        self.rebuild_projects_current_from_history()
+        self.rebuild_all_current_projections()
     }
 
     pub fn tx_fate_log(&self, tx_id: &str) -> rusqlite::Result<Vec<String>> {
@@ -2696,6 +2705,18 @@ impl MiniJazzSqlite {
             }
         }
         sql_tx.commit()
+    }
+
+    pub fn rebuild_all_current_projections(&mut self) -> rusqlite::Result<()> {
+        for projection in CURRENT_PROJECTIONS {
+            match projection {
+                CurrentProjection::TodosSchemaV1Main => self.rebuild_main_current_from_history()?,
+                CurrentProjection::ProjectsSchemaV1Main => {
+                    self.rebuild_projects_current_from_history()?
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn current_projection_fingerprint(&self) -> rusqlite::Result<Vec<String>> {
@@ -4530,5 +4551,62 @@ mod tests {
         let after = db.project_projection_fingerprint().unwrap();
 
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn all_current_projection_rebuilds_cover_todos_and_projects() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "alice-device".into(),
+            name: "Launch".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-1".into(),
+            title: "Ship prototype".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 110,
+        })
+        .unwrap();
+
+        db.conn
+            .execute("DELETE FROM todos__schema_v1_current", [])
+            .unwrap();
+        db.conn
+            .execute("DELETE FROM projects__schema_v1_current", [])
+            .unwrap();
+        assert!(
+            db.query_todos(&TodoQuery::open_since(0))
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert!(
+            db.query_open_todos_with_projects("main")
+                .unwrap()
+                .0
+                .is_empty()
+        );
+
+        db.rebuild_all_current_projections().unwrap();
+
+        assert_eq!(
+            db.query_todos(&TodoQuery::open_since(0)).unwrap().rows[0].row_id,
+            "todo-1"
+        );
+        assert_eq!(
+            db.query_open_todos_with_projects("main").unwrap().0[0]
+                .project
+                .name,
+            "Launch"
+        );
     }
 }

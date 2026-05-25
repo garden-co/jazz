@@ -611,7 +611,7 @@ rerun+diff. A dependency row can change page membership without changing the
 result row itself. Page subscriptions need to retain enough boundary scope to
 know when off-page rows can enter the page.
 
-### 2026-05-24 23:06 PDT
+### 2026-05-24 23:08 PDT
 
 Added first `EXPLAIN QUERY PLAN` hook for the paginated joined query and an
 index on `(branch_id, name, row_id)` for project current rows.
@@ -636,7 +636,7 @@ too much work per candidate row. This is the clearest performance warning so
 far: pure-query snapshots may be acceptable for small branch reads, but the
 lowering needs serious planner attention before we rely on it for hot paths.
 
-### 2026-05-24 23:08 PDT
+### 2026-05-24 23:09 PDT
 
 Rewrote the temp-table snapshot query from correlated `NOT EXISTS` to a grouped
 latest-visible-version CTE.
@@ -655,7 +655,7 @@ better. Pure-query snapshots are still slower than current projections, but the
 difference between "obviously too slow" and "plausibly acceptable for cold
 branches/snapshots" may be mostly query shape, not the whole SQLite approach.
 
-### 2026-05-24 23:09 PDT
+### 2026-05-24 23:12 PDT
 
 Added conflict metadata for joined dependency rows:
 
@@ -669,6 +669,21 @@ Discovery: joined conflict exposure should probably live on the nested
 dependency object, not just the top-level result row. A todo can be perfectly
 unconflicted while its displayed project is conflicted, and sync/listener
 semantics need to preserve that distinction.
+
+### 2026-05-24 23:15 PDT
+
+Added a tiny current-projection registry:
+
+- `CURRENT_PROJECTIONS` lists known main-branch current projections
+- rejection and rejected-bundle import repair call
+  `rebuild_all_current_projections`
+- a regression test deletes both todo and project current rows, then proves one
+  registry rebuild restores both ordinary current reads and joined reads
+
+Discovery: this keeps the prototype honest as tables multiply. The registry is
+still hard-coded, but it moves repair coverage from "remember every table at
+every fate transition" to "register every current projection once." A real
+schema lowerer could generate this list per schema version.
 
 ## Next pressure points after joins
 
