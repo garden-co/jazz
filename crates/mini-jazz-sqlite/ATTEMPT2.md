@@ -412,6 +412,39 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 12:07 PDT
+
+Improved imported bundle effects from broad history effects to actual import
+delta effects.
+
+Red/green test:
+
+- Bob imports a scope bundle and subscribes to the query.
+- Bob imports the same bundle again.
+- Polling the subscription should not rerun, because the second import changed
+  neither history nor tx fate.
+
+Implementation shape:
+
+- `import_query_scope` now detects tx fate changes before upsert.
+- History row effects are emitted only when `INSERT OR IGNORE` actually inserts
+  a row.
+- If a tx fate changes, bundled history rows for that tx emit effects so
+  rejection/acceptance projection repair still wakes listeners.
+
+Discovery: projection effects should be tied to import deltas, not protocol
+payload size. This keeps duplicate sync messages idempotent from the listener
+perspective while preserving rejection invalidation.
+
+Open debt: the best effect source is still probably projection diffing, because
+inserted history does not always imply changed current visibility.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 12:05 PDT
 
 Added the first pure-query branch read.

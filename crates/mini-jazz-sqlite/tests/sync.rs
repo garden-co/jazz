@@ -58,6 +58,42 @@ fn query_scope_bundle_import_reproduces_joined_result() -> mini_jazz_sqlite::Res
 }
 
 #[test]
+fn duplicate_scope_import_does_not_invalidate_subscription() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+    });
+
+    let mut alice = Harness::new()
+        .client("alice", schema.clone())
+        .durable_in_memory()?;
+    let mut bob = Harness::new().client("bob", schema).durable_in_memory()?;
+
+    alice.write(|tx| {
+        tx.insert("todos", json!({ "title": "Synced once", "done": false }))?;
+        Ok(())
+    })?;
+
+    let open_todos = query("todos").filter(eq("done", false));
+    let alice_result = alice.all(open_todos.clone())?;
+    let bundle = alice.export_query_scope(&alice_result.scope)?;
+    bob.import_query_scope(&bundle)?;
+
+    let subscription = bob.subscribe(open_todos)?;
+    assert_eq!(bob.subscription_rerun_count(subscription)?, 1);
+
+    bob.import_query_scope(&bundle)?;
+    let diff = bob.poll_subscription(subscription)?;
+
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.updated.len(), 0);
+    assert_eq!(diff.removed.len(), 0);
+    assert_eq!(bob.subscription_rerun_count(subscription)?, 1);
+
+    Ok(())
+}
+
+#[test]
 fn query_scope_bundle_import_reproduces_optional_missing_include() -> mini_jazz_sqlite::Result<()> {
     let schema = Schema::new()
         .table("projects", |t| {

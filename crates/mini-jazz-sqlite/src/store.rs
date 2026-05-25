@@ -1082,15 +1082,8 @@ impl Client {
     }
 
     pub fn import_query_scope(&mut self, bundle: &QueryScopeBundle) -> Result<()> {
-        let write_effects = bundle
-            .history_rows
-            .iter()
-            .map(|history| WriteEffect {
-                table: history.table.clone(),
-                row_id: history.row_id.clone(),
-            })
-            .collect::<Vec<_>>();
         let sql_tx = self.conn.transaction()?;
+        let mut changed_tx_ids = BTreeMap::new();
         for tx in &bundle.txs {
             sql_tx.execute(
                 "INSERT OR IGNORE INTO jazz_node (node_id) VALUES (?1)",
@@ -1101,6 +1094,22 @@ impl Client {
                 params![tx.node_id],
                 |row| row.get(0),
             )?;
+            let previous_fate: Option<(Option<i64>, String, Option<String>)> = sql_tx
+                .query_row(
+                    "SELECT global_epoch, status, rejection_reason_json FROM jazz_tx WHERE tx_id = ?1",
+                    params![tx.tx_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            if previous_fate.as_ref()
+                != Some(&(
+                    tx.global_epoch,
+                    tx.status.clone(),
+                    tx.rejection_reason_json.clone(),
+                ))
+            {
+                changed_tx_ids.insert(tx.tx_id.clone(), ());
+            }
             sql_tx.execute(
                 "
                 INSERT INTO jazz_tx (
@@ -1126,6 +1135,7 @@ impl Client {
             )?;
         }
 
+        let mut write_effects = Vec::new();
         for history in &bundle.history_rows {
             let table = self.schema.table_def(&history.table)?;
             let plan = TablePlan::new(table);
@@ -1159,7 +1169,7 @@ impl Client {
             values.push(SqlValue::Integer(history.created_at));
             values.push(SqlValue::Integer(history.updated_at));
 
-            sql_tx.execute(
+            let inserted = sql_tx.execute(
                 &format!(
                     "INSERT OR IGNORE INTO {} ({}) VALUES ({})",
                     plan.history,
@@ -1168,6 +1178,12 @@ impl Client {
                 ),
                 params_from_iter(values),
             )?;
+            if inserted > 0 || changed_tx_ids.contains_key(&history.tx_id) {
+                write_effects.push(WriteEffect {
+                    table: history.table.clone(),
+                    row_id: history.row_id.clone(),
+                });
+            }
         }
         sql_tx.commit()?;
         self.rebuild_current_projections()?;
