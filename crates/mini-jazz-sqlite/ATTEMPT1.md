@@ -369,7 +369,7 @@ the same previous row version. That supports the "no explicit parents for now"
 decision. A real merge layer still needs per-column candidate metadata rather
 than one row-level `conflict_tx_ids_jsonb` array.
 
-### 2026-05-24 22:45 PDT
+### 2026-05-24 22:42 PDT
 
 Added the first joined query:
 
@@ -385,7 +385,7 @@ project version is necessary to reproduce the displayed result and to send a
 complete sync payload. This makes the "visited rows" idea concrete without
 SQLite exposing visited rows natively.
 
-### 2026-05-24 22:43 PDT
+### 2026-05-24 22:44 PDT
 
 Added joined subscription invalidation for dependency rows:
 
@@ -399,7 +399,7 @@ rerun+diff correctness. The diff can still be full-row semantic diff, but the
 stored subscription state has to include the dependency payload, not just the
 result table's row id and version.
 
-### 2026-05-24 22:46 PDT
+### 2026-05-24 22:45 PDT
 
 Added a temp-table snapshot query variant:
 
@@ -413,7 +413,7 @@ visibility relation inspectable. The tradeoff is lifecycle management for temp
 tables during nested reads/subscriptions, but that seems more tractable than
 generating huge `IN (...)` predicates for large read sets.
 
-### 2026-05-24 22:49 PDT
+### 2026-05-24 22:47 PDT
 
 Extended transaction bundles to carry `projects` history as well as `todos`
 history, and made import update main current projections for imported
@@ -432,7 +432,7 @@ The sync sender should expand locators into all relevant history rows by table
 and schema, while the receiver updates enough projections to answer ordinary
 current queries after import.
 
-### 2026-05-24 22:51 PDT
+### 2026-05-24 22:48 PDT
 
 Added required dependency deletion behavior for joins:
 
