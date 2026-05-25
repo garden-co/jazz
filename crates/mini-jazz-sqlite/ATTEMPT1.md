@@ -621,7 +621,7 @@ planner evidence in tests, not that the plan is good. The next useful step is
 to make plan assertions or measurements meaningful for realistic row counts and
 page boundaries.
 
-### 2026-05-24 23:06 PDT
+### 2026-05-24 23:08 PDT
 
 Added a tiny snapshot-query ballpark test:
 
@@ -729,6 +729,19 @@ Discovery: predicate scope does not necessarily need a row bundle to be useful.
 For the first protocol shape, it can ride alongside concrete history bundles as
 declarative evidence/revalidation material. The receiver can reproduce the
 result from row bundles, then retain or recompute the same predicate scope.
+
+### 2026-05-24 23:21 PDT
+
+Added a SQL-visible branch source relation spike:
+
+- branch reads can materialize `temp_branch_todo_sources`
+- the query uses source branch, source global epoch, and precedence in SQL
+- branch-local rows shadow base rows without Rust post-combining
+
+Discovery: this is the right direction for branch provenance. A source relation
+makes branch reads inspectable and gives joins/pagination something concrete to
+join against. The current version is still todos-only and uses a temp table, but
+it removes one of the biggest branch-query hand waves.
 
 ## Next pressure points after joins
 
