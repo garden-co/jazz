@@ -1,10 +1,8 @@
 import { createServer as createNetServer } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevServer } from "jazz-napi";
-import { createMigration } from "../cli.js";
 import { loadCompiledSchema } from "../schema-loader.js";
 import {
   fetchPermissionsHead,
@@ -15,7 +13,6 @@ import {
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 const AUTO_PORT_MIN = 20_000;
 const AUTO_PORT_RANGE = 20_000;
-export const DEV_SERVER_MIGRATION_CREATE_PATH = "/_jazz/migrations/create";
 
 const autoAllocatedPorts = new Set<number>();
 
@@ -54,28 +51,6 @@ export interface PushSchemaCatalogueOptions {
   env?: string;
   userBranch?: string;
   enableLogs?: boolean;
-}
-
-export interface DevServerMigrationCreateOptions {
-  serverUrl: string;
-  appId: string;
-  adminSecret: string;
-  schemaDir: string;
-}
-
-interface DevServerMigrationCreateBody {
-  fromHash?: unknown;
-  toHash?: unknown;
-  name?: unknown;
-}
-
-class DevServerMigrationCreateError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
 }
 
 async function canBindPort(port: number): Promise<boolean> {
@@ -216,145 +191,4 @@ export async function pushSchemaCatalogue(
   }
 
   return { hash: result.hash };
-}
-
-async function readRequestBody(req: IncomingMessage): Promise<string> {
-  let body = "";
-
-  for await (const chunk of req) {
-    body += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-    if (body.length > 16_384) {
-      throw new DevServerMigrationCreateError(413, "Request body is too large.");
-    }
-  }
-
-  return body;
-}
-
-function parseMigrationCreateBody(rawBody: string): {
-  fromHash?: string;
-  toHash?: string;
-  name?: string;
-} {
-  let body: DevServerMigrationCreateBody;
-  try {
-    body = JSON.parse(rawBody) as DevServerMigrationCreateBody;
-  } catch {
-    throw new DevServerMigrationCreateError(400, "Request body must be valid JSON.");
-  }
-
-  if (
-    body.fromHash !== undefined &&
-    (typeof body.fromHash !== "string" || body.fromHash.trim().length === 0)
-  ) {
-    throw new DevServerMigrationCreateError(400, "fromHash must be a non-empty string.");
-  }
-  if (
-    body.toHash !== undefined &&
-    (typeof body.toHash !== "string" || body.toHash.trim().length === 0)
-  ) {
-    throw new DevServerMigrationCreateError(400, "toHash must be a non-empty string.");
-  }
-  if ((body.fromHash === undefined) !== (body.toHash === undefined)) {
-    throw new DevServerMigrationCreateError(
-      400,
-      "Provide both fromHash and toHash, or omit both to infer them.",
-    );
-  }
-  if (body.name !== undefined && typeof body.name !== "string") {
-    throw new DevServerMigrationCreateError(400, "name must be a string when provided.");
-  }
-
-  return {
-    fromHash: body.fromHash?.trim(),
-    toHash: body.toHash?.trim(),
-    name: body.name?.trim() || undefined,
-  };
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(body));
-}
-
-export function createDevServerMigrationCreateHandler(options: DevServerMigrationCreateOptions) {
-  return async (
-    req: IncomingMessage,
-    res: ServerResponse,
-    next: (error?: unknown) => void,
-  ): Promise<void> => {
-    if (req.method !== "POST") {
-      sendJson(res, 405, { error: "Use POST to create a migration." });
-      return;
-    }
-
-    try {
-      const request = parseMigrationCreateBody(await readRequestBody(req));
-      let fromHash = request.fromHash;
-      const toHash = request.toHash;
-
-      if (!fromHash && !toHash) {
-        const { head } = await fetchPermissionsHead(options.serverUrl, {
-          appId: options.appId,
-          adminSecret: options.adminSecret,
-        });
-        if (!head) {
-          throw new DevServerMigrationCreateError(
-            409,
-            "Cannot infer migration source because the server has no permissions head.",
-          );
-        }
-        fromHash = head.schemaHash;
-      }
-
-      const filePath = await createMigration({
-        appId: options.appId,
-        serverUrl: options.serverUrl,
-        adminSecret: options.adminSecret,
-        schemaDir: options.schemaDir,
-        migrationsDir: join(options.schemaDir, "migrations"),
-        fromHash,
-        toHash,
-        name: request.name,
-      });
-
-      sendJson(res, 200, { filePath });
-    } catch (error) {
-      if (error instanceof DevServerMigrationCreateError) {
-        sendJson(res, error.status, { error: error.message });
-        return;
-      }
-
-      if (error instanceof Error) {
-        sendJson(res, 500, { error: error.message });
-        return;
-      }
-
-      next(error);
-    }
-  };
-}
-
-export function devServerMigrationRunnerScript(): string {
-  return `<script>
-globalThis.runJazzMigrations = async function runJazzMigrations() {
-  const response = await fetch(${JSON.stringify(DEV_SERVER_MIGRATION_CREATE_PATH)}, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  });
-  const body = await response.json().catch(() => null);
-  if (!response.ok) {
-    const detail = body && typeof body.error === "string" ? \`: \${body.error}\` : "";
-    throw new Error(\`Jazz migration creation failed (\${response.status} \${response.statusText})\${detail}\`);
-  }
-  if (body && typeof body.filePath === "string") {
-    console.log(\`[jazz] Migration created: \${body.filePath}\`);
-  } else {
-    console.log("[jazz] No migration file created.", body);
-  }
-  return body;
-};
-</script>`;
 }

@@ -1,13 +1,7 @@
 import { createRequire } from "node:module";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
-import {
-  createDevServerMigrationCreateHandler,
-  DEV_SERVER_MIGRATION_CREATE_PATH,
-  devServerMigrationRunnerScript,
-} from "./dev-server.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
 // jazz-tools contains a dynamic `import("jazz-wasm")` that we intentionally
@@ -61,16 +55,6 @@ export interface ViteDevServer {
     };
   };
   httpServer: { once(event: string, cb: () => void): void } | null;
-  middlewares?: {
-    use(
-      path: string,
-      handler: (
-        req: IncomingMessage,
-        res: ServerResponse,
-        next: (error?: unknown) => void,
-      ) => void | Promise<void>,
-    ): void;
-  };
   ws: {
     send(payload: { type: string; err?: { message: string; stack?: string } }): void;
   };
@@ -111,15 +95,6 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       };
     },
 
-    transformIndexHtml(html: string, ctx?: { server?: unknown }) {
-      if (!ctx?.server || options.server === false) return html;
-      const script = devServerMigrationRunnerScript();
-      if (html.includes("</head>")) {
-        return html.replace("</head>", `${script}</head>`);
-      }
-      return `${script}${html}`;
-    },
-
     async configureServer(viteServer: ViteDevServer) {
       if (viteServer.config.command !== "serve") return;
 
@@ -154,16 +129,6 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         });
         return;
       }
-
-      viteServer.middlewares?.use(
-        DEV_SERVER_MIGRATION_CREATE_PATH,
-        createDevServerMigrationCreateHandler({
-          serverUrl: managed.serverUrl,
-          appId: managed.appId,
-          adminSecret: managed.adminSecret,
-          schemaDir,
-        }),
-      );
 
       // Vite only exposes VITE_*-prefixed keys to the client bundle via
       // import.meta.env. process.env gets the same values via the managed

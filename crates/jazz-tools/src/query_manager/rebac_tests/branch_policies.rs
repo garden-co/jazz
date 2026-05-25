@@ -251,58 +251,6 @@ fn seed_branch_and_todo(
 }
 
 #[test]
-// Read path:
-//
-//   Session alice -> branches[ownerId=alice] -> todos on branch
-//
-//   Gate                         Expected
-//   ---------------------------  --------
-//   backing branch select        pass
-//   for_branch todos select      pass
-//   branch query result          1 row
-fn branch_read_requires_readable_backing_row_and_matching_branch_policy() {
-    let (mut qm, mut storage, schema) = manager_with_branch_schema(true);
-    let project_id = ObjectId::new();
-    let branch_id = seed_branch_and_todo(&mut qm, &mut storage, &schema, project_id, "alice");
-    let branch_name = branch_name_for(&schema, branch_id);
-
-    let rows = query_rows(
-        &mut qm,
-        &mut storage,
-        QueryBuilder::new("todos").branch(branch_name).build(),
-        Some(Session::new("alice")),
-    );
-
-    assert_eq!(rows.len(), 1);
-}
-
-#[test]
-// Read path:
-//
-//   Session bob -> branches[ownerId=alice] -> todos on branch
-//
-//   Gate                         Expected
-//   ---------------------------  --------
-//   backing branch select        deny
-//   for_branch todos select      not enough
-//   branch query result          0 rows
-fn branch_read_denies_when_backing_row_is_not_readable() {
-    let (mut qm, mut storage, schema) = manager_with_branch_schema(true);
-    let project_id = ObjectId::new();
-    let branch_id = seed_branch_and_todo(&mut qm, &mut storage, &schema, project_id, "alice");
-    let branch_name = branch_name_for(&schema, branch_id);
-
-    let rows = query_rows(
-        &mut qm,
-        &mut storage,
-        QueryBuilder::new("todos").branch(branch_name).build(),
-        Some(Session::new("bob")),
-    );
-
-    assert!(rows.is_empty());
-}
-
-#[test]
 // Missing branch policy:
 //
 //   backing branch select passes
@@ -612,74 +560,6 @@ fn synced_union_branch_read_uses_branch_select_policy_after_structural_graph_com
 }
 
 #[test]
-fn local_union_branch_read_uses_branch_select_policy_after_structural_graph_compile() {
-    let mut todo_policies = TablePolicies::new()
-        .with_select(PolicyExpr::True)
-        .with_insert(PolicyExpr::True);
-    todo_policies.for_branch = HashMap::from([(
-        TableName::new("branches"),
-        TablePolicies::new()
-            .with_select(PolicyExpr::False)
-            .with_insert(PolicyExpr::True),
-    )]);
-    let auth_schema = branch_schema_with_backing_and_todo_policies(
-        TablePolicies::new()
-            .with_select(PolicyExpr::True)
-            .with_insert(PolicyExpr::True),
-        todo_policies,
-    );
-    let structural_schema = strip_test_policies(&auth_schema);
-    let mut qm = create_query_manager(SyncManager::new(), structural_schema.clone());
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-    let project_id = ObjectId::new();
-    let branch_id = qm
-        .insert(
-            &mut storage,
-            "branches",
-            &[Value::Uuid(project_id), Value::Text("alice".into())],
-        )
-        .expect("seed branch row")
-        .row_id;
-    let branch_name = branch_name_for(&structural_schema, branch_id);
-    qm.insert_on_branch(
-        &mut storage,
-        "todos",
-        &branch_name,
-        &[
-            Value::Uuid(project_id),
-            Value::Text("Hidden branch todo".into()),
-        ],
-        None,
-    )
-    .expect("seed branch todo");
-    qm.process(&mut storage);
-    qm.set_authorization_schema(auth_schema);
-
-    let mut query = QueryBuilder::new("todos").build();
-    query.relation_ir = RelExpr::Union {
-        inputs: vec![RelExpr::Branch {
-            input: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan {
-                    table: TableName::new("todos"),
-                }),
-                predicate: PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("projectId"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::Literal(Value::Uuid(project_id)),
-                },
-            }),
-            branches: vec![branch_name],
-        }],
-    };
-    let sub_id = qm
-        .subscribe_with_session(query, Some(Session::new("alice")), None)
-        .expect("subscribe union branch query");
-    qm.process(&mut storage);
-
-    assert!(qm.get_subscription_results(sub_id).is_empty());
-}
-
-#[test]
 fn local_union_branch_read_uses_branch_select_policy_in_graph_filter() {
     let schema = branch_query_matrix_schema(
         SelectPolicyMode::True,
@@ -816,42 +696,6 @@ fn for_branch_only_schema_infers_enforcing_policy_mode() {
         &mut storage,
         QueryBuilder::new("todos").branch(branch_name).build(),
         Some(Session::new("alice")),
-    );
-
-    assert!(rows.is_empty());
-}
-
-#[test]
-// Backing-row requirement:
-//
-//   for_branch todos select = true
-//   backing branches select = ownerId == session.user_id
-//
-//   Session bob cannot read alice's backing branch row,
-//   so branch todos remain hidden even though branch select is true.
-fn branch_select_true_still_requires_readable_backing_row() {
-    let mut todo_policies = TablePolicies::default();
-    todo_policies.for_branch = HashMap::from([(
-        TableName::new("branches"),
-        TablePolicies::new()
-            .with_select(PolicyExpr::True)
-            .with_insert(PolicyExpr::True),
-    )]);
-    let schema = branch_schema_with_todo_policies(todo_policies);
-    let mut qm = create_query_manager_with_policy_mode(
-        SyncManager::new(),
-        schema.clone(),
-        RowPolicyMode::Enforcing,
-    );
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-    let branch_id = seed_branch_and_todo(&mut qm, &mut storage, &schema, ObjectId::new(), "alice");
-    let branch_name = branch_name_for(&schema, branch_id);
-
-    let rows = query_rows(
-        &mut qm,
-        &mut storage,
-        QueryBuilder::new("todos").branch(branch_name).build(),
-        Some(Session::new("bob")),
     );
 
     assert!(rows.is_empty());

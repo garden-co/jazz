@@ -1,7 +1,5 @@
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { jazzPlugin } from "./vite.js";
 import * as devServer from "./dev-server.js";
@@ -9,7 +7,6 @@ import * as schemaWatcher from "./schema-watcher.js";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 
 const tempRoots = createTempRootTracker();
-const indexPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
 const originalJazzTelemetryCollectorUrl = process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
@@ -97,21 +94,6 @@ describe("jazzPlugin", () => {
     expect(alias!.replacement).toMatch(/jazz_wasm\.js$/);
   });
 
-  it("injects runJazzMigrations into dev HTML", () => {
-    const plugin = jazzPlugin();
-    const transform = (
-      plugin as {
-        transformIndexHtml?: (html: string, ctx: { server?: object }) => string;
-      }
-    ).transformIndexHtml;
-
-    expect(transform).toBeDefined();
-    const html = transform!("<html><head></head><body></body></html>", { server: {} });
-
-    expect(html).toContain("globalThis.runJazzMigrations");
-    expect(html).toContain("/_jazz/migrations/create");
-  });
-
   it("starts a server and pushes schema via configureServer hook", async () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-test-");
@@ -176,112 +158,6 @@ describe("jazzPlugin", () => {
     }
 
     await expect(fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok)).rejects.toThrow();
-  }, 30_000);
-
-  it("creates an inferred migration through the dev-server fetch endpoint", async () => {
-    const port = await getAvailablePort();
-    const schemaDir = await tempRoots.create("jazz-vite-migration-endpoint-test-");
-    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
-    await writeFile(
-      join(schemaDir, "permissions.ts"),
-      `
-import { schema as s } from ${JSON.stringify(indexPath)};
-import { app } from "./schema.ts";
-
-export default s.definePermissions(app, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.never(),
-  policy.todos.allowUpdate.never(),
-  policy.todos.allowDelete.never(),
-]);
-`,
-    );
-    vi.spyOn(console, "log").mockImplementation(() => {});
-
-    let migrationRoute:
-      | ((
-          req: Readable & { method?: string; url?: string; headers?: Record<string, string> },
-          res: {
-            statusCode: number;
-            setHeader(name: string, value: string): void;
-            end(body?: string): void;
-          },
-          next: (error?: unknown) => void,
-        ) => void | Promise<void>)
-      | undefined;
-
-    const fakeViteServer = {
-      config: {
-        root: schemaDir,
-        command: "serve" as const,
-        env: {} as Record<string, string>,
-      },
-      httpServer: {
-        once(_event: string, _cb: () => void) {},
-      },
-      middlewares: {
-        use(path: string, handler: typeof migrationRoute) {
-          if (path === "/_jazz/migrations/create") {
-            migrationRoute = handler;
-          }
-        },
-      },
-      ws: { send() {} },
-    };
-
-    const plugin = jazzPlugin({
-      server: { port, adminSecret: "vite-migration-admin" },
-      schemaDir,
-    });
-    const configureServer = plugin.configureServer as (
-      server: typeof fakeViteServer,
-    ) => Promise<void>;
-    await configureServer(fakeViteServer);
-
-    expect(migrationRoute).toBeDefined();
-
-    const fromHash = await devServer.pushSchemaCatalogue({
-      serverUrl: `http://127.0.0.1:${port}`,
-      appId: fakeViteServer.config.env.VITE_JAZZ_APP_ID,
-      adminSecret: "vite-migration-admin",
-      schemaDir,
-    });
-
-    await writeFile(
-      join(schemaDir, "schema.ts"),
-      todoSchema().replace(
-        "    done: s.boolean(),",
-        "    done: s.boolean(),\n    priority: s.int(),",
-      ),
-    );
-
-    let responseBody = "";
-    const request = Readable.from([JSON.stringify({})]) as Readable & {
-      method?: string;
-      url?: string;
-      headers?: Record<string, string>;
-    };
-    request.method = "POST";
-    request.url = "/_jazz/migrations/create";
-    request.headers = { "content-type": "application/json" };
-    const response = {
-      statusCode: 200,
-      setHeader(_name: string, _value: string) {},
-      end(body = "") {
-        responseBody = body;
-      },
-    };
-
-    await migrationRoute!(request, response, (error?: unknown) => {
-      if (error) throw error;
-    });
-
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(responseBody) as { filePath?: string };
-    expect(body.filePath).toContain(`${fromHash.hash.slice(0, 12)}-`);
-    await expect(readdir(join(schemaDir, "migrations"))).resolves.toEqual(
-      expect.arrayContaining([expect.stringContaining(`${fromHash.hash.slice(0, 12)}-`)]),
-    );
   }, 30_000);
 
   it("does not inject a dev server url during build", async () => {
