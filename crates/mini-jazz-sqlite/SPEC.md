@@ -421,9 +421,11 @@ format is JSONB. They should be canonical for byte-for-byte rebuilds.
 
 Read sets are allowed to over-approximate, but they must not omit any row
 version, absence, range, or policy dependency that affected the transaction's
-validity. Write sets are both row-granular and column-granular: rows support
-coarse invalidation/sync, while column masks support merging, policies, and
-subscription filtering.
+validity. Write sets are row-granular for correctness and causality: for
+exclusive/global transaction validation, the row is the conflict item. Column
+masks are auxiliary metadata for mergeable transactions, invalidation
+precision, policy explanation, and conflict UI. They should not make two
+exclusive writes to the same row automatically safe.
 
 The encoding boundary should be centralized early. Storage code should depend
 on typed read/write-set values and a single codec, not ad-hoc JSON/string
@@ -1120,9 +1122,10 @@ Attempt2 guardrails:
   whenever subtle behavior needs them.
 - Use mutable fate on `jazz_tx` as the baseline, while keeping
   proposal-vs-authority-observation explicit in tests and protocol shape.
-- Model conflicts per-column from the start. This is intentionally more
-  demanding than row-level conflict metadata, because it forces the storage,
-  projection, query, sync, and listener shapes to expose the right seams.
+- Model row-level write conflicts from the start, with per-column metadata as
+  auxiliary merge/invalidation/UI data. This is intentionally more demanding
+  than plain row-level candidate tx ids, but column masks must not become the
+  correctness rule for exclusive transactions.
 - No table-specific storage paths after the first schema-driven slice. Fixture
   tables can be concrete; write/query/projection logic should flow through
   schema-derived layouts and plans.
@@ -1180,8 +1183,9 @@ Attempt2 guardrails:
    authority validation, rejection reason, and sync payload.
 
 7. **Conflict model**
-   Make conflicts per-column, not only row-level candidate tx ids. Define API
-   shape for resolved value plus conflict metadata.
+   Make conflict metadata capable of explaining per-column differences, while
+   keeping exclusive write conflicts row-granular. Define API shape for
+   resolved value plus conflict metadata.
 
 8. **Schema lenses**
    Implement one SQL-lowerable rename lens with read union and write-forward
@@ -1423,20 +1427,37 @@ but overfetches badly. Attempt 3 should keep the same semantic tests but start
 with a clearer typed predicate/range representation so it can later lower to
 old/new index-key invalidation and query-aware sync deltas.
 
-#### Conflict Detection Needs Read/Write Semantics, Not Row Multiplicity
+#### Conflict Detection Needs Row Semantics First
 
-The spec says conflicts should be per-column. Attempt 2 confirmed why.
+Attempt 2 briefly used write-column overlap to decide whether concurrent
+pending row versions should expose conflict candidates. That was useful as a
+prototype pressure test for carrying column metadata through write sets,
+projection, sync, and UI-facing row views, but it should not become the
+exclusive transaction correctness rule.
 
-The naive version exposed conflicts whenever multiple pending transactions
-wrote the same row. That was too broad. The improved version used write-column
-overlap:
+For exclusive/globally consistent transactions, the row should be the write
+conflict item. Two transactions that independently write different columns of
+the same row are not automatically semantically independent:
 
-- overlapping column writes expose candidates
-- disjoint column writes do not
-- unknown/empty column masks are conservative wildcards
+- columns can participate in cross-column invariants
+- policies can depend on combinations of columns
+- application meaning is often row/object-level
+- ordinary MVCC databases generally version and conflict at row/tuple
+  granularity
 
-Attempt 3 should start with column masks in the typed write-set model and
-derive conflict candidates from those masks plus causality/read-set facts.
+Column masks still matter, but as auxiliary metadata:
+
+- mergeable/eventually consistent transactions can use column masks as merge
+  hints
+- subscriptions can use column masks to avoid reruns when predicates or
+  projected values cannot change
+- conflict UI can use column masks to explain what each candidate changed
+- policies and validation errors can use masks for explanation and precision
+
+Attempt 3 should therefore use row-granular write sets for causality and
+exclusive validation. Column masks should be carried in typed write-set entries,
+but they should not by themselves prove that two same-row exclusive writes are
+safe.
 
 ### Performance And Layout Learnings
 
