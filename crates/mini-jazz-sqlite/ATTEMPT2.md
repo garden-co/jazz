@@ -382,3 +382,32 @@ Open debt:
   sets exist.
 - `accept_transaction_validating_reads` validates only accepted global history;
   mergeable/local-pending semantics are still outside this path.
+
+### 2026-05-25 11:38 PDT
+
+Corrected the coarse split after feedback.
+
+The first split moved almost all implementation from `lib.rs` into a giant
+`store.rs`, which did not solve the problem. The crate now has real top-level
+modules:
+
+- `error.rs`: shared `Error`/`Result`.
+- `schema.rs`: schema DSL plus internal table/field/index model.
+- `layout.rs`: physical SQLite table/column naming and value conversion.
+- `query.rs`: query DSL, filters, include description, sort description, and
+  filter SQL helper.
+- `scope.rs`: query result/scope DTOs, row views, and subscription diffing.
+- `store.rs`: runtime storage behavior, subscriptions, sync import/export,
+  authority fate mutation, read-set validation, projection rebuild, and the
+  write transaction path.
+
+Discovery: even for prototype speed, module boundaries are useful once the
+system starts to reveal verbs. The next worthwhile split is to move
+transaction/write mechanics out of `store.rs` into `tx.rs`/`write.rs`, but this
+pass already separates the type/plan/query vocabulary from runtime behavior.
+
+Verified after the real split:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
