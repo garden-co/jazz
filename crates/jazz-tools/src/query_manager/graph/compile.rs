@@ -32,8 +32,10 @@ use super::super::index::ScanCondition;
 use super::super::magic_columns::{MagicColumnKind, magic_column_descriptor, magic_column_kind};
 use super::super::policy::PolicyExpr;
 use super::super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
-use super::super::relation_ir::{OrderDirection, ProjectColumn, ProjectExpr, RelExpr};
-use super::super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
+use super::super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
+use super::super::relation_ir_query_plan::{
+    ExecutionQueryPlan, QueryEnvelope, lower_relation_to_execution_plan, unwrap_query_envelope,
+};
 use super::super::session::Session;
 use uuid::Uuid;
 
@@ -57,66 +59,6 @@ fn effective_select_policy(
             .denies_missing_explicit_policy()
             .then_some(PolicyExpr::False)
     })
-}
-
-struct QueryEnvelope {
-    order_by: Vec<(String, SortDirection)>,
-    offset: usize,
-    limit: Option<usize>,
-}
-
-fn unwrap_union_envelope(relation: &RelExpr) -> Option<(&[RelExpr], QueryEnvelope)> {
-    let mut current = relation;
-    let mut order_by = Vec::new();
-    let mut offset = 0;
-    let mut limit = None;
-
-    loop {
-        match current {
-            RelExpr::OrderBy { input, terms } => {
-                if order_by.is_empty() {
-                    order_by = terms
-                        .iter()
-                        .map(|term| {
-                            (
-                                term.column.column.clone(),
-                                match term.direction {
-                                    OrderDirection::Asc => SortDirection::Ascending,
-                                    OrderDirection::Desc => SortDirection::Descending,
-                                },
-                            )
-                        })
-                        .collect();
-                }
-                current = input;
-            }
-            RelExpr::Offset {
-                input,
-                offset: offset_value,
-            } => {
-                offset = *offset_value;
-                current = input;
-            }
-            RelExpr::Limit {
-                input,
-                limit: limit_value,
-            } => {
-                limit = Some(*limit_value);
-                current = input;
-            }
-            RelExpr::Union { inputs } => {
-                return Some((
-                    inputs.as_slice(),
-                    QueryEnvelope {
-                        order_by,
-                        offset,
-                        limit,
-                    },
-                ));
-            }
-            _ => return None,
-        }
-    }
 }
 
 fn is_branch_scoped_user_branch(branches: &[String]) -> bool {
@@ -557,17 +499,8 @@ impl QueryGraph {
             );
         }
 
-        if let RelExpr::Union { inputs } = relation {
-            return Self::compile_relation_ir_union_with_schema_context_and_features(
-                inputs,
-                schema,
-                branches,
-                session,
-                schema_context,
-                row_policy_mode,
-            );
-        }
-        if let Some((inputs, envelope)) = unwrap_union_envelope(relation) {
+        let envelope = unwrap_query_envelope(relation);
+        if let RelExpr::Union { inputs } = envelope.core {
             let graph = Self::compile_relation_ir_union_with_schema_context_and_features(
                 inputs,
                 schema,

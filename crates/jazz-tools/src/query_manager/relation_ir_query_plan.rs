@@ -9,11 +9,11 @@ use super::relation_ir::{
 use super::types::TableName;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct QueryEnvelope<'a> {
-    core: &'a RelExpr,
-    order_by: Vec<(String, SortDirection)>,
-    offset: usize,
-    limit: Option<usize>,
+pub(crate) struct QueryEnvelope<'a> {
+    pub(crate) core: &'a RelExpr,
+    pub(crate) order_by: Vec<(String, SortDirection)>,
+    pub(crate) offset: usize,
+    pub(crate) limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -879,7 +879,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
     }
 }
 
-fn unwrap_query_envelope(expr: &RelExpr) -> QueryEnvelope<'_> {
+pub(crate) fn unwrap_query_envelope(expr: &RelExpr) -> QueryEnvelope<'_> {
     let mut current = expr;
     let mut order_by = Vec::new();
     let mut offset = 0;
