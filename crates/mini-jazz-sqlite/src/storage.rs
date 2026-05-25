@@ -48,6 +48,16 @@ pub struct InsertProject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateProject {
+    pub row_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub name: String,
+    pub actor_id: String,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertTodoForProject {
     pub row_id: String,
     pub tx_id: String,
@@ -250,16 +260,33 @@ pub enum SubscriptionChange {
     Removed(Todo),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinedSubscriptionChange {
+    Added(TodoWithProject),
+    Updated {
+        before: TodoWithProject,
+        after: TodoWithProject,
+    },
+    Removed(TodoWithProject),
+}
+
 #[derive(Debug, Clone)]
 struct Subscription {
     query: TodoQuery,
     last_rows: Vec<Todo>,
 }
 
+#[derive(Debug, Clone)]
+struct JoinedSubscription {
+    branch_id: String,
+    last_rows: Vec<TodoWithProject>,
+}
+
 pub struct MiniJazzSqlite {
     conn: Connection,
     next_subscription_id: u64,
     subscriptions: BTreeMap<SubscriptionId, Subscription>,
+    joined_subscriptions: BTreeMap<SubscriptionId, JoinedSubscription>,
 }
 
 impl MiniJazzSqlite {
@@ -269,6 +296,7 @@ impl MiniJazzSqlite {
             conn,
             next_subscription_id: 0,
             subscriptions: BTreeMap::new(),
+            joined_subscriptions: BTreeMap::new(),
         };
         db.create_schema()?;
         Ok(db)
@@ -280,6 +308,7 @@ impl MiniJazzSqlite {
             conn,
             next_subscription_id: 0,
             subscriptions: BTreeMap::new(),
+            joined_subscriptions: BTreeMap::new(),
         };
         db.create_schema()?;
         Ok(db)
@@ -601,6 +630,80 @@ impl MiniJazzSqlite {
               row_id, branch_id, visible_tx_id, is_deleted, name, created_by, created_at,
               updated_by, updated_at, edit_metadata_json
             ) VALUES (?1, 'main', ?2, 0, ?3, ?4, ?5, ?4, ?5, '{}')
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                input.name,
+                input.actor_id,
+                input.now
+            ],
+        )?;
+        sql_tx.commit()
+    }
+
+    pub fn update_project(&mut self, input: UpdateProject) -> rusqlite::Result<()> {
+        let previous = self.conn.query_row(
+            r#"
+            SELECT visible_tx_id, created_at
+            FROM projects__schema_v1_current
+            WHERE branch_id = 'main' AND row_id = ?1 AND is_deleted = 0
+            "#,
+            params![input.row_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let read_set = format!(
+            r#"[{{"kind":"row","table":"projects","rowId":"{}","visibleTxId":"{}","reason":"write_base"}}]"#,
+            input.row_id, previous.0
+        );
+        let write_set = format!(
+            r#"[{{"table":"projects","rowId":"{}","op":"update","columns":["name","updated_at"]}}]"#,
+            input.row_id
+        );
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'data', 0, '[]', '[]', ?4, ?5, 'local_pending', ?6, ?6, '{}')
+            "#,
+            params![
+                input.tx_id,
+                node_num,
+                local_epoch,
+                read_set,
+                write_set,
+                input.now
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT INTO projects__schema_v1_history (
+              row_id, branch_id, tx_id, op, name, created_by, created_at, updated_by,
+              updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 'update', ?3, ?4, ?5, ?4, ?6, '{}')
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                input.name,
+                input.actor_id,
+                previous.1,
+                input.now
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            UPDATE projects__schema_v1_current
+            SET visible_tx_id = ?2,
+                name = ?3,
+                updated_by = ?4,
+                updated_at = ?5
+            WHERE branch_id = 'main' AND row_id = ?1
             "#,
             params![
                 input.row_id,
@@ -1570,6 +1673,39 @@ impl MiniJazzSqlite {
         Ok(changes)
     }
 
+    pub fn subscribe_joined_todos(&mut self, branch_id: &str) -> rusqlite::Result<SubscriptionId> {
+        let id = SubscriptionId(self.next_subscription_id);
+        self.next_subscription_id += 1;
+        let (last_rows, _) = self.query_open_todos_with_projects(branch_id)?;
+        self.joined_subscriptions.insert(
+            id,
+            JoinedSubscription {
+                branch_id: branch_id.to_owned(),
+                last_rows,
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn poll_joined_subscription(
+        &mut self,
+        id: SubscriptionId,
+    ) -> rusqlite::Result<Vec<JoinedSubscriptionChange>> {
+        let Some(subscription) = self.joined_subscriptions.get(&id).cloned() else {
+            return Ok(Vec::new());
+        };
+        let (next_rows, _) = self.query_open_todos_with_projects(&subscription.branch_id)?;
+        let changes = diff_joined_rows(&subscription.last_rows, &next_rows);
+        self.joined_subscriptions.insert(
+            id,
+            JoinedSubscription {
+                branch_id: subscription.branch_id,
+                last_rows: next_rows,
+            },
+        );
+        Ok(changes)
+    }
+
     pub fn rebuild_main_current_from_history(&mut self) -> rusqlite::Result<()> {
         let sql_tx = self.conn.transaction()?;
         sql_tx.execute(
@@ -1705,6 +1841,40 @@ fn diff_rows(previous: &[Todo], next: &[Todo]) -> Vec<SubscriptionChange> {
     for row in previous {
         if !next_by_id.contains_key(row.row_id.as_str()) {
             changes.push(SubscriptionChange::Removed(row.clone()));
+        }
+    }
+
+    changes
+}
+
+fn diff_joined_rows(
+    previous: &[TodoWithProject],
+    next: &[TodoWithProject],
+) -> Vec<JoinedSubscriptionChange> {
+    let previous_by_id: BTreeMap<&str, &TodoWithProject> = previous
+        .iter()
+        .map(|row| (row.todo.row_id.as_str(), row))
+        .collect();
+    let next_by_id: BTreeMap<&str, &TodoWithProject> = next
+        .iter()
+        .map(|row| (row.todo.row_id.as_str(), row))
+        .collect();
+    let mut changes = Vec::new();
+
+    for row in next {
+        match previous_by_id.get(row.todo.row_id.as_str()) {
+            None => changes.push(JoinedSubscriptionChange::Added(row.clone())),
+            Some(before) if *before != row => changes.push(JoinedSubscriptionChange::Updated {
+                before: (*before).clone(),
+                after: row.clone(),
+            }),
+            Some(_) => {}
+        }
+    }
+
+    for row in previous {
+        if !next_by_id.contains_key(row.todo.row_id.as_str()) {
+            changes.push(JoinedSubscriptionChange::Removed(row.clone()));
         }
     }
 
@@ -2606,6 +2776,56 @@ mod tests {
                 ("projects", "project-1", "tx-project-1", "dependency"),
             ]
         );
+    }
+
+    #[test]
+    fn joined_subscription_updates_when_dependency_row_changes() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "alice-device".into(),
+            name: "Launch".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-1".into(),
+            title: "Wire sync scope".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+
+        let subscription = db.subscribe_joined_todos("main").unwrap();
+        assert!(
+            db.poll_joined_subscription(subscription)
+                .unwrap()
+                .is_empty()
+        );
+
+        db.update_project(UpdateProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-2".into(),
+            node_id: "alice-device".into(),
+            name: "Launch renamed".into(),
+            actor_id: "alice".into(),
+            now: 300,
+        })
+        .unwrap();
+
+        assert!(matches!(
+            db.poll_joined_subscription(subscription).unwrap().as_slice(),
+            [JoinedSubscriptionChange::Updated { before, after }]
+                if before.project.name == "Launch"
+                    && after.project.name == "Launch renamed"
+                    && before.todo.visible_tx_id == after.todo.visible_tx_id
+        ));
     }
 
     #[test]

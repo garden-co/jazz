@@ -385,6 +385,20 @@ project version is necessary to reproduce the displayed result and to send a
 complete sync payload. This makes the "visited rows" idea concrete without
 SQLite exposing visited rows natively.
 
+### 2026-05-24 22:43 PDT
+
+Added joined subscription invalidation for dependency rows:
+
+- project update writes project history/current
+- joined subscription reruns `todos JOIN projects`
+- project-only changes produce an updated joined result even when the todo row
+  version is unchanged
+
+Discovery: dependency rows need subscription semantics equal to result rows for
+rerun+diff correctness. The diff can still be full-row semantic diff, but the
+stored subscription state has to include the dependency payload, not just the
+result table's row id and version.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
