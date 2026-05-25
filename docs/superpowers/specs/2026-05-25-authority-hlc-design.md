@@ -257,14 +257,17 @@ encoding, nullable storage, visible-row copy, and digest/replay equality.
 
 ## Future Work
 
-Future deterministic global snapshots can use `authority_hlc` as the global
-scan boundary:
+Future deterministic global snapshots can combine `authority_hlc` with dotted
+versions:
 
-- include only rows with `authority_hlc <= snapshot_hlc`
+- use `authority_hlc <= snapshot_hlc` as the simple global bookmark for
+  globally eligible batches
+- use dotted versions to represent the precise per-object or per-row causal
+  frontier inside that global cutoff
 - ignore unstamped rows by default
 - order row-history entries by `authority_hlc`, with a stable tie-breaker such
   as `(batch_id, row_id)` when a total order is needed
 
 That future work can decide whether to add snapshot query APIs, historical
 indices, or global-tier-only read modes. This design only persists the metadata
-needed to make that work straightforward.
+needed to provide the global bookmark for that model.

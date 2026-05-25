@@ -167,23 +167,29 @@ future capability without changing what applications see today.
 
 ## Future Snapshot Shape
 
-Later, a deterministic global snapshot can use the authority timeline:
+Later, a deterministic global snapshot can combine the authority timeline with
+dotted versions:
 
 ```text
-snapshot at HLC 500
-
-include row-batch members where:
-  authority_hlc is not null
+snapshot bookmark:
   authority_hlc <= HLC 500
 
-ignore by default:
+dotted versions:
+  per-object/per-row causal frontier inside that global cutoff
+
+include by default:
+  globally stamped rows inside the bookmark
+  versions selected by the dotted-version frontier
+
+exclude by default:
   local-only rows
   edge-only rows
   rows not yet observed by the global authority
 ```
 
-The snapshot then has one global ordering source, independent from client wall
-clocks.
+The HLC is the simple global bookmark: "everything globally observed up to this
+point is eligible." Dotted versions keep the exact row/object frontier precise
+inside that bookmark.
 
 ## Why This Is The Smallest Useful Step
 
