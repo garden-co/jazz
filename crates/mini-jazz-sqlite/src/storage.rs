@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::codec::{EncodedRowRead, decode_first_row_read, encode_row_read};
 use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -706,10 +707,12 @@ impl MiniJazzSqlite {
         let sql_tx = self.conn.transaction()?;
         let node_num = ensure_node(&sql_tx, &input.node_id)?;
         let local_epoch = next_local_epoch(&sql_tx, node_num)?;
-        let read_set = format!(
-            r#"[{{"kind":"row","table":"projects","rowId":"{}","visibleTxId":"{}","reason":"write_base"}}]"#,
-            input.row_id, previous.0
-        );
+        let read_set = encode_row_read(&EncodedRowRead {
+            table: "projects".to_owned(),
+            row_id: input.row_id.clone(),
+            visible_tx_id: previous.0.clone(),
+            reason: "write_base".to_owned(),
+        });
         let write_set = format!(
             r#"[{{"table":"projects","rowId":"{}","op":"update","columns":["name","updated_at"]}}]"#,
             input.row_id
@@ -786,10 +789,12 @@ impl MiniJazzSqlite {
         let sql_tx = self.conn.transaction()?;
         let node_num = ensure_node(&sql_tx, &input.node_id)?;
         let local_epoch = next_local_epoch(&sql_tx, node_num)?;
-        let read_set = format!(
-            r#"[{{"kind":"row","table":"projects","rowId":"{}","visibleTxId":"{}","reason":"write_base"}}]"#,
-            input.row_id, previous.1
-        );
+        let read_set = encode_row_read(&EncodedRowRead {
+            table: "projects".to_owned(),
+            row_id: input.row_id.clone(),
+            visible_tx_id: previous.1.clone(),
+            reason: "write_base".to_owned(),
+        });
         let write_set = format!(
             r#"[{{"table":"projects","rowId":"{}","op":"delete","columns":["is_deleted","updated_at"]}}]"#,
             input.row_id
@@ -1330,10 +1335,12 @@ impl MiniJazzSqlite {
         let local_epoch = next_local_epoch(&sql_tx, node_num)?;
         let done_sql = bool_to_sql(done);
         let conflict_tx_ids = format!(r#"["{}"]"#, input.tx_id);
-        let read_set = format!(
-            r#"[{{"kind":"row","table":"todos","rowId":"{}","visibleTxId":"{}","reason":"write_base"}}]"#,
-            input.row_id, previous.visible_tx_id
-        );
+        let read_set = encode_row_read(&EncodedRowRead {
+            table: "todos".to_owned(),
+            row_id: input.row_id.clone(),
+            visible_tx_id: previous.visible_tx_id.clone(),
+            reason: "write_base".to_owned(),
+        });
         let write_set = format!(
             r#"[{{"table":"todos","rowId":"{}","op":"update","columns":["title","done","updated_at"]}}]"#,
             input.row_id
@@ -1416,10 +1423,12 @@ impl MiniJazzSqlite {
         } else {
             format!(r#"["{}","{}"]"#, previous.visible_tx_id, input.tx_id)
         };
-        let read_set = format!(
-            r#"[{{"kind":"row","table":"todos","rowId":"{}","visibleTxId":"{}","reason":"write_base"}}]"#,
-            input.row_id, input.base_tx_id
-        );
+        let read_set = encode_row_read(&EncodedRowRead {
+            table: "todos".to_owned(),
+            row_id: input.row_id.clone(),
+            visible_tx_id: input.base_tx_id.clone(),
+            reason: "write_base".to_owned(),
+        });
         let write_set = format!(
             r#"[{{"table":"todos","rowId":"{}","op":"update","columns":["title","done","updated_at"]}}]"#,
             input.row_id
@@ -1503,10 +1512,12 @@ impl MiniJazzSqlite {
         let node_num = ensure_node(&sql_tx, &input.node_id)?;
         let local_epoch = next_local_epoch(&sql_tx, node_num)?;
         let conflict_tx_ids = format!(r#"["{}"]"#, input.tx_id);
-        let read_set = format!(
-            r#"[{{"kind":"row","table":"todos","rowId":"{}","visibleTxId":"{}","reason":"write_base"}}]"#,
-            input.row_id, previous.visible_tx_id
-        );
+        let read_set = encode_row_read(&EncodedRowRead {
+            table: "todos".to_owned(),
+            row_id: input.row_id.clone(),
+            visible_tx_id: previous.visible_tx_id.clone(),
+            reason: "write_base".to_owned(),
+        });
         let write_set = format!(
             r#"[{{"table":"todos","rowId":"{}","op":"delete","columns":["is_deleted","updated_at"]}}]"#,
             input.row_id
@@ -1595,7 +1606,9 @@ impl MiniJazzSqlite {
             params![input.tx_id],
             |row| row.get(0),
         )?;
-        if let Some((row_id, expected_tx_id)) = parse_first_row_read(&read_set) {
+        if let Some(row_read) = decode_first_row_read(&read_set) {
+            let row_id = row_read.row_id;
+            let expected_tx_id = row_read.visible_tx_id;
             let actual_tx_id: Option<String> = self
                 .conn
                 .query_row(
@@ -2597,19 +2610,6 @@ fn placeholders(count: usize) -> String {
     std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn parse_first_row_read(read_set_json: &str) -> Option<(String, String)> {
-    let row_id = value_after(read_set_json, r#""rowId":""#)?;
-    let visible_tx_id = value_after(read_set_json, r#""visibleTxId":""#)?;
-    Some((row_id, visible_tx_id))
-}
-
-fn value_after(input: &str, marker: &str) -> Option<String> {
-    let start = input.find(marker)? + marker.len();
-    let rest = &input[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_owned())
 }
 
 #[cfg(test)]

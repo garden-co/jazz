@@ -554,6 +554,21 @@ metadata-only merge path. It shows the visibility boundary clearly: accepted
 branch history is global history but still not main visibility until an explicit
 merge transaction writes or exposes it on main.
 
+### 2026-05-24 23:02 PDT
+
+Added a tiny read-set codec module:
+
+- typed `EncodedRowRead`
+- `encode_row_read`
+- `decode_first_row_read`
+- storage write paths use the encoder
+- authority validation uses the decoder instead of local substring parsing
+
+Discovery: still not a real JSON codec, but moving the encoding boundary into
+one module immediately improves the prototype. The storage layer can now depend
+on a semantic read-set shape rather than scattered string templates. This should
+be replaced by `serde_json`/SQLite JSONB-aware encoding once the shape settles.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

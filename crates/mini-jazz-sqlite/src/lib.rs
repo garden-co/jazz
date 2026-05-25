@@ -2,6 +2,7 @@
 //!
 //! This crate contains a small executable prototype of the SQLite-backed design.
 
+pub mod codec;
 pub mod harness;
 pub mod model;
 pub mod storage;
