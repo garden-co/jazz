@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -99,6 +100,17 @@ pub struct MiniJazzSqlite {
 }
 
 impl MiniJazzSqlite {
+    pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path)?;
+        let db = Self {
+            conn,
+            next_subscription_id: 0,
+            subscriptions: BTreeMap::new(),
+        };
+        db.create_schema()?;
+        Ok(db)
+    }
+
     pub fn in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         let db = Self {
@@ -284,7 +296,7 @@ impl MiniJazzSqlite {
             INSERT INTO todos__schema_v1_history (
               row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
               created_by, created_at, updated_by, updated_at, edit_metadata_json
-            ) VALUES (?1, 'main', ?2, 'update', ?3, ?4, ?5, ?6, ?7, ?6, ?7, '{}')
+            ) VALUES (?1, 'main', ?2, 'update', ?3, ?4, ?5, ?6, ?7, ?6, ?8, '{}')
             "#,
             params![
                 input.row_id,
@@ -293,6 +305,7 @@ impl MiniJazzSqlite {
                 done_sql,
                 conflict_tx_ids,
                 input.actor_id,
+                previous.created_at,
                 input.now
             ],
         )?;
@@ -362,7 +375,7 @@ impl MiniJazzSqlite {
             INSERT INTO todos__schema_v1_history (
               row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
               created_by, created_at, updated_by, updated_at, edit_metadata_json
-            ) VALUES (?1, 'main', ?2, 'delete', ?3, ?4, ?5, ?6, ?7, ?6, ?7, '{}')
+            ) VALUES (?1, 'main', ?2, 'delete', ?3, ?4, ?5, ?6, ?7, ?6, ?8, '{}')
             "#,
             params![
                 input.row_id,
@@ -371,6 +384,7 @@ impl MiniJazzSqlite {
                 bool_to_sql(previous.done),
                 conflict_tx_ids,
                 input.actor_id,
+                previous.created_at,
                 input.now
             ],
         )?;
@@ -489,6 +503,105 @@ impl MiniJazzSqlite {
         );
         Ok(changes)
     }
+
+    pub fn rebuild_main_current_from_history(&mut self) -> rusqlite::Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        sql_tx.execute(
+            "DELETE FROM todos__schema_v1_current WHERE branch_id = 'main'",
+            [],
+        )?;
+        {
+            let mut stmt = sql_tx.prepare(
+                r#"
+                SELECT row_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
+                       created_by, created_at, updated_by, updated_at, edit_metadata_json
+                FROM todos__schema_v1_history
+                WHERE branch_id = 'main'
+                ORDER BY updated_at ASC, tx_id ASC
+                "#,
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let row_id: String = row.get(0)?;
+                let tx_id: String = row.get(1)?;
+                let op: String = row.get(2)?;
+                let title: String = row.get(3)?;
+                let done: i64 = row.get(4)?;
+                let conflict_tx_ids: String = row.get(5)?;
+                let created_by: String = row.get(6)?;
+                let created_at: i64 = row.get(7)?;
+                let updated_by: String = row.get(8)?;
+                let updated_at: i64 = row.get(9)?;
+                let edit_metadata: String = row.get(10)?;
+                let is_deleted = if op == "delete" { 1 } else { 0 };
+
+                sql_tx.execute(
+                    r#"
+                    INSERT INTO todos__schema_v1_current (
+                      row_id, branch_id, visible_tx_id, is_deleted, title, done,
+                      conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+                      edit_metadata_json
+                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    ON CONFLICT(row_id, branch_id) DO UPDATE SET
+                      visible_tx_id = excluded.visible_tx_id,
+                      is_deleted = excluded.is_deleted,
+                      title = excluded.title,
+                      done = excluded.done,
+                      conflict_tx_ids_jsonb = excluded.conflict_tx_ids_jsonb,
+                      created_by = excluded.created_by,
+                      created_at = excluded.created_at,
+                      updated_by = excluded.updated_by,
+                      updated_at = excluded.updated_at,
+                      edit_metadata_json = excluded.edit_metadata_json
+                    "#,
+                    params![
+                        row_id,
+                        tx_id,
+                        is_deleted,
+                        title,
+                        done,
+                        conflict_tx_ids,
+                        created_by,
+                        created_at,
+                        updated_by,
+                        updated_at,
+                        edit_metadata
+                    ],
+                )?;
+            }
+        }
+        sql_tx.commit()
+    }
+
+    pub fn current_projection_fingerprint(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT row_id, branch_id, visible_tx_id, is_deleted, title, done,
+                   conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+                   edit_metadata_json
+            FROM todos__schema_v1_current
+            ORDER BY branch_id, row_id
+            "#,
+        )?;
+        stmt.query_map([], |row| {
+            let fields = [
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?.to_string(),
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?.to_string(),
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)?.to_string(),
+                row.get::<_, String>(9)?,
+                row.get::<_, i64>(10)?.to_string(),
+                row.get::<_, String>(11)?,
+            ];
+            Ok(fields.join("|"))
+        })?
+        .collect()
+    }
 }
 
 fn diff_rows(previous: &[Todo], next: &[Todo]) -> Vec<SubscriptionChange> {
@@ -563,6 +676,7 @@ fn sql_to_bool(value: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn insert_and_query_open_todos_by_system_column() {
@@ -773,5 +887,50 @@ mod tests {
             db.poll_subscription(subscription).unwrap().as_slice(),
             [SubscriptionChange::Removed(row)] if row.row_id == "todo-1"
         ));
+    }
+
+    #[test]
+    fn file_database_survives_reopen_and_projection_rebuild_is_byte_identical() {
+        let path = std::env::temp_dir().join(format!(
+            "mini-jazz-sqlite-{}-{}.db",
+            std::process::id(),
+            "rebuild"
+        ));
+        let _ = fs::remove_file(&path);
+
+        {
+            let mut db = MiniJazzSqlite::open(&path).unwrap();
+            db.insert_todo(InsertTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-1".into(),
+                node_id: "alice-device".into(),
+                title: "Persistent".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+            db.update_todo(UpdateTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-2".into(),
+                node_id: "alice-device".into(),
+                title: Some("Persistent updated".into()),
+                done: None,
+                actor_id: "alice".into(),
+                now: 200,
+            })
+            .unwrap();
+        }
+
+        let mut reopened = MiniJazzSqlite::open(&path).unwrap();
+        let row = reopened.get_todo("main", "todo-1").unwrap().unwrap();
+        assert_eq!(row.title, "Persistent updated");
+
+        let before = reopened.current_projection_fingerprint().unwrap();
+        reopened.rebuild_main_current_from_history().unwrap();
+        let after = reopened.current_projection_fingerprint().unwrap();
+        assert_eq!(before, after);
+
+        fs::remove_file(path).unwrap();
     }
 }

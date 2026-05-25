@@ -66,3 +66,17 @@ runtime choices and still exercises the semantic loop:
 ```text
 write -> rerun SQL -> full-row diff -> update stored result
 ```
+
+### 2026-05-24 22:20 PDT
+
+Added a persistence/reopen check and byte-for-byte current projection rebuild.
+
+Discovery: update and delete history rows must carry immutable creation
+metadata (`created_at`, and eventually `created_by`) as well as updated
+metadata. If history rows only store the new values, rebuilding the main current
+projection from history can drift even when ordinary current reads look correct.
+
+For now the prototype preserves `created_at` across update/delete rows. It still
+uses the write actor as `created_by` on update/delete history rows because the
+read model does not expose `created_by` yet; that should be corrected before
+this becomes a real projection invariant.
