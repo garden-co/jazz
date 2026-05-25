@@ -226,12 +226,17 @@ fn query_scope_records_filter_predicates() -> mini_jazz_sqlite::Result<()> {
         .limit(20);
 
     let result = alice.all(open_todos)?;
+    let bundle = alice.export_query_scope(&result.scope)?;
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.scope.predicate_scopes.len(), 1);
     assert_eq!(result.scope.predicate_scopes[0].table, "todos");
     assert_eq!(result.scope.predicate_scopes[0].column, "done");
     assert_eq!(result.scope.predicate_scopes[0].value, "false");
+    assert_eq!(bundle.predicate_scopes.len(), 1);
+    assert_eq!(bundle.predicate_scopes[0].table, "todos");
+    assert_eq!(bundle.predicate_scopes[0].column, "done");
+    assert_eq!(bundle.predicate_scopes[0].value, "false");
 
     Ok(())
 }

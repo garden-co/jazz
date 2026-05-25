@@ -21,6 +21,7 @@ pub struct QueryScope {
 pub struct QueryScopeBundle {
     pub txs: Vec<TxRecord>,
     pub branches: Vec<BranchRecord>,
+    pub predicate_scopes: Vec<PredicateScope>,
     pub history_rows: Vec<HistoryRecord>,
 }
 
@@ -65,6 +66,7 @@ pub enum ScopeReason {
     Dependency,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PredicateScope {
     pub table: String,
     pub row_id: String,
@@ -74,6 +76,7 @@ pub struct PredicateScope {
     pub reason: PredicateReason,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PredicateReason {
     Filter,
     OptionalIncludeMissing,

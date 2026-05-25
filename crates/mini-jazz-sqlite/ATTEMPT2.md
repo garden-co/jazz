@@ -514,6 +514,35 @@ Verified:
 
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 12:24 PDT
+
+Refined conflict detection and made predicate facts part of sync payloads.
+
+Conflict semantics:
+
+- Red/green test: two concurrent pending updates to the same row but different
+  columns should not expose conflict candidates.
+- Transaction metadata now stores a per-row, per-column write set in addition
+  to row read sets.
+- Current conflict metadata now includes pending candidates only when candidate
+  write column sets overlap. Empty column sets remain conservative wildcards.
+- Discovery: this is enough semantic signal for conflict UI shape, but the
+  authority will eventually want indexed durable write/read-set tables for hot
+  paths instead of parsing tx metadata.
+
+Predicate/read-scope representation:
+
+- `QueryScopeBundle` now carries predicate scopes explicitly.
+- Export still uses broad table closure for filter scopes, but the receiver can
+  now inspect which predicates caused that closure.
+- Discovery: this gives the protocol a place to carry future true range facts
+  without changing the bundle shape again.
+
+Verified focused tests:
+
+- `cargo test -p mini-jazz-sqlite --test sync query_scope_records_filter_predicates`
+- `cargo test -p mini-jazz-sqlite --test conflicts`
+
 ### 2026-05-25 11:42 PDT
 
 Added the first explicit predicate/absence scope fact.

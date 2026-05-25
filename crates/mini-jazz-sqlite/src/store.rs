@@ -84,6 +84,8 @@ pub struct Client {
 struct TxMetadata {
     #[serde(default)]
     read_set: Vec<ReadSetEntry>,
+    #[serde(default)]
+    write_set: Vec<WriteSetEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -91,6 +93,13 @@ pub(crate) struct ReadSetEntry {
     pub(crate) table: String,
     pub(crate) row_id: String,
     pub(crate) visible_tx_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct WriteSetEntry {
+    table: String,
+    row_id: String,
+    columns: Vec<String>,
 }
 
 pub(crate) struct WriteEffect {
@@ -291,10 +300,19 @@ impl Client {
             write_effects: Vec::new(),
         };
         write(&mut write_tx)?;
-        let metadata = TxMetadata {
-            read_set: write_tx.read_set,
-        };
+        let read_set = write_tx.read_set;
         let write_effects = write_tx.write_effects;
+        let metadata = TxMetadata {
+            read_set,
+            write_set: write_effects
+                .iter()
+                .map(|effect| WriteSetEntry {
+                    table: effect.table.clone(),
+                    row_id: effect.row_id.clone(),
+                    columns: effect.columns.clone(),
+                })
+                .collect(),
+        };
         for effect in &write_effects {
             sql_tx.execute(
                 "
@@ -1121,6 +1139,7 @@ impl Client {
         Ok(QueryScopeBundle {
             txs: txs.into_values().collect(),
             branches: branches.into_values().collect(),
+            predicate_scopes: scope.predicate_scopes.clone(),
             history_rows: rows,
         })
     }
@@ -1465,6 +1484,7 @@ impl Client {
         Ok(QueryScopeBundle {
             txs: vec![tx],
             branches: self.transaction_branch_records(tx_id)?,
+            predicate_scopes: Vec::new(),
             history_rows,
         })
     }
@@ -1686,7 +1706,7 @@ impl Client {
 
             let mut stmt = self.conn.prepare(&format!(
                 "
-                SELECT h.j_row_id, h.j_branch_id, h.j_tx_id
+                SELECT h.j_row_id, h.j_branch_id, h.j_tx_id, tx.metadata_json
                 FROM {} h
                 JOIN jazz_tx tx ON tx.tx_id = h.j_tx_id
                 WHERE tx.status = 'local_pending'
@@ -1699,20 +1719,30 @@ impl Client {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })?;
 
-            let mut candidates = BTreeMap::<(String, String), Vec<String>>::new();
+            let mut candidates = BTreeMap::<(String, String), Vec<(String, Vec<String>)>>::new();
             for row in rows {
-                let (row_id, branch_id, tx_id) = row?;
+                let (row_id, branch_id, tx_id, metadata_json) = row?;
+                let metadata: TxMetadata = serde_json::from_str(&metadata_json)
+                    .map_err(|err| Error::new(format!("parse tx metadata: {err}")))?;
+                let columns = metadata
+                    .write_set
+                    .iter()
+                    .find(|write| write.table == table.name && write.row_id == row_id)
+                    .map(|write| write.columns.clone())
+                    .unwrap_or_default();
                 candidates
                     .entry((row_id, branch_id))
                     .or_default()
-                    .push(tx_id);
+                    .push((tx_id, columns));
             }
 
-            for ((row_id, branch_id), tx_ids) in candidates {
-                if tx_ids.len() > 1 {
+            for ((row_id, branch_id), candidate_writes) in candidates {
+                let tx_ids = conflicting_tx_ids(candidate_writes);
+                if !tx_ids.is_empty() {
                     self.conn.execute(
                         &format!(
                             "UPDATE {} SET j_conflicts_json = ?3 \
@@ -1793,4 +1823,21 @@ fn scope_overlaps_write(scope: &QueryScope, write: &WriteEffect) -> bool {
                         .iter()
                         .any(|column| column == &predicate.column))
         })
+}
+
+fn conflicting_tx_ids(candidate_writes: Vec<(String, Vec<String>)>) -> Vec<String> {
+    let mut conflicting = BTreeMap::new();
+    for (idx, (left_tx, left_columns)) in candidate_writes.iter().enumerate() {
+        for (right_tx, right_columns) in candidate_writes.iter().skip(idx + 1) {
+            if write_columns_overlap(left_columns, right_columns) {
+                conflicting.insert(left_tx.clone(), ());
+                conflicting.insert(right_tx.clone(), ());
+            }
+        }
+    }
+    conflicting.into_keys().collect()
+}
+
+fn write_columns_overlap(left: &[String], right: &[String]) -> bool {
+    left.is_empty() || right.is_empty() || left.iter().any(|column| right.contains(column))
 }
