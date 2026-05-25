@@ -19,8 +19,8 @@ pub use schema::*;
 pub use tuple::*;
 pub use value::*;
 
-// Import PolicyExpr for use by schema module
-pub(crate) use crate::query_manager::policy::PolicyExpr;
+// Import policy types for use by schema module
+pub(crate) use crate::query_manager::policy::{Operation, PolicyExpr};
 
 // Tests module
 #[cfg(test)]

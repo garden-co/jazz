@@ -15,6 +15,12 @@ impl RowPolicyMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PermissionPhase {
+    Using,
+    Check,
+}
+
 /// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -166,5 +172,19 @@ impl TablePolicies {
 
     pub fn has_explicit_update_policy(&self) -> bool {
         self.update.using.is_some() || self.update.with_check.is_some()
+    }
+
+    pub(crate) fn policy_for_operation(
+        &self,
+        operation: Operation,
+        phase: PermissionPhase,
+    ) -> Option<&PolicyExpr> {
+        match (operation, phase) {
+            (Operation::Select, _) => self.select_policy(),
+            (Operation::Insert, _) => self.insert_policy(),
+            (Operation::Update, PermissionPhase::Using) => self.update_using_policy(),
+            (Operation::Update, PermissionPhase::Check) => self.update_check_policy(),
+            (Operation::Delete, _) => self.effective_delete_using(),
+        }
     }
 }
