@@ -489,6 +489,20 @@ Rust combiner hard-codes "branch-local shadows base". A real SQL lowering
 probably wants a source relation with `(source_branch_id, vector, precedence)`
 so shadowing works uniformly for joins, pagination, and sync scope.
 
+### 2026-05-24 22:54 PDT
+
+Extended rejection repair to `projects`:
+
+- `reject_tx` now rebuilds both todo and project current projections
+- imported rejection fate also rebuilds both projections
+- rejected project inserts disappear from required joined queries
+- optional joined queries preserve the todo and emit absence predicate scope
+
+Discovery: projection repair is table-polymorphic for the same reason sync
+bundles are table-polymorphic. The first "rebuild main current" helper was
+accidentally todo-specific. Once joins exist, every table participating in
+derived results needs the same rejection/durability repair contract.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

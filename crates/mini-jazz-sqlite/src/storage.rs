@@ -1189,6 +1189,7 @@ impl MiniJazzSqlite {
         sql_tx.commit()?;
         if bundle.tx.status == "rejected" {
             self.rebuild_main_current_from_history()?;
+            self.rebuild_projects_current_from_history()?;
         }
         Ok(())
     }
@@ -1478,7 +1479,8 @@ impl MiniJazzSqlite {
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        self.rebuild_main_current_from_history()
+        self.rebuild_main_current_from_history()?;
+        self.rebuild_projects_current_from_history()
     }
 
     pub fn open_todos_since(
@@ -2121,6 +2123,7 @@ impl MiniJazzSqlite {
                 SELECT todos__schema_v1_history.row_id,
                        todos__schema_v1_history.tx_id,
                        todos__schema_v1_history.op,
+                       todos__schema_v1_history.project_id,
                        todos__schema_v1_history.title,
                        todos__schema_v1_history.done,
                        todos__schema_v1_history.conflict_tx_ids_jsonb,
@@ -2142,26 +2145,28 @@ impl MiniJazzSqlite {
                 let row_id: String = row.get(0)?;
                 let tx_id: String = row.get(1)?;
                 let op: String = row.get(2)?;
-                let title: String = row.get(3)?;
-                let done: i64 = row.get(4)?;
-                let conflict_tx_ids: String = row.get(5)?;
-                let created_by: String = row.get(6)?;
-                let created_at: i64 = row.get(7)?;
-                let updated_by: String = row.get(8)?;
-                let updated_at: i64 = row.get(9)?;
-                let edit_metadata: String = row.get(10)?;
+                let project_id: String = row.get(3)?;
+                let title: String = row.get(4)?;
+                let done: i64 = row.get(5)?;
+                let conflict_tx_ids: String = row.get(6)?;
+                let created_by: String = row.get(7)?;
+                let created_at: i64 = row.get(8)?;
+                let updated_by: String = row.get(9)?;
+                let updated_at: i64 = row.get(10)?;
+                let edit_metadata: String = row.get(11)?;
                 let is_deleted = if op == "delete" { 1 } else { 0 };
 
                 sql_tx.execute(
                     r#"
                     INSERT INTO todos__schema_v1_current (
-                      row_id, branch_id, visible_tx_id, is_deleted, title, done,
+                      row_id, branch_id, visible_tx_id, is_deleted, project_id, title, done,
                       conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
                       edit_metadata_json
-                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                     ON CONFLICT(row_id, branch_id) DO UPDATE SET
                       visible_tx_id = excluded.visible_tx_id,
                       is_deleted = excluded.is_deleted,
+                      project_id = excluded.project_id,
                       title = excluded.title,
                       done = excluded.done,
                       conflict_tx_ids_jsonb = excluded.conflict_tx_ids_jsonb,
@@ -2175,9 +2180,82 @@ impl MiniJazzSqlite {
                         row_id,
                         tx_id,
                         is_deleted,
+                        project_id,
                         title,
                         done,
                         conflict_tx_ids,
+                        created_by,
+                        created_at,
+                        updated_by,
+                        updated_at,
+                        edit_metadata
+                    ],
+                )?;
+            }
+        }
+        sql_tx.commit()
+    }
+
+    pub fn rebuild_projects_current_from_history(&mut self) -> rusqlite::Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        sql_tx.execute(
+            "DELETE FROM projects__schema_v1_current WHERE branch_id = 'main'",
+            [],
+        )?;
+        {
+            let mut stmt = sql_tx.prepare(
+                r#"
+                SELECT projects__schema_v1_history.row_id,
+                       projects__schema_v1_history.tx_id,
+                       projects__schema_v1_history.op,
+                       projects__schema_v1_history.name,
+                       projects__schema_v1_history.created_by,
+                       projects__schema_v1_history.created_at,
+                       projects__schema_v1_history.updated_by,
+                       projects__schema_v1_history.updated_at,
+                       projects__schema_v1_history.edit_metadata_json
+                FROM projects__schema_v1_history
+                JOIN jazz_tx ON jazz_tx.tx_id = projects__schema_v1_history.tx_id
+                WHERE projects__schema_v1_history.branch_id = 'main'
+                  AND jazz_tx.status != 'rejected'
+                ORDER BY projects__schema_v1_history.updated_at ASC,
+                         projects__schema_v1_history.tx_id ASC
+                "#,
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let row_id: String = row.get(0)?;
+                let tx_id: String = row.get(1)?;
+                let op: String = row.get(2)?;
+                let name: String = row.get(3)?;
+                let created_by: String = row.get(4)?;
+                let created_at: i64 = row.get(5)?;
+                let updated_by: String = row.get(6)?;
+                let updated_at: i64 = row.get(7)?;
+                let edit_metadata: String = row.get(8)?;
+                let is_deleted = if op == "delete" { 1 } else { 0 };
+
+                sql_tx.execute(
+                    r#"
+                    INSERT INTO projects__schema_v1_current (
+                      row_id, branch_id, visible_tx_id, is_deleted, name, created_by,
+                      created_at, updated_by, updated_at, edit_metadata_json
+                    ) VALUES (?1, 'main', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    ON CONFLICT(row_id, branch_id) DO UPDATE SET
+                      visible_tx_id = excluded.visible_tx_id,
+                      is_deleted = excluded.is_deleted,
+                      name = excluded.name,
+                      created_by = excluded.created_by,
+                      created_at = excluded.created_at,
+                      updated_by = excluded.updated_by,
+                      updated_at = excluded.updated_at,
+                      edit_metadata_json = excluded.edit_metadata_json
+                    "#,
+                    params![
+                        row_id,
+                        tx_id,
+                        is_deleted,
+                        name,
                         created_by,
                         created_at,
                         updated_by,
@@ -3461,6 +3539,54 @@ mod tests {
                 reason: "optional_dependency_absence".into(),
             }]
         );
+    }
+
+    #[test]
+    fn rejecting_project_insert_repairs_joined_current_projection() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "alice-device".into(),
+            name: "Rejectable".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-1".into(),
+            title: "Depends on rejected project".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        assert_eq!(
+            db.query_open_todos_with_projects("main").unwrap().0.len(),
+            1
+        );
+
+        db.reject_tx(RejectTx {
+            tx_id: "tx-project-1".into(),
+            reason_json: r#"{"code":"permission_denied"}"#.into(),
+        })
+        .unwrap();
+
+        assert!(
+            db.query_open_todos_with_projects("main")
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        let (optional_rows, _, predicate_scope) = db
+            .query_open_todos_with_optional_projects_and_scope("main")
+            .unwrap();
+        assert_eq!(optional_rows.len(), 1);
+        assert_eq!(optional_rows[0].project, None);
+        assert_eq!(predicate_scope[0].reason, "optional_dependency_absence");
     }
 
     #[test]
