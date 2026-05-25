@@ -113,3 +113,32 @@ Added/proved:
 Learning: query-scoped export already forced us to stop treating "all history"
 as the easy sync payload. The test is tiny, but it protects the core product
 claim that Jazz syncs query scope rather than tables.
+
+## 2026-05-25 16:54 PDT
+
+Structural cleanup trigger: `runtime.rs` reached ~750 lines after only 11 tests.
+Before adding policy/branches/lenses, split helper-heavy behavior out so the
+runtime facade stays product-shaped.
+
+Target split:
+
+- `projection`: projection clearing/rebuild and rejection repair helpers
+- `bundle`: query-scoped export/apply helpers
+- `rows`: row-id and fixed-schema insert helpers
+
+## 2026-05-25 16:56 PDT
+
+Course correction before adding features: the runtime must not be hardcoded to
+the todo fixture. The fixture should be a schema used by tests, not knowledge
+baked into the runtime.
+
+Next structural goal:
+
+- introduce generic table/schema definitions
+- generate history/current tables from schema
+- route writes and projection rebuild through table definitions
+- keep product-shaped `projects`/`todos` helpers only as test-fixture
+  convenience over generic runtime operations
+
+This is worth doing before policy/branches/lenses so those features attach to
+the real architecture instead of to hardcoded tables.

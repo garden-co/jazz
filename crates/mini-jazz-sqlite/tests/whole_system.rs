@@ -1,4 +1,6 @@
-use mini_jazz_sqlite::{Runtime, Storage};
+use mini_jazz_sqlite::{Runtime, SchemaDef, Storage};
+use serde_json::json;
+use std::collections::BTreeMap;
 use tempfile::tempdir;
 
 #[test]
@@ -230,4 +232,25 @@ fn authority_acceptance_enriches_existing_transaction() {
         alice.storage_stats().unwrap().physical_tx_num_for(&tx),
         Some(alice.transaction_physical_num_for(&tx).unwrap())
     );
+}
+
+#[test]
+fn runtime_can_install_and_write_a_non_todo_schema() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut runtime =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+    let mut values = BTreeMap::new();
+    values.insert("body".to_owned(), json!("Generic schema works"));
+    values.insert("pinned".to_owned(), json!(true));
+
+    let tx = runtime.insert_row("notes", "note-1", values).unwrap();
+
+    let stats = runtime.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 1);
+    assert_eq!(stats.current_rows, 1);
+    assert!(stats.physical_tx_num_for(&tx).is_some());
+    assert!(runtime.physical_row_num_for("note-1").is_ok());
 }
