@@ -569,6 +569,20 @@ one module immediately improves the prototype. The storage layer can now depend
 on a semantic read-set shape rather than scattered string templates. This should
 be replaced by `serde_json`/SQLite JSONB-aware encoding once the shape settles.
 
+### 2026-05-24 23:03 PDT
+
+Added append-only transaction fate receipts:
+
+- new `jazz_tx_fate`
+- `accept_tx` records an `accepted` receipt
+- `reject_tx` records a `rejected` receipt
+- `jazz_tx` still carries denormalized current fate for query convenience
+
+Discovery: the dual shape feels right for a prototype: append-only fate receipts
+preserve the authority's decisions, while denormalized status/global epoch keeps
+visibility queries simple. The next step would be exporting/importing fate
+receipts explicitly instead of relying only on the mutated `jazz_tx` row.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

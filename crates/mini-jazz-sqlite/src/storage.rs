@@ -396,6 +396,16 @@ impl MiniJazzSqlite {
               UNIQUE (global_epoch)
             );
 
+            CREATE TABLE IF NOT EXISTS jazz_tx_fate (
+              tx_id TEXT NOT NULL,
+              fate TEXT NOT NULL,
+              global_epoch INTEGER,
+              reason_json TEXT,
+              recorded_at INTEGER NOT NULL,
+              PRIMARY KEY (tx_id, fate, recorded_at),
+              FOREIGN KEY (tx_id) REFERENCES jazz_tx(tx_id)
+            );
+
             CREATE TABLE IF NOT EXISTS jazz_branch (
               branch_id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
@@ -1597,6 +1607,14 @@ impl MiniJazzSqlite {
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
+        self.conn.execute(
+            r#"
+            INSERT OR IGNORE INTO jazz_tx_fate (
+              tx_id, fate, global_epoch, reason_json, recorded_at
+            ) VALUES (?1, 'accepted', ?2, NULL, ?2)
+            "#,
+            params![input.tx_id, input.global_epoch],
+        )?;
         Ok(())
     }
 
@@ -1656,8 +1674,36 @@ impl MiniJazzSqlite {
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
+        self.conn.execute(
+            r#"
+            INSERT OR IGNORE INTO jazz_tx_fate (
+              tx_id, fate, global_epoch, reason_json, recorded_at
+            ) VALUES (?1, 'rejected', NULL, ?2, ?3)
+            "#,
+            params![input.tx_id, input.reason_json, now_millis()],
+        )?;
         self.rebuild_main_current_from_history()?;
         self.rebuild_projects_current_from_history()
+    }
+
+    pub fn tx_fate_log(&self, tx_id: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT fate, COALESCE(global_epoch, -1), COALESCE(reason_json, '')
+            FROM jazz_tx_fate
+            WHERE tx_id = ?1
+            ORDER BY recorded_at, fate
+            "#,
+        )?;
+        stmt.query_map(params![tx_id], |row| {
+            Ok(format!(
+                "{}|{}|{}",
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?
+            ))
+        })?
+        .collect()
     }
 
     pub fn open_todos_since(
@@ -2612,6 +2658,15 @@ fn placeholders(count: usize) -> String {
         .join(", ")
 }
 
+fn now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2985,6 +3040,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(history_count, 1);
+    }
+
+    #[test]
+    fn transaction_fate_receipts_are_append_only_observations() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-1".into(),
+            node_id: "alice-device".into(),
+            title: "Accepted".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-1".into(),
+            global_epoch: 7,
+        })
+        .unwrap();
+
+        assert_eq!(db.tx_fate_log("tx-1").unwrap(), vec!["accepted|7|"]);
+
+        db.insert_todo(InsertTodo {
+            row_id: "todo-2".into(),
+            tx_id: "tx-2".into(),
+            node_id: "alice-device".into(),
+            title: "Rejected".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.reject_tx(RejectTx {
+            tx_id: "tx-2".into(),
+            reason_json: r#"{"code":"permission_denied"}"#.into(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.tx_fate_log("tx-2").unwrap(),
+            vec![r#"rejected|-1|{"code":"permission_denied"}"#]
+        );
     }
 
     #[test]
