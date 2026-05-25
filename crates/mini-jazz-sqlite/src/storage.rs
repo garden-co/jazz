@@ -2233,6 +2233,14 @@ impl MiniJazzSqlite {
         })
     }
 
+    pub fn top_project_name_page_boundary_is_crossed(
+        old_project_name: &str,
+        new_project_name: &str,
+        boundary_project_name: &str,
+    ) -> bool {
+        old_project_name <= boundary_project_name || new_project_name <= boundary_project_name
+    }
+
     pub fn explain_top_open_todos_by_project_name(
         &self,
         branch_id: &str,
@@ -4859,6 +4867,19 @@ mod tests {
                 reason: "page_boundary".into(),
             }]
         );
+    }
+
+    #[test]
+    fn top_page_boundary_invalidation_uses_old_and_new_sort_keys() {
+        assert!(MiniJazzSqlite::top_project_name_page_boundary_is_crossed(
+            "Catapult", "Aardwolf", "Beehive"
+        ));
+        assert!(MiniJazzSqlite::top_project_name_page_boundary_is_crossed(
+            "Aardvark", "Zebra", "Beehive"
+        ));
+        assert!(!MiniJazzSqlite::top_project_name_page_boundary_is_crossed(
+            "Catapult", "Zebra", "Beehive"
+        ));
     }
 
     #[test]

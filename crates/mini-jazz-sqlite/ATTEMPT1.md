@@ -773,6 +773,19 @@ sort key moves inside it. Efficient subscriptions probably need either index
 maintenance that can invalidate on old/new sort keys or a broader ordered-index
 watch primitive.
 
+### 2026-05-24 23:25 PDT
+
+Added the smallest old/new sort-key invalidation primitive:
+
+- a top page boundary is crossed if either the old or new project name is inside
+  the watched boundary
+- this catches both rows leaving the page and rows entering from outside
+
+Discovery: ordered-index subscriptions likely want change records that expose
+both old and new index keys. A static predicate scope over the current page is
+not enough by itself; the invalidator needs to classify movement across that
+boundary.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
