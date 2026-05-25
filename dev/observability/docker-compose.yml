@@ -4,7 +4,8 @@ services:
     volumes:
       - ./otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
     ports:
-      - "4317:4317" # OTLP gRPC — jazz server connects here
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP — jazz server connects here
     depends_on:
       - lgtm
 
