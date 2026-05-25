@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,14 +34,78 @@ pub struct UpdateTodo {
     pub now: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteTodo {
+    pub row_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub actor_id: String,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoQuery {
+    pub branch_id: String,
+    pub done: Option<bool>,
+    pub created_after: Option<i64>,
+}
+
+impl TodoQuery {
+    pub fn open_since(created_after: i64) -> Self {
+        Self {
+            branch_id: "main".to_owned(),
+            done: Some(false),
+            created_after: Some(created_after),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowVersionLocator {
+    pub table: String,
+    pub schema: String,
+    pub branch_id: String,
+    pub row_id: String,
+    pub tx_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryResult {
+    pub rows: Vec<Todo>,
+    pub scope: Vec<RowVersionLocator>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubscriptionId(u64);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionChange {
+    Added(Todo),
+    Updated { before: Todo, after: Todo },
+    Removed(Todo),
+}
+
+#[derive(Debug, Clone)]
+struct Subscription {
+    query: TodoQuery,
+    last_rows: Vec<Todo>,
+}
+
 pub struct MiniJazzSqlite {
     conn: Connection,
+    next_subscription_id: u64,
+    subscriptions: BTreeMap<SubscriptionId, Subscription>,
 }
 
 impl MiniJazzSqlite {
     pub fn in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let db = Self { conn };
+        let db = Self {
+            conn,
+            next_subscription_id: 0,
+            subscriptions: BTreeMap::new(),
+        };
         db.create_schema()?;
         Ok(db)
     }
@@ -256,6 +322,81 @@ impl MiniJazzSqlite {
         sql_tx.commit()
     }
 
+    pub fn delete_todo(&mut self, input: DeleteTodo) -> rusqlite::Result<()> {
+        let previous = self
+            .get_todo("main", &input.row_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let conflict_tx_ids = format!(r#"["{}"]"#, input.tx_id);
+        let read_set = format!(
+            r#"[{{"kind":"row","table":"todos","rowId":"{}","visibleTxId":"{}","reason":"write_base"}}]"#,
+            input.row_id, previous.visible_tx_id
+        );
+        let write_set = format!(
+            r#"[{{"table":"todos","rowId":"{}","op":"delete","columns":["is_deleted","updated_at"]}}]"#,
+            input.row_id
+        );
+
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'data', 0, '[]', '[]', ?4, ?5, 'local_pending', ?6, ?6, '{}')
+            "#,
+            params![
+                input.tx_id,
+                node_num,
+                local_epoch,
+                read_set,
+                write_set,
+                input.now
+            ],
+        )?;
+
+        sql_tx.execute(
+            r#"
+            INSERT INTO todos__schema_v1_history (
+              row_id, branch_id, tx_id, op, title, done, conflict_tx_ids_jsonb,
+              created_by, created_at, updated_by, updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 'delete', ?3, ?4, ?5, ?6, ?7, ?6, ?7, '{}')
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                previous.title,
+                bool_to_sql(previous.done),
+                conflict_tx_ids,
+                input.actor_id,
+                input.now
+            ],
+        )?;
+
+        sql_tx.execute(
+            r#"
+            UPDATE todos__schema_v1_current
+            SET visible_tx_id = ?2,
+                is_deleted = 1,
+                conflict_tx_ids_jsonb = ?3,
+                updated_by = ?4,
+                updated_at = ?5
+            WHERE branch_id = 'main' AND row_id = ?1
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                conflict_tx_ids,
+                input.actor_id,
+                input.now
+            ],
+        )?;
+
+        sql_tx.commit()
+    }
+
     pub fn open_todos_since(
         &self,
         branch_id: &str,
@@ -289,6 +430,94 @@ impl MiniJazzSqlite {
             )
             .optional()
     }
+
+    pub fn query_todos(&self, query: &TodoQuery) -> rusqlite::Result<QueryResult> {
+        let done = query.done.map(bool_to_sql);
+        let created_after = query.created_after.unwrap_or(i64::MIN);
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT row_id, title, done, created_at, updated_at, visible_tx_id
+            FROM todos__schema_v1_current
+            WHERE branch_id = ?1
+              AND is_deleted = 0
+              AND (?2 IS NULL OR done = ?2)
+              AND created_at > ?3
+            ORDER BY created_at DESC, row_id ASC
+            "#,
+        )?;
+        let rows: Vec<Todo> = stmt
+            .query_map(params![query.branch_id, done, created_after], todo_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        let scope = rows
+            .iter()
+            .map(|row| RowVersionLocator {
+                table: "todos".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: query.branch_id.clone(),
+                row_id: row.row_id.clone(),
+                tx_id: row.visible_tx_id.clone(),
+                reason: "result".to_owned(),
+            })
+            .collect();
+        Ok(QueryResult { rows, scope })
+    }
+
+    pub fn subscribe_todos(&mut self, query: TodoQuery) -> rusqlite::Result<SubscriptionId> {
+        let id = SubscriptionId(self.next_subscription_id);
+        self.next_subscription_id += 1;
+        let last_rows = self.query_todos(&query)?.rows;
+        self.subscriptions
+            .insert(id, Subscription { query, last_rows });
+        Ok(id)
+    }
+
+    pub fn poll_subscription(
+        &mut self,
+        id: SubscriptionId,
+    ) -> rusqlite::Result<Vec<SubscriptionChange>> {
+        let Some(subscription) = self.subscriptions.get(&id).cloned() else {
+            return Ok(Vec::new());
+        };
+        let next_rows = self.query_todos(&subscription.query)?.rows;
+        let changes = diff_rows(&subscription.last_rows, &next_rows);
+        self.subscriptions.insert(
+            id,
+            Subscription {
+                query: subscription.query,
+                last_rows: next_rows,
+            },
+        );
+        Ok(changes)
+    }
+}
+
+fn diff_rows(previous: &[Todo], next: &[Todo]) -> Vec<SubscriptionChange> {
+    let previous_by_id: BTreeMap<&str, &Todo> = previous
+        .iter()
+        .map(|row| (row.row_id.as_str(), row))
+        .collect();
+    let next_by_id: BTreeMap<&str, &Todo> =
+        next.iter().map(|row| (row.row_id.as_str(), row)).collect();
+    let mut changes = Vec::new();
+
+    for row in next {
+        match previous_by_id.get(row.row_id.as_str()) {
+            None => changes.push(SubscriptionChange::Added(row.clone())),
+            Some(before) if *before != row => changes.push(SubscriptionChange::Updated {
+                before: (*before).clone(),
+                after: row.clone(),
+            }),
+            Some(_) => {}
+        }
+    }
+
+    for row in previous {
+        if !next_by_id.contains_key(row.row_id.as_str()) {
+            changes.push(SubscriptionChange::Removed(row.clone()));
+        }
+    }
+
+    changes
 }
 
 fn todo_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
@@ -404,5 +633,145 @@ mod tests {
             )
             .unwrap();
         assert!(read_set.contains(r#""visibleTxId":"tx-1""#));
+    }
+
+    #[test]
+    fn delete_hides_current_row_but_keeps_history() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-1".into(),
+            node_id: "alice-device".into(),
+            title: "Delete me".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+
+        db.delete_todo(DeleteTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-2".into(),
+            node_id: "alice-device".into(),
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+
+        assert!(db.get_todo("main", "todo-1").unwrap().is_none());
+        let history_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM todos__schema_v1_history WHERE row_id = 'todo-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_count, 2);
+    }
+
+    #[test]
+    fn query_returns_result_scope_locators() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-1".into(),
+            node_id: "alice-device".into(),
+            title: "Older".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-2".into(),
+            tx_id: "tx-2".into(),
+            node_id: "alice-device".into(),
+            title: "Newer".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+
+        let result = db.query_todos(&TodoQuery::open_since(0)).unwrap();
+
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| row.row_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo-2", "todo-1"]
+        );
+        assert_eq!(result.scope.len(), 2);
+        assert_eq!(result.scope[0].row_id, "todo-2");
+        assert_eq!(result.scope[0].tx_id, "tx-2");
+        assert_eq!(result.scope[0].reason, "result");
+    }
+
+    #[test]
+    fn subscription_reports_added_updated_and_removed_rows() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        let subscription = db.subscribe_todos(TodoQuery::open_since(0)).unwrap();
+        assert!(db.poll_subscription(subscription).unwrap().is_empty());
+
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-1".into(),
+            node_id: "alice-device".into(),
+            title: "Appears".into(),
+            done: true,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        assert!(db.poll_subscription(subscription).unwrap().is_empty());
+
+        db.update_todo(UpdateTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-2".into(),
+            node_id: "alice-device".into(),
+            title: None,
+            done: Some(false),
+            actor_id: "alice".into(),
+            now: 150,
+        })
+        .unwrap();
+        assert!(matches!(
+            db.poll_subscription(subscription).unwrap().as_slice(),
+            [SubscriptionChange::Added(row)] if row.row_id == "todo-1"
+        ));
+
+        db.update_todo(UpdateTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-3".into(),
+            node_id: "alice-device".into(),
+            title: Some("Changed".into()),
+            done: None,
+            actor_id: "alice".into(),
+            now: 175,
+        })
+        .unwrap();
+        assert!(matches!(
+            db.poll_subscription(subscription).unwrap().as_slice(),
+            [SubscriptionChange::Updated { before, after }]
+                if before.title == "Appears" && after.title == "Changed"
+        ));
+
+        db.update_todo(UpdateTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-4".into(),
+            node_id: "alice-device".into(),
+            title: None,
+            done: Some(true),
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        assert!(matches!(
+            db.poll_subscription(subscription).unwrap().as_slice(),
+            [SubscriptionChange::Removed(row)] if row.row_id == "todo-1"
+        ));
     }
 }

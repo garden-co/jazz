@@ -43,3 +43,26 @@ SQLite treats `$name` as parameter syntax in many contexts. For implementation I
 encoded system columns as snake_case (`tx_id`, `created_at`, etc.) while keeping
 `$` names in the spec as semantic notation. Later lowering needs a single
 identifier codec instead of hand-written names.
+
+### 2026-05-24 22:18 PDT
+
+Reached first vertical slice:
+
+- deterministic harness skeleton
+- pure model types for transaction status/vector visibility/read-write sets
+- SQLite schema bootstrap
+- insert/update/delete on hard-coded `todos`
+- current query over user and system columns
+- result-scope locators
+- local subscription rerun+diff for added/updated/removed
+
+Discovery: the hard-coded table is a good forcing function. Generic schema
+lowering would be premature; the current useful pressure is on transaction
+metadata, read/write sets, and deterministic projection rebuilding.
+
+Subscription decision: callback-free polling API for tests. This avoids async
+runtime choices and still exercises the semantic loop:
+
+```text
+write -> rerun SQL -> full-row diff -> update stored result
+```
