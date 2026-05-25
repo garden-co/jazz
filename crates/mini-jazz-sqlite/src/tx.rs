@@ -18,7 +18,12 @@ pub(crate) fn ensure_node(conn: &Connection, node_id: &str) -> Result<i64> {
     )?)
 }
 
-pub(crate) fn create_tx(conn: &Connection, node_num: i64, now: i64) -> Result<(i64, String)> {
+pub(crate) fn create_tx(
+    conn: &Connection,
+    node_num: i64,
+    node_id: &str,
+    now: i64,
+) -> Result<(i64, String)> {
     let next_epoch = conn
         .query_row(
             "SELECT COALESCE(MAX(local_epoch), 0) + 1 FROM jazz_tx WHERE node_num = ?",
@@ -26,7 +31,7 @@ pub(crate) fn create_tx(conn: &Connection, node_num: i64, now: i64) -> Result<(i
             |row| row.get::<_, i64>(0),
         )
         .unwrap_or(1);
-    let tx_id = format!("tx-{node_num}-{next_epoch}");
+    let tx_id = format!("tx-{node_id}-{next_epoch}");
     conn.execute(
         "INSERT INTO jazz_tx
           (tx_id, node_num, local_epoch, kind, conflict_mode, outcome, created_at, metadata_json)

@@ -1,12 +1,13 @@
 use crate::sync::{Bundle, ProjectRecord, TodoRecord, TxRecord};
 use crate::types::{StorageStats, TodoView};
 use crate::{schema, storage, tx, Result, Storage};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Runtime {
     conn: Connection,
+    node_id: String,
     principal: String,
     node_num: i64,
 }
@@ -18,6 +19,7 @@ impl Runtime {
         let node_num = tx::ensure_node(&conn, node_id)?;
         Ok(Self {
             conn,
+            node_id: node_id.to_owned(),
             principal: principal.to_owned(),
             node_num,
         })
@@ -26,7 +28,7 @@ impl Runtime {
     pub fn create_project(&mut self, id: &str, title: &str) -> Result<String> {
         let db = self.conn.transaction()?;
         let now = now_ms();
-        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, now)?;
+        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
         let row_num = ensure_row_id(&db, "projects", id)?;
         db.execute(
             "INSERT OR IGNORE INTO projects__schema_v1_history
@@ -61,7 +63,7 @@ impl Runtime {
     ) -> Result<String> {
         let db = self.conn.transaction()?;
         let now = now_ms();
-        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, now)?;
+        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
         let row_num = ensure_row_id(&db, "todos", id)?;
         let project_row_num = ensure_row_id(&db, "projects", project_id)?;
         db.execute(
@@ -257,6 +259,53 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn transaction(&mut self) -> TransactionBuilder<'_> {
+        TransactionBuilder {
+            runtime: self,
+            mutations: Vec::new(),
+        }
+    }
+
+    pub fn delete_todo(&mut self, id: &str) -> Result<String> {
+        let db = self.conn.transaction()?;
+        let now = now_ms();
+        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
+        let row_num = row_num(&db, id)?;
+        db.execute(
+            "INSERT OR IGNORE INTO todos__schema_v1_history
+             (row_num, tx_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+             SELECT row_num, ?, 3, title, done, project_row_num, j_created_at, ?, j_created_by, ?
+             FROM todos__schema_v1_current
+             WHERE row_num = ?",
+            params![tx_num, now, self.principal, row_num],
+        )?;
+        db.execute(
+            "DELETE FROM todos__schema_v1_current WHERE row_num = ?",
+            params![row_num],
+        )?;
+        db.commit()?;
+        Ok(tx_id)
+    }
+
+    pub fn clear_current_projection_for_test(&mut self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM todos__schema_v1_current", [])?;
+        self.conn
+            .execute("DELETE FROM projects__schema_v1_current", [])?;
+        Ok(())
+    }
+
+    pub fn rebuild_current_projection(&mut self) -> Result<()> {
+        self.clear_current_projection_for_test()?;
+        rebuild_projects(&self.conn)?;
+        rebuild_todos(&self.conn)?;
+        Ok(())
+    }
+
+    pub fn physical_row_num_for(&self, row_id: &str) -> Result<i64> {
+        row_num(&self.conn, row_id)
+    }
+
     pub fn storage_stats(&self) -> Result<StorageStats> {
         let history_rows: i64 = self.conn.query_row(
             "SELECT
@@ -292,6 +341,77 @@ impl Runtime {
     }
 }
 
+pub struct TransactionBuilder<'a> {
+    runtime: &'a mut Runtime,
+    mutations: Vec<Mutation>,
+}
+
+enum Mutation {
+    Project {
+        id: String,
+        title: String,
+    },
+    Todo {
+        id: String,
+        title: String,
+        done: bool,
+        project_id: String,
+    },
+}
+
+impl<'a> TransactionBuilder<'a> {
+    pub fn create_project(mut self, id: &str, title: &str) -> Self {
+        self.mutations.push(Mutation::Project {
+            id: id.to_owned(),
+            title: title.to_owned(),
+        });
+        self
+    }
+
+    pub fn create_todo(mut self, id: &str, title: &str, done: bool, project_id: &str) -> Self {
+        self.mutations.push(Mutation::Todo {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            done,
+            project_id: project_id.to_owned(),
+        });
+        self
+    }
+
+    pub fn commit(self) -> Result<String> {
+        let db = self.runtime.conn.transaction()?;
+        let now = now_ms();
+        let (tx_num, tx_id) =
+            tx::create_tx(&db, self.runtime.node_num, &self.runtime.node_id, now)?;
+        for mutation in self.mutations {
+            match mutation {
+                Mutation::Project { id, title } => {
+                    insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?
+                }
+                Mutation::Todo {
+                    id,
+                    title,
+                    done,
+                    project_id,
+                } => insert_todo(
+                    &db,
+                    tx_num,
+                    NewTodo {
+                        id: &id,
+                        title: &title,
+                        done,
+                        project_id: &project_id,
+                        now,
+                        principal: &self.runtime.principal,
+                    },
+                )?,
+            }
+        }
+        db.commit()?;
+        Ok(tx_id)
+    }
+}
+
 fn ensure_row_id(conn: &Connection, table: &str, row_id: &str) -> Result<i64> {
     conn.execute(
         "INSERT OR IGNORE INTO jazz_row_id (table_name, row_id) VALUES (?, ?)",
@@ -302,6 +422,188 @@ fn ensure_row_id(conn: &Connection, table: &str, row_id: &str) -> Result<i64> {
         params![row_id],
         |row| row.get(0),
     )?)
+}
+
+fn row_num(conn: &Connection, row_id: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT row_num FROM jazz_row_id WHERE row_id = ?",
+        params![row_id],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| crate::Error::new(format!("unknown row {row_id}")))
+}
+
+fn insert_project(
+    conn: &Connection,
+    tx_num: i64,
+    id: &str,
+    title: &str,
+    now: i64,
+    principal: &str,
+) -> Result<()> {
+    let row_num = ensure_row_id(conn, "projects", id)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO projects__schema_v1_history
+         (row_num, tx_num, op, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?)",
+        params![row_num, tx_num, title, now, now, principal, principal],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO projects__schema_v1_current
+         (row_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
+         VALUES (?, ?, 0, ?, ?, ?, ?, ?)",
+        params![row_num, tx_num, title, now, now, principal, principal],
+    )?;
+    Ok(())
+}
+
+struct NewTodo<'a> {
+    id: &'a str,
+    title: &'a str,
+    done: bool,
+    project_id: &'a str,
+    now: i64,
+    principal: &'a str,
+}
+
+fn insert_todo(conn: &Connection, tx_num: i64, todo: NewTodo<'_>) -> Result<()> {
+    let row_num = ensure_row_id(conn, "todos", todo.id)?;
+    let project_row_num = ensure_row_id(conn, "projects", todo.project_id)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO todos__schema_v1_history
+         (row_num, tx_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            row_num,
+            tx_num,
+            todo.title,
+            i64::from(todo.done),
+            project_row_num,
+            todo.now,
+            todo.now,
+            todo.principal,
+            todo.principal
+        ],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO todos__schema_v1_current
+         (row_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+         VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            row_num,
+            tx_num,
+            todo.title,
+            i64::from(todo.done),
+            project_row_num,
+            todo.now,
+            todo.now,
+            todo.principal,
+            todo.principal
+        ],
+    )?;
+    Ok(())
+}
+
+fn rebuild_projects(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT h.row_num, h.tx_num, h.op, h.title, h.j_created_at, h.j_updated_at, h.j_created_by, h.j_updated_by
+         FROM projects__schema_v1_history h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE tx.outcome != ?
+         ORDER BY h.row_num, h.tx_num",
+    )?;
+    let rows = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    })?;
+    for row in rows {
+        let (row_num, tx_num, op, title, created_at, updated_at, created_by, updated_by) = row?;
+        if op == 3 {
+            conn.execute(
+                "DELETE FROM projects__schema_v1_current WHERE row_num = ?",
+                params![row_num],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT OR REPLACE INTO projects__schema_v1_current
+                 (row_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
+                 VALUES (?, ?, 0, ?, ?, ?, ?, ?)",
+                params![row_num, tx_num, title, created_at, updated_at, created_by, updated_by],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_todos(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT h.row_num, h.tx_num, h.op, h.title, h.done, h.project_row_num, h.j_created_at, h.j_updated_at, h.j_created_by, h.j_updated_by
+         FROM todos__schema_v1_history h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE tx.outcome != ?
+         ORDER BY h.row_num, h.tx_num",
+    )?;
+    let rows = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, i64>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
+        ))
+    })?;
+    for row in rows {
+        let (
+            row_num,
+            tx_num,
+            op,
+            title,
+            done,
+            project_row_num,
+            created_at,
+            updated_at,
+            created_by,
+            updated_by,
+        ) = row?;
+        if op == 3 {
+            conn.execute(
+                "DELETE FROM todos__schema_v1_current WHERE row_num = ?",
+                params![row_num],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT OR REPLACE INTO todos__schema_v1_current
+                 (row_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+                 VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    row_num,
+                    tx_num,
+                    title,
+                    done,
+                    project_row_num,
+                    created_at,
+                    updated_at,
+                    created_by,
+                    updated_by
+                ],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {

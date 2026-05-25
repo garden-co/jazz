@@ -57,3 +57,32 @@ for now and split into modules:
 Learning: starting with SQLite from the first test is not slowing us down. The
 boundary is already cleaner than Attempt 2 because storage opening, DDL, tx
 facts, sync payloads, and runtime facade are separate from the beginning.
+
+## 2026-05-25 16:49 PDT
+
+Next target: complete more of the transaction/history/sync spine before moving
+to policy/branches.
+
+Planned tests:
+
+- explicit transaction seals multiple mutations
+- rebuilding current projection from history matches current reads
+- delete appends history and hides current row
+- applying the same bundle twice is idempotent
+- replicas can use different physical ids for the same public ids
+
+## 2026-05-25 16:51 PDT
+
+Second spine slice is green: 9 whole-system tests pass.
+
+Added/proved:
+
+- explicit transaction builder seals project + multiple todos under one tx id
+- projection rebuild from history restores current reads
+- delete appends a history row and removes current visibility
+- applying the same bundle twice is idempotent
+- two replicas can use different physical row ids for the same public row ids
+
+Important early catch: public tx ids cannot be based on local physical
+`node_num`, because two replicas may both assign the writer physical node `1`.
+Attempt 3 tx ids now include the public node id plus local epoch.

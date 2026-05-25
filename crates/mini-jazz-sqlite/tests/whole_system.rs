@@ -92,3 +92,97 @@ fn durable_nodes_survive_reopen_but_memory_nodes_start_empty() {
     let fresh_memory = Runtime::open(Storage::Memory, "tab", "alice").unwrap();
     assert!(fresh_memory.open_todos().unwrap().is_empty());
 }
+
+#[test]
+fn explicit_transaction_seals_multiple_mutations_atomically() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    let tx = alice
+        .transaction()
+        .create_project("project-1", "Atomic project")
+        .create_todo("todo-1", "First todo", false, "project-1")
+        .create_todo("todo-2", "Second todo", false, "project-1")
+        .commit()
+        .unwrap();
+
+    let todos = alice.open_todos().unwrap();
+    assert_eq!(todos.len(), 2);
+    assert!(todos.iter().all(|todo| todo.tx_id == tx));
+
+    let stats = alice.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 3);
+    assert_eq!(stats.current_rows, 3);
+}
+
+#[test]
+fn rebuild_current_projection_from_history_matches_current_reads() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Rebuild me", false, "project-1")
+        .unwrap();
+    let before = alice.open_todos().unwrap();
+
+    alice.clear_current_projection_for_test().unwrap();
+    assert!(alice.open_todos().unwrap().is_empty());
+
+    alice.rebuild_current_projection().unwrap();
+    assert_eq!(alice.open_todos().unwrap(), before);
+}
+
+#[test]
+fn delete_is_history_not_removal() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Delete as history", false, "project-1")
+        .unwrap();
+    alice.delete_todo("todo-1").unwrap();
+
+    assert!(alice.open_todos().unwrap().is_empty());
+    let stats = alice.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 3);
+    assert_eq!(stats.current_rows, 1);
+}
+
+#[test]
+fn same_bundle_twice_is_idempotent() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Apply twice", false, "project-1")
+        .unwrap();
+
+    let bundle = alice.export_query_scope_open_todos().unwrap();
+    bob.apply_bundle(&bundle).unwrap();
+    bob.apply_bundle(&bundle).unwrap();
+
+    assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
+    assert_eq!(bob.storage_stats().unwrap().history_rows, 2);
+}
+
+#[test]
+fn replicas_may_use_different_physical_ids_for_same_public_ids() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+
+    bob.create_project("bob-local-project", "Bob local")
+        .unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Different physical ids", false, "project-1")
+        .unwrap();
+    let bundle = alice.export_query_scope_open_todos().unwrap();
+    bob.apply_bundle(&bundle).unwrap();
+
+    assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
+    assert_ne!(
+        alice.physical_row_num_for("project-1").unwrap(),
+        bob.physical_row_num_for("project-1").unwrap()
+    );
+}
