@@ -145,6 +145,17 @@ impl Client {
             CREATE INDEX IF NOT EXISTS jazz_tx_status_global_epoch
               ON jazz_tx(status, global_epoch, tx_id);
 
+            CREATE TABLE IF NOT EXISTS jazz_tx_write (
+              tx_id TEXT NOT NULL,
+              table_name TEXT NOT NULL,
+              row_id TEXT NOT NULL,
+              PRIMARY KEY (tx_id, table_name, row_id),
+              FOREIGN KEY (tx_id) REFERENCES jazz_tx(tx_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS jazz_tx_write_table_row
+              ON jazz_tx_write(table_name, row_id, tx_id);
+
             CREATE TABLE IF NOT EXISTS jazz_branch (
               branch_id TEXT PRIMARY KEY,
               base_global_epoch INTEGER NOT NULL
@@ -280,6 +291,15 @@ impl Client {
             read_set: write_tx.read_set,
         };
         let write_effects = write_tx.write_effects;
+        for effect in &write_effects {
+            sql_tx.execute(
+                "
+                INSERT OR IGNORE INTO jazz_tx_write (tx_id, table_name, row_id)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![tx_id, effect.table, effect.row_id],
+            )?;
+        }
         sql_tx.execute(
             "UPDATE jazz_tx SET metadata_json = ?2 WHERE tx_id = ?1",
             params![
@@ -1137,6 +1157,13 @@ impl Client {
 
         let mut write_effects = Vec::new();
         for history in &bundle.history_rows {
+            sql_tx.execute(
+                "
+                INSERT OR IGNORE INTO jazz_tx_write (tx_id, table_name, row_id)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![history.tx_id, history.table, history.row_id],
+            )?;
             let table = self.schema.table_def(&history.table)?;
             let plan = TablePlan::new(table);
             let mut cols = vec![
@@ -1302,7 +1329,9 @@ impl Client {
         )?;
 
         let mut history_rows = Vec::new();
-        for table in self.schema.tables.values() {
+        let table_names = self.transaction_write_tables(tx_id)?;
+        for table_name in table_names {
+            let table = self.schema.table_def(&table_name)?;
             let plan = TablePlan::new(table);
             let mut select_cols = vec![
                 "j_row_id".to_owned(),
@@ -1361,6 +1390,18 @@ impl Client {
             txs: vec![tx],
             history_rows,
         })
+    }
+
+    fn transaction_write_tables(&self, tx_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT table_name FROM jazz_tx_write WHERE tx_id = ?1 ORDER BY table_name",
+        )?;
+        let rows = stmt.query_map(params![tx_id], |row| row.get(0))?;
+        let mut table_names = Vec::new();
+        for row in rows {
+            table_names.push(row?);
+        }
+        Ok(table_names)
     }
 
     pub fn transaction_status(&self, tx_id: &str) -> Result<String> {

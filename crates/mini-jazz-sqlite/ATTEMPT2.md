@@ -412,6 +412,35 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 12:08 PDT
+
+Added a persistent write-set index.
+
+Change:
+
+- New system table: `jazz_tx_write(tx_id, table_name, row_id)`.
+- Local writes populate it from `WriteTx` effects before commit.
+- Imported history rows populate it during `import_query_scope`.
+- `export_transaction(tx_id)` now reads distinct table names from
+  `jazz_tx_write` instead of scanning every schema table.
+
+Discovery: write effects, sync closure, and tx export want the same durable
+write-set fact. The in-memory effect log is listener-oriented; `jazz_tx_write`
+is protocol/runtime metadata and should survive restart.
+
+Open debt:
+
+- Backfill for older stores is not handled in the prototype.
+- We still need column masks in the write-set.
+- `export_transaction` should probably fail loudly if the tx has no write-set
+  rows but does have history rows; that would catch index drift.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 12:07 PDT
 
 Improved imported bundle effects from broad history effects to actual import
