@@ -34,7 +34,7 @@ use super::RowNode;
 #[derive(Debug)]
 pub struct PolicyFilterNode {
     descriptor: RowDescriptor,
-    policy: PolicyExpr,
+    policy: Option<PolicyExpr>,
     policy_operation: Operation,
     session: Session,
     /// Schema for INHERITS lookups (resolving foreign key references).
@@ -149,25 +149,6 @@ impl PolicyFilterNode {
         )
     }
 
-    pub fn new_with_branch_and_policy_mode(
-        descriptor: RowDescriptor,
-        policy: PolicyExpr,
-        session: Session,
-        schema: Schema,
-        table_name: impl Into<String>,
-        branch: impl Into<String>,
-        row_policy_mode: RowPolicyMode,
-    ) -> Self {
-        Self::new_with_options(
-            descriptor,
-            policy,
-            session,
-            schema,
-            table_name,
-            PolicyFilterOptions::for_branch(branch).with_row_policy_mode(row_policy_mode),
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_branch_policy_mode_and_operation(
         descriptor: RowDescriptor,
@@ -219,6 +200,28 @@ impl PolicyFilterNode {
         table_name: impl Into<String>,
         options: PolicyFilterOptions,
     ) -> Self {
+        let policy = Some(policy);
+        Self::new_with_options_internal(descriptor, policy, session, schema, table_name, options)
+    }
+
+    pub(crate) fn new_for_table_policy(
+        descriptor: RowDescriptor,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        options: PolicyFilterOptions,
+    ) -> Self {
+        Self::new_with_options_internal(descriptor, None, session, schema, table_name, options)
+    }
+
+    fn new_with_options_internal(
+        descriptor: RowDescriptor,
+        policy: Option<PolicyExpr>,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        options: PolicyFilterOptions,
+    ) -> Self {
         let PolicyFilterOptions {
             branch,
             initial_depth,
@@ -226,7 +229,18 @@ impl PolicyFilterNode {
             policy_operation,
         } = options;
         let table_name = table_name.into();
-        let mut inherits_tables = collect_policy_dependency_tables(&policy, &descriptor);
+        let mut inherits_tables = policy
+            .as_ref()
+            .map(|policy| collect_policy_dependency_tables(policy, &descriptor))
+            .unwrap_or_default();
+        if policy.is_none()
+            && let Some(table_schema) = schema.get(&TableName::new(&table_name))
+            && let Some(table_policy) = table_schema
+                .policies
+                .policy_for_operation(policy_operation, PermissionPhase::Using)
+        {
+            inherits_tables.extend(collect_policy_dependency_tables(table_policy, &descriptor));
+        }
         let (has_branch_policy, branch_dependency_tables) = branch_policy_dependency_tables(
             &schema,
             &descriptor,
@@ -398,6 +412,14 @@ impl PolicyFilterNode {
             return result;
         }
 
+        let policy = self
+            .policy
+            .as_ref()
+            .or_else(|| self.table_policy_for_current_operation());
+        let Some(policy) = policy else {
+            return !self.row_policy_mode.denies_missing_explicit_policy();
+        };
+
         let mut evaluator = PolicyContextEvaluator::new(
             &self.schema,
             &self.session,
@@ -410,7 +432,7 @@ impl PolicyFilterNode {
             row,
             &self.descriptor,
             &self.table_name,
-            Some(&self.policy),
+            Some(policy),
             io,
             row_loader,
             self.initial_depth,
@@ -565,7 +587,14 @@ impl PolicyFilterNode {
 
     /// Evaluate the policy expression against a row.
     pub fn evaluate(&self, row: &Row) -> bool {
-        self.evaluate_expr(&self.policy, row, self.initial_depth)
+        let Some(policy) = self
+            .policy
+            .as_ref()
+            .or_else(|| self.table_policy_for_current_operation())
+        else {
+            return !self.row_policy_mode.denies_missing_explicit_policy();
+        };
+        self.evaluate_expr(policy, row, self.initial_depth)
     }
 
     /// Evaluate a policy expression with recursion depth tracking.
@@ -604,6 +633,16 @@ impl PolicyFilterNode {
                 depth,
             ),
         }
+    }
+
+    fn table_policy_for_current_operation(&self) -> Option<&PolicyExpr> {
+        self.schema
+            .get(&TableName::new(&self.table_name))
+            .and_then(|table_schema| {
+                table_schema
+                    .policies
+                    .policy_for_operation(self.policy_operation, PermissionPhase::Using)
+            })
     }
 
     /// Evaluate INHERITS without context - fails closed.

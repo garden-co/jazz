@@ -4,7 +4,7 @@ use std::{cmp::Ordering, ops::Bound};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode,
-    Schema, SchemaHash, TableName, TupleDescriptor, Value,
+    Schema, SchemaHash, TableName, TableSchema, TupleDescriptor, Value,
 };
 use crate::schema_manager::{
     SchemaContext, translate_column_for_index, translate_table_name_to_schema,
@@ -18,7 +18,7 @@ use super::super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::super::graph_nodes::magic_columns::{MagicColumnRequest, MagicColumnsNode};
 use super::super::graph_nodes::materialize::MaterializeNode;
 use super::super::graph_nodes::output::{OutputMode, OutputNode};
-use super::super::graph_nodes::policy_filter::PolicyFilterNode;
+use super::super::graph_nodes::policy_filter::{PolicyFilterNode, PolicyFilterOptions};
 use super::super::graph_nodes::project::ProjectNode;
 use super::super::graph_nodes::recursive_relation::{
     CorrelationSource, RecursiveHop, RecursiveRelationNode,
@@ -53,7 +53,6 @@ struct BranchCompileContext {
     branches: Vec<String>,
     schema_hash_by_branch: HashMap<String, SchemaHash>,
     policy_branch: String,
-    single_composed_non_main: bool,
 }
 
 impl BranchCompileContext {
@@ -81,14 +80,11 @@ impl BranchCompileContext {
             .first()
             .cloned()
             .unwrap_or_else(|| "main".to_string());
-        let single_composed_non_main = branches.len() == 1
-            && ComposedBranchName::parse_non_main(&BranchName::new(&branches[0])).is_some();
 
         Self {
             branches,
             schema_hash_by_branch,
             policy_branch,
-            single_composed_non_main,
         }
     }
 
@@ -100,16 +96,18 @@ impl BranchCompileContext {
         &self.policy_branch
     }
 
-    fn is_single_composed_non_main(&self) -> bool {
-        self.single_composed_non_main
-    }
-
     fn schema_hash_for(&self, schema_context: &SchemaContext, branch: &str) -> Option<SchemaHash> {
         self.schema_hash_by_branch
             .get(branch)
             .copied()
             .or_else(|| resolve_branch_schema_hash(schema_context, branch))
     }
+}
+
+fn needs_select_policy_filter(table_schema: &TableSchema, row_policy_mode: RowPolicyMode) -> bool {
+    row_policy_mode.denies_missing_explicit_policy()
+        || table_schema.policies.select_policy().is_some()
+        || !table_schema.policies.for_branch.is_empty()
 }
 
 fn natural_row_projection_element_index(
@@ -764,10 +762,6 @@ impl QueryGraph {
 
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.columns.clone();
-        let select_policy = table_schema.policies.select_policy_for_branch_scope(
-            branch_context.is_single_composed_non_main(),
-            row_policy_mode,
-        );
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
 
         let scan_plans: Vec<_> = plan
@@ -813,16 +807,17 @@ impl QueryGraph {
         );
         let scope_table_map = HashMap::from([(plan.base_scope.clone(), plan.table)]);
 
-        // Policy filter node (if session provided and table has SELECT policy)
-        if let (Some(session), Some(policy)) = (&session, select_policy) {
-            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+        // Policy filter node (if session provided and table needs SELECT policy routing)
+        if let Some(session) = &session
+            && needs_select_policy_filter(table_schema, row_policy_mode)
+        {
+            let policy_node = PolicyFilterNode::new_for_table_policy(
                 current_descriptor.clone(),
-                policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
-                branch_context.policy_branch(),
-                row_policy_mode,
+                PolicyFilterOptions::for_branch(branch_context.policy_branch())
+                    .with_row_policy_mode(row_policy_mode),
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -1479,21 +1474,16 @@ impl QueryGraph {
 
             // Track current left side descriptor (accumulates columns from joins)
             let mut left_id = base_mat_id;
-            if let (Some(session), Some(policy)) = (
-                &session,
-                base_table_schema.policies.select_policy_for_branch_scope(
-                    branch_context.is_single_composed_non_main(),
-                    row_policy_mode,
-                ),
-            ) {
-                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+            if let Some(session) = &session
+                && needs_select_policy_filter(base_table_schema, row_policy_mode)
+            {
+                let policy_node = PolicyFilterNode::new_for_table_policy(
                     base_descriptor.clone(),
-                    policy,
                     session.clone(),
                     schema.clone(),
                     plan.table.as_str(),
-                    branch_context.policy_branch(),
-                    row_policy_mode,
+                    PolicyFilterOptions::for_branch(branch_context.policy_branch())
+                        .with_row_policy_mode(row_policy_mode),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -1560,21 +1550,16 @@ impl QueryGraph {
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
             graph.add_edge(right_mat_id, right_scan_output);
             let mut right_input_id = right_mat_id;
-            if let (Some(session), Some(policy)) = (
-                &session,
-                right_table_schema.policies.select_policy_for_branch_scope(
-                    branch_context.is_single_composed_non_main(),
-                    row_policy_mode,
-                ),
-            ) {
-                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+            if let Some(session) = &session
+                && needs_select_policy_filter(right_table_schema, row_policy_mode)
+            {
+                let policy_node = PolicyFilterNode::new_for_table_policy(
                     right_descriptor.clone(),
-                    policy,
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
-                    branch_context.policy_branch(),
-                    row_policy_mode,
+                    PolicyFilterOptions::for_branch(branch_context.policy_branch())
+                        .with_row_policy_mode(row_policy_mode),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
