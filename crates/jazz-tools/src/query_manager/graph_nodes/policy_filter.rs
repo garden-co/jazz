@@ -20,9 +20,10 @@ use crate::query_manager::policy::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    LoadedRow, PermissionPhase, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple,
-    TupleDelta, TupleElement,
+    ComposedBranchName, LoadedRow, PermissionPhase, Row, RowDescriptor, RowPolicyMode, Schema,
+    SchemaHash, TableName, Tuple, TupleDelta, TupleElement,
 };
+use crate::schema_manager::{LensTransformer, SchemaContext};
 
 use crate::storage::Storage;
 
@@ -44,6 +45,9 @@ pub struct PolicyFilterNode {
     table_name: String,
     /// Branch name for index lookups.
     branch: String,
+    /// Current authorization schema context, used to lens-transform branch
+    /// backing rows before exposing them as `$branch`.
+    schema_context: Option<SchemaContext>,
     row_policy_mode: RowPolicyMode,
     /// Initial recursion depth used for policy evaluation.
     initial_depth: usize,
@@ -63,6 +67,7 @@ pub struct PolicyFilterNode {
 #[derive(Debug)]
 pub(crate) struct PolicyFilterOptions {
     branch: String,
+    schema_context: Option<SchemaContext>,
     initial_depth: usize,
     row_policy_mode: RowPolicyMode,
     policy_operation: Operation,
@@ -81,6 +86,11 @@ impl PolicyFilterOptions {
         self
     }
 
+    pub(crate) fn with_schema_context(mut self, schema_context: &SchemaContext) -> Self {
+        self.schema_context = Some(schema_context.clone());
+        self
+    }
+
     pub(crate) fn with_row_policy_mode(mut self, row_policy_mode: RowPolicyMode) -> Self {
         self.row_policy_mode = row_policy_mode;
         self
@@ -96,6 +106,7 @@ impl Default for PolicyFilterOptions {
     fn default() -> Self {
         Self {
             branch: "main".to_string(),
+            schema_context: None,
             initial_depth: 0,
             row_policy_mode: RowPolicyMode::PermissiveLocal,
             policy_operation: Operation::Select,
@@ -216,6 +227,7 @@ impl PolicyFilterNode {
     ) -> Self {
         let PolicyFilterOptions {
             branch,
+            schema_context,
             initial_depth,
             row_policy_mode,
             policy_operation,
@@ -250,6 +262,7 @@ impl PolicyFilterNode {
             schema,
             table_name,
             branch,
+            schema_context,
             row_policy_mode,
             initial_depth,
             current_tuples: AHashSet::new(),
@@ -496,11 +509,19 @@ impl PolicyFilterNode {
                 }
 
                 let backing_provenance = backing_row.row_provenance();
+                let Some(backing_content) = self.transform_content_for_schema(
+                    backing_table.as_str(),
+                    &backing_row.data,
+                    backing_row.batch_id,
+                    current_branch,
+                ) else {
+                    return BranchBackingResolution::Denied;
+                };
                 let backing_policy = backing_schema.policies.select_policy();
                 let backing_allowed = if let Some(policy) = backing_policy {
                     let backing_row_for_policy = Row::new(
                         branch_object_id,
-                        backing_row.data.clone(),
+                        backing_content.clone(),
                         backing_row.batch_id,
                         backing_provenance.clone(),
                     );
@@ -555,11 +576,81 @@ impl PolicyFilterNode {
                     backing_table: *backing_table,
                     row_id: branch_object_id,
                     descriptor: backing_schema.columns.clone(),
-                    content: backing_row.data.to_vec(),
+                    content: backing_content,
                     provenance: backing_provenance,
                 })
             },
         ))
+    }
+
+    fn transform_content_for_schema(
+        &self,
+        table: &str,
+        content: &[u8],
+        batch_id: crate::row_histories::BatchId,
+        branch_name: BranchName,
+    ) -> Option<Vec<u8>> {
+        let Some(schema_context) = &self.schema_context else {
+            return Some(content.to_vec());
+        };
+
+        let source_hash = self
+            .schema_hash_for_branch(schema_context, &branch_name)
+            .or_else(|| {
+                (branch_name.as_str() == schema_context.branch_name().as_str())
+                    .then_some(schema_context.current_hash)
+            })
+            .or_else(|| {
+                ComposedBranchName::parse(&branch_name).and_then(|composed| {
+                    self.find_schema_by_short_hash(schema_context, &composed.schema_hash)
+                })
+            });
+        let source_hash = match source_hash {
+            Some(source_hash) => source_hash,
+            None if ComposedBranchName::parse(&branch_name).is_some() => return None,
+            None => return Some(content.to_vec()),
+        };
+
+        if source_hash == schema_context.current_hash {
+            return Some(content.to_vec());
+        }
+
+        LensTransformer::new(schema_context, table)
+            .transform(content, batch_id, source_hash)
+            .ok()
+            .map(|result| result.data)
+    }
+
+    fn schema_hash_for_branch(
+        &self,
+        schema_context: &SchemaContext,
+        branch_name: &BranchName,
+    ) -> Option<SchemaHash> {
+        if branch_name.as_str() == schema_context.branch_name().as_str() {
+            return Some(schema_context.current_hash);
+        }
+
+        for hash in schema_context.live_schemas.keys() {
+            let live_branch =
+                ComposedBranchName::new(&schema_context.env, *hash, &schema_context.user_branch)
+                    .to_branch_name();
+            if live_branch.as_str() == branch_name.as_str() {
+                return Some(*hash);
+            }
+        }
+
+        None
+    }
+
+    fn find_schema_by_short_hash(
+        &self,
+        schema_context: &SchemaContext,
+        short_hash: &SchemaHash,
+    ) -> Option<SchemaHash> {
+        schema_context
+            .all_live_hashes()
+            .into_iter()
+            .find(|hash| hash.short() == short_hash.short())
     }
 
     /// Evaluate the policy expression against a row.

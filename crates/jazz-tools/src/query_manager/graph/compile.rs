@@ -817,6 +817,7 @@ impl QueryGraph {
                 schema.clone(),
                 plan.table.as_str(),
                 PolicyFilterOptions::for_branch(branch_context.policy_branch())
+                    .with_schema_context(schema_context)
                     .with_row_policy_mode(row_policy_mode),
             );
             let inherits_tables: Vec<TableName> = policy_node
@@ -1483,6 +1484,7 @@ impl QueryGraph {
                     schema.clone(),
                     plan.table.as_str(),
                     PolicyFilterOptions::for_branch(branch_context.policy_branch())
+                        .with_schema_context(schema_context)
                         .with_row_policy_mode(row_policy_mode),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
@@ -1559,6 +1561,7 @@ impl QueryGraph {
                     schema.clone(),
                     join_spec.table.as_str(),
                     PolicyFilterOptions::for_branch(branch_context.policy_branch())
+                        .with_schema_context(schema_context)
                         .with_row_policy_mode(row_policy_mode),
                 );
                 let inherits_tables: Vec<TableName> = policy_node

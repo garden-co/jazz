@@ -6,8 +6,9 @@ use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::relation_ir::{
     ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
 };
-use crate::query_manager::types::SchemaBuilder;
+use crate::query_manager::types::{OperationPolicy, SchemaBuilder};
 use crate::query_manager::writes::RowBranchWrite;
+use crate::sync_manager::ServerId;
 
 use super::*;
 
@@ -184,6 +185,10 @@ fn branch_schema(include_todo_branch_policy: bool) -> Schema {
 
 fn todos_metadata() -> HashMap<String, String> {
     HashMap::from([(MetadataKey::Table.to_string(), "todos".to_string())])
+}
+
+fn branches_metadata() -> HashMap<String, String> {
+    HashMap::from([(MetadataKey::Table.to_string(), "branches".to_string())])
 }
 
 fn manager_with_branch_schema(
@@ -1943,6 +1948,124 @@ fn branch_ref_lens_schemas() -> (Schema, Schema, Lens, SchemaHash, SchemaHash) {
     );
     let lens = Lens::new(legacy_hash, auth_hash, transform);
     (legacy, auth, lens, legacy_hash, auth_hash)
+}
+
+fn branch_ref_read_lens_schemas() -> (Schema, Schema, Lens, SchemaHash, SchemaHash) {
+    let (legacy, mut auth, lens, legacy_hash, auth_hash) = branch_ref_lens_schemas();
+    let todo_policies = auth
+        .get_mut(&TableName::new("todos"))
+        .expect("todos table should exist")
+        .policies
+        .for_branch
+        .get_mut(&TableName::new("branches"))
+        .expect("branch policies should exist");
+    todo_policies.select = OperationPolicy::using(PolicyExpr::Cmp {
+        column: "createdBy".into(),
+        op: CmpOp::Eq,
+        value: PolicyValue::BranchRef("ownerId".into()),
+    });
+    (legacy, auth, lens, legacy_hash, auth_hash)
+}
+
+#[test]
+// BranchRef lens path for graph read filtering:
+//
+//   legacy backing branch row lacks ownerId
+//        --lens adds ownerId=alice-->
+//   auth branch select compares todo.createdBy == $branch.ownerId
+//
+//   Expected: graph policy filtering transforms the backing row before
+//   evaluating `$branch.ownerId`.
+fn branch_read_transforms_backing_row_before_branch_ref_policy() {
+    let (legacy, auth, lens, legacy_hash, auth_hash) = branch_ref_read_lens_schemas();
+    let mut qm = create_query_manager_with_policy_mode(
+        SyncManager::new(),
+        auth.clone(),
+        RowPolicyMode::PermissiveLocal,
+    );
+    qm.set_known_schemas(Arc::new(HashMap::from([
+        (legacy_hash, legacy.clone()),
+        (auth_hash, auth.clone()),
+    ])));
+    qm.add_live_schema(legacy.clone());
+    qm.register_lens(lens);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_id = ObjectId::new();
+    let legacy_main_branch = ComposedBranchName::new("dev", legacy_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+    let branch_id = ObjectId::new();
+    let legacy_branch_descriptor = legacy
+        .get(&TableName::new("branches"))
+        .expect("legacy branches table should exist")
+        .columns
+        .clone();
+    let branch_commit = stored_row_commit(
+        smallvec![],
+        encode_row(&legacy_branch_descriptor, &[Value::Uuid(project_id)]).unwrap(),
+        1_000,
+        "alice",
+        None,
+    );
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: row_batch_created_payload(
+            branch_id,
+            &legacy_main_branch,
+            Some(RowMetadata {
+                id: branch_id,
+                metadata: branches_metadata(),
+            }),
+            &branch_commit,
+        ),
+    });
+    let branch_name = branch_name_for(&legacy, branch_id);
+    let todo_id = ObjectId::new();
+    let legacy_todo_descriptor = legacy
+        .get(&TableName::new("todos"))
+        .expect("legacy todos table should exist")
+        .columns
+        .clone();
+    let todo_commit = stored_row_commit(
+        smallvec![],
+        encode_row(
+            &legacy_todo_descriptor,
+            &[
+                Value::Uuid(project_id),
+                Value::Text("Read branch-ref lens docs".into()),
+            ],
+        )
+        .unwrap(),
+        1_001,
+        "alice",
+        None,
+    );
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: row_batch_created_payload(
+            todo_id,
+            &branch_name,
+            Some(RowMetadata {
+                id: todo_id,
+                metadata: todos_metadata(),
+            }),
+            &todo_commit,
+        ),
+    });
+    qm.process(&mut storage);
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("todos").branch(&branch_name).build(),
+        Some(Session::new("alice")),
+    );
+    assert_eq!(
+        rows.len(),
+        1,
+        "branch read should use transformed backing row for BranchRef"
+    );
 }
 
 #[test]

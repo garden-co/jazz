@@ -14,6 +14,11 @@ use super::types::{
     TableName, TablePolicies, TableSchema,
 };
 
+/// Inputs for evaluating one already-selected policy expression.
+///
+/// This is the low-level evaluation shape: the caller has already decided which
+/// policy applies. `branch_context` is present only when a `forBranch` policy is
+/// being evaluated and `$branch.*` references need backing-row values.
 pub(crate) struct AuthorizationPolicyRequest<'a> {
     pub(crate) object_id: ObjectId,
     pub(crate) branch_name: BranchName,
@@ -30,6 +35,11 @@ pub(crate) struct AuthorizationPolicyRequest<'a> {
     pub(crate) branch_context: Option<&'a BranchPolicyContext<'a>>,
 }
 
+/// Inputs for evaluating a permission route.
+///
+/// This is the preferred shape for permission checks. The caller supplies the
+/// row and operation, while the route decides which policy expression applies
+/// and whether a missing policy should allow or deny.
 pub(crate) struct PermissionEvaluationRequest<'a> {
     pub(crate) object_id: ObjectId,
     pub(crate) branch_name: BranchName,
@@ -45,6 +55,11 @@ pub(crate) struct PermissionEvaluationRequest<'a> {
     pub(crate) settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
 }
 
+/// Backing row resolved from a composed branch id for `forBranch` policies.
+///
+/// For a branch like `<env>/<schema>/<row-id>`, the user branch segment points
+/// at a row on the composed main branch. That row becomes the `$branch` context
+/// exposed to branch policies.
 pub(crate) struct ResolvedBranchPolicyBacking {
     pub(crate) backing_table: TableName,
     pub(crate) row_id: ObjectId,
@@ -53,6 +68,11 @@ pub(crate) struct ResolvedBranchPolicyBacking {
     pub(crate) provenance: RowProvenance,
 }
 
+/// Permission route for a row.
+///
+/// Normal rows use table policies directly. Composed non-main branches never
+/// fall back to normal policies; they either use a resolved `forBranch` policy,
+/// carry no branch policy so missing-policy rules apply, or deny immediately.
 pub(crate) enum PermissionRoute<'a> {
     Normal {
         policies: &'a TablePolicies,
@@ -64,6 +84,10 @@ pub(crate) enum PermissionRoute<'a> {
     Denied,
 }
 
+/// Result of evaluating a route.
+///
+/// Callers use this when they need different error messages for missing policy,
+/// route resolution failure, and policy expression failure.
 pub(crate) enum PermissionDecision {
     Allowed,
     DeniedRoute,
@@ -71,6 +95,11 @@ pub(crate) enum PermissionDecision {
     DeniedPolicy,
 }
 
+/// Result of trying one `forBranch` backing table.
+///
+/// `NotFound` means this backing table did not contain the branch row, so the
+/// router may try another `forBranch` entry. `Denied` means a row existed or was
+/// otherwise resolved far enough to fail hard, so resolution must stop.
 pub(crate) enum BranchBackingResolution {
     Found(ResolvedBranchPolicyBacking),
     NotFound,
@@ -174,6 +203,9 @@ pub(crate) fn resolve_permission_route_with_backing_loader<'a, F>(
 where
     F: FnMut(&TableName, &TableSchema, ObjectId, BranchName) -> BranchBackingResolution,
 {
+    // Routing owns the branch-shape rules. The caller-owned callback owns the
+    // storage/evaluation details, which differ between QueryManager and graph
+    // policy filters.
     let Some(target_schema) = auth_schema.get(&table_name) else {
         return PermissionRoute::Denied;
     };

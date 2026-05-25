@@ -464,7 +464,33 @@ impl QueryManager {
         output_rows_are_visible.then_some(authorized)
     }
 
-    fn filter_unauthorized_nested_rows(value: &mut Value, authorized_ids: &HashSet<ObjectId>) {
+    fn nested_row_authorized(
+        object_id: ObjectId,
+        tuple_provenance: &TupleProvenance,
+        authorized_provenance: &TupleProvenance,
+    ) -> bool {
+        let mut saw_denied_scope = false;
+        let mut saw_authorized_scope = false;
+
+        for scoped_object @ (scoped_id, _) in tuple_provenance.iter().copied() {
+            if scoped_id != object_id {
+                continue;
+            }
+            if authorized_provenance.contains(&scoped_object) {
+                saw_authorized_scope = true;
+            } else {
+                saw_denied_scope = true;
+            }
+        }
+
+        saw_authorized_scope && !saw_denied_scope
+    }
+
+    fn filter_unauthorized_nested_rows(
+        value: &mut Value,
+        tuple_provenance: &TupleProvenance,
+        authorized_provenance: &TupleProvenance,
+    ) {
         match value {
             Value::Array(values) => {
                 values.retain_mut(|value| match value {
@@ -472,23 +498,39 @@ impl QueryManager {
                         id: Some(object_id),
                         values,
                     } => {
-                        if !authorized_ids.contains(object_id) {
+                        if !Self::nested_row_authorized(
+                            *object_id,
+                            tuple_provenance,
+                            authorized_provenance,
+                        ) {
                             return false;
                         }
                         for value in values {
-                            Self::filter_unauthorized_nested_rows(value, authorized_ids);
+                            Self::filter_unauthorized_nested_rows(
+                                value,
+                                tuple_provenance,
+                                authorized_provenance,
+                            );
                         }
                         true
                     }
                     other => {
-                        Self::filter_unauthorized_nested_rows(other, authorized_ids);
+                        Self::filter_unauthorized_nested_rows(
+                            other,
+                            tuple_provenance,
+                            authorized_provenance,
+                        );
                         true
                     }
                 });
             }
             Value::Row { values, .. } => {
                 for value in values {
-                    Self::filter_unauthorized_nested_rows(value, authorized_ids);
+                    Self::filter_unauthorized_nested_rows(
+                        value,
+                        tuple_provenance,
+                        authorized_provenance,
+                    );
                 }
             }
             _ => {}
@@ -500,22 +542,32 @@ impl QueryManager {
         descriptor: &RowDescriptor,
         authorized_provenance: TupleProvenance,
     ) -> Option<Tuple> {
-        let authorized_ids: HashSet<ObjectId> = authorized_provenance
-            .iter()
-            .map(|(object_id, _)| *object_id)
-            .collect();
-
+        let tuple_provenance = tuple.provenance().clone();
         if tuple.len() == 1
             && let Some(TupleElement::Row { content, .. }) = tuple.get_mut(0)
         {
             let mut values = decode_row(descriptor, content).ok()?;
             for value in &mut values {
-                Self::filter_unauthorized_nested_rows(value, &authorized_ids);
+                Self::filter_unauthorized_nested_rows(
+                    value,
+                    &tuple_provenance,
+                    &authorized_provenance,
+                );
             }
             *content = encode_row(descriptor, &values).ok()?.into();
         }
 
         Some(tuple.with_provenance(authorized_provenance))
+    }
+
+    fn tuple_provenance_key(tuple: &Tuple) -> Vec<(ObjectId, BranchName)> {
+        let mut key: Vec<_> = tuple.provenance().iter().copied().collect();
+        key.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
+        });
+        key
     }
 
     fn authorized_tuples_from_graph_result(
@@ -620,10 +672,11 @@ impl QueryManager {
         }
 
         let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
-        let mut authorized_scope_by_tuple: HashMap<Vec<ObjectId>, TupleProvenance> = HashMap::new();
+        let mut authorized_scope_by_tuple: HashMap<Vec<(ObjectId, BranchName)>, TupleProvenance> =
+            HashMap::new();
 
         let authorized_scope_tuples = graph.filtered_sync_scope_tuples(|tuple| {
-            let key = tuple.ids();
+            let key = Self::tuple_provenance_key(tuple);
             match self.authorized_tuple_provenance(
                 storage,
                 settlement_eval_cache,
@@ -647,7 +700,7 @@ impl QueryManager {
                 .into_iter()
                 .flat_map(|tuple| {
                     authorized_scope_by_tuple
-                        .remove(&tuple.ids())
+                        .remove(&Self::tuple_provenance_key(&tuple))
                         .unwrap_or_default()
                         .into_iter()
                 })
