@@ -743,6 +743,21 @@ makes branch reads inspectable and gives joins/pagination something concrete to
 join against. The current version is still todos-only and uses a temp table, but
 it removes one of the biggest branch-query hand waves.
 
+### 2026-05-24 23:23 PDT
+
+Added a top-N joined subscription variant:
+
+- subscription state can be backed by `query_top_open_todos_by_project_name`
+- project sort-key changes that move an off-page todo onto the page produce an
+  added row and a removed row
+- the result matches fresh query rerun semantics
+
+Discovery: simple rerun+diff can produce the correct semantic diff for page
+membership churn, but it does not yet explain why the page was invalidated or
+which off-page boundary rows were watched. This keeps the correctness story
+alive while pointing at the next performance/scope problem: page boundary
+dependencies.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

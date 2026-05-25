@@ -375,6 +375,7 @@ struct Subscription {
 #[derive(Debug, Clone)]
 struct JoinedSubscription {
     branch_id: String,
+    top_by_project_name_limit: Option<i64>,
     last_rows: Vec<TodoWithProject>,
 }
 
@@ -2704,6 +2705,26 @@ impl MiniJazzSqlite {
             id,
             JoinedSubscription {
                 branch_id: branch_id.to_owned(),
+                top_by_project_name_limit: None,
+                last_rows,
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn subscribe_top_open_todos_by_project_name(
+        &mut self,
+        branch_id: &str,
+        limit: i64,
+    ) -> rusqlite::Result<SubscriptionId> {
+        let id = SubscriptionId(self.next_subscription_id);
+        self.next_subscription_id += 1;
+        let last_rows = self.query_top_open_todos_by_project_name(branch_id, limit)?;
+        self.joined_subscriptions.insert(
+            id,
+            JoinedSubscription {
+                branch_id: branch_id.to_owned(),
+                top_by_project_name_limit: Some(limit),
                 last_rows,
             },
         );
@@ -2717,12 +2738,18 @@ impl MiniJazzSqlite {
         let Some(subscription) = self.joined_subscriptions.get(&id).cloned() else {
             return Ok(Vec::new());
         };
-        let (next_rows, _) = self.query_open_todos_with_projects(&subscription.branch_id)?;
+        let next_rows = if let Some(limit) = subscription.top_by_project_name_limit {
+            self.query_top_open_todos_by_project_name(&subscription.branch_id, limit)?
+        } else {
+            self.query_open_todos_with_projects(&subscription.branch_id)?
+                .0
+        };
         let changes = diff_joined_rows(&subscription.last_rows, &next_rows);
         self.joined_subscriptions.insert(
             id,
             JoinedSubscription {
                 branch_id: subscription.branch_id,
+                top_by_project_name_limit: subscription.top_by_project_name_limit,
                 last_rows: next_rows,
             },
         );
@@ -4612,6 +4639,87 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["todo-a", "todo-c"]
         );
+    }
+
+    #[test]
+    fn top_joined_subscription_reports_page_churn_from_dependency_sort_key() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        for (project_id, tx_id, name, todo_id, todo_tx) in [
+            (
+                "project-a",
+                "tx-project-a",
+                "Aardvark",
+                "todo-a",
+                "tx-todo-a",
+            ),
+            (
+                "project-b",
+                "tx-project-b",
+                "Beehive",
+                "todo-b",
+                "tx-todo-b",
+            ),
+            (
+                "project-c",
+                "tx-project-c",
+                "Catapult",
+                "todo-c",
+                "tx-todo-c",
+            ),
+        ] {
+            db.insert_project(InsertProject {
+                row_id: project_id.into(),
+                tx_id: tx_id.into(),
+                node_id: "alice-device".into(),
+                name: name.into(),
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+            db.insert_todo_for_project(InsertTodoForProject {
+                row_id: todo_id.into(),
+                tx_id: todo_tx.into(),
+                node_id: "alice-device".into(),
+                project_id: project_id.into(),
+                title: format!("Todo for {name}"),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            })
+            .unwrap();
+        }
+
+        let subscription = db
+            .subscribe_top_open_todos_by_project_name("main", 2)
+            .unwrap();
+        assert!(
+            db.poll_joined_subscription(subscription)
+                .unwrap()
+                .is_empty()
+        );
+
+        db.update_project(UpdateProject {
+            row_id: "project-c".into(),
+            tx_id: "tx-project-c-rename".into(),
+            node_id: "alice-device".into(),
+            base_tx_id: None,
+            name: "Aardwolf".into(),
+            actor_id: "alice".into(),
+            now: 300,
+        })
+        .unwrap();
+
+        let changes = db.poll_joined_subscription(subscription).unwrap();
+        assert!(matches!(
+            changes.as_slice(),
+            [
+                JoinedSubscriptionChange::Added(added),
+                JoinedSubscriptionChange::Removed(removed)
+            ]
+                if added.todo.row_id == "todo-c"
+                    && added.project.name == "Aardwolf"
+                    && removed.todo.row_id == "todo-b"
+        ));
     }
 
     #[test]
