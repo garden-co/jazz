@@ -72,3 +72,36 @@ names and quoted SQL identifiers need to stay separate in the layout layer.
 Discovery: the public-ish API is already doing useful pressure work. The test
 did not call `insert_todo` or `query_open_todos_with_projects`; fixture tables
 are concrete, but the engine path is schema-driven.
+
+### 2026-05-25 11:15 PDT
+
+Starting subscription slice with a red joined-subscription test:
+
+- subscribe to open todos with required project include
+- update only the project row
+- poll subscription
+- expect an updated semantic result row, not an unchanged result
+
+This targets the attempt1 lesson that subscription state must store dependency
+payloads, not only result row ids/versions.
+
+### 2026-05-25 11:17 PDT
+
+Joined dependency-update subscription test is green.
+
+Implementation shape:
+
+- `Client::subscribe(query)` runs the query once and stores full previous
+  `RowView`s.
+- `Client::poll_subscription(id)` reruns the query and diffs by `$rowId` plus
+  full row payload equality.
+- `RowView` includes nested dependency values, so a project-only rename changes
+  the semantic todo row even though the todo row id and tx id stay the same.
+
+Discovery: for v0, a subscription can be almost embarrassingly simple if the
+previous result stores decoded dependency payloads. The correctness boundary is
+`run_query -> full semantic rows + scope`, not "watch this result table row".
+
+Discovery: update support immediately made immutable creation metadata useful.
+`update` preserves `j_created_at`, writes a new history row, updates
+`j_updated_at`, and current rebuild still has enough data to stay deterministic.

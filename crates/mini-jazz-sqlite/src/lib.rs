@@ -182,23 +182,44 @@ pub struct ClientBuilder {
 impl ClientBuilder {
     pub fn durable_at(self, path: &Path) -> Result<Client> {
         let conn = Connection::open(path)?;
-        let mut client = Client {
-            node_id: self.node_id,
-            schema: self.schema,
-            conn,
-        };
-        client.bootstrap()?;
-        Ok(client)
+        Client::open(self.node_id, self.schema, conn)
     }
+
+    pub fn durable_in_memory(self) -> Result<Client> {
+        let conn = Connection::open_in_memory()?;
+        Client::open(self.node_id, self.schema, conn)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SubscriptionId(u64);
+
+struct Subscription {
+    query: Query,
+    previous_rows: Vec<RowView>,
 }
 
 pub struct Client {
     node_id: String,
     schema: Schema,
     conn: Connection,
+    subscriptions: BTreeMap<SubscriptionId, Subscription>,
+    next_subscription_id: u64,
 }
 
 impl Client {
+    fn open(node_id: String, schema: Schema, conn: Connection) -> Result<Self> {
+        let mut client = Client {
+            node_id,
+            schema,
+            conn,
+            subscriptions: BTreeMap::new(),
+            next_subscription_id: 1,
+        };
+        client.bootstrap()?;
+        Ok(client)
+    }
+
     fn bootstrap(&mut self) -> Result<()> {
         self.conn.execute_batch(
             "
@@ -512,6 +533,37 @@ impl Client {
         })
     }
 
+    pub fn subscribe(&mut self, query: Query) -> Result<SubscriptionId> {
+        let initial = self.all(query.clone())?;
+        let id = SubscriptionId(self.next_subscription_id);
+        self.next_subscription_id += 1;
+        self.subscriptions.insert(
+            id,
+            Subscription {
+                query,
+                previous_rows: initial.rows,
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn poll_subscription(&mut self, id: SubscriptionId) -> Result<SubscriptionDiff> {
+        let query = self
+            .subscriptions
+            .get(&id)
+            .ok_or_else(|| Error::new("unknown subscription"))?
+            .query
+            .clone();
+        let next = self.all(query)?;
+        let subscription = self
+            .subscriptions
+            .get_mut(&id)
+            .ok_or_else(|| Error::new("unknown subscription"))?;
+        let diff = diff_rows(&subscription.previous_rows, &next.rows);
+        subscription.previous_rows = next.rows;
+        Ok(diff)
+    }
+
     fn lower_include<'a>(
         &'a self,
         base: &'a TableDef,
@@ -654,6 +706,47 @@ impl WriteTx<'_> {
         Ok(RowRef { id: row_id })
     }
 
+    pub fn update(&mut self, table_name: &str, row_id: &str, patch: JsonValue) -> Result<()> {
+        let table = self.schema.table_def(table_name)?;
+        let object = patch
+            .as_object()
+            .ok_or_else(|| Error::new("update patch must be an object"))?;
+        let current = current_table(table_name);
+
+        let mut select_cols = vec!["j_created_at".to_owned()];
+        select_cols.extend(table.fields.iter().map(|field| quote_ident(&field.name)));
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM {current} WHERE j_branch_id = 'main' AND j_row_id = ?",
+            select_cols.join(", ")
+        ))?;
+        let existing = stmt
+            .query_row(params![row_id], |row| {
+                let created_at: i64 = row.get(0)?;
+                let mut values = Vec::new();
+                for (idx, field) in table.fields.iter().enumerate() {
+                    let sql_value = match field.kind {
+                        FieldKind::Text | FieldKind::Ref { .. } => {
+                            SqlValue::Text(row.get(idx + 1)?)
+                        }
+                        FieldKind::Bool => SqlValue::Integer(row.get(idx + 1)?),
+                    };
+                    values.push(sql_value);
+                }
+                Ok((created_at, values))
+            })
+            .optional()?
+            .ok_or_else(|| Error::new(format!("missing row {table_name}:{row_id}")))?;
+
+        let (created_at, mut values) = existing;
+        for (idx, field) in table.fields.iter().enumerate() {
+            if let Some(value) = object.get(&field.name) {
+                values[idx] = json_to_sql(value, &field.kind)?;
+            }
+        }
+
+        self.write_version(table, row_id, "update", values, created_at, self.now)
+    }
+
     fn row_count(&self, table_name: &str) -> Result<i64> {
         self.conn
             .query_row(
@@ -673,12 +766,6 @@ impl WriteTx<'_> {
         let object = value
             .as_object()
             .ok_or_else(|| Error::new("insert value must be an object"))?;
-        let user_cols = table
-            .fields
-            .iter()
-            .map(|field| quote_ident(&field.name))
-            .collect::<Vec<_>>();
-
         let mut values = Vec::new();
         for field in &table.fields {
             let json = object.get(&field.name).ok_or_else(|| {
@@ -687,8 +774,25 @@ impl WriteTx<'_> {
             values.push(json_to_sql(json, &field.kind)?);
         }
 
+        self.write_version(table, row_id, "insert", values, self.now, self.now)
+    }
+
+    fn write_version(
+        &mut self,
+        table: &TableDef,
+        row_id: &str,
+        op: &str,
+        values: Vec<SqlValue>,
+        created_at: i64,
+        updated_at: i64,
+    ) -> Result<()> {
         let history = history_table(&table.name);
         let current = current_table(&table.name);
+        let user_cols = table
+            .fields
+            .iter()
+            .map(|field| quote_ident(&field.name))
+            .collect::<Vec<_>>();
 
         let history_cols = std::iter::once("j_row_id".to_owned())
             .chain(std::iter::once("j_branch_id".to_owned()))
@@ -713,12 +817,12 @@ impl WriteTx<'_> {
             SqlValue::Text(row_id.to_owned()),
             SqlValue::Text("main".to_owned()),
             SqlValue::Text(self.tx_id.clone()),
-            SqlValue::Text("insert".to_owned()),
+            SqlValue::Text(op.to_owned()),
         ];
         history_values.extend(values.clone());
         history_values.push(SqlValue::Text("{}".to_owned()));
-        history_values.push(SqlValue::Integer(self.now));
-        history_values.push(SqlValue::Integer(self.now));
+        history_values.push(SqlValue::Integer(created_at));
+        history_values.push(SqlValue::Integer(updated_at));
 
         self.conn.execute(
             &format!(
@@ -737,8 +841,8 @@ impl WriteTx<'_> {
         ];
         current_values.extend(values);
         current_values.push(SqlValue::Text("{}".to_owned()));
-        current_values.push(SqlValue::Integer(self.now));
-        current_values.push(SqlValue::Integer(self.now));
+        current_values.push(SqlValue::Integer(created_at));
+        current_values.push(SqlValue::Integer(updated_at));
 
         self.conn.execute(
             &format!(
@@ -911,6 +1015,12 @@ pub struct QueryResult {
     pub scope: QueryScope,
 }
 
+pub struct SubscriptionDiff {
+    pub added: Vec<RowView>,
+    pub updated: Vec<RowView>,
+    pub removed: Vec<RowView>,
+}
+
 pub struct QueryScope {
     pub result_rows: Vec<ScopeRow>,
     pub dependency_rows: Vec<ScopeRow>,
@@ -928,6 +1038,7 @@ pub enum ScopeReason {
     Dependency,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct RowView {
     values: BTreeMap<String, JsonValue>,
     includes: BTreeMap<String, RowView>,
@@ -940,6 +1051,47 @@ impl RowView {
 
     pub fn include(&self, alias: &str) -> Option<&RowView> {
         self.includes.get(alias)
+    }
+}
+
+fn diff_rows(previous: &[RowView], next: &[RowView]) -> SubscriptionDiff {
+    let previous_by_id = previous
+        .iter()
+        .map(|row| (row.row_id().to_owned(), row))
+        .collect::<BTreeMap<_, _>>();
+    let next_by_id = next
+        .iter()
+        .map(|row| (row.row_id().to_owned(), row))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    let mut removed = Vec::new();
+
+    for (row_id, next_row) in &next_by_id {
+        match previous_by_id.get(row_id) {
+            Some(previous_row) if *previous_row != *next_row => updated.push((*next_row).clone()),
+            Some(_) => {}
+            None => added.push((*next_row).clone()),
+        }
+    }
+
+    for (row_id, previous_row) in &previous_by_id {
+        if !next_by_id.contains_key(row_id) {
+            removed.push((*previous_row).clone());
+        }
+    }
+
+    SubscriptionDiff {
+        added,
+        updated,
+        removed,
+    }
+}
+
+impl RowView {
+    fn row_id(&self) -> &str {
+        self.get("$rowId").unwrap_or("")
     }
 }
 
