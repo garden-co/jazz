@@ -1,5 +1,12 @@
 # jazz-napi
 
+## 2.0.0-alpha.50
+
+### Patch Changes
+
+- 640f169: Publish a Windows x64 (MSVC) native binding (`@garden-co/jazz-napi-win32-x64-msvc`) alongside the existing Linux and macOS bindings.
+- e49cf4c: Moves write error propagation fully into the Rust runtime
+
 ## 2.0.0-alpha.49
 
 ### Patch Changes
