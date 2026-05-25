@@ -6005,6 +6005,64 @@ mod tests {
     }
 
     #[test]
+    fn imported_full_history_scope_can_recreate_older_snapshot() {
+        let mut alice = MiniJazzSqlite::in_memory().unwrap();
+        let mut bob = MiniJazzSqlite::in_memory().unwrap();
+        alice
+            .insert_todo(InsertTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-todo-1".into(),
+                node_id: "alice-device".into(),
+                title: "Draft".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+        alice
+            .accept_tx(AcceptTx {
+                tx_id: "tx-todo-1".into(),
+                global_epoch: 1,
+            })
+            .unwrap();
+        alice
+            .update_todo(UpdateTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-todo-2".into(),
+                node_id: "alice-device".into(),
+                title: Some("Edited".into()),
+                done: None,
+                actor_id: "alice".into(),
+                now: 200,
+            })
+            .unwrap();
+        alice
+            .accept_tx(AcceptTx {
+                tx_id: "tx-todo-2".into(),
+                global_epoch: 2,
+            })
+            .unwrap();
+
+        let query = alice.query_todos(&TodoQuery::open_since(0)).unwrap();
+        let bundle = alice
+            .export_query_scope_full_history(&query.scope, &[])
+            .unwrap();
+        bob.import_query_scope(&bundle).unwrap();
+
+        assert_eq!(
+            bob.query_todos(&TodoQuery::open_since(0)).unwrap().rows[0].title,
+            "Edited"
+        );
+        assert_eq!(
+            bob.query_todos_at_global_epoch(&TodoQuery::open_since(0), 1)
+                .unwrap()
+                .rows[0]
+                .title,
+            "Draft"
+        );
+    }
+
+    #[test]
     fn file_database_survives_reopen_and_projection_rebuild_is_byte_identical() {
         let path = std::env::temp_dir().join(format!(
             "mini-jazz-sqlite-{}-{}.db",

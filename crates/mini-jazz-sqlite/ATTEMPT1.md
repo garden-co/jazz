@@ -881,6 +881,20 @@ acceptance correctness, but only if validation treats them as a set. The first
 single-entry decoder was too easy to accidentally accept a transaction whose
 second dependency had changed.
 
+### 2026-05-24 23:38 PDT
+
+Validated full-history scope on the receiver:
+
+- Alice exports full history for a currently visible todo
+- Bob imports the scope bundle
+- Bob can read both current state and an older global snapshot from the imported
+  history
+
+Discovery: full-history scope is not only for audit payloads. It lets a receiver
+recreate historical snapshots for rows that are inside the query's result scope.
+This supports semantic diffs and time-travel inspection without needing a
+separate snapshot payload.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
