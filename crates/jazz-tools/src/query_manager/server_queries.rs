@@ -14,7 +14,9 @@ use crate::sync_manager::{
 };
 
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
-use super::permission_routing::{PermissionEvaluationRequest, branch_policy_scope};
+use super::permission_routing::{
+    PermissionDecision, PermissionEvaluationRequest, branch_policy_scope,
+};
 use super::policy::{ComplexClause, Operation};
 use super::policy_graph::{PolicyGraph, PolicyGraphBuildOptions};
 use super::session::Session;
@@ -1696,40 +1698,7 @@ impl QueryManager {
             &auth_context,
             &source_branch_schema_map,
         );
-        if route.is_denied() {
-            let reason = format!(
-                "{:?} denied by branch policy on table {}",
-                check.operation, table_name.0
-            );
-            self.sync_manager
-                .reject_permission_check(storage, check, reason);
-            return;
-        }
-        if route
-            .policy_for_operation(check.operation, PermissionPhase::Check)
-            .is_none()
-        {
-            if route.allows_missing_policy(check.operation, self.row_policy_mode) {
-                self.sync_manager.approve_permission_check(storage, check);
-            } else if route.is_branch() {
-                let reason = format!(
-                    "{:?} denied by branch policy on table {}",
-                    check.operation, table_name.0
-                );
-                self.sync_manager
-                    .reject_permission_check(storage, check, reason);
-            } else {
-                let reason = format!(
-                    "{:?} denied on table {} - missing explicit policy",
-                    check.operation, table_name.0
-                );
-                self.sync_manager
-                    .reject_permission_check(storage, check, reason);
-            }
-            return;
-        }
-
-        if self.evaluate_permission_route(
+        match self.evaluate_permission_route_decision(
             storage,
             &route,
             PermissionEvaluationRequest {
@@ -1747,23 +1716,48 @@ impl QueryManager {
                 settlement_eval_cache: None,
             },
         ) {
-            self.sync_manager.approve_permission_check(storage, check);
-            return;
+            PermissionDecision::Allowed => {
+                self.sync_manager.approve_permission_check(storage, check);
+            }
+            PermissionDecision::DeniedRoute => {
+                let reason = format!(
+                    "{:?} denied by branch policy on table {}",
+                    check.operation, table_name.0
+                );
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
+            }
+            PermissionDecision::DeniedMissingPolicy => {
+                let reason = if route.is_branch() {
+                    format!(
+                        "{:?} denied by branch policy on table {}",
+                        check.operation, table_name.0
+                    )
+                } else {
+                    format!(
+                        "{:?} denied on table {} - missing explicit policy",
+                        check.operation, table_name.0
+                    )
+                };
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
+            }
+            PermissionDecision::DeniedPolicy => {
+                let reason = if route.is_branch() {
+                    format!(
+                        "{:?} denied by branch policy on table {}",
+                        check.operation, table_name.0
+                    )
+                } else {
+                    format!(
+                        "{:?} denied by policy on table {}",
+                        check.operation, table_name.0
+                    )
+                };
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
+            }
         }
-
-        let reason = if route.is_branch() {
-            format!(
-                "{:?} denied by branch policy on table {}",
-                check.operation, table_name.0
-            )
-        } else {
-            format!(
-                "{:?} denied by policy on table {}",
-                check.operation, table_name.0
-            )
-        };
-        self.sync_manager
-            .reject_permission_check(storage, check, reason);
     }
 
     /// Evaluate UPDATE permission with both USING (old row) and WITH CHECK (new row).
@@ -1843,12 +1837,10 @@ impl QueryManager {
             return;
         }
 
-        let has_using_policy = route
-            .policy_for_operation(Operation::Update, PermissionPhase::Using)
-            .is_some();
-        let has_check_policy = route
-            .policy_for_operation(Operation::Update, PermissionPhase::Check)
-            .is_some();
+        let has_using_policy =
+            route.has_policy_for_operation(Operation::Update, PermissionPhase::Using);
+        let has_check_policy =
+            route.has_policy_for_operation(Operation::Update, PermissionPhase::Check);
         if !has_using_policy && !has_check_policy {
             if route.allows_missing_policy(Operation::Update, self.row_policy_mode) {
                 self.sync_manager.approve_permission_check(storage, check);

@@ -10,8 +10,8 @@ use super::policy::{BranchPolicyContext, Operation, PolicyExpr};
 use super::session::Session;
 use super::settlement_eval_cache::SettlementEvalCache;
 use super::types::{
-    ComposedBranchName, Row, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName,
-    TablePolicies,
+    ComposedBranchName, PermissionPhase, Row, RowDescriptor, RowPolicyMode, Schema, SchemaHash,
+    TableName, TablePolicies, TableSchema,
 };
 
 pub(crate) struct AuthorizationPolicyRequest<'a> {
@@ -64,6 +64,19 @@ pub(crate) enum PermissionRoute<'a> {
     Denied,
 }
 
+pub(crate) enum PermissionDecision {
+    Allowed,
+    DeniedRoute,
+    DeniedMissingPolicy,
+    DeniedPolicy,
+}
+
+pub(crate) enum BranchBackingResolution {
+    Found(ResolvedBranchPolicyBacking),
+    NotFound,
+    Denied,
+}
+
 pub(crate) fn branch_policy_scope(branch_name: &BranchName) -> Option<ComposedBranchName> {
     ComposedBranchName::parse_non_main(branch_name)
 }
@@ -98,7 +111,7 @@ impl PermissionRoute<'_> {
             .and_then(|policies| policies.policy_for_operation(operation, phase))
     }
 
-    fn branch_context(&self) -> Option<BranchPolicyContext<'_>> {
+    pub(crate) fn branch_context(&self) -> Option<BranchPolicyContext<'_>> {
         match self {
             Self::Branch {
                 backing: Some(backing),
@@ -129,6 +142,79 @@ impl PermissionRoute<'_> {
 
         !row_policy_mode.denies_missing_explicit_policy()
     }
+
+    pub(crate) fn missing_policy_decision(
+        &self,
+        operation: Operation,
+        row_policy_mode: RowPolicyMode,
+    ) -> PermissionDecision {
+        if self.allows_missing_policy(operation, row_policy_mode) {
+            PermissionDecision::Allowed
+        } else {
+            PermissionDecision::DeniedMissingPolicy
+        }
+    }
+
+    pub(crate) fn has_policy_for_operation(
+        &self,
+        operation: Operation,
+        phase: PermissionPhase,
+    ) -> bool {
+        self.policy_for_operation(operation, phase).is_some()
+    }
+}
+
+pub(crate) fn resolve_permission_route_with_backing_loader<'a, F>(
+    branch_name: BranchName,
+    table_name: TableName,
+    auth_schema: &'a Schema,
+    row_policy_mode: RowPolicyMode,
+    mut resolve_backing: F,
+) -> PermissionRoute<'a>
+where
+    F: FnMut(&TableName, &TableSchema, ObjectId, BranchName) -> BranchBackingResolution,
+{
+    let Some(target_schema) = auth_schema.get(&table_name) else {
+        return PermissionRoute::Denied;
+    };
+    let Some(composed) = branch_policy_scope(&branch_name) else {
+        return PermissionRoute::Normal {
+            policies: &target_schema.policies,
+        };
+    };
+
+    if target_schema.policies.for_branch.is_empty() {
+        return PermissionRoute::Branch {
+            policies: None,
+            backing: None,
+        };
+    }
+
+    let Ok(branch_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
+        return PermissionRoute::Denied;
+    };
+    let branch_object_id = ObjectId::from_uuid(branch_uuid);
+    let main_branch = branch_main_name(&composed);
+
+    for (backing_table, branch_policies) in &target_schema.policies.for_branch {
+        let Some(backing_schema) = auth_schema.get(backing_table) else {
+            return PermissionRoute::Denied;
+        };
+        let backing =
+            match resolve_backing(backing_table, backing_schema, branch_object_id, main_branch) {
+                BranchBackingResolution::Found(backing) => backing,
+                BranchBackingResolution::NotFound => continue,
+                BranchBackingResolution::Denied => return PermissionRoute::Denied,
+            };
+
+        return PermissionRoute::Branch {
+            policies: Some(branch_policies),
+            backing: Some(backing),
+        };
+    }
+
+    let _ = row_policy_mode;
+    PermissionRoute::Denied
 }
 
 impl QueryManager {
@@ -213,15 +299,30 @@ impl QueryManager {
         route: &PermissionRoute<'_>,
         request: PermissionEvaluationRequest<'_>,
     ) -> bool {
+        matches!(
+            self.evaluate_permission_route_decision(storage, route, request),
+            PermissionDecision::Allowed
+        )
+    }
+
+    pub(crate) fn evaluate_permission_route_decision(
+        &mut self,
+        storage: &dyn Storage,
+        route: &PermissionRoute<'_>,
+        request: PermissionEvaluationRequest<'_>,
+    ) -> PermissionDecision {
+        if route.is_denied() {
+            return PermissionDecision::DeniedRoute;
+        }
         let Some(policy) = route
             .policies()
             .and_then(|policies| policies.policy_for_operation(request.operation, request.phase))
         else {
-            return route.allows_missing_policy(request.operation, self.row_policy_mode);
+            return route.missing_policy_decision(request.operation, self.row_policy_mode);
         };
 
         let branch_context = route.branch_context();
-        self.evaluate_authorization_policy(
+        if self.evaluate_authorization_policy(
             storage,
             AuthorizationPolicyRequest {
                 object_id: request.object_id,
@@ -238,7 +339,11 @@ impl QueryManager {
                 settlement_eval_cache: request.settlement_eval_cache,
                 branch_context: branch_context.as_ref(),
             },
-        )
+        ) {
+            PermissionDecision::Allowed
+        } else {
+            PermissionDecision::DeniedPolicy
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -252,91 +357,69 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> PermissionRoute<'a> {
-        let Some(target_schema) = auth_schema.get(&table_name) else {
-            return PermissionRoute::Denied;
-        };
-        let Some(composed) = branch_policy_scope(&branch_name) else {
-            return PermissionRoute::Normal {
-                policies: &target_schema.policies,
-            };
-        };
-
-        if target_schema.policies.for_branch.is_empty() {
-            return PermissionRoute::Branch {
-                policies: None,
-                backing: None,
-            };
-        }
-
-        let Ok(branch_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
-            return PermissionRoute::Denied;
-        };
-        let branch_object_id = ObjectId::from_uuid(branch_uuid);
-        let main_branch = branch_main_name(&composed);
-
-        for (backing_table, branch_policies) in &target_schema.policies.for_branch {
-            let Ok(Some(backing_row)) = storage.load_visible_region_row(
-                backing_table.as_str(),
-                main_branch.as_str(),
-                branch_object_id,
-            ) else {
-                continue;
-            };
-            if backing_row.is_hard_deleted() {
-                return PermissionRoute::Denied;
-            }
-            let Some(backing_schema) = auth_schema.get(backing_table) else {
-                return PermissionRoute::Denied;
-            };
-            let backing_provenance = backing_row.row_provenance();
-            let Some(transformed_backing_content) = self.transform_content_to_authorization_schema(
-                backing_table.as_str(),
-                &backing_row.data,
-                backing_row.batch_id,
-                main_branch,
-                source_branch_schema_map,
-                auth_context,
-            ) else {
-                return PermissionRoute::Denied;
-            };
-
-            if let Some(backing_select) = backing_schema.policies.select_policy() {
-                if !self.evaluate_authorization_policy(
-                    storage,
-                    AuthorizationPolicyRequest {
-                        object_id: branch_object_id,
-                        branch_name: main_branch,
-                        table_name: *backing_table,
-                        policy: backing_select,
-                        content: &backing_row.data,
-                        provenance: &backing_provenance,
-                        session,
-                        auth_schema,
-                        auth_context,
+        resolve_permission_route_with_backing_loader(
+            branch_name,
+            table_name,
+            auth_schema,
+            self.row_policy_mode,
+            |backing_table, backing_schema, branch_object_id, main_branch| {
+                let Ok(Some(backing_row)) = storage.load_visible_region_row(
+                    backing_table.as_str(),
+                    main_branch.as_str(),
+                    branch_object_id,
+                ) else {
+                    return BranchBackingResolution::NotFound;
+                };
+                if backing_row.is_hard_deleted() {
+                    return BranchBackingResolution::Denied;
+                };
+                let backing_provenance = backing_row.row_provenance();
+                let Some(transformed_backing_content) = self
+                    .transform_content_to_authorization_schema(
+                        backing_table.as_str(),
+                        &backing_row.data,
+                        backing_row.batch_id,
+                        main_branch,
                         source_branch_schema_map,
-                        operation: Operation::Select,
-                        settlement_eval_cache: None,
-                        branch_context: None,
-                    },
-                ) {
-                    return PermissionRoute::Denied;
-                }
-            } else if self.row_policy_mode.denies_missing_explicit_policy() {
-                return PermissionRoute::Denied;
-            }
+                        auth_context,
+                    )
+                else {
+                    return BranchBackingResolution::Denied;
+                };
 
-            return PermissionRoute::Branch {
-                policies: Some(branch_policies),
-                backing: Some(ResolvedBranchPolicyBacking {
+                if let Some(backing_select) = backing_schema.policies.select_policy() {
+                    if !self.evaluate_authorization_policy(
+                        storage,
+                        AuthorizationPolicyRequest {
+                            object_id: branch_object_id,
+                            branch_name: main_branch,
+                            table_name: *backing_table,
+                            policy: backing_select,
+                            content: &backing_row.data,
+                            provenance: &backing_provenance,
+                            session,
+                            auth_schema,
+                            auth_context,
+                            source_branch_schema_map,
+                            operation: Operation::Select,
+                            settlement_eval_cache: None,
+                            branch_context: None,
+                        },
+                    ) {
+                        return BranchBackingResolution::Denied;
+                    }
+                } else if self.row_policy_mode.denies_missing_explicit_policy() {
+                    return BranchBackingResolution::Denied;
+                }
+
+                BranchBackingResolution::Found(ResolvedBranchPolicyBacking {
                     backing_table: *backing_table,
                     row_id: branch_object_id,
                     descriptor: backing_schema.columns.clone(),
                     content: transformed_backing_content,
                     provenance: backing_provenance,
-                }),
-            };
-        }
-
-        PermissionRoute::Denied
+                })
+            },
+        )
     }
 }

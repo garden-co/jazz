@@ -6,21 +6,22 @@
 use ahash::AHashSet;
 use std::collections::HashSet;
 
-use crate::metadata::RowProvenance;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::column_is_null;
 use crate::query_manager::graph_nodes::policy_eval::{
     PolicyContextEvaluator, collect_policy_dependency_tables,
 };
-use crate::query_manager::permission_routing::{branch_main_name, branch_policy_scope};
+use crate::query_manager::permission_routing::{
+    BranchBackingResolution, PermissionRoute, ResolvedBranchPolicyBacking, branch_policy_scope,
+    resolve_permission_route_with_backing_loader,
+};
 use crate::query_manager::policy::{
-    BranchPolicyContext, Operation, PolicyExpr, evaluate_expr_recursive,
-    normalize_recursive_max_depth,
+    Operation, PolicyExpr, evaluate_expr_recursive, normalize_recursive_max_depth,
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ComposedBranchName, LoadedRow, PermissionPhase, Row, RowBytes, RowDescriptor, RowPolicyMode,
-    Schema, TableName, TablePolicies, TableSchema, Tuple, TupleDelta, TupleElement,
+    LoadedRow, PermissionPhase, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple,
+    TupleDelta, TupleElement,
 };
 
 use crate::storage::Storage;
@@ -100,15 +101,6 @@ impl Default for PolicyFilterOptions {
             policy_operation: Operation::Select,
         }
     }
-}
-
-struct BranchPolicyBacking<'a> {
-    backing_table: &'a TableName,
-    branch_policies: &'a TablePolicies,
-    row_id: ObjectId,
-    descriptor: RowDescriptor,
-    content: RowBytes,
-    provenance: RowProvenance,
 }
 
 impl PolicyFilterNode {
@@ -446,37 +438,26 @@ impl PolicyFilterNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> Option<bool> {
-        let composed = branch_policy_scope(&BranchName::new(&self.branch))?;
         let target_table = TableName::new(&self.table_name);
-        let target_schema = self.schema.get(&target_table)?;
-        if target_schema.policies.for_branch.is_empty() {
-            return Some(!self.row_policy_mode.denies_missing_explicit_policy());
-        }
-
-        let Some(backing) = self.resolve_branch_policy_backing(io, &composed, target_schema) else {
+        let route = self.resolve_permission_route(io, target_table)?;
+        if route.is_denied() {
             return Some(false);
-        };
-        let policy = backing
-            .branch_policies
-            .policy_for_operation(self.policy_operation, PermissionPhase::Using);
+        }
+        let policy = route.policy_for_operation(self.policy_operation, PermissionPhase::Using);
         let Some(policy) = policy else {
-            return Some(!self.row_policy_mode.denies_missing_explicit_policy());
+            return Some(route.allows_missing_policy(self.policy_operation, self.row_policy_mode));
         };
 
-        let branch_context = BranchPolicyContext {
-            table_name: backing.backing_table,
-            row_id: backing.row_id,
-            descriptor: &backing.descriptor,
-            content: &backing.content,
-            provenance: &backing.provenance,
-        };
+        let branch_context = route.branch_context();
         let mut evaluator = PolicyContextEvaluator::new(
             &self.schema,
             &self.session,
             &self.branch,
             self.row_policy_mode,
-        )
-        .with_branch_context(&branch_context);
+        );
+        if let Some(branch_context) = branch_context.as_ref() {
+            evaluator = evaluator.with_branch_context(branch_context);
+        }
         let mut visited_referencing = HashSet::new();
         Some(evaluator.evaluate_row_access(
             self.policy_operation,
@@ -491,98 +472,94 @@ impl PolicyFilterNode {
         ))
     }
 
-    fn resolve_branch_policy_backing<'a>(
-        &'a self,
+    fn resolve_permission_route(
+        &self,
         io: &dyn Storage,
-        composed: &ComposedBranchName,
-        target_schema: &'a TableSchema,
-    ) -> Option<BranchPolicyBacking<'a>> {
-        let Ok(branch_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
-            return None;
-        };
-        let branch_object_id = ObjectId::from_uuid(branch_uuid);
-        let current_branch = branch_main_name(composed);
-
-        for (backing_table, branch_policies) in &target_schema.policies.for_branch {
-            let Ok(Some(backing_row)) = io.load_visible_region_row(
-                backing_table.as_str(),
-                current_branch.as_str(),
-                branch_object_id,
-            ) else {
-                continue;
-            };
-            if backing_row.is_hard_deleted() {
-                return None;
-            }
-
-            let backing_schema = self.schema.get(backing_table)?;
-            let backing_provenance = backing_row.row_provenance();
-            let backing_policy = backing_schema.policies.select_policy();
-            let backing_allowed = if let Some(policy) = backing_policy {
-                let backing_row_for_policy = Row::new(
-                    branch_object_id,
-                    backing_row.data.clone(),
-                    backing_row.batch_id,
-                    backing_provenance.clone(),
-                );
-                let mut evaluator = PolicyContextEvaluator::new(
-                    &self.schema,
-                    &self.session,
-                    current_branch.as_str(),
-                    self.row_policy_mode,
-                );
-                let mut visited_referencing = HashSet::new();
-                let mut backing_dependency_loader =
-                    |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
-                        let table_hint = table_hint?;
-                        let Ok(Some(row)) = io.load_visible_region_row(
-                            table_hint.as_str(),
-                            current_branch.as_str(),
-                            id,
-                        ) else {
-                            return None;
-                        };
-                        if row.is_hard_deleted() {
-                            return None;
-                        }
-                        Some(LoadedRow::new(
-                            row.data.clone(),
-                            row.row_provenance(),
-                            [(id, BranchName::new(row.branch.as_str()))]
-                                .into_iter()
-                                .collect(),
-                            row.batch_id,
-                        ))
-                    };
-                evaluator.evaluate_row_access(
-                    Operation::Select,
-                    &backing_row_for_policy,
-                    &backing_schema.columns,
+        target_table: TableName,
+    ) -> Option<PermissionRoute<'_>> {
+        branch_policy_scope(&BranchName::new(&self.branch))?;
+        Some(resolve_permission_route_with_backing_loader(
+            BranchName::new(&self.branch),
+            target_table,
+            &self.schema,
+            self.row_policy_mode,
+            |backing_table, backing_schema, branch_object_id, current_branch| {
+                let Ok(Some(backing_row)) = io.load_visible_region_row(
                     backing_table.as_str(),
-                    Some(policy),
-                    io,
-                    &mut backing_dependency_loader,
-                    0,
-                    &mut visited_referencing,
-                )
-            } else {
-                !self.row_policy_mode.denies_missing_explicit_policy()
-            };
-            if !backing_allowed {
-                return None;
-            }
+                    current_branch.as_str(),
+                    branch_object_id,
+                ) else {
+                    return BranchBackingResolution::NotFound;
+                };
+                if backing_row.is_hard_deleted() {
+                    return BranchBackingResolution::Denied;
+                }
 
-            return Some(BranchPolicyBacking {
-                backing_table,
-                branch_policies,
-                row_id: branch_object_id,
-                descriptor: backing_schema.columns.clone(),
-                content: backing_row.data.clone(),
-                provenance: backing_provenance,
-            });
-        }
+                let backing_provenance = backing_row.row_provenance();
+                let backing_policy = backing_schema.policies.select_policy();
+                let backing_allowed = if let Some(policy) = backing_policy {
+                    let backing_row_for_policy = Row::new(
+                        branch_object_id,
+                        backing_row.data.clone(),
+                        backing_row.batch_id,
+                        backing_provenance.clone(),
+                    );
+                    let mut evaluator = PolicyContextEvaluator::new(
+                        &self.schema,
+                        &self.session,
+                        current_branch.as_str(),
+                        self.row_policy_mode,
+                    );
+                    let mut visited_referencing = HashSet::new();
+                    let mut backing_dependency_loader =
+                        |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                            let table_hint = table_hint?;
+                            let Ok(Some(row)) = io.load_visible_region_row(
+                                table_hint.as_str(),
+                                current_branch.as_str(),
+                                id,
+                            ) else {
+                                return None;
+                            };
+                            if row.is_hard_deleted() {
+                                return None;
+                            }
+                            Some(LoadedRow::new(
+                                row.data.clone(),
+                                row.row_provenance(),
+                                [(id, BranchName::new(row.branch.as_str()))]
+                                    .into_iter()
+                                    .collect(),
+                                row.batch_id,
+                            ))
+                        };
+                    evaluator.evaluate_row_access(
+                        Operation::Select,
+                        &backing_row_for_policy,
+                        &backing_schema.columns,
+                        backing_table.as_str(),
+                        Some(policy),
+                        io,
+                        &mut backing_dependency_loader,
+                        0,
+                        &mut visited_referencing,
+                    )
+                } else {
+                    !self.row_policy_mode.denies_missing_explicit_policy()
+                };
+                if !backing_allowed {
+                    return BranchBackingResolution::Denied;
+                }
 
-        None
+                BranchBackingResolution::Found(ResolvedBranchPolicyBacking {
+                    backing_table: *backing_table,
+                    row_id: branch_object_id,
+                    descriptor: backing_schema.columns.clone(),
+                    content: backing_row.data.to_vec(),
+                    provenance: backing_provenance,
+                })
+            },
+        ))
     }
 
     /// Evaluate the policy expression against a row.

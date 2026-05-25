@@ -21,7 +21,9 @@ use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
     WriteTableCacheEntry,
 };
-use super::permission_routing::{PermissionEvaluationRequest, branch_policy_scope};
+use super::permission_routing::{
+    PermissionDecision, PermissionEvaluationRequest, branch_policy_scope,
+};
 use super::policy::{
     BranchPolicyContext, ComplexClause, Operation, PolicyEvalRefs,
     evaluate_simple_parts_with_context,
@@ -1301,27 +1303,7 @@ impl QueryManager {
             auth_context,
             &source_branch_schema_map,
         );
-        if route.is_denied() {
-            return Err(QueryError::PolicyDenied {
-                table: table_name,
-                operation: check.operation,
-            });
-        }
-
-        if route
-            .policy_for_operation(check.operation, check.phase)
-            .is_none()
-        {
-            if route.allows_missing_policy(check.operation, self.row_policy_mode) {
-                return Ok(());
-            }
-            return Err(QueryError::PolicyDenied {
-                table: table_name,
-                operation: check.operation,
-            });
-        }
-
-        if self.evaluate_permission_route(
+        match self.evaluate_permission_route_decision(
             storage,
             &route,
             PermissionEvaluationRequest {
@@ -1339,12 +1321,13 @@ impl QueryManager {
                 settlement_eval_cache: None,
             },
         ) {
-            Ok(())
-        } else {
-            Err(QueryError::PolicyDenied {
+            PermissionDecision::Allowed => Ok(()),
+            PermissionDecision::DeniedRoute
+            | PermissionDecision::DeniedMissingPolicy
+            | PermissionDecision::DeniedPolicy => Err(QueryError::PolicyDenied {
                 table: table_name,
                 operation: check.operation,
-            })
+            }),
         }
     }
 
