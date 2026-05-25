@@ -493,6 +493,26 @@ impl PolicyFilterNode {
                     self.row_policy_mode,
                 );
                 let mut visited_referencing = HashSet::new();
+                let mut backing_dependency_loader =
+                    |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                        let table_hint = table_hint?;
+                        let Ok(Some(row)) =
+                            io.load_visible_region_row(table_hint.as_str(), &current_branch, id)
+                        else {
+                            return None;
+                        };
+                        if row.is_hard_deleted() {
+                            return None;
+                        }
+                        Some(LoadedRow::new(
+                            row.data.clone(),
+                            row.row_provenance(),
+                            [(id, BranchName::new(row.branch.as_str()))]
+                                .into_iter()
+                                .collect(),
+                            row.batch_id,
+                        ))
+                    };
                 evaluator.evaluate_row_access(
                     Operation::Select,
                     &backing_row_for_policy,
@@ -500,7 +520,7 @@ impl PolicyFilterNode {
                     backing_table.as_str(),
                     Some(policy),
                     io,
-                    row_loader,
+                    &mut backing_dependency_loader,
                     0,
                     &mut visited_referencing,
                 )

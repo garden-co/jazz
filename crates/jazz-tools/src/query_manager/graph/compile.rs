@@ -1148,17 +1148,29 @@ impl QueryGraph {
         };
         ensure_relation_tables_exist(&query.relation_ir, schema)?;
 
+        let features = RelationCompileFeatures {
+            include_deleted: query.include_deleted,
+            array_subqueries: query.array_subqueries.clone(),
+            select_columns: query.select_columns.clone(),
+        };
+
+        if let Some(plan) = lower_relation_to_execution_plan(
+            &query.relation_ir,
+            &branches,
+            features.include_deleted,
+            features.array_subqueries.clone(),
+            features.select_columns.clone(),
+        ) {
+            validate_execution_plan(&plan, schema)?;
+        }
+
         Self::compile_relation_ir_with_schema_context_and_features(
             &query.relation_ir,
             schema,
             &branches,
             session,
             schema_context,
-            RelationCompileFeatures {
-                include_deleted: query.include_deleted,
-                array_subqueries: query.array_subqueries.clone(),
-                select_columns: query.select_columns.clone(),
-            },
+            features,
             row_policy_mode,
         )
         .ok_or_else(|| {
