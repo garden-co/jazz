@@ -120,7 +120,7 @@ Attempt 2 contradicted earlier assumptions:
 
 Performance experiments found:
 
-- compact integer/BLOB ids can dramatically reduce disk and peak memory
+- compact internal ids can dramatically reduce disk and peak memory
 - `WITHOUT ROWID` is useful for composite-primary-key system tables
 - index shape can dominate snapshot-read performance
 - current projection reads are close to raw data with matching indexes
@@ -169,14 +169,14 @@ Stable identity visible across sync/API boundaries.
 
 **Physical Id**
 
-Compact SQLite-local identity used in hot tables and indexes.
+Compact SQLite-local integer identity used in hot tables and indexes.
 
 ## 6. Physical Storage Principles
 
 Physical storage is not the public data model.
 
-Public identities should remain stable strings or canonical externally visible
-values. Hot SQLite tables should use compact physical ids.
+Public identities remain stable strings at API/protocol boundaries. Hot SQLite
+tables use local integer surrogate ids.
 
 Normative decisions for Attempt 3:
 
@@ -186,30 +186,31 @@ Normative decisions for Attempt 3:
   proves otherwise.
 - Keep current projection for main branch only by default.
 - Keep history append-only.
-- Store public ids at API/protocol boundaries and in mapping tables or compact
-  BLOB encodings.
+- Store public ids at API/protocol boundaries and in mapping tables.
 - Generate covering and partial indexes from query/schema intent.
 - Do not introduce custom page compression in Attempt 3.
 
-Open physical id decision:
+Decision: Attempt 3 uses local integer surrogates for hot SQLite storage.
 
-- local integer surrogates plus mapping tables
-- or inline fixed-width binary ids derived from public ids
+This applies to:
 
-The BLOB experiments suggest inline fixed-width binary ids are attractive if
-public ids have a canonical compact binary form. Integer surrogates are also
-attractive, but introduce mapping-table joins and hydration logic.
+- nodes: `node_num`
+- transactions: `tx_num`
+- rows: `row_num`
+- branches: `branch_num`
+- tables/schemas/columns where they appear repeatedly in hot metadata
 
-Attempt 3 should choose one baseline before implementation starts. If unsure,
-implement a narrow physical-id trait/codec and run the first local slice with
-both layouts behind a compile-time test helper. Avoid making every runtime path
-generic if that slows the attempt down.
+Stable public ids remain strings and are stored once at the boundary. Bundles
+export public ids. Import hydrates public ids into local integer surrogates.
+
+Fixed-width BLOB ids were promising in experiments, but they require committing
+to a canonical binary public-id format. They are not the Attempt 3 baseline.
 
 ## 7. Physical Id Model
 
-Every public id that appears in hot tables should have a physical form.
+Every public id that appears in hot tables has a local integer surrogate.
 
-Candidate local surrogate tables:
+Candidate surrogate tables:
 
 ```sql
 CREATE TABLE jazz_node_id (
@@ -234,20 +235,12 @@ CREATE TABLE jazz_branch_id (
 );
 ```
 
-If fixed-width binary ids are used instead, hot tables may use:
-
-```sql
-tx_id BLOB NOT NULL
-row_id BLOB NOT NULL
-branch_id BLOB NOT NULL
-```
-
 The codec must be centralized.
 
 Required operations:
 
-- encode public id for hot storage
-- decode hot id for export/debugging
+- hydrate public id to local integer id
+- decode local integer id to public id for export/debugging
 - hydrate public id on bundle import
 - allocate local surrogate on first sight
 - preserve stable public identity across local-to-global mapping
@@ -255,7 +248,6 @@ Required operations:
 Risks:
 
 - mapping tables increase insert cost and public-id lookup cost
-- inline BLOB ids require a durable canonical external-id format
 - physical ids must not leak into public API semantics
 
 ## 8. Integer Enum Model
@@ -302,9 +294,8 @@ Mitigations:
 
 ## 9. Core System Tables
 
-The exact table names are not final. The shape below assumes local integer
-surrogates. If fixed BLOB ids are selected, replace `_num` keys with compact
-BLOB keys.
+The exact table names are not final. The physical shape uses local integer
+surrogates in hot paths and stores public ids at boundary tables.
 
 ```sql
 CREATE TABLE jazz_node (
@@ -348,8 +339,8 @@ Open:
 
 - whether `metadata_blob` is JSON text, SQLite JSONB, postcard/bincode-like
   bytes, or a custom canonical encoding
-- whether public id mapping lives inside `jazz_tx`/`jazz_branch` or separate
-  mapping tables
+- exactly which public id mappings are embedded in system tables versus split
+  into dedicated mapping tables
 - whether branch source flattening should be stored as BLOB, normalized rows,
   or both
 
@@ -1102,7 +1093,7 @@ Required semantic regression scenarios from Attempt 2:
 
 Attempt 3 should add early tests for:
 
-- compact physical ids roundtrip through sync
+- local integer physical ids roundtrip through sync and hydrate from public ids
 - integer enum codec rejects unknown discriminants
 - projection-diff import effects
 - row-granular same-row exclusive conflict despite disjoint column masks
@@ -1123,8 +1114,8 @@ CI until stabilized.
 
 1. Physical layout and id codec.
 
-   Decide integer surrogates vs fixed BLOB ids. Implement DDL for one schema
-   with integer enums and `WITHOUT ROWID`.
+   Implement local integer surrogates, public-id mapping tables, integer enums,
+   and `WITHOUT ROWID` DDL for one schema.
 
 2. Local write/query/current projection.
 
@@ -1173,7 +1164,7 @@ product completeness.
 
 Success means:
 
-- compact physical ids/enums are used from the beginning
+- local integer physical ids and integer enums are used from the beginning
 - current main reads are fast and projection-backed
 - history remains source of truth
 - projection rebuild/diff is a central mechanism
@@ -1194,7 +1185,32 @@ Failure modes to watch:
 - policy/lens ambitions overwhelm the core spine
 - layout generics slow iteration more than they help
 
-## 31. Meta: How Serious Should Attempt 3 Be?
+## 31. Possible Future Revisit: Fixed-Width Binary Ids
+
+Attempt 3 should not branch over physical id representations. Its baseline is
+local integer surrogates.
+
+Fixed-width binary ids remain a possible future optimization if public Jazz ids
+gain or already have a canonical compact binary form.
+
+Why revisit later:
+
+- BLOB id experiments showed strong disk savings versus long text ids.
+- Inline binary ids avoid mapping-table joins for public-id lookup.
+- A fixed binary representation may simplify some protocol/storage roundtrips.
+
+Why not now:
+
+- integer surrogates are the most SQLite-native hot key shape
+- mapping/hydration semantics are straightforward and explicit
+- choosing BLOB ids now would couple storage to a not-yet-final public id
+  encoding
+- Attempt 3 needs fewer branches, not more
+
+If revisited, it should be a contained physical-layout experiment after the
+Attempt 3 semantics spine is working.
+
+## 32. Meta: How Serious Should Attempt 3 Be?
 
 Attempt 3 should be more serious than Attempt 2, but still an attempt.
 
