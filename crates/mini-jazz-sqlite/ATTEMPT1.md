@@ -503,6 +503,21 @@ bundles are table-polymorphic. The first "rebuild main current" helper was
 accidentally todo-specific. Once joins exist, every table participating in
 derived results needs the same rejection/durability repair contract.
 
+### 2026-05-24 22:56 PDT
+
+Added model-level read-set validation for authority acceptance:
+
+- `ReadSet::validate_against(AuthorityReadState)`
+- row reads compare expected visible tx id to authority current state
+- stale row reads produce a rejectable `ReadValidationError::StaleRow`
+- range validation is explicitly unsupported for now
+
+Discovery: this reinforces the "no explicit parents yet" direction. For the
+exclusive/global-consistent path, a precise enough read set can tell the
+authority whether the transaction was based on stale data. Parent pointers may
+still be useful for graph traversal or debugging, but the correctness check can
+start from read sets.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

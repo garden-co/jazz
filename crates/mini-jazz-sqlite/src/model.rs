@@ -366,6 +366,64 @@ impl ReadSet {
     pub fn push(&mut self, entry: ReadSetEntry) {
         self.entries.push(entry);
     }
+
+    pub fn validate_against(&self, state: &AuthorityReadState) -> Result<(), ReadValidationError> {
+        for entry in &self.entries {
+            match entry {
+                ReadSetEntry::Row(read) => {
+                    let current = state.visible_tx(&read.table, &read.row_id);
+                    if current != read.visible_tx_id.as_ref() {
+                        return Err(ReadValidationError::StaleRow {
+                            table: read.table.clone(),
+                            row_id: read.row_id.clone(),
+                            expected: read.visible_tx_id.clone(),
+                            actual: current.cloned(),
+                        });
+                    }
+                }
+                ReadSetEntry::Range(_) => {
+                    return Err(ReadValidationError::RangeValidationUnsupported);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct AuthorityReadState {
+    rows: Vec<AuthorityRowState>,
+}
+
+impl AuthorityReadState {
+    pub fn new(rows: Vec<AuthorityRowState>) -> Self {
+        Self { rows }
+    }
+
+    pub fn visible_tx(&self, table: &str, row_id: &str) -> Option<&TxId> {
+        self.rows
+            .iter()
+            .find(|row| row.table == table && row.row_id == row_id)
+            .and_then(|row| row.visible_tx_id.as_ref())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorityRowState {
+    pub table: String,
+    pub row_id: String,
+    pub visible_tx_id: Option<TxId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReadValidationError {
+    StaleRow {
+        table: String,
+        row_id: String,
+        expected: Option<TxId>,
+        actual: Option<TxId>,
+    },
+    RangeValidationUnsupported,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -689,5 +747,47 @@ mod tests {
 
         assert_eq!(read_set.entries.len(), 2);
         assert_eq!(write_set.entries[0].columns, vec!["title", "$updatedAt"]);
+    }
+
+    #[test]
+    fn row_read_sets_validate_against_authority_current_state() {
+        let read_set = ReadSet::new(vec![ReadSetEntry::Row(RowRead {
+            table: "todos".to_owned(),
+            row_id: "todo_launch_checklist".to_owned(),
+            visible_tx_id: Some(TxId::from("tx_base")),
+            reason: ReadReason::PreviousVersionForWrite,
+        })]);
+        let state = AuthorityReadState::new(vec![AuthorityRowState {
+            table: "todos".to_owned(),
+            row_id: "todo_launch_checklist".to_owned(),
+            visible_tx_id: Some(TxId::from("tx_base")),
+        }]);
+
+        assert_eq!(read_set.validate_against(&state), Ok(()));
+    }
+
+    #[test]
+    fn stale_row_read_sets_are_rejectable_without_parent_pointers() {
+        let read_set = ReadSet::new(vec![ReadSetEntry::Row(RowRead {
+            table: "todos".to_owned(),
+            row_id: "todo_launch_checklist".to_owned(),
+            visible_tx_id: Some(TxId::from("tx_base")),
+            reason: ReadReason::PreviousVersionForWrite,
+        })]);
+        let state = AuthorityReadState::new(vec![AuthorityRowState {
+            table: "todos".to_owned(),
+            row_id: "todo_launch_checklist".to_owned(),
+            visible_tx_id: Some(TxId::from("tx_newer")),
+        }]);
+
+        assert_eq!(
+            read_set.validate_against(&state),
+            Err(ReadValidationError::StaleRow {
+                table: "todos".to_owned(),
+                row_id: "todo_launch_checklist".to_owned(),
+                expected: Some(TxId::from("tx_base")),
+                actual: Some(TxId::from("tx_newer")),
+            })
+        );
     }
 }
