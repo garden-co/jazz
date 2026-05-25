@@ -412,6 +412,29 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 12:02 PDT
+
+Started extracting visibility planning.
+
+Change:
+
+- Added `visibility.rs` with helpers for accepted-history visibility:
+  - join a row version to an accepted transaction at/before an epoch
+  - assert no newer accepted row version is visible at/before that epoch
+- Rewired `all_at_global_epoch` to use those helpers for both base and joined
+  dependency rows.
+
+Discovery: even this tiny extraction immediately exposed parameter-order
+coupling in generated SQL. A fuller query planner should return SQL fragments
+plus ordered bind params together, not as separate strings and hand-maintained
+parameter pushes.
+
+Verified no behavior change:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 11:59 PDT
 
 Extended pure-query historical snapshots to required includes.

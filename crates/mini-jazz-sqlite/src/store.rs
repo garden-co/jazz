@@ -5,6 +5,7 @@ use crate::scope::{
     diff_rows, HistoryRecord, PredicateReason, PredicateScope, QueryResult, QueryScope,
     QueryScopeBundle, RowView, ScopeReason, ScopeRow, SubscriptionDiff, TxRecord,
 };
+use crate::visibility::{accepted_history_join, latest_accepted_history_predicate};
 use crate::write::WriteTx;
 use crate::{Error, Result};
 
@@ -504,10 +505,11 @@ impl Client {
             "
             SELECT {}
             FROM {} base
-            JOIN jazz_tx base_tx ON base_tx.tx_id = base.j_tx_id
+            {}
             ",
             select_cols.join(", "),
-            plan.history
+            plan.history,
+            accepted_history_join("base", "base_tx")
         );
 
         if let Some(include) = &include {
@@ -518,20 +520,8 @@ impl Client {
                   ON dep.j_branch_id = base.j_branch_id
                  AND dep.j_row_id = base.{}
                  AND dep.j_op != 'delete'
-                JOIN jazz_tx dep_tx ON dep_tx.tx_id = dep.j_tx_id
-                 AND dep_tx.status = 'global_durable_accepted'
-                 AND dep_tx.global_epoch <= ?
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM {} dep_newer
-                   JOIN jazz_tx dep_newer_tx ON dep_newer_tx.tx_id = dep_newer.j_tx_id
-                   WHERE dep_newer.j_branch_id = dep.j_branch_id
-                     AND dep_newer.j_row_id = dep.j_row_id
-                     AND dep_newer_tx.status = 'global_durable_accepted'
-                     AND dep_newer_tx.global_epoch <= ?
-                     AND (dep_newer_tx.global_epoch, dep_newer.j_tx_id) >
-                         (dep_tx.global_epoch, dep.j_tx_id)
-                 )
+                {}
+                 AND {}
                 ",
                 if include.required {
                     "INNER JOIN"
@@ -540,7 +530,14 @@ impl Client {
                 },
                 include_plan.history,
                 quote_ident(&include.fk_field.name),
-                include_plan.history
+                accepted_history_join("dep", "dep_tx"),
+                latest_accepted_history_predicate(
+                    &include_plan.history,
+                    "dep",
+                    "dep_tx",
+                    "dep_newer",
+                    "dep_newer_tx"
+                )
             ));
         }
 
@@ -548,30 +545,23 @@ impl Client {
             "
             WHERE base.j_branch_id = ?
               AND base.j_op != 'delete'
-              AND base_tx.status = 'global_durable_accepted'
-              AND base_tx.global_epoch <= ?
-              AND NOT EXISTS (
-                SELECT 1
-                FROM {} newer
-                JOIN jazz_tx newer_tx ON newer_tx.tx_id = newer.j_tx_id
-                WHERE newer.j_branch_id = base.j_branch_id
-                  AND newer.j_row_id = base.j_row_id
-                  AND newer_tx.status = 'global_durable_accepted'
-                  AND newer_tx.global_epoch <= ?
-                  AND (newer_tx.global_epoch, newer.j_tx_id) >
-                      (base_tx.global_epoch, base.j_tx_id)
-              )
+              AND {}
             ",
-            plan.history
+            latest_accepted_history_predicate(
+                &plan.history,
+                "base",
+                "base_tx",
+                "newer",
+                "newer_tx"
+            )
         ));
 
-        let mut sql_params = Vec::new();
+        let mut sql_params = vec![SqlValue::Integer(global_epoch)];
         if include.is_some() {
             sql_params.push(SqlValue::Integer(global_epoch));
             sql_params.push(SqlValue::Integer(global_epoch));
         }
         sql_params.push(SqlValue::Text("main".to_owned()));
-        sql_params.push(SqlValue::Integer(global_epoch));
         sql_params.push(SqlValue::Integer(global_epoch));
         for filter in &query.filters {
             sql.push_str(" AND ");

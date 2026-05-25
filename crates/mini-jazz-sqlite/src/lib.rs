@@ -6,6 +6,7 @@ mod query;
 mod schema;
 mod scope;
 mod store;
+mod visibility;
 mod write;
 
 pub use error::{Error, Result};
