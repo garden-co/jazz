@@ -1,28 +1,36 @@
-# Distilled SQLite Core Spec
+# SQLite Jazz Core Spec
 
-## Goal
+## Purpose
 
-Build a new Jazz core on top of SQLite. SQLite provides local ACID
-transactions, persistence, indexes, and query planning. Jazz provides the
-distributed/local-first semantics above it:
+Build a new Jazz core on top of SQLite.
 
+SQLite provides:
+
+- local ACID transactions
+- durable storage
+- indexes
+- query planning
+- ordinary relational joins and sorting
+
+Jazz provides the distributed/local-first semantics above SQLite:
+
+- transaction identity and fate
 - append-only row history
-- derived current projections
-- transactions and branch snapshots
+- current projections
+- version-vector and branch visibility
 - query subscriptions
 - query-scoped sync
+- read/write-set validation
+- conflict candidates and resolution
 - policies
 - schema-version lenses
 
-The first target is native Rust SQLite. The first implementation slice should
-prove local CRUD, fast current reads on `main`, subscriptions, and the core
-transaction/snapshot model before sync.
+The goal is not to preserve current Jazz internals. The goal is to preserve the
+validated high-level Jazz API and rebuild the engine bottom-up around SQLite.
 
 ## Application Surface
 
-Most consumers use a typed schema/query API rather than SQL directly. The
-SQLite core must preserve this high-level shape while changing the storage
-engine underneath it.
+Consumers mostly use typed schemas and query builders rather than SQL.
 
 Example schema:
 
@@ -66,13 +74,16 @@ db.subscribeAll(
 );
 ```
 
-## Storage Model
+The first implementation target is native Rust SQLite. Browser/WASM SQLite is a
+separate packaging and startup-size risk, not the first semantics target.
+
+## Core Storage Shape
 
 Every logical user table has append-only history tables. History is the source
 of truth.
 
-Each schema version gets its own physical table shape because schema versions
-can have different columns:
+Each structural schema version gets its own physical table shape, because
+columns can differ across schema versions:
 
 ```text
 todos__schema_v1_history
@@ -83,189 +94,231 @@ tasks__schema_v2_current
 
 The `main` branch gets a derived current projection for fast ordinary reads.
 Non-main branches and arbitrary historical snapshots start as pure-query reads
-over history. Per-branch projections, sparse branch overlays, and query-shaped
-indexes are serving indexes only; they are not required for correctness.
+over history plus branch/source metadata.
 
-`$rowId` is globally unique across all tables.
+Per-branch projections, sparse branch overlays, query-specific serving indexes,
+and hot-branch projections are optional serving indexes. They must not be
+required for correctness.
+
+Row ids are globally unique.
 
 ## System Tables
+
+System tables are engine-only, so their columns use plain names.
 
 Sketch:
 
 ```sql
 CREATE TABLE jazz_node (
-  $nodeNum INTEGER PRIMARY KEY,
-  $nodeId TEXT NOT NULL UNIQUE
+  node_num INTEGER PRIMARY KEY,
+  node_id TEXT NOT NULL UNIQUE
 );
 
 CREATE TABLE jazz_tx (
-  $txId TEXT PRIMARY KEY,
-  $nodeNum INTEGER NOT NULL,
-  $localEpoch INTEGER NOT NULL,
-  $globalEpoch INTEGER,
-  $kind TEXT NOT NULL, -- data | branch_metadata | schema_metadata | permission_metadata
-  $baseGlobalEpoch INTEGER NOT NULL,
-  $baseLocalJsonb BLOB NOT NULL,
-  $baseIncludeJsonb BLOB NOT NULL,
-  $readSetJsonb BLOB NOT NULL,
-  $writeSetJsonb BLOB NOT NULL,
-  $status TEXT NOT NULL, -- local_pending | edge_durable | global_durable_accepted | rejected
-  $rejectionReasonJson TEXT,
-  $createdAt INTEGER NOT NULL,
-  $sealedAt INTEGER,
-  $metadataJson TEXT NOT NULL,
-  UNIQUE ($nodeNum, $localEpoch),
-  UNIQUE ($globalEpoch)
+  tx_id TEXT PRIMARY KEY,
+  node_num INTEGER NOT NULL,
+  local_epoch INTEGER NOT NULL,
+  global_epoch INTEGER,
+  kind TEXT NOT NULL,
+  base_global_epoch INTEGER NOT NULL,
+  base_local_jsonb BLOB NOT NULL,
+  base_include_jsonb BLOB NOT NULL,
+  read_set_jsonb BLOB NOT NULL,
+  write_set_jsonb BLOB NOT NULL,
+  status TEXT NOT NULL,
+  rejection_reason_json TEXT,
+  created_at INTEGER NOT NULL,
+  sealed_at INTEGER,
+  metadata_json TEXT NOT NULL,
+  UNIQUE (node_num, local_epoch),
+  UNIQUE (global_epoch)
 );
 
+CREATE INDEX jazz_tx_status_global_epoch
+  ON jazz_tx(status, global_epoch, tx_id);
+
 CREATE TABLE jazz_branch (
-  $branchId TEXT PRIMARY KEY,
-  $name TEXT NOT NULL,
-  $headGlobalEpoch INTEGER NOT NULL,
-  $headLocalJsonb BLOB NOT NULL,
-  $headIncludeJsonb BLOB NOT NULL,
-  $baseProvenanceJsonb BLOB NOT NULL
+  branch_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  head_global_epoch INTEGER NOT NULL,
+  head_local_jsonb BLOB NOT NULL,
+  head_include_jsonb BLOB NOT NULL,
+  base_provenance_jsonb BLOB NOT NULL
 );
 
 CREATE TABLE jazz_branch_history (
-  $branchId TEXT NOT NULL,
-  $txId TEXT NOT NULL,
-  $op TEXT NOT NULL, -- create | update_head | merge
-  $headGlobalEpoch INTEGER NOT NULL,
-  $headLocalJsonb BLOB NOT NULL,
-  $headIncludeJsonb BLOB NOT NULL,
-  $baseProvenanceJsonb BLOB NOT NULL,
-  $metadataJson TEXT NOT NULL,
-  PRIMARY KEY ($branchId, $txId),
-  FOREIGN KEY ($txId) REFERENCES jazz_tx($txId)
+  branch_id TEXT NOT NULL,
+  tx_id TEXT NOT NULL,
+  op TEXT NOT NULL,
+  head_global_epoch INTEGER NOT NULL,
+  head_local_jsonb BLOB NOT NULL,
+  head_include_jsonb BLOB NOT NULL,
+  base_provenance_jsonb BLOB NOT NULL,
+  metadata_json TEXT NOT NULL,
+  PRIMARY KEY (branch_id, tx_id),
+  FOREIGN KEY (tx_id) REFERENCES jazz_tx(tx_id)
+);
+
+CREATE TABLE jazz_branch_base (
+  branch_id TEXT NOT NULL,
+  source_branch_id TEXT NOT NULL,
+  source_global_epoch INTEGER NOT NULL,
+  precedence INTEGER NOT NULL,
+  PRIMARY KEY (branch_id, source_branch_id, precedence),
+  FOREIGN KEY (branch_id) REFERENCES jazz_branch(branch_id)
 );
 
 CREATE TABLE jazz_schema (
-  $schemaHash TEXT PRIMARY KEY,
-  $schemaJson TEXT NOT NULL
+  schema_hash TEXT PRIMARY KEY,
+  schema_json TEXT NOT NULL
 );
 ```
 
-Indexes:
+Transaction kinds:
 
-```sql
-CREATE INDEX jazz_tx_global_epoch_idx
-ON jazz_tx($globalEpoch)
-WHERE $globalEpoch IS NOT NULL;
-
-CREATE INDEX jazz_tx_node_local_idx
-ON jazz_tx($nodeNum, $localEpoch);
-
-CREATE INDEX jazz_tx_status_idx
-ON jazz_tx($status);
+```text
+data
+branch_metadata
+schema_metadata
+permission_metadata
 ```
 
-`$kind` makes metadata-only transactions explicit. A branch metadata merge is a
-`branch_metadata` transaction with a `jazz_branch_history` row and no user-table
-history rows.
+The first implementation should try mutable fate directly on `jazz_tx`:
+
+```text
+status
+global_epoch
+rejection_reason_json
+```
+
+The hope is that mutable fate on `jazz_tx`, plus durable transaction rows and
+sync replay, is enough for replayability. Append-only fate receipts are a
+possible later addition if debugging, audit, idempotency, or authority handoff
+requires them. They are not baseline spec for the next implementation pass.
+
+Even without a separate receipt table, the implementation should keep the
+conceptual boundary clear: proposed transaction state and authority observations
+are different facts. Importing an authority response enriches or rejects an
+existing transaction; it does not create a new public transaction identity.
 
 ## User Tables
+
+User row tables mix app columns and engine columns. Engine columns use `j_`;
+app columns do not.
+
+The lowerer needs one identifier codec. SQLite treats bare `$name` as parameter
+syntax in common contexts, so user-facing `$` system fields must never be
+hand-written as physical SQLite identifiers.
 
 History table sketch:
 
 ```sql
 CREATE TABLE todos__schema_v1_history (
-  $rowId TEXT NOT NULL,
-  $branchId TEXT NOT NULL,
-  $txId TEXT NOT NULL,
-  $op TEXT NOT NULL, -- insert | update | delete
+  j_row_id TEXT NOT NULL,
+  j_branch_id TEXT NOT NULL,
+  j_tx_id TEXT NOT NULL,
+  j_op TEXT NOT NULL,
 
   title TEXT,
   done INTEGER,
 
-  $conflictTxIdsJsonb BLOB NOT NULL,
-  $createdBy TEXT,
-  $createdAt INTEGER NOT NULL,
-  $updatedBy TEXT,
-  $updatedAt INTEGER NOT NULL,
-  $editMetadataJson TEXT NOT NULL,
+  j_conflict_tx_ids_jsonb BLOB NOT NULL,
+  j_created_by TEXT,
+  j_created_at INTEGER NOT NULL,
+  j_updated_by TEXT,
+  j_updated_at INTEGER NOT NULL,
+  j_edit_metadata_json TEXT NOT NULL,
 
-  PRIMARY KEY ($rowId, $branchId, $txId),
-  FOREIGN KEY ($txId) REFERENCES jazz_tx($txId)
+  PRIMARY KEY (j_row_id, j_branch_id, j_tx_id),
+  FOREIGN KEY (j_tx_id) REFERENCES jazz_tx(tx_id)
 );
+
+CREATE INDEX todos__schema_v1_history_branch_row_updated
+  ON todos__schema_v1_history(j_branch_id, j_row_id, j_updated_at DESC, j_tx_id);
+
+CREATE INDEX todos__schema_v1_history_branch_tx
+  ON todos__schema_v1_history(j_branch_id, j_tx_id, j_row_id);
 ```
 
-Main current projection sketch:
+Current projection sketch:
 
 ```sql
 CREATE TABLE todos__schema_v1_current (
-  $rowId TEXT NOT NULL,
-  $branchId TEXT NOT NULL,
-  $visibleTxId TEXT NOT NULL,
-  $isDeleted INTEGER NOT NULL,
+  j_row_id TEXT NOT NULL,
+  j_branch_id TEXT NOT NULL,
+  j_visible_tx_id TEXT NOT NULL,
+  j_is_deleted INTEGER NOT NULL,
 
   title TEXT,
   done INTEGER,
 
-  $conflictTxIdsJsonb BLOB NOT NULL,
-  $createdBy TEXT,
-  $createdAt INTEGER NOT NULL,
-  $updatedBy TEXT,
-  $updatedAt INTEGER NOT NULL,
-  $editMetadataJson TEXT NOT NULL,
+  j_conflict_tx_ids_jsonb BLOB NOT NULL,
+  j_created_by TEXT,
+  j_created_at INTEGER NOT NULL,
+  j_updated_by TEXT,
+  j_updated_at INTEGER NOT NULL,
+  j_edit_metadata_json TEXT NOT NULL,
 
-  PRIMARY KEY ($rowId, $branchId)
+  PRIMARY KEY (j_row_id, j_branch_id)
 );
 
 CREATE INDEX todos__schema_v1_current_done_created_at
-  ON todos__schema_v1_current($branchId, done, $createdAt DESC);
+  ON todos__schema_v1_current(j_branch_id, done, j_created_at DESC);
 ```
 
-System columns such as `$createdAt`, `$updatedAt`, `$createdBy`, and
-`$updatedBy` are queryable anywhere ordinary user columns are queryable.
+History rows for update/delete must carry immutable creation metadata as well
+as updated metadata. Otherwise byte-for-byte current projection rebuilds can
+drift.
 
-Physical column names prefixed with `$` are owned by the database engine. The
-implementation may quote or encode those names differently for SQLite; the
-prefix is the semantic marker in this spec.
+More generally, history rows must carry every projection-affecting field needed
+for deterministic rebuilds: operation/delete state, immutable creation metadata,
+updated metadata, conflict candidates, and cleared conflict state.
+
+Current projections must be rebuildable from history plus transaction fate.
+Projection rebuilds should be registered/generated per schema table rather than
+hand-coded at each rejection/import path.
+
+The local `main` current projection is the optimistic current local view. It may
+include local pending transactions. Global historical snapshots are different:
+they only include transactions accepted by the authority at or below the
+requested global epoch. APIs should make this read mode explicit.
 
 ## Transactions
 
 The only write unit is a transaction. One write call creates one sealed
 transaction. Multi-row writes use the same transaction abstraction.
 
-A transaction can be:
+Transaction identity has three coordinates:
 
-- `mergeable / eventually consistent`: accepted independently, later merged per
-  column
-- `exclusive / globally consistent`: authority-serialized and globally
-  validated; conflicts or constraint violations may reject it
+- `$txId`: stable public identity, never rewritten
+- `($nodeId, $localEpoch)`: assigned immediately by the writer
+- `$globalEpoch`: assigned later by the authority
 
-Transaction identity has two layers:
+`$globalEpoch` is a simple logical number. The first version has one authority.
+Future sharding should remain implicit below this logical model rather than
+surfacing authority ids in vectors or queries.
 
-- `$txId` is stable public identity.
-- `($nodeId, $localEpoch)` is assigned immediately by the writer.
-- `$globalEpoch` is assigned later by the authority when the transaction becomes
-  globally known.
+SQLite databases may use local integer surrogates such as `node_num` for compact
+joins and indexes. Sync boundaries must export stable node ids and hydrate local
+surrogates on import.
 
-`$globalEpoch` is a simple number in the logical model. The first
-implementation has one authority, so this is one global order. Future sharding
-should remain implicit beneath the logical epoch model rather than surfacing
-authority ids in ordinary vectors or queries.
-
-When the authority accepts a local transaction, it broadcasts a fate/mapping
-event:
+When the authority accepts a transaction, it broadcasts a fate/mapping for the
+existing transaction identity:
 
 ```text
 TxAccepted {
-  txId: <same id>,
-  nodeNum: 7,
-  nodeId: alice_device,
+  txId: "tx_alice_21",
+  nodeId: "alice_device",
   localEpoch: 21,
-  globalEpoch: 1057,
-  fate: accepted,
+  globalEpoch: 1057
 }
 ```
 
-Receivers update `jazz_tx.$globalEpoch` and `$status` for the existing
-transaction row. References do not need to rename from local to global; compact
-vectors can simply prefer global coordinates after the mapping is known.
+Receivers update the existing `jazz_tx` row. References do not rename from local
+to global; compact coordinates become additional addressability for the same
+transaction.
 
-The status state machine is central and intentionally small:
+Transaction state machine:
 
 ```text
 local_pending -> edge_durable -> global_durable_accepted
@@ -274,76 +327,117 @@ local_pending -> rejected
 edge_durable -> rejected
 ```
 
-The direct `local_pending -> global_durable_accepted` transition is expected
-when there is no edge tier.
+Direct `local_pending -> global_durable_accepted` is allowed when there is no
+edge tier.
 
-Rejected transactions are marked rejected. Visibility predicates must check
-transaction fate/status so rejected transactions are not made visible merely
-because they are below a local vector base. Rejected transactions store a
-machine-readable error reason in `$rejectionReasonJson`. Rejected transactions
-are retained in history for now.
+Rejected transactions:
 
-Branch-local accepted transactions also receive normal global epochs. They are
-globally known history, but remain invisible to `main`
-unless a merge-commit transaction makes them visible across branches.
+- remain in history
+- keep machine-readable rejection reasons
+- are filtered out by visibility predicates
+- do not require version-vector excludes
 
-For v0, merge resolution may be last-writer-wins, but it should already be
-per-column. History may contain multiple visible candidates; current
-projections store derived merge resolution for the branch/snapshot they serve.
-Current projections store the resolved value plus conflict metadata, not one
-projection row per visible candidate. For v0, conflict metadata is just the
-candidate `$txId`s. Reads that need conflict detail load candidate row versions
-from history on demand.
+If a rejected local transaction affected an optimistic current projection, the
+recipient must repair derived projections. The first implementation can rebuild
+affected current projections from non-rejected history; write-set-driven repair
+is an optimization.
 
-Conflict candidate `$txId`s are ordered by `$updatedAt`, with global epoch as
-the tie breaker. This ordering is part of the byte-for-byte rebuild contract.
+Accepted branch-local transactions receive normal global epochs. They are
+globally known history, but they remain isolated to their branch until an
+explicit merge transaction changes cross-branch visibility.
 
-Insert lowering sketch:
+## Transaction Acceptance
 
-```sql
-BEGIN IMMEDIATE;
+Transactions can be:
 
-INSERT INTO jazz_tx (
-  $txId, $nodeNum, $localEpoch, $kind, $baseGlobalEpoch, $baseLocalJsonb,
-  $baseIncludeJsonb, $readSetJsonb, $writeSetJsonb, $status,
-  $createdAt, $sealedAt, $metadataJson
-) VALUES (
-  :txId, :nodeNum, :localEpoch, 'data', :baseGlobalEpoch, :baseLocalJsonb,
-  :baseIncludeJsonb, :readSetJsonb, :writeSetJsonb, 'local_pending',
-  :now, :now, :metadataJson
-);
+- mergeable/eventually consistent
+- exclusive/globally consistent
 
-INSERT INTO todos__schema_v1_history (
-  $rowId, $branchId, $txId, $op,
-  title, done,
-  $conflictTxIdsJsonb,
-  $createdBy, $createdAt, $updatedBy, $updatedAt, $editMetadataJson
-) VALUES (
-  :rowId, 'main', :txId, 'insert',
-  :title, 0,
-  jsonb_array(:txId),
-  :actorId, :now, :actorId, :now, :editMetadataJson
-);
+Mergeable transactions can be accepted independently and later reconciled.
+Exclusive transactions are authority-validated before global acceptance.
 
-INSERT INTO todos__schema_v1_current (
-  $rowId, $branchId, $visibleTxId, $isDeleted,
-  title, done,
-  $conflictTxIdsJsonb,
-  $createdBy, $createdAt, $updatedBy, $updatedAt, $editMetadataJson
-) VALUES (
-  :rowId, 'main', :txId, 0,
-  :title, 0,
-  jsonb_array(:txId),
-  :actorId, :now, :actorId, :now, :editMetadataJson
-);
+Authority acceptance checks precise read sets:
 
-COMMIT;
+- row reads must still point at the authority-visible row version
+- absence/range reads must still be true
+- mixed read sets must validate every entry
+- writes carry row and column masks
+
+If a transaction writes a row, its read set includes the exact previous visible
+row version even when application code did not explicitly read that row first.
+
+The prototype showed that precise read/write sets can replace explicit parent
+pointers for v0 acceptance correctness. Parent pointers may still be useful
+later for debugging or graph traversal, but they are not baseline.
+
+## Read And Write Sets
+
+Stored inline on `jazz_tx` as canonical JSONB/BLOB-shaped data for now.
+
+Example:
+
+```json
+[
+  {
+    "kind": "row",
+    "table": "todos",
+    "rowId": "todo_1",
+    "visibleTxId": "tx_base",
+    "reason": "write_base"
+  },
+  {
+    "kind": "range",
+    "table": "projects",
+    "index": "projects_by_row_id_deleted",
+    "predicate": { "rowId": "project_missing", "isDeleted": false },
+    "reason": "optional_dependency_absence"
+  }
+]
 ```
+
+Read reasons include at least:
+
+```text
+direct
+write_base
+policy_dependency
+optional_dependency_absence
+page_boundary
+```
+
+Write-set entries include:
+
+```json
+{
+  "table": "todos",
+  "rowId": "todo_1",
+  "op": "update",
+  "columns": ["title", "$updatedAt"]
+}
+```
+
+Read/write sets need typed internal representations even if the first durable
+format is JSONB. They should be canonical for byte-for-byte rebuilds.
+
+Read sets are allowed to over-approximate, but they must not omit any row
+version, absence, range, or policy dependency that affected the transaction's
+validity. Write sets are both row-granular and column-granular: rows support
+coarse invalidation/sync, while column masks support merging, policies, and
+subscription filtering.
+
+The encoding boundary should be centralized early. Storage code should depend
+on typed read/write-set values and a single codec, not ad-hoc JSON/string
+templates scattered through write and acceptance paths.
+
+Validation must decode and check every read-set entry. A partial decoder that
+only validates the first row/range dependency is unsound.
+
+Open: exact JSONB schema, compact encoding, and whether large read sets need
+side tables.
 
 ## Version Vectors
 
-The snapshot/read-set representation is a compact, additive dotted version
-vector:
+Use compact additive dotted version vectors:
 
 ```ts
 type TxRef = { txId: string } | { global: number } | { node: string; local: number };
@@ -357,136 +451,106 @@ type VersionVector = {
 
 Semantics:
 
-- `globalBase` includes all globally assigned transactions through that epoch.
-- `localBases[node]` includes locally durable transactions for that node through
-  that local epoch, whether or not they have global epochs yet.
-- `include` contains sparse positive dots beyond the bases.
-- There is no `exclude` in v0.
-- Vectors are closed: they do not point to other vectors/snapshots.
-- If a local base includes rejected local transactions, visibility filters them
-  out by status. This keeps vectors additive and avoids negative holes.
+- `globalBase` includes all globally accepted transactions through that epoch
+- `localBases[node]` includes locally durable transactions for that node
+- `include` contains sparse positive dots
+- no `exclude` in v0
+- vectors are closed, not pointers to other snapshots
+- rejected transactions are filtered by transaction fate/status
 
-Vectors are stored inline where they are owned:
+There is no general snapshot table in the baseline. Vectors are stored directly
+where owned:
 
-- transactions store their read/base vector
-- branches store their effective head vector
-- subscriptions/resume state store their ack/read vectors
+- transactions
+- branches
+- subscriptions
+- reconnect state
+- named snapshots later, if needed
 
-There is no general snapshot table in the baseline. Named snapshots can later
-be metadata rows containing the same scalar + JSONB vector fields.
+Representation tradeoff:
 
-SQLite storage uses scalar columns for hot/common fields and SQLite JSONB BLOBs
-for uncommon vector parts:
+- `$txId` includes are long but stable
+- global epochs are compact but only exist after acceptance
+- node-local coordinates are compact locally but need global mapping awareness
 
-```text
-local bases: [[nodeNum, localBaseEpoch], ...]
-include dots: [{ "txId": "..." }, { "global": 45 }, { "node": 7, "local": 21 }]
-```
+First pass can use `$txId` includes for stability, then experiment with epoch
+coordinates for compactness.
+Until compact coordinate upgrades are proven, `$txId` includes are the preferred
+prototype representation because they are stable before and after authority
+mapping.
 
-The durable/protocol representation for `include` dots is still experimental.
-The tradeoff is:
+Vector JSONB/BLOB fields must be canonical. Local bases should sort by node
+identity or local surrogate. Include dots need a canonical mixed-coordinate
+sort. Branch provenance either preserves user/input order with explicit ordinals
+or uses a canonical key; this remains a representation decision.
 
-- `$txId`: long but stable and never needs rewriting
-- global epoch: compact, but only available after acceptance
-- node-local coordinate: compact for local work, but should be upgraded or
-  compacted after global mapping is known
+SQLite query execution should decode a vector once into bindings or temp
+tables. It should not repeatedly parse JSONB per candidate history row.
+Temp visibility tables are useful for testability too: they make the resolved
+visibility relation inspectable, even if another representation wins for
+performance.
 
-Durable vector JSONB must be emitted canonically so derived projections can be
-rebuilt byte-for-byte. Local bases are sorted by `nodeNum`. Include dots need a
-canonical coordinate sort. Branch provenance either preserves input order with
-explicit ordinals or uses a canonical key; this remains a representation
-choice.
-
-The hot path should not run `json_each()` over vector JSONB for every candidate
-history row. Query execution decodes the one snapshot vector once into scalar
-bindings, generated `OR` predicates, or tiny temp tables:
+Useful temp-table shape:
 
 ```sql
 CREATE TEMP TABLE snapshot_node_base (
-  $nodeNum INTEGER PRIMARY KEY,
-  $localBaseEpoch INTEGER NOT NULL
+  node_num INTEGER PRIMARY KEY,
+  local_base_epoch INTEGER NOT NULL
 );
 
 CREATE TEMP TABLE snapshot_include_tx (
-  $txId TEXT PRIMARY KEY
+  tx_id TEXT PRIMARY KEY
 );
 ```
 
-Visibility predicate:
+## Snapshot And Time-Travel Reads
 
-```sql
--- A transaction is visible in snapshot S if:
--- 1. it is globally durable with $globalEpoch <= S.$globalBaseEpoch, or
--- 2. it is local to a node with $localEpoch <= S.local_base(node), or
--- 3. it is explicitly included by S.
--- Rejected transactions are never visible.
-```
+Pure-query history reads are the correctness baseline.
 
-Read sets use the same vector shape. They may over-approximate, but must not
-omit any transaction whose visible row version or policy dependency affected
-the result.
+Snapshot query shape:
 
-Transactions also store precise inline JSONB read/write sets:
+1. Resolve visible transaction ids/coordinates from the vector.
+2. Query history for latest visible version per row.
+3. Filter deletes.
+4. Apply user predicates/order.
 
-```text
-readSet:
-  [
-    {
-      "kind": "row",
-      "table": "todos",
-      "rowId": "...",
-      "visibleTxId": "...",
-      "reason": "direct"
-    },
-    {
-      "kind": "range",
-      "table": "todos",
-      "index": "todos_done_created_at",
-      "predicate": { "done": false, "$createdAt": { "gt": 123 } },
-      "snapshot": { "globalBase": 1057 }
-    }
-  ]
+The prototype found:
 
-writeSet:
-  [
-    {
-      "table": "todos",
-      "rowId": "...",
-      "op": "update",
-      "columns": ["title", "$updatedAt"]
-    }
-  ]
-```
+- naive correlated `NOT EXISTS` shape was very slow
+- grouped latest-visible CTE was much faster
+- 2,000 rows / 1,333 matching open rows:
+  - current projection roughly 2.4 ms
+  - optimized temp-table snapshot roughly 17 ms in debug test mode
 
-Read sets include directly used row versions and predicate/index/range reads
-needed to validate exclusive transactions. If a transaction writes a row, its
-read set includes the exact previous visible version of that row even when the
-application did not explicitly read it first. Write sets are both row-granular
-and column-granular: row ids support coarse invalidation/sync, while column
-masks support merge, policy checks, and subscription filtering.
+This is acceptable for cold snapshots/branches in v0. Hot `main` reads should
+use current projections. Hot branches may later get projections or serving
+indexes.
 
-Policy dependencies are not part of local transaction causality for v0. Policies
-are authoritatively evaluated when the transaction is received at the global
-tier.
+The initial snapshot lowering candidate should be the grouped latest-visible
+CTE shape, with visibility pre-decoded into temp tables or an equivalent
+relation. Correlated `NOT EXISTS` remains a comparison point, not the default.
 
-Global epochs alone do not encode true causality or concurrency. They give an
-authority order after acceptance. Causality comes from the transaction's base
-vector plus precise read/write sets. Flattening local transactions into global
-epochs must not discard the original local coordinates or read/base vector
-needed to answer whether two transactions were concurrent.
+Open performance experiments:
 
-The core model does not use explicit parent pointers. Merges that need a common
-ancestor derive it by walking history with the relevant read/write sets and
-snapshot vectors. That can be slower than a parent-pointer lookup; correctness
-and a cleaner model matter more for v0.
+- normalized history + join to `jazz_tx`
+- denormalized transaction coordinates on history rows
+- temp tables vs generated predicates for visible transaction sets
+- grouped CTE vs window functions vs `NOT EXISTS`
+- native history sort/index layouts
+- target: pure-query branch/time-travel reads around tens of milliseconds at
+  100k-row early datasets are acceptable for cold paths
 
 ## Branches
 
-A branch's visible content is defined by an effective closed version vector, not
+A branch's visible content is defined by branch provenance/source metadata, not
 by copying the whole database.
 
-Branch metadata should be user-visible data. The recommended app model is an
-ordinary table such as `branches`, whose row id is also the branch id:
+There are two layers:
+
+- user-visible branch rows for app metadata and permissions
+- engine tables for effective visibility and provenance
+
+Recommended app-level shape:
 
 ```ts
 const branch = await db.insert(app.branches, {
@@ -498,669 +562,673 @@ const branch = await db.insert(app.branches, {
 const draft = db.branch(branch.id);
 ```
 
-That row is the permission anchor for using the branch. Branch reads require
-read permission on the branch metadata row. Branch writes require update
-permission on that row. Normal table/row policies still apply to data accessed
-through the branch.
+The user-visible branch row is the natural permission anchor.
+Branch reads require read permission on the branch row. Branch writes require
+update permission on the branch row, plus ordinary table/row permissions for
+data accessed through the branch.
 
-The system still keeps `jazz_branch` and `jazz_branch_history` for effective
-visibility vectors and provenance. Those tables are engine metadata derived
-from branch operations, while app-level branch rows provide naming, lifecycle,
-product metadata, and natural permissions.
+Engine branch metadata:
 
-Accepted branch transactions become global history but remain isolated to their
-branch. Global history is not equivalent to visibility on `main`; content
-becomes visible across branches only through explicit merge-commit
-transactions.
+- `jazz_branch`: current branch head/projection
+- `jazz_branch_history`: append-only branch metadata history
+- `jazz_branch_base`: precise source list usable by SQL
 
-Branches may be created from multiple bases:
+Branch reads use a source relation:
 
 ```text
-createBranch feature_branch from:
-  main@globalBase 42
-  design_branch@head
-  import_branch@snapshot abc
+(source_branch_id, source_global_epoch, precedence)
 ```
 
-The stored branch keeps both:
-
-- precise base provenance in `$baseProvenanceJsonb`
-- a flattened effective head vector used for query-time visibility
-
-Branch head changes are append-only. `jazz_branch` stores the current branch
-head as a projection; `jazz_branch_history` stores every branch create/head
-update/merge operation keyed by the transaction that made the change.
-
-`$baseProvenanceJsonb` records the branch creation/merge inputs that produced
-the effective vector. Its exact JSON shape is still open, but it must preserve
-enough information for UI/debugging and byte-for-byte rebuilds.
-
-Base conflicts are a to-be-tried decision: represent conflicts between bases as
-multiple visible candidates until a later merge-resolution transaction, rather
-than resolving them immediately during branch creation/flattening.
-
-Merge commits can take two shapes:
-
-- metadata-only visibility change: update branch visibility/effective vector
-  when no conflicting row values need to be resolved; this is still a normal
-  `jazz_tx` row, with a `jazz_branch_history` row and no user-table history rows
-- ordinary data transaction: write translated/resolved row versions on the
-  target branch when conflicts require explicit resolution
-
-## Query Execution
-
-Current `main` reads should use current projections:
-
-```sql
-SELECT $rowId, title, done, $createdAt
-FROM todos__schema_v1_current
-WHERE $branchId = :branchId
-  AND $isDeleted = 0
-  AND done = 0
-  AND $createdAt > :yesterday
-ORDER BY $createdAt DESC;
-```
-
-Queries used for subscriptions and upstream sync can add engine-only scope
-outputs. Those outputs are not exposed to application code.
-
-```sql
-SELECT
-  $rowId,
-  title,
-  done,
-  $createdAt,
-
-  json_array(
-    json_object(
-      'kind', 'result',
-      'table', 'todos',
-      'schema', 'schema_v1',
-      'branch', $branchId,
-      'rowId', $rowId,
-      'txId', $visibleTxId
-    )
-  ) AS $resultScopeJson,
-
-  json_array() AS $policyScopeJson
-FROM todos__schema_v1_current
-WHERE $branchId = :branchId
-  AND $isDeleted = 0
-  AND done = 0
-  AND $createdAt > :yesterday
-ORDER BY $createdAt DESC;
-```
-
-The JSON scope columns are illustrative. The implementation may use hidden
-columns, a second result set, temporary tables, or a Rust side channel.
-
-Pagination scope includes exactly the visible page in v0:
-
-```sql
-WITH page AS (
-  SELECT $rowId, $branchId, $visibleTxId
-  FROM todos__schema_v1_current
-  WHERE $branchId = :branchId
-    AND $isDeleted = 0
-    AND done = 0
-    AND $createdAt > :yesterday
-  ORDER BY $createdAt DESC
-  LIMIT 20
-)
-SELECT 'todos', 'schema_v1', $branchId, $rowId, $visibleTxId, 'result'
-FROM page;
-```
-
-Live subscriptions can still notice rows entering or leaving the page because
-the full SQL is rerun after relevant writes. Upstream sync can rerun and send
-the new page scope after relevant upstream changes.
-
-Includes and joins add result dependencies. A result containing a todo with its
-project is not locally reproducible unless both rows are present:
-
-```sql
-SELECT
-  t.$rowId AS todo_id,
-  t.title,
-  p.$rowId AS project_id,
-  p.name AS project_name,
-
-  json_array(
-    json_object(
-      'kind', 'result',
-      'table', 'todos',
-      'schema', 'schema_v1',
-      'branch', t.$branchId,
-      'rowId', t.$rowId,
-      'txId', t.$visibleTxId
-    ),
-    json_object(
-      'kind', 'result_dependency',
-      'table', 'projects',
-      'schema', 'schema_v1',
-      'branch', p.$branchId,
-      'rowId', p.$rowId,
-      'txId', p.$visibleTxId
-    )
-  ) AS $resultScopeJson
-FROM todos__schema_v1_current t
-JOIN projects__schema_v1_current p
-  ON p.$branchId = t.$branchId
- AND p.$rowId = t.project_id
- AND p.$isDeleted = 0
-WHERE t.$branchId = :branchId
-  AND t.$isDeleted = 0
-  AND t.done = 0;
-```
-
-Policies add policy dependencies separately from result dependencies:
-
-```sql
-WITH candidate_todos AS (
-  SELECT *
-  FROM todos__schema_v1_current
-  WHERE $branchId = :branchId
-    AND $isDeleted = 0
-    AND done = 0
-),
-authorized AS (
-  SELECT
-    t.*,
-    p.$rowId AS $policyProjectRowId,
-    p.$visibleTxId AS $policyProjectTxId
-  FROM candidate_todos t
-  JOIN projects__schema_v1_current p
-    ON p.$branchId = t.$branchId
-   AND p.$rowId = t.project_id
-   AND p.$isDeleted = 0
-  WHERE p.owner_id = :session_account_id
-)
-SELECT
-  $rowId,
-  title,
-  done,
-  json_array(
-    json_object(
-      'kind', 'policy_dependency',
-      'table', 'projects',
-      'schema', 'schema_v1',
-      'branch', $branchId,
-      'rowId', $policyProjectRowId,
-      'txId', $policyProjectTxId,
-      'operation', 'read'
-    )
-  ) AS $policyScopeJson
-FROM authorized;
-```
-
-Branch/time-travel reads start as pure-query history reads with a snapshot
-predicate. The exact SQL is still a sketch:
-
-```sql
-SELECT *
-FROM todos__schema_v1_history h
-JOIN jazz_tx tx ON tx.$txId = h.$txId
-WHERE h.$branchId = :branchId
-  AND jazz_tx_visible_in_snapshot(tx.$txId, :snapshot_vector)
-  AND NOT EXISTS (
-    SELECT 1
-    FROM todos__schema_v1_history newer
-    JOIN jazz_tx newer_tx ON newer_tx.$txId = newer.$txId
-    WHERE newer.$rowId = h.$rowId
-      AND newer.$branchId = h.$branchId
-      AND jazz_tx_visible_in_snapshot(newer_tx.$txId, :snapshot_vector)
-      AND jazz_tx_happens_after(newer.$txId, h.$txId)
-  );
-```
-
-Pure-query history snapshots are the correctness baseline. Optional serving
-indexes are reserved for hot branch/snapshot paths.
-
-Snapshot query performance should be measured both ways:
-
-- normalized: history rows join `jazz_tx` for `$nodeNum`, `$localEpoch`,
-  `$globalEpoch`, and `$status`
-- denormalized: history rows copy those transaction coordinates/status so
-  snapshot predicates can avoid the join
-
-This is an explicit space-vs-compute experiment. The normalized shape is simpler
-and avoids duplicated metadata; the denormalized shape may be substantially
-faster for history-heavy snapshot reads.
-
-## Subscriptions
-
-Subscriptions are part of the first local implementation slice.
-
-The first engine reruns compiled SQL and diffs full result rows:
-
-1. Store original query AST, compiled SQL, previous ordered rows, scope, and
-   dependency metadata.
-2. After a Jazz write commits in SQLite, the applicator records touched
-   tables/rows/columns/branches/schemas/transactions.
-3. The subscription manager reruns potentially affected SQL.
-4. It diffs previous and new ordered full result rows.
-5. It publishes added/updated/removed/moved rows and updates scope.
-
-No SQLite triggers or hooks should be semantic machinery. The Jazz applicator
-already has the necessary write-set information.
-
-Subscription state should include at least:
+SQL chooses the highest-precedence visible row per row id. This represents:
 
 ```text
-subscription_id
-original query AST
-compiled SQL
-last result rows, in order
-last result scope
-last policy scope
-tables/columns it may depend on
+draft over main
+branch_b over branch_a over main
 ```
 
-Full-row diffs are intentional: listeners should eventually be able to receive
-semantic diffs, not only membership changes.
+The same effective source stack must be used for every table in one query. A
+joined branch query cannot read the parent row from one source interpretation
+and the dependency row from another.
 
-## Sync Scope
+Branches store both:
 
-Sync remains query-scoped. Lower-tier nodes forward writes upward and await
-durability acks. They also forward desired queries upward.
+- precise provenance
+- flattened/effective source list for querying
 
-An upstream tier executes lowered SQL and sends enough data for the lower tier
-to reproduce the result locally at the requested durability tier. It does not
-need to send the app-facing result as source of truth.
+Precise provenance is for UI/debugging/rebuilds. The flattened source list is a
+serving representation for SQL visibility. The two should be rebuildable from
+branch metadata history.
 
-Sync scope includes:
+Metadata-only branch merges are first-class:
 
-- rows in the result set
-- joined/include dependency rows
-- policy dependency rows
-- any other rows needed to recreate the query result
+- write a `branch_metadata` transaction
+- update branch source/provenance
+- do not copy user-table history
 
-For v0, sync can send the full history of result/dependency rows. Policy
-dependency rows are sent to ordinary clients. Opaque authorization proofs are
-future work.
+Data-copy merges remain possible when conflicts require explicit translated row
+versions, but metadata-only merge better matches the desired isolation model.
+Data-copy merge is a fallback/resolution strategy, not the default merge
+semantics.
 
-For paginated queries, v0 sync scope includes only the current page. Live
-subscriptions rerun on the upstream tier and send the new page scope when
-relevant changes occur.
+Open branch questions:
 
-Reconnect can start by replaying desired subscriptions and comparing known
-transaction ids.
+- exact `base_provenance_jsonb` shape
+- deriving flattened sources from precise provenance
+- conflicts between multiple bases as multiple visible candidates
+- permissions on branch source changes
+- hot branch projection heuristics
 
-For a simple current read, upstream sync scope can be represented as row-version
-locators:
+## Conflict Candidates And Resolution
+
+Current projections store:
+
+- resolved value
+- conflict metadata
+
+For v0, conflict metadata is candidate tx ids:
+
+```text
+j_conflict_tx_ids_jsonb
+```
+
+Conflict metadata belongs at the object that is conflicted. In joined results,
+a todo can be unconflicted while its nested project is conflicted.
+
+Conflict resolution is an ordinary data transaction:
+
+- reads the conflicted current row
+- writes the chosen value
+- clears candidate metadata
+- records which candidates were resolved in transaction metadata
+
+Projection rebuild after conflict resolution must be byte-for-byte stable.
+Resolution history rows must carry both the chosen value and the cleared
+candidate metadata.
+Transaction metadata records the candidate tx ids resolved by the transaction,
+so rebuilds, listeners, and sync can explain why conflict metadata disappeared.
+
+Open:
+
+- per-column candidate representation
+- merge algorithms beyond last-writer-wins
+- conflict metadata API shape
+- candidate ordering rules beyond `updatedAt` plus global epoch tie-breaker
+
+## Queries
+
+Current `main` reads use current projections:
 
 ```sql
-WITH visible_result AS (
-  SELECT
-    $rowId,
-    $branchId,
-    $visibleTxId
-  FROM todos__schema_v1_current
-  WHERE $branchId = :branchId
-    AND $isDeleted = 0
-    AND done = 0
-    AND $createdAt > :yesterday
-  ORDER BY $createdAt DESC
-)
-SELECT
-  'todos' AS $tableName,
-  'schema_v1' AS $schemaHash,
-  $branchId,
-  $rowId,
-  $visibleTxId AS $txId,
-  'result' AS $reason
-FROM visible_result;
+SELECT j_row_id, title, done, j_created_at
+FROM todos__schema_v1_current
+WHERE j_branch_id = :branch_id
+  AND j_is_deleted = 0
+  AND done = 0
+  AND j_created_at > :yesterday
+ORDER BY j_created_at DESC;
 ```
 
-The sender expands `(table, schema, branch, $rowId, $txId)` into the history
-and current-projection messages required by the sync protocol.
+Queries can also return engine-only scope data. The implementation may use:
 
-## Includes, Policies, and Constraints
+- hidden columns
+- side-channel collection
+- temp tables
+- a second result set
+- Rust-side locator assembly
 
-Includes are read in the same consistency snapshot as their parent query.
+Do not expose scope internals to normal application code.
 
-If an included child is required by the type, a missing child filters out the
-parent. If it is optional, the included value is `null`.
+Scope representation is still a first implementation choice. The attempt1 spike
+identified three plausible shapes to compare on the same joined query:
 
-Policies lower into SQL. Policy dependencies are tracked separately from result
-dependencies so sync can send rows needed to justify authorization decisions.
+- hidden JSON/JSONB columns in the SQL result
+- temp tables or a second result set populated by the lowered query
+- Rust-side side-channel assembly from projected locators
+
+The choice should be judged by deterministic ordering, duplicate handling, and
+how naturally scope expands into history bundles.
+
+## Includes And Joins
+
+Required includes lower to inner joins. If the child/dependency is missing, the
+parent row is filtered out.
+
+Optional includes lower to left joins. If the child/dependency is missing, the
+parent row remains and the included value is `null`.
+
+Optional missing includes require predicate/absence scope, because there is no
+concrete row locator for the absence.
+
+Joined query scope distinguishes:
+
+- parent/result row
+- dependency row
+- policy row
+- absence/predicate
+
+This is required for sync, subscriptions, and authority validation.
+
+For subscriptions, required and optional dependency changes have different
+semantic diffs: deleting a required dependency removes the parent result, while
+deleting an optional dependency keeps the parent, nulls the child, and records
+absence/predicate scope.
+
+## Policies
+
+Policies should lower to SQL in v0.
+
+Policy dependencies are separate from result dependencies even when they point
+at the same row. This avoids ambiguity about whether a row was needed to render
+the result, enforce authorization, or both.
+A scope entry's reason is part of its meaning; the same row may appear as both
+result/dependency scope and policy scope without collapsing those roles.
 
 Example policy shape:
 
 ```ts
-import { schema as s } from "jazz-tools";
-import { app } from "./schema";
-
 export default s.definePermissions(app, ({ policy, session, allowedTo }) => [
   policy.projects.allowRead.where({ ownerId: session.user_id }),
   policy.todos.allowRead.where(allowedTo.read("projectId")),
 ]);
 ```
 
-Foreign-key constraints are enforced by the authority for exclusive/globally
-consistent transactions. Mergeable transactions can be accepted and reconciled
-without local SQLite FK enforcement.
+Policy dependencies may be sent to ordinary clients in v0. Opaque proofs are
+future work.
 
-## Schemas and Lenses
+Open:
 
-Each structural schema version gets its own SQLite history/current table shape.
+- exact policy-scope output format
+- authority vs local policy evaluation split
+- inherited/recursive policy lowering
+- policy explanation/error payloads
 
-Lenses must be SQL-lowerable in the first implementation. Reads over a newer
-schema can union native rows with lens-translated rows from older schema tables.
+## Subscriptions
 
-Example rename lens shape:
+Baseline subscriptions rerun SQL and diff full result rows:
 
 ```text
-schema v1:
-  todos.title
-  todos.done
+write commits
+applicator records touched tables/rows/columns
+subscription manager reruns affected queries
+diff previous ordered full rows vs next ordered full rows
+emit semantic changes
+update stored scope
+```
 
-schema v2:
-  tasks.text       -- renamed from todos.title
-  tasks.completed  -- renamed from todos.done
+No SQLite triggers should carry semantic machinery. The Jazz write applicator
+has write-set information and should drive invalidation.
+
+Subscription state should include the original query AST, compiled SQL, previous
+ordered result rows, last result scope, last policy scope, and dependency
+metadata for tables/columns/branches/schemas/transactions it may depend on.
+For joined results, previous rows must include dependency payloads too; a
+dependency-only update can change the semantic result without changing the
+result row's id or visible transaction.
+
+Rerun+diff is semantically correct for:
+
+- simple current queries
+- joined dependency updates
+- required dependency deletion
+- optional dependency nulling
+- top-N page churn
+
+Efficient invalidation is still open, especially for ordered/page queries.
+
+Page scope can include a boundary predicate, such as:
+
+```json
+{
+  "done": false,
+  "projectNameLte": "Beehive",
+  "limit": 20
+}
+```
+
+But boundary predicates alone are insufficient. If an off-page row moves from
+`"Zebra"` to `"Aardwolf"`, invalidation needs old and new sort keys to detect
+the boundary crossing.
+
+Likely need:
+
+- old/new index-key change records
+- ordered-index watch primitives
+- or coarse invalidation for first version
+
+Public pagination cursors may be row ids, but internal invalidation still needs
+the resolved order key for the cursor row. A row-id cursor does not by itself
+detect an off-page row whose old/new sort key crosses into the page.
+The minimal precise rule is boundary crossing: rerun a page when either the old
+or new ordered index key is inside the watched page boundary.
+
+## Sync Scope
+
+Sync remains query-scoped.
+
+Upstream executes lowered SQL and sends enough data for the lower tier to
+reproduce the query locally. The app-facing result is not the source of truth;
+row history is.
+
+Scope categories:
+
+- result rows
+- include/join dependency rows
+- policy dependency rows
+- predicate/range/absence facts
+- page boundary facts
+
+Concrete row scope expands to transaction bundles. Bundle export deduplicates
+by tx id, even if locators mention the same dependency multiple times.
+Scope locators and wire bundles intentionally have different cardinality:
+locators may repeat to explain each result's dependencies, while wire bundles
+should deduplicate concrete transactions.
+
+Bundles are table/schema-polymorphic. A query involving `todos` and `projects`
+must export/import history for both tables. Import is an upsert of transaction
+fate plus history rows; importing a rejection can require projection repair.
+
+Import has semantic side effects. It may hydrate node surrogates, update
+transaction fate, update current projections for accepted imported rows, and
+repair projections for imported rejections. It is not an insert-only operation.
+
+For v0, sync can send full history of result/dependency rows. This supports:
+
+- replay
+- semantic diffs
+- time-travel inspection of rows in the result set
+- reproducing older snapshots for rows that were in scope
+
+Predicate scope rides alongside row bundles. It may not correspond to any row
+bundle.
+The same predicate/range facts should serve three roles when possible: query
+sync scope, subscription invalidation scope, and authority-side read-set
+validation for optional dependencies, policy checks, and uniqueness-like
+constraints.
+
+Reconnect can start by replaying desired subscriptions and comparing known
+transaction ids / vectors. More compact sync protocols can come later.
+
+## Schemas And Lenses
+
+Each structural schema version has its own history/current table shape.
+
+Lenses must be SQL-lowerable at first.
+
+Reads over newer schemas can union native rows with lens-translated rows from
+older schema tables.
+
+Example:
+
+```text
+v1 todos.title      -> v2 tasks.text
+v1 todos.done       -> v2 tasks.completed
 ```
 
 Read lowering sketch:
 
 ```sql
 WITH native_v2 AS (
-  SELECT
-    $rowId,
-    $branchId,
-    $visibleTxId,
-    text,
-    completed
+  SELECT j_row_id, j_branch_id, j_visible_tx_id, text, completed
   FROM tasks__schema_v2_current
-  WHERE $branchId = :branchId
-    AND $isDeleted = 0
+  WHERE j_branch_id = :branch_id
+    AND j_is_deleted = 0
 ),
 translated_v1 AS (
-  SELECT
-    $rowId,
-    $branchId,
-    $visibleTxId,
-    title AS text,
-    done AS completed
+  SELECT j_row_id, j_branch_id, j_visible_tx_id, title AS text, done AS completed
   FROM todos__schema_v1_current
-  WHERE $branchId = :branchId
-    AND $isDeleted = 0
+  WHERE j_branch_id = :branch_id
+    AND j_is_deleted = 0
 )
-SELECT *
-FROM native_v2
+SELECT * FROM native_v2
 UNION ALL
-SELECT *
-FROM translated_v1;
+SELECT * FROM translated_v1;
 ```
 
 Writes through a lens create a new row version in the writer's current schema
-table rather than mutating the source schema table.
+version table.
 
-If versions of the same logical row exist in different schema tables:
+Open:
 
-- mergeable transactions merge with translation
-- exclusive transactions are authority-decided; conflicting same-row updates can
-  be rejected like same-schema exclusive conflicts
-
-Schema, catalogue, permissions, and lens changes should ideally be represented
-as transactions in the same history/sync system.
-
-## Initial Parity Ladder
-
-1. Single-table local CRUD, one branch, one schema, no policies.
-2. One-shot current reads via SQLite, with result-scope capture.
-3. Subscriptions via rerun+diff.
-4. Two-table joins/includes with explicit result dependencies.
-5. Local durable restart.
-6. Upstream query forwarding with result sync scope.
-7. Reconnect/replay from durable tx/history tables.
-8. Simple policies with separate policy scope.
-9. Pure-query branch/time-travel snapshots.
-10. Schema lenses.
-11. Multi-write transactions and conflict reconciliation.
-12. Optional serving indexes for hot snapshot/branch reads.
-13. Recursive/inherited policies and complex sync scopes.
-
-## Performance Targets
-
-Initial targets:
-
-- current reads comfortably below 1 ms for early datasets
-- pure-query branch/time-travel snapshot reads below roughly 50 ms at 100k rows
-  are acceptable
+- cross-schema same-row conflict resolution
+- lens write translation constraints
+- schema metadata as transactions
+- serving indexes over lens unions
 
 ## Implementation Strategy
 
-The implementation should be driven by a deterministic multi-tier harness before
-it grows production transport or storage adapters. The harness is the main tool
-for making local-first/distributed behavior precise.
+Continue with a deterministic multi-tier harness.
 
-The harness should model:
-
-- client main thread
-- client worker
-- edge tier
-- core authority
-- durable and ephemeral storage nodes
-- fast reliable IPC-like links
-- slower unreliable network links
-
-Each simulated node should run the same core state machine against a pluggable
-storage adapter:
+Model:
 
 ```text
-Node {
-  nodeId
-  role: client_main | client_worker | edge | core
-  storage: durable_sqlite | ephemeral_sqlite | in_memory
-  inbox
-  outbox
-  clock
-}
+client main
+client worker
+edge tier
+core authority
+durable storage
+ephemeral storage
+scriptable links
 ```
 
-Transport should be explicit and scriptable:
+Harness capabilities:
+
+- enqueue messages
+- deliver in chosen orders
+- drop/duplicate messages
+- partition/reconnect links
+- restart nodes
+- inspect durable SQLite state
+
+Each simulated node should run the same core state machine against pluggable
+durable or ephemeral storage. The first harness does not need real networking;
+explicit message delivery is more useful for making distributed semantics
+testable.
+
+The first local subscription API can be callback-free/polling in tests. That
+keeps async/runtime choices out of the semantics while still exercising the
+rerun+diff loop.
+
+Prefer vertical executable slices:
+
+1. Single-node CRUD/current projection/restart.
+2. Local subscriptions through rerun+diff.
+3. Authority acceptance/rejection and local-to-global mapping.
+4. Query-scoped sync for result/dependency rows.
+5. Predicate/absence scope and authority validation.
+6. Branch creation/source reads/metadata merge.
+7. Policies with separate policy scope.
+8. Full-history scope import/export.
+9. Conflict candidates and resolution.
+10. Schema lenses.
+
+Each slice should assert whole-system invariants, especially projection rebuild
+stability, query reproduction after sync, subscription diff correctness, branch
+visibility explainability, and idempotent reconnect/import behavior.
+
+Projection rebuilders should be registered/generated per schema table. Fate
+imports, rejections, and repair paths should call the registry rather than
+remembering each current table at each transition.
+
+Benchmarks should be promoted from harness scenarios after semantics are clear.
+Use isolated SQLite microbenchmarks only when a scenario identifies a concrete
+hot path.
+Planner visibility is part of that work: add `EXPLAIN QUERY PLAN` hooks for
+known risky lowerings before relying on them for performance claims.
+
+## Attempt2 Architecture Pass
+
+Attempt2 should get closer to a small working system, not another collection of
+independent spikes. It is also an architecture-discovery pass: the goal is to
+learn which component boundaries survive when CRUD, queries, subscriptions,
+sync, authority validation, branches, and conflicts all run through them.
+
+The test API does not need to reach the final TypeScript DSL yet, but it should
+be semantically close enough that tests read like product usage rather than
+storage-helper usage.
+
+Example Rust-side shape:
+
+```rust
+let schema = Schema::new()
+    .table("projects", |t| {
+        t.text("name");
+        t.index("by_name", ["name", "$createdAt"]);
+    })
+    .table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+        t.ref_("project_id", "projects");
+        t.index("open_by_created", ["done", "$createdAt"]);
+    });
+
+let alice = harness.client("alice", schema.clone()).durable();
+let core = harness.authority("core", schema.clone());
+
+alice.write(|tx| {
+    let project = tx.insert("projects", json!({ "name": "SQLite Jazz" }));
+    tx.insert("todos", json!({
+        "title": "Design attempt2",
+        "done": false,
+        "project_id": project.id()
+    }));
+})?;
+
+let sub = alice.subscribe(
+    query("todos")
+        .filter(eq("done", false))
+        .include_required("project")
+        .order_by("$createdAt", Desc)
+        .limit(20),
+)?;
+```
+
+Tests should mostly use this public-ish engine surface: define schema, write,
+query, subscribe, sync, restart. Direct storage helpers can exist, but they
+should not become the main semantic test surface.
+
+### Architectural Style
+
+Attempt2 should prefer declarative data structures and small execution
+pipelines over manager-style components. The durable architecture should be the
+flow of data and effects, not a taxonomy of service objects.
+
+Stable artifacts should mostly be data:
+
+- `SchemaDef`: logical tables, fields, relations, indexes, policies, and schema
+  versions.
+- `StorageLayout`: physical system tables, user history/current tables,
+  indexes, physical names, and user-column escaping.
+- `TablePlan`: per-table DDL, row codecs, system-column mapping, scope locator
+  shape, and bundle expansion shape.
+- `WritePlan`: append transaction, append row history, update projections,
+  record read/write sets, and emit touched facts.
+- `ProjectionPlan`: current projection update/rebuild SQL plus deterministic
+  rebuild invariants.
+- `QueryPlan`: lowered SQL, row decoder, required temp relations, and scope
+  plan.
+- `ScopePlan`: result/dependency/policy/predicate/page locators and their
+  cardinality/deduplication rules.
+- `VisibilityPlan`: version-vector canonicalization and visibility-relation
+  materialization.
+- `BranchSourcePlan`: precise provenance to flattened source relation.
+- `ValidationPlan`: authority-side read-set, policy, and constraint checks.
+- `SyncBundlePlan`: transaction/history/fate/scope export and semantic import.
+- `EffectLog`: touched rows, columns, tables, branches, schemas, tx fate, and
+  old/new index keys for invalidation.
+
+Runtime code should be a small set of verbs over those artifacts:
+
+- `lower_schema(schema) -> StorageLayout`
+- `derive_plans(layout) -> table/write/query/projection/sync plans`
+- `apply_local_write(plan, input) -> effects`
+- `run_query(plan, snapshot_or_current) -> rows + scope`
+- `apply_import(bundle_plan, bundle) -> effects`
+- `validate_at_authority(validation_plan, tx) -> fate`
+- `repair_projections(projection_plans, effects)`
+- `run_subscription_tick(query_plan, previous, effects) -> diff + scope`
+- `export_scope(sync_plan, scope) -> bundle`
+
+Storage remains a thin SQLite capability used by these verbs: execute SQL,
+manage transactions, create temp relations, inspect plans, and persist bytes.
+It should not accumulate Jazz semantics behind object boundaries.
+
+This style is intentionally closer to data-driven app/game-engine design:
+schema data generates plans, plans plus inputs produce effects, and effects
+drive invalidation, sync, and repair. Some artifacts may later become plain
+functions or SQL strings rather than structs. That is fine; the important part
+is that semantics are explicit and testable as data flowing through phases.
+
+The meaningful execution phases are:
 
 ```text
-Link {
-  from
-  to
-  reliability
-  latency_model
-  partition_state
-}
+write:
+  allocate tx -> append history -> update current -> record effects -> notify
+
+import:
+  hydrate ids -> upsert tx/fate -> append missing history -> repair -> notify
+
+query:
+  materialize visibility/source relations -> run SQL -> collect scope -> decode
+
+authority:
+  validate reads/policies/constraints -> decide fate -> emit observation
+
+subscription:
+  choose affected subscriptions -> rerun -> diff full rows -> publish
+
+sync:
+  expand scope -> dedupe bundles -> import -> reproduce query
 ```
 
-The first harness does not need real networking. It should let tests enqueue
-messages, deliver them in chosen orders, drop them, duplicate them, partition
-links, restart nodes, and inspect durable state.
+Attempt2 vertical slices:
 
-Development should proceed as vertical slices through this harness:
+1. Schema-driven local engine: generated `projects`/`todos` history/current DDL,
+   layouts, table plans, write plans, and projection plans.
+2. Typed query compiler: current `main` filters over user/system columns,
+   joins/includes, order/limit, query plans, result scope, and dependency scope.
+3. Subscriptions: rerun+diff over compiled queries with previous result and
+   dependency payloads, including required deletion, optional nulling, and page
+   churn.
+4. Sync between stores: joined query scope export/import, full-history mode,
+   predicate absence scope, bundle plans, and deduped bundles.
+5. Authority loop: optimistic client writes, export to authority, read-set
+   validation plan, accept/reject, fate import, and projection repair.
+6. Snapshot/vector reads: temp visibility relation, grouped latest-visible CTE,
+   visibility plan, and tests for global/local/include visibility.
+7. Branches: branch creation from sources, branch-local writes, shared
+   branch source plan, metadata-only merge, and joined branch query.
+8. Conflicts: concurrent writes from the same base, visible candidates, resolved
+   value plus conflict metadata, and deterministic resolution rebuilds.
 
-1. Single durable node: schema registration, insert/update/delete, current
-   projection, restart.
-2. Local subscriptions on one node: rerun+diff after writes, including system
-   column filters.
-3. Two local nodes with explicit message delivery: local transaction creation,
-   forwarding, authority acceptance, local-to-global mapping broadcast.
-4. Query-scoped sync: lower-tier subscription forwarded upward, result rows and
-   dependency rows sent downward, local reproduction asserted.
-5. Reconnect: desired subscriptions replayed, known transaction/vector state
-   compared, missing rows/fates repaired.
-6. Branches: branch creation from a closed vector, branch-local writes,
-   merge-commit visibility, multiple base provenance.
-7. Policies/includes: required vs optional includes, result dependencies,
-   policy dependencies.
-8. Schema lenses: read through SQL-lowerable lenses, write new versions in the
-   writer's schema version.
+Attempt2 should make progress on open questions while implementing these slices,
+but its primary output is architectural evidence: which abstractions simplify
+the whole system, which leak, and where SQLite-specific assumptions need to be
+contained.
 
-Each slice should include invariants over the whole simulated system:
+Attempt2 guardrails:
 
-- every visible row version has an accepted/non-rejected transaction
-- current projections can be rebuilt byte-for-byte from history
-- vector/provenance JSONB arrays are emitted in canonical order
-- a synced query result is reproducible from the receiver's local rows
-- subscription diffs match rerunning the query from scratch
-- branch visibility is explainable by the branch effective vector
-- local-to-global transaction mappings never change `$txId`
-- reconnect converges without duplicate visible effects
+- Start each vertical slice from product-shaped integration tests. Write the
+  test first, watch it fail, then implement.
+- Keep tests on the public-ish engine API wherever possible. Storage helpers
+  can exist behind the scenes, but should not become the main semantic surface.
+- Recreate `crates/mini-jazz-sqlite` as an active Rust crate root. Keep
+  `reference/attempt1` inside the folder for comparison.
+- Use native Rust SQLite via `rusqlite` for the next semantics pass.
+- Keep a detailed `ATTEMPT2.md` decision/discovery log while work is in
+  progress. It is cheap while context is fresh and can be summarized later.
+- Use `projects` and `todos` as the canonical fixture, but add richer fixtures
+  whenever subtle behavior needs them.
+- Use mutable fate on `jazz_tx` as the baseline, while keeping
+  proposal-vs-authority-observation explicit in tests and protocol shape.
+- Model conflicts per-column from the start. This is intentionally more
+  demanding than row-level conflict metadata, because it forces the storage,
+  projection, query, sync, and listener shapes to expose the right seams.
+- No table-specific storage paths after the first schema-driven slice. Fixture
+  tables can be concrete; write/query/projection logic should flow through
+  schema-derived layouts and plans.
+- Commit after each green vertical slice so architectural turns are easy to
+  inspect and backtrack.
+- First daytime target: get slices 1-3 green, then inspect the architecture
+  before pushing into sync and authority.
 
-Benchmarks should come after these semantics are executable. The first
-benchmarks should be harness scenarios promoted into measurement mode rather
-than isolated microbenchmarks, with focused SQLite microbenchmarks added only
-when a scenario identifies a concrete hot path.
+## Invariants
 
-## Implementation Spike Learnings
+- Every visible row version references a non-rejected transaction.
+- Rejected transactions may remain in history but are never visible.
+- Current projections rebuild byte-for-byte from history and transaction fate.
+- Projection repair is table/schema-polymorphic.
+- Transaction ids never change after local creation.
+- Local-to-global mapping enriches transaction coordinates; it does not rename
+  transactions.
+- Sync boundaries export stable node ids and rehydrate local node surrogates.
+- Sync recipients can reproduce scoped query results locally.
+- Subscription diffs match rerunning the query from scratch.
+- Branch visibility is explainable by source/provenance metadata.
+- Read-set validation checks every declared row/range dependency.
+- Policy scope remains distinguishable from result/dependency scope.
+- User-facing `$` semantics are independent of physical SQLite identifier
+  encoding.
 
-The first native Rust/SQLite spike intentionally used hard-coded `todos` and
-`projects` tables. That proved useful: generic schema lowering can wait until
-transaction fate, projection rebuilds, query scope, and branch visibility have
-executable semantics.
+## Next Things To Derisk
 
-Concrete lessons so far:
+1. **Generic lowering**
+   Replace hard-coded `todos`/`projects` storage with generated descriptors for
+   history/current DDL, projection rebuilds, import/export, and scope capture.
+   Generated descriptors should also own projection registry entries, row
+   bundle expansion, rejection repair, and rebuild invariants.
 
-- SQLite treats bare `$name` identifiers like parameters in common contexts.
-  The implementation needs a system-column identifier codec even though this
-  spec keeps `$` names as semantic notation.
-- Current projections are the right fast path for ordinary `main` reads. They
-  must be byte-for-byte rebuildable from non-rejected history, and projection
-  repair should be table/schema-polymorphic rather than hand-coded at every
-  fate transition.
-- Rejection and authority acceptance work best as both denormalized transaction
-  state on `jazz_tx` and append-only fate receipts. The denormalized state keeps
-  visibility queries simple; receipts preserve replay/audit semantics.
-- Query scope should distinguish result rows, joined/include dependencies,
-  policy dependencies, and predicate/range dependencies. Optional missing
-  includes require predicate scope, because there is no concrete row locator for
-  the absence.
-- Required includes map cleanly to inner joins: a missing required dependency
-  removes the parent result. Optional includes map to left joins plus absence
-  scope.
-- Rerun-and-diff subscriptions can produce correct semantic results, including
-  joined dependency updates and page churn. Efficient invalidation still needs
-  richer metadata, especially old/new index keys for ordered pages.
-- Pure-query snapshot reads are viable as the correctness baseline, but query
-  shape matters enormously. A grouped latest-visible-version CTE was much
-  faster than a correlated `NOT EXISTS` shape in the first debug ballpark.
-- Branch reads want SQL-visible source/provenance relations. A source table with
-  `(source_branch_id, source_global_epoch, precedence)` lets SQLite perform
-  base-plus-branch shadowing and gives sync scope precise provenance.
-- Precise read/write sets can replace explicit parent pointers for the v0
-  causality and exclusive-acceptance checks. Row reads catch stale updates;
-  predicate/range reads catch absence and uniqueness-like hazards.
-- Conflict metadata belongs at the row/object that is conflicted, including
-  nested dependency objects in joined results. Conflict resolution can be
-  represented as an ordinary data transaction that writes the chosen value and
-  clears candidate metadata.
+2. **Realtime invalidation**
+   Prove a cheap invalidation path for non-trivial subscriptions, especially
+   ordered/page/range queries with old/new index keys. Row-id-only public
+   cursors should be tested against internal order-key invalidation.
 
-## Open Questions and Underspecified Areas
+3. **Version-vector compactness**
+   Compare tx-id includes, global epoch dots, and node-local dots for storage,
+   wire size, and upgrade behavior after authority mapping.
 
-### Version Vectors
+4. **Read/write-set encoding**
+   Move from tiny prototype codec to a canonical typed JSONB shape. Measure
+   when inline JSONB becomes too large and whether side tables are needed.
 
-- What are the exact canonical compaction rules for durable vectors?
-- When can a local dot/base be rewritten or omitted after a global epoch mapping
-  is known?
-- What canonical sort should include dots use across `$txId`, global epoch, and
-  node-local coordinate forms?
-- Experiment with `include` dot representations: `$txId`s are stable but long;
-  epoch indexes are compact, while local epoch indexes need upgrading after
-  global mapping.
-- Is `JSONB` acceptable for all targets, especially browser/WASM SQLite, or do
-  we need a fallback representation?
-- Can most visibility checks compile to indexed range predicates, or do we need
-  custom SQLite functions or side tables?
-- Do broadcasts need both `$nodeId/$localEpoch` and `$txId`, or can peers always
-  resolve one from the other before applying the mapping?
+5. **Branch provenance**
+   Specify exact precise provenance shape and deterministic flattening into
+   queryable source lists, including multiple bases and conflicts.
+   Prove joined branch queries use one shared effective source stack.
 
-### Read/Write Sets
+6. **Policy lowering**
+   Implement one real policy path end-to-end: SQL lowering, policy scope,
+   authority validation, rejection reason, and sync payload.
 
-- What exact JSONB schema should range predicates use so they are stable,
-  canonical, and SQL-lowerable?
-- How large can inline read/write JSONB become before we need side tables?
+7. **Conflict model**
+   Make conflicts per-column, not only row-level candidate tx ids. Define API
+   shape for resolved value plus conflict metadata.
 
-### Snapshot Query Performance
+8. **Schema lenses**
+   Implement one SQL-lowerable rename lens with read union and write-forward
+   behavior, then test cross-schema conflicts.
 
-- Measure normalized history rows vs denormalized transaction coordinates/status
-  on history rows, and decide based on the space-vs-compute tradeoff.
-- What is the best SQL shape for "latest visible version per row": `NOT EXISTS`,
-  window functions, grouped max keys, or another shape?
-- What native sort order/indexes should history tables use for snapshot reads?
-- When do we introduce optional branch overlays or hot-branch projections?
-- Should query-time decoded vectors use temp tables, generated `OR` clauses, or
-  bound table-valued mechanisms?
+9. **SQLite/WASM product risk**
+   Measure binary size, startup time, persistence options, and feature
+   availability for the chosen browser SQLite build, including JSONB support or
+   required fallback encoding.
 
-### Branches
+10. **Snapshot performance**
+    Run larger realistic datasets and compare pure-query history reads,
+    denormalized history coordinates, temp-table visibility, and optional hot
+    branch projections.
+    Include query-plan assertions or captured planner evidence for candidate
+    lowerings.
 
-- How exactly do we flatten multiple base vectors into the smallest safe closed
-  vector?
-- What is the precise `$baseProvenanceJsonb` shape?
-- How do multiple visible candidates flow through reads, subscriptions, and sync
-  before a merge-resolution transaction exists?
+## Open Questions
 
-### Transactions and Conflict Resolution
-
-- What is the concrete data model for per-column merge candidates?
-- How is last-writer-wins ordered: global epoch, local epoch, created time, or
-  explicit merge metadata?
-- What is the exact acceptance flow for mergeable vs exclusive transactions?
-- Rejected transactions are retained in history. How are rejected local
-  transactions removed from current projections and subscription results?
-- Can one sealed transaction touch multiple tables and schema versions in v0?
-- What schema should `$rejectionReasonJson` use?
-
-### Current Projections
-
-- Is the main current projection one table per schema version only, or does it
-  also need per-branch columns/rows for `main` sub-branches?
-- What other canonical ordering rules are required to guarantee byte-for-byte
-  current projection rebuilds?
-
-### Sync Scope
-
-- What exact representation replaces the example `$resultScopeJson` and
-  `$policyScopeJson`: hidden columns, second result sets, temp tables, or a Rust
-  side channel?
-- For v0, is sending full history for result/dependency rows always acceptable?
-- What does a reconnect "known transaction ids" summary look like when vectors
-  can represent compact ranges?
-- How much policy dependency history is required: current visible row only, or
-  enough history to replay authorization at a requested snapshot?
-- Do policy dependency rows need to be opaque in some environments sooner than
-  planned?
-
-### Subscriptions
-
-- How broad can invalidation be before rerun+diff is too expensive?
-- What dependency metadata should compiled subscriptions store?
-- How are semantic diffs represented when rows have conflict candidates or lens
-  translations?
-- Should subscription read sets become durable resume tokens?
-
-### Policies, Relations, and Constraints
-
-- Which policy language subset is SQL-lowerable in v0?
-- How are recursive/inherited policies represented without reintroducing a query
-  graph?
-- How should optional vs required includes interact with authorization failure
-  versus missing data?
-- Are FK constraints only authority-side for exclusive transactions, or do we
-  still want local advisory checks for developer feedback?
-
-### Schemas and Lenses
-
-- What is the physical identity of a logical row across schema-version tables?
-- How are duplicate logical row versions across schema tables detected and
-  resolved efficiently?
-- Can all v0 lenses be expressed as SQL projections/unions, or do we need
-  restricted expression forms?
-- Should schema/catalogue/lens/permission changes be user-visible transactions
-  from day one or introduced later?
-
-### Implementation and Testing
-
-- What minimal Rust API should sit between Jazz semantics and SQLite so SQLite
-  can later be replaced or augmented?
-- How should the multi-tier test harness model client main thread, worker, edge,
-  and core authorities?
-- Which benchmarks are required before choosing between pure-query snapshots,
-  denormalized history coordinates, and serving indexes?
-- What SQLite version is required for JSONB across native and WASM targets?
+- Is mutable fate on `jazz_tx` sufficient for replay/debugging, or do we later
+  need append-only authority fate receipts?
+- If fate remains mutable on `jazz_tx`, what protocol shape preserves the
+  distinction between proposed transaction state and authority observations?
+- What is the exact escaping rule for user columns beginning with `j_` inside
+  row tables?
+- What exact JSONB shapes should vectors, read sets, write sets, conflict
+  metadata, and branch provenance use?
+- Is SQLite JSONB available in every target we care about, or do durable
+  encodings need a non-JSONB fallback?
+- Which version-vector coordinate form should be canonical on disk and wire?
+- How do we compact local vector coordinates after global acceptance?
+- What does a reconnect "known transactions/vectors" summary look like once
+  vectors can represent compact ranges?
+- How broad should predicate/range sync scope be for optional includes and
+  policy checks?
+- How should optional vs required includes interact with authorization failure:
+  filter parent, null child, or return an authorization error?
+- What is the first acceptable subscription invalidation strategy for ordered
+  queries?
+- Should subscription read/scope state become durable resume material, or is it
+  initially reconstructed by replaying desired subscriptions?
+- How should multiple base conflicts surface before resolution?
+- What permissions are required to add/remove branch sources?
+- Can policy dependency rows always be sent to clients in v0, or do some apps
+  need opaque authorization material immediately?
+- When do current projections need to exist for non-main branches?
+- What exact acceptance flow distinguishes mergeable and exclusive
+  transactions once policies, constraints, and read-set validation all run?
+- Which parts of this can remain SQLite-specific, and where is the minimal
+  replaceable embedded-database interface?

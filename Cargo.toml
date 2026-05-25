@@ -9,7 +9,6 @@ members = [
   "examples/todo-server-rs",
   "examples/docs/todo-server-rs",
   "crates/opfs-btree",
-  "crates/mini-jazz-sqlite",
 ]
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }
