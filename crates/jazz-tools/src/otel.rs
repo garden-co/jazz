@@ -1,40 +1,33 @@
 //! OpenTelemetry tracer initialization.
 //!
-//! Activated by the `otel` feature + `JAZZ_OTEL=1` env var at runtime in the CLI,
-//! or by explicit dev-server telemetry configuration in NAPI.
-//! Standard OTel env vars (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`,
-//! `OTEL_TRACES_SAMPLER`, etc.) are respected automatically by the SDK.
+//! Activated by the `otel` feature + `OTEL_EXPORTER_OTLP_ENDPOINT` being set
+//! at runtime in the CLI, or by explicit dev-server telemetry configuration
+//! in NAPI. Standard OTel env vars (`OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`,
+//! etc.) are respected automatically by the SDK.
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{Protocol, WithExportConfig};
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 
 const DEFAULT_SERVICE_NAME: &str = "jazz-server";
 
-/// Build an OTel TracerProvider.
-///
-/// - If `OTEL_EXPORTER_OTLP_ENDPOINT` is set → OTLP/HTTP JSON exporter.
-/// - Otherwise → stdout exporter for local dev.
+/// Build an OTel TracerProvider exporting to the OTLP/HTTP endpoint
+/// configured via `OTEL_EXPORTER_OTLP_ENDPOINT`.
 pub fn init_tracer_provider() -> SdkTracerProvider {
-    let mut builder = tracer_provider_builder(
+    let builder = tracer_provider_builder(
         std::env::var("OTEL_SERVICE_NAME")
             .unwrap_or_else(|_| DEFAULT_SERVICE_NAME.into())
             .as_str(),
     );
 
-    if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_protocol(Protocol::HttpJson)
-            .build()
-            .expect("failed to build OTLP exporter");
-        builder = builder.with_batch_exporter(exporter);
-    } else {
-        let exporter = opentelemetry_stdout::SpanExporter::default();
-        builder = builder.with_simple_exporter(exporter);
-    }
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpJson)
+        .build()
+        .expect("failed to build OTLP exporter");
 
-    builder.build()
+    builder.with_batch_exporter(exporter).build()
 }
 
 /// Build an OTel TracerProvider for a specific service and optional OTLP/HTTP traces endpoint.
@@ -91,4 +84,44 @@ where
 {
     let tracer = provider.tracer("jazz-server");
     tracing_opentelemetry::layer().with_tracer(tracer)
+}
+
+/// Build an OTel LoggerProvider exporting to the OTLP/HTTP endpoint
+/// configured via `OTEL_EXPORTER_OTLP_ENDPOINT`.
+pub fn init_logger_provider() -> SdkLoggerProvider {
+    let exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpJson)
+        .build()
+        .expect("failed to build OTLP log exporter");
+
+    SdkLoggerProvider::builder()
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name(
+                    std::env::var("OTEL_SERVICE_NAME")
+                        .unwrap_or_else(|_| DEFAULT_SERVICE_NAME.into()),
+                )
+                .with_attribute(opentelemetry::KeyValue::new(
+                    "service.version",
+                    env!("CARGO_PKG_VERSION"),
+                ))
+                .build(),
+        )
+        .with_batch_exporter(exporter)
+        .build()
+}
+
+/// Build the `opentelemetry-appender-tracing` bridge layer from a logger provider.
+/// Converts `tracing` events into OTel `LogRecord`s with trace context attached.
+pub fn log_bridge<S>(
+    provider: &SdkLoggerProvider,
+) -> opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge<
+    SdkLoggerProvider,
+    opentelemetry_sdk::logs::SdkLogger,
+>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(provider)
 }

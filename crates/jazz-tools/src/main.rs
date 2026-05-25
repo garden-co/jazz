@@ -527,23 +527,34 @@ mod tests {
 }
 
 #[cfg(feature = "otel")]
-static OTEL_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
+static OTEL_TRACER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
+    std::sync::OnceLock::new();
+#[cfg(feature = "otel")]
+static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> =
     std::sync::OnceLock::new();
 
 fn init_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
     #[cfg(feature = "otel")]
     {
-        if std::env::var("JAZZ_OTEL").map_or(false, |v| v == "1") {
-            let provider = otel::init_tracer_provider();
-            let otel_layer = otel::layer(&provider);
-            let _ = OTEL_PROVIDER.set(provider);
+        if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+            let tracer_provider = otel::init_tracer_provider();
+            let otel_trace_layer = otel::layer(&tracer_provider);
+            let _ = OTEL_TRACER_PROVIDER.set(tracer_provider);
+
+            let logger_provider = otel::init_logger_provider();
+            let otel_log_layer = otel::log_bridge::<tracing_subscriber::Registry>(&logger_provider);
+            let _ = OTEL_LOGGER_PROVIDER.set(logger_provider);
+
             tracing_subscriber::registry()
                 .with(make_env_filter())
-                .with(tracing_subscriber::fmt::layer())
-                .with(otel_layer)
+                .with(fmt_layer)
+                .with(otel_trace_layer)
+                .with(otel_log_layer)
                 .init();
             return;
         }
@@ -551,16 +562,21 @@ fn init_tracing() {
 
     tracing_subscriber::registry()
         .with(make_env_filter())
-        .with(tracing_subscriber::fmt::layer())
+        .with(fmt_layer)
         .init();
 }
 
 fn shutdown_tracing() {
     #[cfg(feature = "otel")]
     {
-        if let Some(provider) = OTEL_PROVIDER.get() {
+        if let Some(provider) = OTEL_TRACER_PROVIDER.get() {
             if let Err(e) = provider.shutdown() {
-                eprintln!("OTel shutdown error: {e}");
+                eprintln!("OTel tracer shutdown error: {e}");
+            }
+        }
+        if let Some(provider) = OTEL_LOGGER_PROVIDER.get() {
+            if let Err(e) = provider.shutdown() {
+                eprintln!("OTel logger shutdown error: {e}");
             }
         }
     }
