@@ -1232,3 +1232,460 @@ Attempt2 guardrails:
   transactions once policies, constraints, and read-set validation all run?
 - Which parts of this can remain SQLite-specific, and where is the minimal
   replaceable embedded-database interface?
+
+## Post-Attempt 2 Synthesis
+
+Recorded after Attempt 2 completed on 2026-05-25.
+
+This section is intentionally appended instead of folded into the spec body.
+The body above is the pre-Attempt-2 design snapshot. The notes below summarize
+what the executable attempt taught us, including contradictions that should
+shape the next spec.
+
+### Overall Result
+
+Attempt 2 was successful.
+
+It produced a small working SQLite-backed Jazz-like core with:
+
+- schema-driven history/current table creation
+- local transactions and durable reopen
+- current projection rebuild
+- joined current queries
+- required and optional includes
+- rerun-and-diff subscriptions
+- query scope capture
+- query-scoped sync bundles
+- mutable transaction fate
+- authority accept/reject and row read-set validation
+- query-only historical snapshot reads
+- query-only branch reads
+- branch-scoped sync
+- projection-diff-driven import effects
+- column-overlap conflict candidates
+- predicate scopes in bundles
+- whole-system Alice/Bob/authority tests
+- multiple layout/performance experiments
+
+The attempt also showed that the implementation was valuable as executable
+knowledge, but not necessarily as the architecture to carry forward. The code
+grew through discovery and therefore contains accidental shapes: large runtime
+methods, partial planner extraction, prototype bundle formats, and physical
+layouts that no longer match the best layout evidence. Copying tests and
+selected helper ideas into a fresh Attempt 3 is likely cheaper than preserving
+the Attempt 2 implementation spine.
+
+### Validated Design Direction
+
+SQLite is a plausible substrate for the core semantics.
+
+The prototype repeatedly benefited from SQLite's ordinary strengths:
+
+- ACID local writes made "one write call = one sealed transaction" easy.
+- Current projections made normal reads fast and simple.
+- History plus transaction fate made rejection repair and replay semantics
+  straightforward.
+- SQL joins were sufficient for required and optional includes.
+- Query-only historical and branch reads were possible without projection
+  tables.
+- Index shape had a first-order impact on performance and can be generated
+  from schema/query plans.
+
+The data-driven, verb-oriented approach also held up. The most useful
+boundaries were not manager objects; they were data artifacts and execution
+verbs:
+
+- table/layout plans
+- query lowering plus row decoders
+- scope locators
+- visibility expressions
+- write effects
+- projection rebuild/diff
+- sync bundle expansion/import
+- authority validation
+
+Attempt 3 should continue in this style, but start with a cleaner spine rather
+than gradually extracting from Attempt 2's central `store.rs`.
+
+### Important Contradictions
+
+Several pre-Attempt-2 spec assumptions should change.
+
+#### Physical Storage Should Not Be Stringly
+
+The spec body sketches text ids and text enums in hot SQLite tables:
+
+- `tx_id TEXT`
+- `j_row_id TEXT`
+- `j_branch_id TEXT`
+- `kind TEXT`
+- `status TEXT`
+- `j_op TEXT`
+
+The layout experiments strongly contradict this as the preferred physical
+shape.
+
+Findings:
+
+- Integer internal ids were the largest win in micro-layout experiments.
+- `WITHOUT ROWID` helped composite-primary-key system tables materially.
+- Inline fixed-width BLOB ids were attractive when public ids can be decoded to
+  compact bytes.
+- Interned integer ids helped for realistic long public ids, but add mapping
+  table lookups.
+- Integer enums should be the default physical representation.
+
+Attempt 3 should specify physical storage with compact internal ids and integer
+enums from the beginning. Public string ids should remain API/protocol
+identities, but hot SQLite tables should use either:
+
+- local integer surrogates plus mapping tables, or
+- fixed-width binary ids if public ids have a canonical compact form.
+
+This is a major reason to start Attempt 3 from scratch: the current prototype
+runtime and DDL were written around text ids.
+
+#### Read/Write Sets Should Start Inline, Not Fully Indexed
+
+The spec already leans toward inline JSONB/BLOB read/write sets with possible
+side tables later. Attempt 2 supports that baseline.
+
+The read/write-set storage experiment found:
+
+- JSON metadata was smallest and fastest to insert.
+- fully indexed read/write tables improved validation latency, but cost about
+  1.57x disk and about 2x insert time in the synthetic workload.
+- a naive hybrid side index was not attractive: it paid almost the same storage
+  cost as the indexed layout while still parsing JSON for validation.
+
+So the next spec should keep inline canonical metadata as the default, with
+side indexes introduced only for specific hot authority operations that justify
+their disk/write cost.
+
+The "specific hot operation" part matters: an indexed read/write-set table is
+not free just because it makes a lookup prettier.
+
+#### Branch Scope Needs Explicit Branch Identity
+
+The spec body says branch visibility is defined by branch provenance/source
+metadata, but Attempt 2 found a sharper requirement:
+
+A query scope itself must carry the branch identity when the query was executed
+against a branch.
+
+Reason:
+
+- A branch view may contain only main-base rows.
+- In that case, branch provenance cannot be inferred from result row tx ids.
+- Exporting only visible row history loses the branch record/base unless the
+  scope explicitly says which branch produced the view.
+
+Attempt 2 fixed this by adding `branch_id` to `QueryScope` and exporting the
+branch record even when no branch-local history row appears.
+
+Attempt 3 should make branch/source context part of the query scope model from
+the start, not an optional sync add-on.
+
+#### Import Effects Should Be Projection-Diff Driven
+
+The spec says import has semantic side effects, but does not yet say precisely
+how listener invalidation should observe those effects.
+
+Attempt 2 found:
+
+- emitting effects for every imported history row over-invalidates
+- emitting effects only for insert deltas is better but still wrong
+- the useful listener effect source is projection delta: did the visible
+  current row change?
+
+Attempt 3 should model import as:
+
+```text
+hydrate ids -> upsert tx/fate/history -> repair/materialize projections
+-> diff affected visible projections -> emit effects
+```
+
+History deltas are protocol/storage facts. Projection deltas are listener facts.
+They should not be conflated.
+
+#### Predicate Scope Is Shared Protocol, Subscription, And Validation Data
+
+The spec already anticipated predicate/range/absence scope. Attempt 2 made the
+need concrete:
+
+- optional missing includes need absence scope
+- row-leaving-filter sync fails without predicate scope
+- predicate scope can drive subscription invalidation
+- predicate scope should ride in bundles, not just local query state
+
+The prototype used broad table closure for filter predicates. That is correct
+but overfetches badly. Attempt 3 should keep the same semantic tests but start
+with a clearer typed predicate/range representation so it can later lower to
+old/new index-key invalidation and query-aware sync deltas.
+
+#### Conflict Detection Needs Read/Write Semantics, Not Row Multiplicity
+
+The spec says conflicts should be per-column. Attempt 2 confirmed why.
+
+The naive version exposed conflicts whenever multiple pending transactions
+wrote the same row. That was too broad. The improved version used write-column
+overlap:
+
+- overlapping column writes expose candidates
+- disjoint column writes do not
+- unknown/empty column masks are conservative wildcards
+
+Attempt 3 should start with column masks in the typed write-set model and
+derive conflict candidates from those masks plus causality/read-set facts.
+
+### Performance And Layout Learnings
+
+The most important performance lesson is that layout and indexes cannot be
+evaluated independently.
+
+In one layout experiment, historical snapshot reads were catastrophically slow
+with naive history indexes. Adding a history index matching visibility/order
+changed the result from seconds to tens of milliseconds for the repeated
+benchmark.
+
+Current projection reads were close to raw data when the current index matched
+the query.
+
+Layout observations:
+
+- text-system layout was about 12x raw data size in one benchmark
+- compact integer system layout reduced that to about 5.8x raw
+- compact integer layout was about half the file size of text-system
+- page size did not matter much for the tested workloads
+- compression could save disk, but local SQLite has no built-in zstd/zlib page
+  compression; compact physical layouts are lower-risk than custom compression
+  layers
+
+Micro-representation observations:
+
+- integer ids plus `WITHOUT ROWID` gave the best size among tested table shapes
+- omitting empty conflict metadata saved only a few percent
+- covering indexes bought meaningful query speed for modest disk cost
+- partial indexes for common predicates were promising
+- interning long public ids helped disk and snapshots but slowed direct
+  public-id lookup due to mapping joins
+- inline 16-byte BLOB ids were attractive if public ids can be represented in a
+  canonical binary form
+- compact ids reduced SQLite peak memory in the rough memory experiment
+- Rust hot maps should avoid `String` keys when possible; `String` and
+  `Vec<u8>` carry 24-byte headers plus heap allocations, while `[u8; 16]` and
+  integer keys are inline
+
+Attempt 3 should begin with an explicit physical layout decision matrix rather
+than inheriting the text layout from the prototype.
+
+Recommended baseline to try:
+
+- stable public ids at API/protocol boundaries
+- compact physical ids in hot SQLite tables
+- integer enum discriminants
+- composite-primary-key tables as `WITHOUT ROWID`
+- generated covering/partial indexes from schema/query declarations
+- nullable or omitted conflict metadata when no candidates exist
+- current projection only for main by default
+- pure-query history/branch reads as correctness baseline
+
+Open physical layout decision:
+
+- local integer surrogates versus fixed-width binary ids
+
+The BLOB experiment suggests fixed-width binary ids are attractive if the
+external id format supports them. Integer surrogates are also attractive but
+require mapping tables and hydration logic. Attempt 3 should make this a first
+decision, not a later refactor.
+
+### What Remains Unknown
+
+Attempt 2 clarified many semantics, but several areas remain underspecified.
+
+#### Branches
+
+The prototype covered one-source branch overlays:
+
+```text
+branch over main@global_epoch
+```
+
+Still open:
+
+- multi-base branch provenance
+- deterministic flattening of precise provenance
+- conflicts between bases as visible candidates
+- branch-source permission checks
+- metadata-only merge semantics
+- joined branch queries using one shared source interpretation
+- hot branch projection heuristics
+
+Attempt 3 should not overfit to the Attempt 2 branch table. It should start
+with the source/provenance relation as a first-class query input.
+
+#### Version Vectors
+
+Attempt 2 mostly avoided full dotted version vectors. It used simple global
+epochs and branch base epochs for the slices.
+
+Still open:
+
+- exact canonical vector encoding
+- compact local-to-global coordinate upgrade
+- vector summaries for reconnect
+- temp visibility relation shape
+- whether tx-id dots, local dots, or global epoch dots are canonical on disk
+
+Attempt 3 should probably implement a tiny visibility relation early, even if
+the first branch/snapshot tests only need global epochs. Otherwise query code
+will keep baking in one-off visibility predicates.
+
+#### Query Scope And Range Facts
+
+Attempt 2 represented predicate scopes but not true old/new range facts.
+
+Still open:
+
+- old/new ordered index key records for subscriptions
+- page-boundary invalidation
+- compact predicate/range sync closure
+- policy dependency scope
+- query scope cardinality and duplicate explanation rules
+
+The row-leaving-filter and optional-missing tests should be preserved as
+regression tests. They are excellent pressure tests for scope correctness.
+
+#### Policies
+
+Attempt 2 did not implement policies. This remains a large untested area.
+
+Open:
+
+- SQL-lowered policy checks
+- policy scope distinct from result/dependency scope
+- authority validation for policies
+- local policy evaluation versus authority evaluation
+- whether policy dependency rows can always be sent to clients in v0
+
+#### Schema Lenses
+
+Attempt 2 did not implement schema lenses. The spec body still contains only a
+sketch.
+
+Open:
+
+- physical layout across schema versions
+- lens read unions
+- write-forward behavior
+- cross-schema conflict candidates
+- serving indexes over lens unions
+
+#### WASM/Browser SQLite
+
+Attempt 2 focused on native Rust SQLite. Browser packaging, startup, and
+persistence remain product risks.
+
+Open:
+
+- SQLite WASM binary size
+- startup time until usable
+- OPFS/persistence behavior
+- JSONB availability or fallback encoding
+- extension availability
+
+### Starting From Scratch Versus Continuing
+
+The conclusion after Attempt 2 is stronger than before: Attempt 3 should
+probably start from scratch inside a new crate/folder or a fresh implementation
+subtree.
+
+Reasons to start fresh:
+
+- Attempt 2's physical layout is now known to be wrong for the next baseline.
+- The runtime grew around text ids, text enums, and a central store coordinator.
+- Branch identity, projection-diff effects, and predicate scopes were added
+  reactively.
+- The useful pieces are tests, examples, and lessons, not the module graph.
+- Copying small helpers from Attempt 2 is cheap.
+
+What should be kept:
+
+- product-shaped integration tests as semantic targets
+- perf/layout examples as decision probes
+- `ATTEMPT2.md` as discovery evidence
+- the public-ish test vocabulary: schema, write, query, subscribe, export,
+  import, accept/reject, branch
+- small code fragments that remain clean, such as layout-name helpers or row
+  decoders, if they fit the new architecture
+
+What should be discarded or rewritten:
+
+- text-id/table DDL
+- string enum physical storage
+- broad central `store.rs` orchestration
+- ad-hoc SQL parameter assembly
+- prototype bundle structs that do not encode branch/source context cleanly
+- hard-coded visibility predicates
+
+### Meta-Commentary On The Process
+
+The attempt-based process is working very well.
+
+Reasons:
+
+- Worked examples and product-shaped tests forced semantic clarity faster than
+  abstract spec editing.
+- Red/green slices found contradictions that were hard to see in prose.
+- Keeping a detailed decision log let us preserve context without prematurely
+  polishing the spec.
+- Performance experiments were most useful after semantics existed, because
+  they could target concrete hot shapes.
+- The prototype was allowed to be ugly in places, which made it faster and more
+  honest as a learning tool.
+
+What worked especially well:
+
+- committing after green slices
+- logging discoveries immediately with timestamps
+- using whole-system tests with Alice/Bob/authority
+- preserving contradictions instead of smoothing them over too early
+- letting branch/sync/subscription tests expose missing scope facts
+- building small standalone SQLite examples for layout questions
+
+What did not work as well:
+
+- splitting implementation too late let `store.rs` become too central
+- early text physical layout influenced too much runtime code
+- subagent overlap created duplicate/out-of-order log entries
+- benchmark examples are useful but not yet normalized enough for stable
+  comparisons across machines
+- some tests still use prototype APIs that are lower-level than desired
+
+For the next spec:
+
+- Write it after synthesizing Attempt 2, not by incrementally patching this
+  pre-Attempt-2 document.
+- Start with physical layout decisions, because they influence every hot path.
+- Separate semantic model from physical representation explicitly.
+- Treat branch/source context as part of query scope from the beginning.
+- Define the execution verbs before naming components.
+- Include a "what this attempt will not solve" section to keep the slice sharp.
+- Promote proven Attempt 2 tests into explicit semantic scenarios.
+- Keep unresolved questions visible rather than encoding guesses as tables.
+
+For Attempt 3:
+
+- Start fresh, but copy tests and small helpers aggressively.
+- Establish compact ids/enums in the first DDL.
+- Build a tiny visibility relation early.
+- Implement current main, branch, and historical reads through one visibility
+  lowering path as soon as possible.
+- Make projection-diff effects the only listener invalidation source for import.
+- Keep read/write sets typed from the start, even if encoded inline.
+- Add planner/`EXPLAIN QUERY PLAN` capture to performance-sensitive lowerings.
+- Keep a decision log, but ensure entries are appended only at the end.
+
+The right mental model for Attempt 3 is not "continue implementing Attempt 2."
+It is "use Attempt 2 as executable research, then rebuild the first serious
+spine with the research baked in."
