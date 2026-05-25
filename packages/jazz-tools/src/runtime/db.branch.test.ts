@@ -72,9 +72,9 @@ describe("Db.branch", () => {
 
     await db.branch("branch-row-1").all(app.todos);
 
-    expect(client.branchNameForUserBranch).toHaveBeenCalledWith("branch-row-1");
+    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
     expect(client.query).toHaveBeenCalledWith(
-      expect.stringContaining('"branches":["test-1234567890ab-branch-row-1"]'),
+      expect.stringContaining('"branches":["branch-row-1"]'),
       expect.anything(),
     );
   });
@@ -85,13 +85,27 @@ describe("Db.branch", () => {
 
     await db.branch("branch-row-1").all(app.todos.branch("query-branch"));
 
-    expect(client.branchNameForUserBranch).toHaveBeenCalledWith("query-branch");
+    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
     expect(client.query).toHaveBeenCalledWith(
-      expect.stringContaining('"branches":["test-1234567890ab-query-branch"]'),
+      expect.stringContaining('"branches":["query-branch"]'),
       expect.anything(),
     );
     expect(client.query).not.toHaveBeenCalledWith(
-      expect.stringContaining('"branches":["test-1234567890ab-branch-row-1"]'),
+      expect.stringContaining('"branches":["branch-row-1"]'),
+      expect.anything(),
+    );
+  });
+
+  it("treats branch-looking query input as a logical branch id", async () => {
+    const { client } = makeClient();
+    const db = new TestDb(client);
+    const branchLikeInput = "otherenv-deadbeefcafe-branch-row-1";
+
+    await db.all(app.todos.branch(branchLikeInput));
+
+    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining(`"branches":["${branchLikeInput}"]`),
       expect.anything(),
     );
   });
@@ -137,13 +151,12 @@ describe("Db.branch", () => {
       }),
     );
 
-    expect(client.branchNameForUserBranch).toHaveBeenCalledWith("outer-branch");
-    expect(client.branchNameForUserBranch).toHaveBeenCalledWith("included-branch");
+    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
 
     const [queryJson] = vi.mocked(client.query).mock.calls.at(-1)! as [string];
     const query = JSON.parse(queryJson);
-    expect(query.branches).toEqual(["test-1234567890ab-outer-branch"]);
-    expect(query.array_subqueries[0].branches).toEqual(["test-1234567890ab-included-branch"]);
+    expect(query.branches).toEqual(["outer-branch"]);
+    expect(query.array_subqueries[0].branches).toEqual(["included-branch"]);
   });
 
   it("preserves explicit branches on each union relation seed", async () => {
@@ -161,18 +174,13 @@ describe("Db.branch", () => {
 
     await db.branch("outer-branch").all(queryBuilder);
 
-    expect(client.branchNameForUserBranch).toHaveBeenCalledWith("union-branch-a");
-    expect(client.branchNameForUserBranch).toHaveBeenCalledWith("union-branch-b");
+    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
 
     const [queryJson] = vi.mocked(client.queryInternal).mock.calls.at(-1)! as [string];
     const query = JSON.parse(queryJson);
-    expect(query.branches).toEqual(["test-1234567890ab-outer-branch"]);
-    expect(query.relation_ir.Union.inputs[0].Branch.branches).toEqual([
-      "test-1234567890ab-union-branch-a",
-    ]);
-    expect(query.relation_ir.Union.inputs[1].Branch.branches).toEqual([
-      "test-1234567890ab-union-branch-b",
-    ]);
+    expect(query.branches).toEqual(["outer-branch"]);
+    expect(query.relation_ir.Union.inputs[0].Branch.branches).toEqual(["union-branch-a"]);
+    expect(query.relation_ir.Union.inputs[1].Branch.branches).toEqual(["union-branch-b"]);
   });
 
   it("delegates branch mutation error listeners to the parent db", () => {

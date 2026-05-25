@@ -217,15 +217,11 @@ function queryUsesRelationTraversal(builtQuery: NormalizedBuiltQuery): boolean {
   );
 }
 
-function isComposedRuntimeBranchName(branchName: string): boolean {
-  return /^[^-]+-[0-9a-fA-F]{12}-.+$/.test(branchName);
-}
+function withDefaultQueryBranch(queryJson: string, defaultBranchId: string | null): string {
+  if (!defaultBranchId) {
+    return queryJson;
+  }
 
-function withRuntimeBranches(
-  queryJson: string,
-  resolveRuntimeBranch: (userBranch: string) => string,
-  defaultBranchName: string | null,
-): string {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(queryJson) as Record<string, unknown>;
@@ -233,112 +229,16 @@ function withRuntimeBranches(
     return queryJson;
   }
 
-  const normalizeBranches = (branches: unknown): string[] =>
-    Array.isArray(branches)
-      ? branches
-          .filter((branch): branch is string => typeof branch === "string")
-          .map((branch) =>
-            isComposedRuntimeBranchName(branch) ? branch : resolveRuntimeBranch(branch),
-          )
-      : [];
-
-  let changedBranches = false;
-
-  const applyRuntimeBranchesToArraySubqueries = (subqueries: unknown): void => {
-    if (!Array.isArray(subqueries)) {
-      return;
-    }
-    for (const subquery of subqueries) {
-      if (!subquery || typeof subquery !== "object") {
-        continue;
-      }
-      const subqueryRecord = subquery as Record<string, unknown>;
-      const explicitSubqueryBranches = normalizeBranches(subqueryRecord.branches);
-      if (explicitSubqueryBranches.length > 0) {
-        subqueryRecord.branches = explicitSubqueryBranches;
-        changedBranches = true;
-      }
-      applyRuntimeBranchesToArraySubqueries(subqueryRecord.nested_arrays);
-    }
-  };
-
-  const applyRuntimeBranchesToRelationIr = (relationIr: unknown): void => {
-    if (!relationIr || typeof relationIr !== "object") {
-      return;
-    }
-
-    const relationRecord = relationIr as Record<string, unknown>;
-    const branchRecord = relationRecord.Branch;
-    if (branchRecord && typeof branchRecord === "object") {
-      const branchScope = branchRecord as Record<string, unknown>;
-      const explicitBranchScopeBranches = normalizeBranches(branchScope.branches);
-      if (explicitBranchScopeBranches.length > 0) {
-        branchScope.branches = explicitBranchScopeBranches;
-        changedBranches = true;
-      }
-      applyRuntimeBranchesToRelationIr(branchScope.input);
-    }
-
-    const filterRecord = relationRecord.Filter;
-    if (filterRecord && typeof filterRecord === "object") {
-      applyRuntimeBranchesToRelationIr((filterRecord as Record<string, unknown>).input);
-    }
-
-    const unionRecord = relationRecord.Union;
-    if (unionRecord && typeof unionRecord === "object") {
-      const inputs = (unionRecord as Record<string, unknown>).inputs;
-      if (Array.isArray(inputs)) {
-        for (const input of inputs) {
-          applyRuntimeBranchesToRelationIr(input);
-        }
-      }
-    }
-
-    const joinRecord = relationRecord.Join;
-    if (joinRecord && typeof joinRecord === "object") {
-      const join = joinRecord as Record<string, unknown>;
-      applyRuntimeBranchesToRelationIr(join.left);
-      applyRuntimeBranchesToRelationIr(join.right);
-    }
-
-    const projectRecord = relationRecord.Project;
-    if (projectRecord && typeof projectRecord === "object") {
-      applyRuntimeBranchesToRelationIr((projectRecord as Record<string, unknown>).input);
-    }
-
-    const gatherRecord = relationRecord.Gather;
-    if (gatherRecord && typeof gatherRecord === "object") {
-      const gather = gatherRecord as Record<string, unknown>;
-      applyRuntimeBranchesToRelationIr(gather.seed);
-      applyRuntimeBranchesToRelationIr(gather.step);
-    }
-
-    for (const key of ["Distinct", "OrderBy", "Offset", "Limit"]) {
-      const wrapper = relationRecord[key];
-      if (wrapper && typeof wrapper === "object") {
-        applyRuntimeBranchesToRelationIr((wrapper as Record<string, unknown>).input);
-      }
-    }
-  };
-
-  const explicitBranches = normalizeBranches(parsed.branches);
-
-  applyRuntimeBranchesToArraySubqueries(parsed.array_subqueries);
-  applyRuntimeBranchesToRelationIr(parsed.relation_ir);
-
-  if (explicitBranches.length > 0) {
-    parsed.branches = explicitBranches;
-    changedBranches = true;
-  } else if (defaultBranchName) {
-    parsed.branches = [defaultBranchName];
-    changedBranches = true;
-  }
-
-  if (changedBranches) {
-    return JSON.stringify(parsed);
-  } else {
+  const branches = parsed.branches;
+  if (
+    Array.isArray(branches) &&
+    branches.some((branch): branch is string => typeof branch === "string")
+  ) {
     return queryJson;
   }
+
+  parsed.branches = [defaultBranchId];
+  return JSON.stringify(parsed);
 }
 
 export interface ActiveQuerySubscriptionTrace {
@@ -677,6 +577,7 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
     private readonly beginRuntimeHandle: (client: JazzClient) => TRuntimeHandle,
     private readonly resolveDefaultRuntimeBranch: (client: JazzClient) => string | null,
+    private readonly resolveDefaultQueryBranch: () => string | null,
   ) {}
 
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbBatchHandleBinding {
@@ -791,11 +692,7 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     const translatedQuery = translateQuery(builderJson, planningSchema);
-    const wasmQuery = withRuntimeBranches(
-      translatedQuery,
-      (userBranch) => client.branchNameForUserBranch(userBranch),
-      this.resolveDefaultRuntimeBranch(client),
-    );
+    const wasmQuery = withDefaultQueryBranch(translatedQuery, this.resolveDefaultQueryBranch());
     const rows = await runtimeHandle.query(wasmQuery, options);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
@@ -833,8 +730,15 @@ export class DbTransaction extends DbBatchHandleBase<RuntimeTransaction> {
     resolveClient: (schema: WasmSchema) => JazzClient,
     beginRuntimeTransaction: (client: JazzClient) => RuntimeTransaction,
     resolveDefaultRuntimeBranch: (client: JazzClient) => string | null,
+    resolveDefaultQueryBranch: () => string | null,
   ) {
-    super("DbTransaction", resolveClient, beginRuntimeTransaction, resolveDefaultRuntimeBranch);
+    super(
+      "DbTransaction",
+      resolveClient,
+      beginRuntimeTransaction,
+      resolveDefaultRuntimeBranch,
+      resolveDefaultQueryBranch,
+    );
   }
 }
 
@@ -852,8 +756,15 @@ export class DbDirectBatch extends DbBatchHandleBase<RuntimeDirectBatch> {
     resolveClient: (schema: WasmSchema) => JazzClient,
     beginRuntimeBatch: (client: JazzClient) => RuntimeDirectBatch,
     resolveDefaultRuntimeBranch: (client: JazzClient) => string | null,
+    resolveDefaultQueryBranch: () => string | null,
   ) {
-    super("DbDirectBatch", resolveClient, beginRuntimeBatch, resolveDefaultRuntimeBranch);
+    super(
+      "DbDirectBatch",
+      resolveClient,
+      beginRuntimeBatch,
+      resolveDefaultRuntimeBranch,
+      resolveDefaultQueryBranch,
+    );
   }
 }
 
@@ -1202,6 +1113,10 @@ export class Db {
   }
 
   protected resolveDefaultRuntimeBranch(_client: JazzClient): string | null {
+    return null;
+  }
+
+  protected resolveDefaultQueryBranch(): string | null {
     return null;
   }
 
@@ -1954,6 +1869,7 @@ export class Db {
           : client.beginTransactionInternal(context?.session, context?.attribution);
       },
       (client) => this.resolveDefaultRuntimeBranch(client),
+      () => this.resolveDefaultQueryBranch(),
     );
   }
 
@@ -1999,6 +1915,7 @@ export class Db {
           : client.beginBatchInternal(context?.session, context?.attribution);
       },
       (client) => this.resolveDefaultRuntimeBranch(client),
+      () => this.resolveDefaultQueryBranch(),
     );
   }
 
@@ -2104,11 +2021,7 @@ export class Db {
     const queryOptions = ordinaryDbQueryOptions(options);
     await this.ensureQueryReady(queryOptions);
     const translatedQuery = translateQuery(builderJson, planningSchema);
-    const wasmQuery = withRuntimeBranches(
-      translatedQuery,
-      (userBranch) => client.branchNameForUserBranch(userBranch),
-      this.resolveDefaultRuntimeBranch(client),
-    );
+    const wasmQuery = withDefaultQueryBranch(translatedQuery, this.resolveDefaultQueryBranch());
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const runtimeQueryOptions = usesRelationTraversal
       ? { ...queryOptions, runtimeSettledTier: null }
@@ -2251,11 +2164,7 @@ export class Db {
       builtQuery.select,
     );
     const translatedQuery = translateQuery(builderJson, planningSchema);
-    const wasmQuery = withRuntimeBranches(
-      translatedQuery,
-      (userBranch) => client.branchNameForUserBranch(userBranch),
-      this.resolveDefaultRuntimeBranch(client),
-    );
+    const wasmQuery = withDefaultQueryBranch(translatedQuery, this.resolveDefaultQueryBranch());
 
     const transform = (row: WasmRow): T =>
       transformOutputRow(
@@ -2476,6 +2385,10 @@ class BranchDb extends Db {
 
   protected override resolveDefaultRuntimeBranch(client: JazzClient): string | null {
     return client.branchNameForUserBranch(this.branchId);
+  }
+
+  protected override resolveDefaultQueryBranch(): string | null {
+    return this.branchId;
   }
 }
 

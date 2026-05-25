@@ -169,6 +169,10 @@ fn short_hash(hash: &impl ToString) -> String {
     hash.to_string().chars().take(12).collect()
 }
 
+fn dev_server_migration_create_console_call() -> &'static str {
+    "runJazzMigrations()"
+}
+
 pub(crate) fn log_schema_warning(
     warning: &SchemaWarning,
     origin: Option<&str>,
@@ -202,11 +206,12 @@ pub(crate) fn log_connection_schema_diagnostics(
             origin = origin,
             client_schema_hash = %client_hash,
             permissions_schema_hash = %permissions_hash,
-            "Your declared schema {} is disconnected from the schema used to enforce permissions: {}. Reads and writes may fail until you add a migration. To recover, run `npx jazz-tools@alpha migrations create --fromHash {} --toHash {}`.",
+            "Your declared schema {} is disconnected from the schema used to enforce permissions: {}. Reads and writes may fail until you add a migration. To recover, run `npx jazz-tools@alpha migrations create --fromHash {} --toHash {}`. If this app is running through a DevServer, open the app console and call `{}`.",
             client_hash,
             permissions_hash,
             permissions_hash,
             client_hash,
+            dev_server_migration_create_console_call(),
         );
     }
 

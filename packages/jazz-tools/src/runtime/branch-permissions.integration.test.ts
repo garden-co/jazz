@@ -922,8 +922,9 @@ describe("branch permissions integration", () => {
     const context = await createTestContext(branchReadDenyPermissions);
     const aliceDb = context.forSession(session("alice"), app);
     const draftDb = aliceDb.branch("alice-draft");
+    const backendDraftDb = context.withAttribution("alice").branch("alice-draft");
 
-    await draftDb
+    await backendDraftDb
       .insert(app.todos, {
         projectId: randomUUID(),
         title: "Invalid branch todo",
@@ -932,6 +933,20 @@ describe("branch permissions integration", () => {
       .wait({ tier: "local" });
 
     await expect(draftDb.all(app.todos.where({}))).resolves.toEqual([]);
+  });
+
+  it("does not fall back to normal table insert policy for non-row-id branch names", async () => {
+    const context = await createTestContext(branchReadDenyPermissions);
+    const aliceDb = context.forSession(session("alice"), app);
+    const draftDb = aliceDb.branch("alice-draft");
+
+    await expectMutationDenied("named branch insert uses branch policy", () =>
+      draftDb.insert(app.todos, {
+        projectId: randomUUID(),
+        title: "Denied named branch todo",
+        ownerId: "bob",
+      }),
+    );
   });
 
   it("uses an app-created branch row as the branch db backing row", async () => {

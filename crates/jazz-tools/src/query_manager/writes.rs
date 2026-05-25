@@ -1375,10 +1375,7 @@ impl QueryManager {
         session?;
 
         let uses_branch_scoped_policy = ComposedBranchName::parse(&BranchName::new(branch))
-            .is_some_and(|composed| {
-                composed.user_branch != "main"
-                    && uuid::Uuid::parse_str(&composed.user_branch).is_ok()
-            });
+            .is_some_and(|composed| composed.user_branch != "main");
 
         if !uses_branch_scoped_policy
             && !self.local_subscription_uses_explicit_authorization(session)
@@ -1445,12 +1442,14 @@ impl QueryManager {
         if composed.user_branch == "main" {
             return None;
         }
-        let branch_uuid = uuid::Uuid::parse_str(&composed.user_branch).ok()?;
-        let branch_object_id = ObjectId::from_uuid(branch_uuid);
         let target_schema = auth_schema.get(&table_name)?;
         if target_schema.policies.for_branch.is_empty() {
             return Some(!self.row_policy_mode.denies_missing_explicit_policy());
         }
+        let Ok(branch_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
+            return Some(false);
+        };
+        let branch_object_id = ObjectId::from_uuid(branch_uuid);
 
         let current_branch = ComposedBranchName::new(&composed.env, composed.schema_hash, "main")
             .to_branch_name()

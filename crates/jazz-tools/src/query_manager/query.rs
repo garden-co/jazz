@@ -5,7 +5,10 @@ use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey, SortTarget};
 use crate::query_manager::magic_columns::is_magic_column_name;
-use crate::query_manager::types::{ColumnType, RowDescriptor, TableName, TupleDescriptor, Value};
+use crate::query_manager::types::{
+    ColumnType, ComposedBranchName, RowDescriptor, TableName, TupleDescriptor, Value,
+};
+use crate::schema_manager::SchemaContext;
 
 use super::query_to_relation_ir::normalize_query_to_rel_expr;
 use super::relation_ir::ColumnRef;
@@ -622,6 +625,83 @@ fn default_disjuncts() -> Vec<Conjunction> {
 }
 
 impl Query {
+    fn runtime_branch_for_logical_branch(
+        schema_context: &SchemaContext,
+        user_branch: &str,
+    ) -> String {
+        ComposedBranchName::new(
+            &schema_context.env,
+            schema_context.current_hash,
+            user_branch,
+        )
+        .to_branch_name()
+        .as_str()
+        .to_string()
+    }
+
+    fn compose_logical_branch_list(branches: &mut [String], schema_context: &SchemaContext) {
+        for branch in branches {
+            *branch = Self::runtime_branch_for_logical_branch(schema_context, branch);
+        }
+    }
+
+    fn compose_logical_array_subquery_branches(
+        specs: &mut [ArraySubquerySpec],
+        schema_context: &SchemaContext,
+    ) {
+        for spec in specs {
+            Self::compose_logical_branch_list(&mut spec.branches, schema_context);
+            Self::compose_logical_array_subquery_branches(&mut spec.nested_arrays, schema_context);
+        }
+    }
+
+    fn compose_logical_relation_branches(
+        relation: &mut crate::query_manager::relation_ir::RelExpr,
+        schema_context: &SchemaContext,
+    ) {
+        use crate::query_manager::relation_ir::RelExpr;
+
+        match relation {
+            RelExpr::TableScan { .. } => {}
+            RelExpr::Branch { input, branches } => {
+                Self::compose_logical_branch_list(branches, schema_context);
+                Self::compose_logical_relation_branches(input, schema_context);
+            }
+            RelExpr::Filter { input, .. }
+            | RelExpr::Project { input, .. }
+            | RelExpr::Distinct { input, .. }
+            | RelExpr::OrderBy { input, .. }
+            | RelExpr::Offset { input, .. }
+            | RelExpr::Limit { input, .. } => {
+                Self::compose_logical_relation_branches(input, schema_context);
+            }
+            RelExpr::Union { inputs } => {
+                for input in inputs {
+                    Self::compose_logical_relation_branches(input, schema_context);
+                }
+            }
+            RelExpr::Join { left, right, .. } => {
+                Self::compose_logical_relation_branches(left, schema_context);
+                Self::compose_logical_relation_branches(right, schema_context);
+            }
+            RelExpr::Gather { seed, step, .. } => {
+                Self::compose_logical_relation_branches(seed, schema_context);
+                Self::compose_logical_relation_branches(step, schema_context);
+            }
+        }
+    }
+
+    /// Convert public query branch ids into runtime branch names for this schema context.
+    ///
+    /// This is called at runtime API ingress. QueryManager internals still use
+    /// composed branch names so internal callers can keep constructing
+    /// low-level queries directly.
+    pub fn compose_logical_branches_for_context(&mut self, schema_context: &SchemaContext) {
+        Self::compose_logical_branch_list(&mut self.branches, schema_context);
+        Self::compose_logical_array_subquery_branches(&mut self.array_subqueries, schema_context);
+        Self::compose_logical_relation_branches(&mut self.relation_ir, schema_context);
+    }
+
     fn validate_conditions(conditions: &[Condition]) -> Result<(), QueryBuildError> {
         for condition in conditions {
             match condition {
@@ -691,6 +771,23 @@ impl Query {
     /// Check if this query has array subqueries.
     pub fn has_array_subqueries(&self) -> bool {
         !self.array_subqueries.is_empty()
+    }
+
+    pub(crate) fn explicit_array_subquery_branches(&self) -> Vec<String> {
+        fn collect(specs: &[ArraySubquerySpec], branches: &mut Vec<String>) {
+            for spec in specs {
+                for branch in &spec.branches {
+                    if !branches.iter().any(|existing| existing == branch) {
+                        branches.push(branch.clone());
+                    }
+                }
+                collect(&spec.nested_arrays, branches);
+            }
+        }
+
+        let mut branches = Vec::new();
+        collect(&self.array_subqueries, &mut branches);
+        branches
     }
 
     /// Check if this query has a recursive expansion.

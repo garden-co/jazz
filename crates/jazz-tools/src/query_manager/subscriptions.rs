@@ -64,20 +64,30 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         graph: &QueryGraph,
     ) -> Vec<String> {
+        fn push_unique(branches: &mut Vec<String>, branch: String) {
+            if !branches.iter().any(|existing| existing == &branch) {
+                branches.push(branch);
+            }
+        }
+
         let scan_branches = graph.scan_branches();
-        if !scan_branches.is_empty() {
-            return scan_branches;
+        let mut branches = if !scan_branches.is_empty() {
+            scan_branches
+        } else if !query.branches.is_empty() {
+            query.branches.clone()
+        } else {
+            schema_context
+                .all_branch_names()
+                .into_iter()
+                .map(|b| b.as_str().to_string())
+                .collect()
+        };
+
+        for branch in query.explicit_array_subquery_branches() {
+            push_unique(&mut branches, branch);
         }
 
-        if !query.branches.is_empty() {
-            return query.branches.clone();
-        }
-
-        schema_context
-            .all_branch_names()
-            .into_iter()
-            .map(|b| b.as_str().to_string())
-            .collect()
+        branches
     }
 
     /// Subscribe to query results (delta mode).

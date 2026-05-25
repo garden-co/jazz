@@ -30,6 +30,32 @@ fn test_runtime_core_insert_query() {
 }
 
 #[test]
+fn runtime_query_composes_logical_branch_ids() {
+    let mut core = create_runtime_with_schema(test_schema(), "runtime-logical-branch-query");
+    let draft_branch =
+        ComposedBranchName::new("dev", core.schema_manager().current_hash(), "draft")
+            .to_branch_name()
+            .as_str()
+            .to_string();
+    let write_context = WriteContext::default().with_target_branch_name(draft_branch);
+    let ((object_id, row_values), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Draft"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    core.immediate_tick();
+    core.batched_tick();
+
+    let query = QueryBuilder::new("users").branch("draft").build();
+    let results = execute_runtime_query(&mut core, query, None);
+
+    assert_eq!(results, vec![(object_id, row_values)]);
+}
+
+#[test]
 fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
     let mut old_runtime = create_runtime_with_schema(test_schema(), "restart-sync-test");
     let user_id = ObjectId::new();

@@ -228,6 +228,9 @@ function isTablePoliciesLike(input: unknown): input is TablePolicies {
   const tablePolicy = input as Record<string, unknown>;
   const validOperationKeys = ["select", "insert", "update", "delete"];
   return Object.entries(tablePolicy).every(([key, value]) => {
+    if (key === "for_branch") {
+      return isPermissionsMap(value);
+    }
     if (!validOperationKeys.includes(key)) {
       return false;
     }

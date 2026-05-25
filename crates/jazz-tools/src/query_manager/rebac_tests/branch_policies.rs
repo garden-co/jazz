@@ -1043,6 +1043,51 @@ fn branch_insert_uses_matching_branch_policy() {
 }
 
 #[test]
+// Non-row-id branch insert:
+//
+//   Branch name = dev/<schema-hash>/alice-draft
+//   No backing row can be resolved from the branch name.
+//
+//   Normal insert = true
+//   Branch insert = false
+//   Expected: normal insert is not used as a fallback.
+fn branch_insert_does_not_fall_back_to_normal_policy_for_non_row_id_branch() {
+    let mut todo_policies = TablePolicies::new().with_insert(PolicyExpr::True);
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new().with_insert(PolicyExpr::False),
+    )]);
+    let schema = branch_schema_with_todo_policies(todo_policies);
+    let mut qm = create_query_manager_with_policy_mode(
+        SyncManager::new(),
+        schema.clone(),
+        RowPolicyMode::Enforcing,
+    );
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let branch_name = ComposedBranchName::new("dev", SchemaHash::compute(&schema), "alice-draft")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+    let write_context = WriteContext::from_session(Session::new("alice"));
+
+    let denied = qm.insert_on_branch(
+        &mut storage,
+        "todos",
+        &branch_name,
+        &[Value::Uuid(ObjectId::new()), Value::Text("Draft".into())],
+        Some(&write_context),
+    );
+
+    assert!(matches!(
+        denied,
+        Err(QueryError::PolicyDenied {
+            operation: Operation::Insert,
+            ..
+        })
+    ));
+}
+
+#[test]
 // Branch update with only WITH CHECK:
 //
 //   old clause = missing
@@ -1161,6 +1206,224 @@ fn synced_branch_insert_uses_branch_policy_without_normal_insert_policy() {
         &[
             Value::Uuid(project_id),
             Value::Text("Write branch sync docs".into()),
+        ],
+    )
+    .unwrap();
+    let commit = stored_row_commit(
+        smallvec![],
+        content,
+        1_000,
+        ObjectId::new().to_string(),
+        None,
+    );
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: row_batch_created_payload(
+            todo_id,
+            &branch_name,
+            Some(RowMetadata {
+                id: todo_id,
+                metadata: todos_metadata(),
+            }),
+            &commit,
+        ),
+    });
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let batch_id = row_batch_id_for_commit(todo_id, &branch_name, &commit);
+    let outbox = qm.sync_manager_mut().take_outbox();
+    assert!(!client_write_was_rejected(&outbox, client_id, batch_id));
+    assert!(
+        test_row_tip_ids(&storage, todo_id, &branch_name)
+            .unwrap()
+            .contains(&batch_id)
+    );
+}
+
+#[test]
+// Synced non-row-id branch insert:
+//
+//   Branch name = dev/<schema-hash>/alice-draft
+//   Normal insert = true
+//   Branch insert = false
+//   Expected: synced writes do not use normal insert as a fallback.
+fn synced_branch_insert_does_not_fall_back_to_normal_policy_for_non_row_id_branch() {
+    let mut todo_policies = TablePolicies::new().with_insert(PolicyExpr::True);
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new().with_insert(PolicyExpr::False),
+    )]);
+    let schema = branch_schema_with_todo_policies(todo_policies);
+    let mut qm = create_query_manager_with_policy_mode(
+        SyncManager::new(),
+        schema.clone(),
+        RowPolicyMode::Enforcing,
+    );
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let branch_name = ComposedBranchName::new("dev", SchemaHash::compute(&schema), "alice-draft")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+    let todos_descriptor = schema
+        .get(&TableName::new("todos"))
+        .unwrap()
+        .columns
+        .clone();
+    let todo_id = create_test_row(&mut storage, Some(todos_metadata()));
+    let client_id = ClientId::new();
+    connect_client(&mut qm, &storage, client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+    set_client_query_scope(
+        &mut qm,
+        &storage,
+        client_id,
+        QueryId(1),
+        HashSet::from([(todo_id, BranchName::new(&branch_name))]),
+        None,
+    );
+    qm.sync_manager_mut().take_outbox();
+
+    let content = encode_row(
+        &todos_descriptor,
+        &[Value::Uuid(ObjectId::new()), Value::Text("Draft".into())],
+    )
+    .unwrap();
+    let commit = stored_row_commit(
+        smallvec![],
+        content,
+        1_000,
+        ObjectId::new().to_string(),
+        None,
+    );
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: row_batch_created_payload(
+            todo_id,
+            &branch_name,
+            Some(RowMetadata {
+                id: todo_id,
+                metadata: todos_metadata(),
+            }),
+            &commit,
+        ),
+    });
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let batch_id = row_batch_id_for_commit(todo_id, &branch_name, &commit);
+    let outbox = qm.sync_manager_mut().take_outbox();
+    assert!(client_write_was_rejected(&outbox, client_id, batch_id));
+    let tips = test_row_tip_ids(&storage, todo_id, &branch_name);
+    assert!(tips.is_err() || !tips.unwrap().contains(&batch_id));
+}
+
+#[test]
+// Synced branch insert with complex branch policy:
+//
+//   client todo insert on branch B
+//              |
+//              v
+//   todos.for_branch insert = todo.projectId == $branch.projectId
+//                             AND exists approvals(projectId == $branch.projectId)
+//
+//   Stored rows on branch B         Expected server decision
+//   ------------------------------  ------------------------
+//   approvals[projectId=P]          accept todo[projectId=P]
+fn synced_branch_insert_allows_complex_branch_policy_after_simple_parts_pass() {
+    let mut todo_policies = TablePolicies::default();
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new().with_insert(PolicyExpr::And(vec![
+            project_matches_branch_policy(),
+            PolicyExpr::Exists {
+                table: "approvals".into(),
+                condition: Box::new(project_matches_branch_policy()),
+            },
+        ])),
+    )]);
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("branches")
+                .column("projectId", ColumnType::Uuid)
+                .column("ownerId", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .column("projectId", ColumnType::Uuid)
+                .column("title", ColumnType::Text)
+                .policies(todo_policies),
+        )
+        .table(
+            TableSchema::builder("approvals")
+                .column("projectId", ColumnType::Uuid)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .build();
+    let mut qm = create_query_manager_with_policy_mode(
+        SyncManager::new(),
+        schema.clone(),
+        RowPolicyMode::Enforcing,
+    );
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_id = ObjectId::new();
+    let branch_id = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_id), Value::Text("alice".into())],
+        )
+        .expect("insert branch row")
+        .row_id;
+    let branch_name = branch_name_for(&schema, branch_id);
+    qm.insert_on_branch(
+        &mut storage,
+        "approvals",
+        &branch_name,
+        &[Value::Uuid(project_id)],
+        None,
+    )
+    .expect("seed branch approval");
+
+    let todos_descriptor = schema
+        .get(&TableName::new("todos"))
+        .unwrap()
+        .columns
+        .clone();
+    let todo_id = create_test_row(&mut storage, Some(todos_metadata()));
+    let client_id = ClientId::new();
+    connect_client(&mut qm, &storage, client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+    set_client_query_scope(
+        &mut qm,
+        &storage,
+        client_id,
+        QueryId(1),
+        HashSet::from([(todo_id, BranchName::new(&branch_name))]),
+        None,
+    );
+    qm.sync_manager_mut().take_outbox();
+
+    let content = encode_row(
+        &todos_descriptor,
+        &[
+            Value::Uuid(project_id),
+            Value::Text("Write branch sync docs through approval".into()),
         ],
     )
     .unwrap();

@@ -14,10 +14,7 @@ use crate::sync_manager::{
 };
 
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
-use super::policy::{
-    BranchPolicyContext, ComplexClause, Operation, PolicyExpr,
-    evaluate_expr_recursive_with_branch_context,
-};
+use super::policy::{BranchPolicyContext, ComplexClause, Operation, PolicyExpr};
 use super::policy_graph::{PolicyGraph, PolicyGraphBuildOptions};
 use super::session::Session;
 use super::settlement_eval_cache::SettlementEvalCache;
@@ -413,20 +410,6 @@ impl QueryManager {
             return false;
         };
 
-        if let Some(branch_context) = branch_context {
-            let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
-            return evaluate_expr_recursive_with_branch_context(
-                policy,
-                &row.data,
-                &row.provenance,
-                &table_schema.columns,
-                session,
-                Some(row.id),
-                branch_context,
-                0,
-            );
-        }
-
         let mut evaluator = PolicyContextEvaluator::new(
             auth_schema,
             session,
@@ -434,6 +417,9 @@ impl QueryManager {
             self.row_policy_mode,
         )
         .with_settlement_eval_cache(settlement_eval_cache);
+        if let Some(branch_context) = branch_context {
+            evaluator = evaluator.with_branch_context(branch_context);
+        }
         let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
@@ -481,12 +467,14 @@ impl QueryManager {
         if composed.user_branch == "main" {
             return None;
         }
-        let branch_uuid = uuid::Uuid::parse_str(&composed.user_branch).ok()?;
-        let branch_object_id = ObjectId::from_uuid(branch_uuid);
         let target_schema = auth_schema.get(&table_name)?;
         if target_schema.policies.for_branch.is_empty() {
             return Some(!self.row_policy_mode.denies_missing_explicit_policy());
         }
+        let Ok(branch_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
+            return Some(false);
+        };
+        let branch_object_id = ObjectId::from_uuid(branch_uuid);
         let current_branch =
             ComposedBranchName::new(&composed.env, composed.schema_hash, "main").to_branch_name();
 
@@ -841,12 +829,24 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         graph: &crate::query_manager::graph::QueryGraph,
     ) -> Vec<String> {
-        let scan_branches = graph.scan_branches();
-        if !scan_branches.is_empty() {
-            return scan_branches;
+        fn push_unique(branches: &mut Vec<String>, branch: String) {
+            if !branches.iter().any(|existing| existing == &branch) {
+                branches.push(branch);
+            }
         }
 
-        Self::resolved_server_query_branches(query, schema_context)
+        let scan_branches = graph.scan_branches();
+        let mut branches = if !scan_branches.is_empty() {
+            scan_branches
+        } else {
+            Self::resolved_server_query_branches(query, schema_context)
+        };
+
+        for branch in query.explicit_array_subquery_branches() {
+            push_unique(&mut branches, branch);
+        }
+
+        branches
     }
 
     pub(super) fn query_for_server_compile(
@@ -1983,12 +1983,7 @@ impl QueryManager {
         let new_provenance = Self::payload_row_provenance(&check.payload);
 
         if ComposedBranchName::parse(&branch_name)
-            .and_then(|composed| {
-                (composed.user_branch != "main"
-                    && uuid::Uuid::parse_str(&composed.user_branch).is_ok())
-                .then_some(())
-            })
-            .is_some()
+            .is_some_and(|composed| composed.user_branch != "main")
         {
             let old_content = match check.old_content.as_ref() {
                 Some(c) if !c.is_empty() => c,
