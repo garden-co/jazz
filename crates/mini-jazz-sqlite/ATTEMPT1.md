@@ -834,3 +834,27 @@ Concrete next experiments after the first speedrun:
    is still untouched. Query the first N open todos ordered by project name,
    rename a project across the page boundary, and compare fresh query output to
    subscription diff output.
+
+## SQL-visible branch provenance at 23:21
+
+Added a bounded todo-only spike for a temporary `temp_branch_todo_sources`
+relation with `(source_branch_id, source_global_epoch, precedence)`.
+
+What it showed:
+
+1. The branch source stack can be exposed to SQLite directly. A single SQL query
+   can read accepted history from each source branch at its own epoch boundary,
+   then use `ROW_NUMBER() OVER (PARTITION BY row_id ORDER BY precedence)` to let
+   branch-local rows shadow base rows.
+
+2. This matches the current Rust-combined branch query for the tested shape:
+   main-base todo rows plus a branch-local row with the same `row_id`.
+
+3. Scope can carry precise provenance naturally from SQL. The shadowed row has
+   `branch_id = draft`; the untouched base row has `branch_id = main`.
+
+Open follow-up:
+
+- Generalize the temporary source relation from todo-only branch reads to joined
+  todo/project reads, so both sides of a join share exactly the same branch
+  source stack.

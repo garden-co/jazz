@@ -3806,6 +3806,124 @@ mod tests {
     }
 
     #[test]
+    fn branch_source_temp_table_query_shadows_base_rows_in_sql() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-main-1".into(),
+            node_id: "alice-device".into(),
+            title: "Base title".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-main-1".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-2".into(),
+            tx_id: "tx-main-2".into(),
+            node_id: "alice-device".into(),
+            title: "Base only".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 110,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-main-2".into(),
+            global_epoch: 2,
+        })
+        .unwrap();
+        db.create_branch(CreateBranch {
+            branch_id: "draft".into(),
+            tx_id: "tx-create-draft".into(),
+            node_id: "alice-device".into(),
+            name: "Alice draft".into(),
+            head_global_epoch: 2,
+            base_provenance_json: r#"[{"branch":"main","globalBase":2}]"#.into(),
+            now: 150,
+        })
+        .unwrap();
+        db.insert_todo_in_branch(
+            "draft",
+            InsertTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-draft-shadow".into(),
+                node_id: "alice-device".into(),
+                title: "Draft title".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            },
+        )
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-draft-shadow".into(),
+            global_epoch: 3,
+        })
+        .unwrap();
+
+        let query = TodoQuery {
+            branch_id: "draft".into(),
+            done: Some(false),
+            created_after: Some(0),
+        };
+        let rust_combined = db.query_todos_on_branch(&query, "draft", 3).unwrap();
+        let sql_combined = db
+            .query_todos_on_branch_with_source_table(&query, "draft", 3)
+            .unwrap();
+
+        assert_eq!(sql_combined.rows, rust_combined.rows);
+        assert_eq!(
+            sql_combined
+                .scope
+                .iter()
+                .map(|locator| {
+                    (
+                        locator.row_id.as_str(),
+                        locator.branch_id.as_str(),
+                        locator.tx_id.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("todo-1", "draft", "tx-draft-shadow"),
+                ("todo-2", "main", "tx-main-2")
+            ]
+        );
+
+        let sources = db
+            .conn
+            .prepare(
+                r#"
+                SELECT source_branch_id, source_global_epoch, precedence
+                FROM temp_branch_todo_sources
+                ORDER BY precedence
+                "#,
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            sources,
+            vec![("draft".to_owned(), 3, 0), ("main".to_owned(), 2, 1)]
+        );
+    }
+
+    #[test]
     fn branch_data_merge_makes_branch_rows_visible_on_main() {
         let mut db = MiniJazzSqlite::in_memory().unwrap();
         db.create_branch(CreateBranch {
