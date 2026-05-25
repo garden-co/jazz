@@ -412,6 +412,34 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 11:42 PDT
+
+Added the first explicit predicate/absence scope fact.
+
+Optional includes now record a `PredicateScope` when the referenced dependency
+row is missing. The current shape is intentionally narrow:
+
+- table
+- row id
+- reason: `OptionalIncludeMissing`
+
+Discovery: this is a useful stepping stone before full predicate/range read
+sets. It proves the query result can carry non-row-locator scope facts while
+still keeping row result/dependency scope separate.
+
+Open debt:
+
+- Predicate scope is not yet exported in sync bundles.
+- Predicate scope is not yet used for subscription invalidation.
+- Required includes and ordinary filters still do not record range/predicate
+  read facts.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 11:41 PDT
 
 Extracted write transaction mechanics too.

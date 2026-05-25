@@ -113,7 +113,7 @@ fn joined_subscription_updates_when_dependency_payload_changes() -> mini_jazz_sq
         .order_by("$createdAt", Desc)
         .limit(20);
 
-    let subscription = alice.subscribe(open_todos)?;
+    let subscription = alice.subscribe(open_todos.clone())?;
 
     alice.write(|tx| {
         tx.update(
@@ -176,7 +176,7 @@ fn joined_subscription_removes_row_when_required_dependency_is_deleted(
         .include_required("project", "project_id")
         .order_by("$createdAt", Desc);
 
-    let subscription = alice.subscribe(open_todos)?;
+    let subscription = alice.subscribe(open_todos.clone())?;
 
     alice.write(|tx| {
         tx.delete("projects", &project_id)?;
@@ -227,7 +227,7 @@ fn optional_subscription_nulls_deleted_dependency() -> mini_jazz_sqlite::Result<
         .include_optional("project", "project_id")
         .order_by("$createdAt", Desc);
 
-    let subscription = alice.subscribe(open_todos)?;
+    let subscription = alice.subscribe(open_todos.clone())?;
 
     alice.write(|tx| {
         tx.delete("projects", &project_id)?;
@@ -244,6 +244,12 @@ fn optional_subscription_nulls_deleted_dependency() -> mini_jazz_sqlite::Result<
         "Can survive without project"
     );
     assert!(diff.updated[0].include("project").is_none());
+
+    let after_delete = alice.all(open_todos)?;
+    assert_eq!(after_delete.scope.dependency_rows.len(), 0);
+    assert_eq!(after_delete.scope.predicate_scopes.len(), 1);
+    assert_eq!(after_delete.scope.predicate_scopes[0].table, "projects");
+    assert_eq!(after_delete.scope.predicate_scopes[0].row_id, project_id);
 
     Ok(())
 }

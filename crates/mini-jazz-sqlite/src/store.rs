@@ -2,8 +2,8 @@ use crate::layout::{json_to_sql, placeholders, quote_ident, read_field, TablePla
 use crate::query::{filter_sql, Include, LoweredInclude, Query, SortDirection};
 use crate::schema::{FieldKind, Schema, TableDef};
 use crate::scope::{
-    diff_rows, HistoryRecord, QueryResult, QueryScope, QueryScopeBundle, RowView, ScopeReason,
-    ScopeRow, SubscriptionDiff, TxRecord,
+    diff_rows, HistoryRecord, PredicateReason, PredicateScope, QueryResult, QueryScope,
+    QueryScopeBundle, RowView, ScopeReason, ScopeRow, SubscriptionDiff, TxRecord,
 };
 use crate::write::WriteTx;
 use crate::{Error, Result};
@@ -360,7 +360,12 @@ impl Client {
 
             let mut includes = BTreeMap::new();
             let mut dependency_scope = Vec::new();
+            let mut predicate_scopes = Vec::new();
             if let Some(include) = &include {
+                let expected_dep_row_id = values
+                    .get(&include.fk_field.name)
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned);
                 let dep_row_id: Option<String> = row.get(idx)?;
                 idx += 1;
                 let dep_tx_id: Option<String> = row.get(idx)?;
@@ -391,6 +396,14 @@ impl Client {
                         tx_id: dep_tx_id,
                         reason: ScopeReason::Dependency,
                     });
+                } else if !include.required {
+                    if let Some(row_id) = expected_dep_row_id {
+                        predicate_scopes.push(PredicateScope {
+                            table: include.table.name.clone(),
+                            row_id,
+                            reason: PredicateReason::OptionalIncludeMissing,
+                        });
+                    }
                 }
             }
 
@@ -403,17 +416,20 @@ impl Client {
                     reason: ScopeReason::Result,
                 },
                 dependency_scope,
+                predicate_scopes,
             ))
         })?;
 
         let mut result_rows = Vec::new();
         let mut result_scope = Vec::new();
         let mut dependency_scope = Vec::new();
+        let mut predicate_scopes = Vec::new();
         for row in rows {
-            let (view, result_locator, dependencies) = row?;
+            let (view, result_locator, dependencies, predicates) = row?;
             result_rows.push(view);
             result_scope.push(result_locator);
             dependency_scope.extend(dependencies);
+            predicate_scopes.extend(predicates);
         }
 
         Ok(QueryResult {
@@ -421,6 +437,7 @@ impl Client {
             scope: QueryScope {
                 result_rows: result_scope,
                 dependency_rows: dependency_scope,
+                predicate_scopes,
             },
         })
     }

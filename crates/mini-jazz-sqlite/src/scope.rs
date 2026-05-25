@@ -15,6 +15,7 @@ pub struct SubscriptionDiff {
 pub struct QueryScope {
     pub result_rows: Vec<ScopeRow>,
     pub dependency_rows: Vec<ScopeRow>,
+    pub predicate_scopes: Vec<PredicateScope>,
 }
 
 pub struct QueryScopeBundle {
@@ -56,6 +57,16 @@ pub struct ScopeRow {
 pub enum ScopeReason {
     Result,
     Dependency,
+}
+
+pub struct PredicateScope {
+    pub table: String,
+    pub row_id: String,
+    pub reason: PredicateReason,
+}
+
+pub enum PredicateReason {
+    OptionalIncludeMissing,
 }
 
 #[derive(Clone, Debug, PartialEq)]
