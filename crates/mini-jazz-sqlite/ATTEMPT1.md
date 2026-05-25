@@ -399,6 +399,20 @@ rerun+diff correctness. The diff can still be full-row semantic diff, but the
 stored subscription state has to include the dependency payload, not just the
 result table's row id and version.
 
+### 2026-05-24 22:46 PDT
+
+Added a temp-table snapshot query variant:
+
+- resolves the vector to `temp_visible_tx`
+- runs one SQL query against history joined to the temp visible set
+- verifies it matches the direct/looping snapshot implementation
+
+Discovery: this feels much closer to the shape we want for real lowering. It
+lets SQLite plan the history query as one query and makes the resolved
+visibility relation inspectable. The tradeoff is lifecycle management for temp
+tables during nested reads/subscriptions, but that seems more tractable than
+generating huge `IN (...)` predicates for large read sets.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

@@ -1552,6 +1552,77 @@ impl MiniJazzSqlite {
         })
     }
 
+    pub fn query_todos_at_snapshot_with_temp_table(
+        &mut self,
+        query: &TodoQuery,
+        snapshot: &SnapshotVector,
+    ) -> rusqlite::Result<QueryResult> {
+        let mut visible_tx_ids = self.visible_tx_ids(snapshot)?;
+        visible_tx_ids.sort();
+        visible_tx_ids.dedup();
+
+        let sql_tx = self.conn.transaction()?;
+        sql_tx.execute_batch(
+            r#"
+            CREATE TEMP TABLE IF NOT EXISTS temp_visible_tx (
+              tx_id TEXT PRIMARY KEY
+            );
+            DELETE FROM temp_visible_tx;
+            "#,
+        )?;
+        for tx_id in &visible_tx_ids {
+            sql_tx.execute(
+                "INSERT INTO temp_visible_tx (tx_id) VALUES (?1)",
+                params![tx_id],
+            )?;
+        }
+
+        let done = query.done.map(bool_to_sql);
+        let created_after = query.created_after.unwrap_or(i64::MIN);
+        let rows = {
+            let mut stmt = sql_tx.prepare(
+                r#"
+                SELECT h.row_id, h.title, h.done, h.created_at, h.updated_at, h.tx_id
+                FROM todos__schema_v1_history h
+                JOIN jazz_tx tx ON tx.tx_id = h.tx_id
+                JOIN temp_visible_tx visible ON visible.tx_id = h.tx_id
+                WHERE h.branch_id = ?1
+                  AND h.op != 'delete'
+                  AND (?2 IS NULL OR h.done = ?2)
+                  AND h.created_at > ?3
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM todos__schema_v1_history newer_h
+                    JOIN jazz_tx newer_tx ON newer_tx.tx_id = newer_h.tx_id
+                    JOIN temp_visible_tx newer_visible
+                      ON newer_visible.tx_id = newer_h.tx_id
+                    WHERE newer_h.branch_id = h.branch_id
+                      AND newer_h.row_id = h.row_id
+                      AND newer_h.tx_id != h.tx_id
+                      AND newer_tx.node_num = tx.node_num
+                      AND newer_tx.local_epoch > tx.local_epoch
+                  )
+                ORDER BY h.created_at DESC, h.row_id ASC
+                "#,
+            )?;
+            stmt.query_map(params![query.branch_id, done, created_after], todo_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        sql_tx.commit()?;
+        let scope = rows
+            .iter()
+            .map(|row| RowVersionLocator {
+                table: "todos".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: query.branch_id.clone(),
+                row_id: row.row_id.clone(),
+                tx_id: row.visible_tx_id.clone(),
+                reason: "result".to_owned(),
+            })
+            .collect();
+        Ok(QueryResult { rows, scope })
+    }
+
     pub fn query_todos_on_branch(
         &self,
         query: &TodoQuery,
@@ -2403,6 +2474,46 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["tx-include", "tx-local", "tx-global"]
         );
+    }
+
+    #[test]
+    fn temp_table_snapshot_query_matches_direct_snapshot_query() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-1".into(),
+            node_id: "alice-device".into(),
+            title: "Accepted".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-1".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-2".into(),
+            tx_id: "tx-2".into(),
+            node_id: "alice-device".into(),
+            title: "Local".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+
+        let snapshot = SnapshotVector::new(1).with_local_base("alice-device", 2);
+        let direct = db
+            .query_todos_at_snapshot(&TodoQuery::open_since(0), &snapshot)
+            .unwrap();
+        let temp = db
+            .query_todos_at_snapshot_with_temp_table(&TodoQuery::open_since(0), &snapshot)
+            .unwrap();
+
+        assert_eq!(temp, direct);
     }
 
     #[test]
