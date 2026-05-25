@@ -481,6 +481,9 @@ impl Client {
         for locator in scope.result_rows.iter().chain(&scope.dependency_rows) {
             scoped_rows.insert((locator.table.clone(), locator.row_id.clone()), ());
         }
+        for predicate in &scope.predicate_scopes {
+            scoped_rows.insert((predicate.table.clone(), predicate.row_id.clone()), ());
+        }
 
         for ((table_name, row_id), ()) in scoped_rows {
             let table = self.schema.table_def(&table_name)?;

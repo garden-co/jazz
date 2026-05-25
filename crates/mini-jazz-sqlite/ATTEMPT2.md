@@ -412,6 +412,27 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 11:45 PDT
+
+Made absence scope affect sync bundles.
+
+Red test: Bob first imports a todo with an optional project include, then Alice
+deletes the project and exports the same optional query. Without exporting the
+predicate-scoped project row history, Bob kept rendering the stale project.
+
+Fix: `export_query_scope` now follows `predicate_scopes` in addition to result
+and dependency row locators. This sends the delete history needed for Bob to
+reproduce the null optional include.
+
+Discovery: predicate/absence scope is not just listener metadata; it is part of
+the sync closure required to recreate query semantics.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 11:44 PDT
 
 Split integration tests by behavior:
