@@ -193,6 +193,7 @@ pub struct SnapshotVector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxBundle {
     pub tx: TxBundleRecord,
+    pub fate: Vec<TxFateRecord>,
     pub todo_history: Vec<TodoHistoryRecord>,
     pub project_history: Vec<ProjectHistoryRecord>,
 }
@@ -214,6 +215,15 @@ pub struct TxBundleRecord {
     pub created_at: i64,
     pub sealed_at: Option<i64>,
     pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxFateRecord {
+    pub tx_id: String,
+    pub fate: String,
+    pub global_epoch: Option<i64>,
+    pub reason_json: Option<String>,
+    pub recorded_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1117,6 +1127,25 @@ impl MiniJazzSqlite {
         )?;
         let mut stmt = self.conn.prepare(
             r#"
+            SELECT tx_id, fate, global_epoch, reason_json, recorded_at
+            FROM jazz_tx_fate
+            WHERE tx_id = ?1
+            ORDER BY recorded_at, fate
+            "#,
+        )?;
+        let fate = stmt
+            .query_map(params![tx_id], |row| {
+                Ok(TxFateRecord {
+                    tx_id: row.get(0)?,
+                    fate: row.get(1)?,
+                    global_epoch: row.get(2)?,
+                    reason_json: row.get(3)?,
+                    recorded_at: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut stmt = self.conn.prepare(
+            r#"
             SELECT row_id, branch_id, tx_id, op, project_id, title, done, conflict_tx_ids_jsonb,
                    created_by, created_at, updated_by, updated_at, edit_metadata_json
             FROM todos__schema_v1_history
@@ -1170,6 +1199,7 @@ impl MiniJazzSqlite {
             .collect::<rusqlite::Result<_>>()?;
         Ok(TxBundle {
             tx,
+            fate,
             todo_history,
             project_history,
         })
@@ -1325,6 +1355,22 @@ impl MiniJazzSqlite {
                     ],
                 )?;
             }
+        }
+        for fate in &bundle.fate {
+            sql_tx.execute(
+                r#"
+                INSERT OR IGNORE INTO jazz_tx_fate (
+                  tx_id, fate, global_epoch, reason_json, recorded_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![
+                    fate.tx_id,
+                    fate.fate,
+                    fate.global_epoch,
+                    fate.reason_json,
+                    fate.recorded_at
+                ],
+            )?;
         }
         sql_tx.commit()?;
         if bundle.tx.status == "rejected" {
@@ -3520,6 +3566,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, ("global_durable_accepted".into(), 1));
+        assert_eq!(
+            alice.tx_fate_log("tx-alice-1").unwrap(),
+            vec!["accepted|1|"]
+        );
     }
 
     #[test]
@@ -3566,6 +3616,10 @@ mod tests {
         assert_eq!(
             status,
             ("rejected".into(), r#"{"code":"permission_denied"}"#.into())
+        );
+        assert_eq!(
+            alice.tx_fate_log("tx-alice-1").unwrap(),
+            vec![r#"rejected|-1|{"code":"permission_denied"}"#]
         );
     }
 

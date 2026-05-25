@@ -583,6 +583,20 @@ preserve the authority's decisions, while denormalized status/global epoch keeps
 visibility queries simple. The next step would be exporting/importing fate
 receipts explicitly instead of relying only on the mutated `jazz_tx` row.
 
+### 2026-05-24 23:04 PDT
+
+Extended transaction bundles to carry fate receipts:
+
+- `TxBundle` now includes `jazz_tx_fate` rows
+- import inserts fate receipts idempotently
+- client acceptance/rejection propagation tests assert both current tx state and
+  the received fate log
+
+Discovery: this makes authority decisions feel like first-class sync data
+rather than incidental column mutations. The denormalized `jazz_tx.status` still
+drives query speed, but receipts are now available for audit, replay, and
+eventual append-only authority semantics.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
