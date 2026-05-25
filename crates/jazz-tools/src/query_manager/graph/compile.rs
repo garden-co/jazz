@@ -61,7 +61,7 @@ fn effective_select_policy(
     })
 }
 
-fn is_branch_scoped_user_branch(branches: &[String]) -> bool {
+fn is_single_composed_non_main_branch(branches: &[String]) -> bool {
     let Some(branch) = branches.first() else {
         return false;
     };
@@ -71,10 +71,7 @@ fn is_branch_scoped_user_branch(branches: &[String]) -> bool {
     let Some(composed) = ComposedBranchName::parse(&BranchName::new(branch)) else {
         return false;
     };
-    if composed.user_branch == "main" {
-        return false;
-    }
-    uuid::Uuid::parse_str(&composed.user_branch).is_ok()
+    composed.user_branch != "main"
 }
 
 fn effective_select_policy_for_branches(
@@ -82,7 +79,7 @@ fn effective_select_policy_for_branches(
     branches: &[String],
     row_policy_mode: RowPolicyMode,
 ) -> Option<PolicyExpr> {
-    if is_branch_scoped_user_branch(branches) {
+    if is_single_composed_non_main_branch(branches) {
         let branch_policies: Vec<_> = table_schema
             .policies
             .for_branch

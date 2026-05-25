@@ -6,6 +6,7 @@
 use ahash::AHashSet;
 use std::collections::HashSet;
 
+use crate::metadata::RowProvenance;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::column_is_null;
 use crate::query_manager::graph_nodes::policy_eval::{
@@ -17,8 +18,8 @@ use crate::query_manager::policy::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ComposedBranchName, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName,
-    TablePolicies, Tuple, TupleDelta, TupleElement,
+    ComposedBranchName, LoadedRow, Row, RowBytes, RowDescriptor, RowPolicyMode, Schema, TableName,
+    TablePolicies, TableSchema, Tuple, TupleDelta, TupleElement,
 };
 
 use crate::storage::Storage;
@@ -98,6 +99,20 @@ impl Default for PolicyFilterOptions {
             policy_operation: Operation::Select,
         }
     }
+}
+
+struct BranchPolicyBacking<'a> {
+    backing_table: &'a TableName,
+    branch_policies: &'a TablePolicies,
+    row_id: ObjectId,
+    descriptor: RowDescriptor,
+    content: RowBytes,
+    provenance: RowProvenance,
+}
+
+fn branch_policy_scope(branch: &str) -> Option<ComposedBranchName> {
+    let composed = ComposedBranchName::parse(&BranchName::new(branch))?;
+    (composed.user_branch != "main").then_some(composed)
 }
 
 impl PolicyFilterNode {
@@ -224,8 +239,7 @@ impl PolicyFilterNode {
             policy_operation,
         );
         inherits_tables.extend(branch_dependency_tables);
-        let has_inherits =
-            has_branch_policy || !inherits_tables.is_empty() || policy_contains_branch_ref(&policy);
+        let has_inherits = has_branch_policy || !inherits_tables.is_empty();
         Self {
             descriptor,
             policy,
@@ -414,20 +428,57 @@ impl PolicyFilterNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> Option<bool> {
-        let branch_name = BranchName::new(&self.branch);
-        let composed = ComposedBranchName::parse(&branch_name)?;
-        if composed.user_branch == "main" {
-            return None;
-        }
+        let composed = branch_policy_scope(&self.branch)?;
         let target_table = TableName::new(&self.table_name);
         let target_schema = self.schema.get(&target_table)?;
-
         if target_schema.policies.for_branch.is_empty() {
             return Some(!self.row_policy_mode.denies_missing_explicit_policy());
         }
 
-        let Ok(branch_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
+        let Some(backing) = self.resolve_branch_policy_backing(io, &composed, target_schema) else {
             return Some(false);
+        };
+        let policy = operation_policy(backing.branch_policies, self.policy_operation);
+        let Some(policy) = policy else {
+            return Some(!self.row_policy_mode.denies_missing_explicit_policy());
+        };
+
+        let branch_context = BranchPolicyContext {
+            table_name: backing.backing_table,
+            row_id: backing.row_id,
+            descriptor: &backing.descriptor,
+            content: &backing.content,
+            provenance: &backing.provenance,
+        };
+        let mut evaluator = PolicyContextEvaluator::new(
+            &self.schema,
+            &self.session,
+            &self.branch,
+            self.row_policy_mode,
+        )
+        .with_branch_context(&branch_context);
+        let mut visited_referencing = HashSet::new();
+        Some(evaluator.evaluate_row_access(
+            self.policy_operation,
+            row,
+            &self.descriptor,
+            &self.table_name,
+            Some(policy),
+            io,
+            row_loader,
+            self.initial_depth,
+            &mut visited_referencing,
+        ))
+    }
+
+    fn resolve_branch_policy_backing<'a>(
+        &'a self,
+        io: &dyn Storage,
+        composed: &ComposedBranchName,
+        target_schema: &'a TableSchema,
+    ) -> Option<BranchPolicyBacking<'a>> {
+        let Ok(branch_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
+            return None;
         };
         let branch_object_id = ObjectId::from_uuid(branch_uuid);
         let current_branch = ComposedBranchName::new(&composed.env, composed.schema_hash, "main")
@@ -444,30 +495,18 @@ impl PolicyFilterNode {
                 continue;
             };
             if backing_row.is_hard_deleted() {
-                return Some(false);
+                return None;
             }
 
-            let Some(backing_schema) = self.schema.get(backing_table) else {
-                return Some(false);
-            };
-            let backing_loaded = LoadedRow::new(
-                backing_row.data.clone(),
-                backing_row.row_provenance(),
-                [(
-                    branch_object_id,
-                    BranchName::new(backing_row.branch.as_str()),
-                )]
-                .into_iter()
-                .collect(),
-                backing_row.batch_id,
-            );
+            let backing_schema = self.schema.get(backing_table)?;
+            let backing_provenance = backing_row.row_provenance();
             let backing_policy = backing_schema.policies.select_policy();
             let backing_allowed = if let Some(policy) = backing_policy {
                 let backing_row_for_policy = Row::new(
                     branch_object_id,
-                    backing_loaded.data.clone(),
-                    backing_loaded.batch_id,
-                    backing_loaded.row_provenance.clone(),
+                    backing_row.data.clone(),
+                    backing_row.batch_id,
+                    backing_provenance.clone(),
                 );
                 let mut evaluator = PolicyContextEvaluator::new(
                     &self.schema,
@@ -511,49 +550,20 @@ impl PolicyFilterNode {
                 !self.row_policy_mode.denies_missing_explicit_policy()
             };
             if !backing_allowed {
-                return Some(false);
+                return None;
             }
 
-            let policy = match self.policy_operation {
-                Operation::Select => branch_policies.select_policy(),
-                Operation::Insert => branch_policies.insert_policy(),
-                Operation::Update => branch_policies.update_using_policy(),
-                Operation::Delete => branch_policies.effective_delete_using(),
-            };
-            let Some(policy) = policy else {
-                return Some(!self.row_policy_mode.denies_missing_explicit_policy());
-            };
-
-            let backing_provenance = backing_row.row_provenance();
-            let branch_context = BranchPolicyContext {
-                table_name: backing_table,
+            return Some(BranchPolicyBacking {
+                backing_table,
+                branch_policies,
                 row_id: branch_object_id,
-                descriptor: &backing_schema.columns,
-                content: &backing_row.data,
-                provenance: &backing_provenance,
-            };
-            let mut evaluator = PolicyContextEvaluator::new(
-                &self.schema,
-                &self.session,
-                &self.branch,
-                self.row_policy_mode,
-            )
-            .with_branch_context(&branch_context);
-            let mut visited_referencing = HashSet::new();
-            return Some(evaluator.evaluate_row_access(
-                self.policy_operation,
-                row,
-                &self.descriptor,
-                &self.table_name,
-                Some(policy),
-                io,
-                row_loader,
-                self.initial_depth,
-                &mut visited_referencing,
-            ));
+                descriptor: backing_schema.columns.clone(),
+                content: backing_row.data.clone(),
+                provenance: backing_provenance,
+            });
         }
 
-        Some(false)
+        None
     }
 
     /// Evaluate the policy expression against a row.
@@ -648,9 +658,7 @@ fn branch_policy_dependency_tables(
     branch: &str,
     policy_operation: Operation,
 ) -> (bool, HashSet<String>) {
-    let branch_scoped = ComposedBranchName::parse(&BranchName::new(branch))
-        .is_some_and(|composed| composed.user_branch != "main");
-    if !branch_scoped {
+    if branch_policy_scope(branch).is_none() {
         return (false, HashSet::new());
     }
 
@@ -686,84 +694,6 @@ fn operation_policy(policies: &TablePolicies, operation: Operation) -> Option<&P
         Operation::Insert => policies.insert_policy(),
         Operation::Update => policies.update_using_policy(),
         Operation::Delete => policies.effective_delete_using(),
-    }
-}
-
-fn policy_contains_branch_ref(expr: &PolicyExpr) -> bool {
-    match expr {
-        PolicyExpr::Cmp {
-            value: crate::query_manager::policy::PolicyValue::BranchRef(_),
-            ..
-        }
-        | PolicyExpr::Contains {
-            value: crate::query_manager::policy::PolicyValue::BranchRef(_),
-            ..
-        } => true,
-        PolicyExpr::InList { values, .. } => values.iter().any(|value| {
-            matches!(
-                value,
-                crate::query_manager::policy::PolicyValue::BranchRef(_)
-            )
-        }),
-        PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {
-            exprs.iter().any(policy_contains_branch_ref)
-        }
-        PolicyExpr::Not(inner) => policy_contains_branch_ref(inner),
-        PolicyExpr::Exists { condition, .. } => policy_contains_branch_ref(condition),
-        PolicyExpr::ExistsRel { rel } => relation_contains_branch_ref(rel),
-        _ => false,
-    }
-}
-
-fn relation_value_contains_branch_ref(value: &crate::query_manager::relation_ir::ValueRef) -> bool {
-    matches!(
-        value,
-        crate::query_manager::relation_ir::ValueRef::BranchRef(_)
-    )
-}
-
-fn relation_predicate_contains_branch_ref(
-    predicate: &crate::query_manager::relation_ir::PredicateExpr,
-) -> bool {
-    use crate::query_manager::relation_ir::PredicateExpr;
-
-    match predicate {
-        PredicateExpr::Cmp { right, .. } | PredicateExpr::Contains { right, .. } => {
-            relation_value_contains_branch_ref(right)
-        }
-        PredicateExpr::In { values, .. } => values.iter().any(relation_value_contains_branch_ref),
-        PredicateExpr::And(exprs) | PredicateExpr::Or(exprs) => {
-            exprs.iter().any(relation_predicate_contains_branch_ref)
-        }
-        PredicateExpr::Not(inner) => relation_predicate_contains_branch_ref(inner),
-        PredicateExpr::IsNull { .. }
-        | PredicateExpr::IsNotNull { .. }
-        | PredicateExpr::True
-        | PredicateExpr::False => false,
-    }
-}
-
-fn relation_contains_branch_ref(rel: &crate::query_manager::relation_ir::RelExpr) -> bool {
-    use crate::query_manager::relation_ir::RelExpr;
-
-    match rel {
-        RelExpr::Filter { input, predicate } => {
-            relation_contains_branch_ref(input) || relation_predicate_contains_branch_ref(predicate)
-        }
-        RelExpr::Union { inputs } => inputs.iter().any(relation_contains_branch_ref),
-        RelExpr::Join { left, right, .. } => {
-            relation_contains_branch_ref(left) || relation_contains_branch_ref(right)
-        }
-        RelExpr::Project { input, .. }
-        | RelExpr::Branch { input, .. }
-        | RelExpr::Distinct { input, .. }
-        | RelExpr::OrderBy { input, .. }
-        | RelExpr::Offset { input, .. }
-        | RelExpr::Limit { input, .. } => relation_contains_branch_ref(input),
-        RelExpr::Gather { seed, step, .. } => {
-            relation_contains_branch_ref(seed) || relation_contains_branch_ref(step)
-        }
-        RelExpr::TableScan { .. } => false,
     }
 }
 

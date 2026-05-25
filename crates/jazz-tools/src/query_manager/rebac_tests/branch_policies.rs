@@ -620,8 +620,8 @@ fn local_union_branch_read_uses_branch_select_policy_in_graph_filter() {
 //
 //   Normal select = true
 //   Branch select = false
-//   Expected: normal select is not used as a fallback.
-fn branch_read_does_not_fall_back_to_normal_policy_for_non_row_id_branch() {
+//   Expected: forBranch resolution fails and denies instead of using normal select.
+fn branch_read_denies_when_for_branch_resolution_fails_for_non_row_id_branch() {
     let mut todo_policies = TablePolicies::new()
         .with_select(PolicyExpr::True)
         .with_insert(PolicyExpr::True);
@@ -1120,8 +1120,8 @@ fn branch_insert_uses_matching_branch_policy() {
 //
 //   Normal insert = true
 //   Branch insert = false
-//   Expected: normal insert is not used as a fallback.
-fn branch_insert_does_not_fall_back_to_normal_policy_for_non_row_id_branch() {
+//   Expected: forBranch resolution fails and denies instead of using normal insert.
+fn branch_insert_denies_when_for_branch_resolution_fails_for_non_row_id_branch() {
     let mut todo_policies = TablePolicies::new().with_insert(PolicyExpr::True);
     todo_policies.for_branch = HashMap::from([(
         TableName::new("branches"),
@@ -1319,8 +1319,8 @@ fn synced_branch_insert_uses_branch_policy_without_normal_insert_policy() {
 //   Branch name = dev/<schema-hash>/alice-draft
 //   Normal insert = true
 //   Branch insert = false
-//   Expected: synced writes do not use normal insert as a fallback.
-fn synced_branch_insert_does_not_fall_back_to_normal_policy_for_non_row_id_branch() {
+//   Expected: forBranch resolution fails and denies instead of using normal insert.
+fn synced_branch_insert_denies_when_for_branch_resolution_fails_for_non_row_id_branch() {
     let mut todo_policies = TablePolicies::new().with_insert(PolicyExpr::True);
     todo_policies.for_branch = HashMap::from([(
         TableName::new("branches"),
