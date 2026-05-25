@@ -411,3 +411,21 @@ Verified after the real split:
 - `cargo fmt -p mini-jazz-sqlite`
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 11:41 PDT
+
+Extracted write transaction mechanics too.
+
+- `write.rs` now owns `WriteTx`, `RowRef`, row read recording, current-row
+  reads for mutation, history append, and current projection writes.
+- `store.rs` keeps transaction orchestration and read-set validation metadata
+  for now, because authority validation/import/export still live there.
+
+This brings `store.rs` under 1k lines. It is still the runtime coordinator, but
+it no longer owns the mutation mechanics directly.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`

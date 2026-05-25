@@ -6,6 +6,7 @@ mod query;
 mod schema;
 mod scope;
 mod store;
+mod write;
 
 pub use error::{Error, Result};
 pub use query::{eq, gt, query, Desc, Filter, FilterValue, Query, SortDirection};
@@ -15,3 +16,4 @@ pub use scope::{
     SubscriptionDiff, TxRecord,
 };
 pub use store::*;
+pub use write::{RowRef, WriteTx};
