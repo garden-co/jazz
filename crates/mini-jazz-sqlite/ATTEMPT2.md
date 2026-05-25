@@ -412,31 +412,17 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
-### 2026-05-25 12:12 PDT
+### 2026-05-25 11:41 PDT
 
-Refined predicate invalidation with local write column masks.
+Extracted write transaction mechanics too.
 
-Red/green test:
+- `write.rs` now owns `WriteTx`, `RowRef`, row read recording, current-row
+  reads for mutation, history append, and current projection writes.
+- `store.rs` keeps transaction orchestration and read-set validation metadata
+  for now, because authority validation/import/export still live there.
 
-- Subscribe to `todos where done = false`.
-- Keep a closed row outside the result.
-- Update only the closed row's `title`.
-- Polling the subscription should skip rerun, because neither result row scope
-  nor the `done` predicate scope overlaps the changed column.
-
-Implementation shape:
-
-- `WriteEffect` now carries changed user columns.
-- Inserts/deletes conservatively mark all user columns.
-- Updates mark only patched columns.
-- Predicate scope overlap checks table/row plus changed column:
-  - exact result/dependency row still invalidates regardless of column
-  - table-level predicate scope invalidates only when the predicate column was
-    changed, or when the effect has unknown columns
-
-Discovery: this keeps the broad table predicate closure correct while making it
-less noisy for common non-result payload updates. It is still not true old/new
-index-key range invalidation, but it is the first useful precision step.
+This brings `store.rs` under 1k lines. It is still the runtime coordinator, but
+it no longer owns the mutation mechanics directly.
 
 Verified:
 
@@ -444,38 +430,27 @@ Verified:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
-### 2026-05-25 12:10 PDT
+### 2026-05-25 11:42 PDT
 
-Added first conflict candidate projection.
+Added the first explicit predicate/absence scope fact.
 
-Red/green test:
+Optional includes now record a `PredicateScope` when the referenced dependency
+row is missing. The current shape is intentionally narrow:
 
-- Core creates and accepts a base row.
-- Alice and Bob both import the base and update the same row independently.
-- Core imports both pending updates without validating/rejecting either.
-- Query returns one resolved current row, while `$conflicts` contains both
-  pending candidate tx ids.
+- table
+- row id
+- reason: `OptionalIncludeMissing`
 
-Implementation shape:
-
-- Current row views now expose `$conflicts` from `j_conflicts_json`.
-- Current projection rebuild resets conflict metadata, then detects rows with
-  multiple local-pending candidates on the same branch/row id.
-- For those rows, current projection stores:
-  `{ "candidates": [tx_id, ...] }`
-
-Discovery: this is enough to prove the "resolved current value plus conflict
-meta" shape, but the candidate detection is intentionally naive. It uses
-multiple local-pending versions as the conflict signal, not true causality from
-read/write sets.
+Discovery: this is a useful stepping stone before full predicate/range read
+sets. It proves the query result can carry non-row-locator scope facts while
+still keeping row result/dependency scope separate.
 
 Open debt:
 
-- Conflict candidate detection should use causality/read-write sets.
-- Conflict metadata should include per-column masks and candidate values, not
-  only tx ids.
-- Resolved value policy is currently whatever current projection selected
-  deterministically; it is not a real merge resolver.
+- Predicate scope is not yet exported in sync bundles.
+- Predicate scope is not yet used for subscription invalidation.
+- Required includes and ordinary filters still do not record range/predicate
+  read facts.
 
 Verified:
 
@@ -483,28 +458,106 @@ Verified:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
-### 2026-05-25 12:08 PDT
+### 2026-05-25 11:44 PDT
 
-Added a persistent write-set index.
+Split integration tests by behavior:
 
-Change:
+- `attempt2_local.rs`: local storage/query/reopen.
+- `subscriptions.rs`: dependency-driven subscription diffs and optional
+  absence scope.
+- `sync.rs`: scoped bundle export/import reproduction.
+- `authority.rs`: acceptance, rejection, and read-set validation.
 
-- New system table: `jazz_tx_write(tx_id, table_name, row_id)`.
-- Local writes populate it from `WriteTx` effects before commit.
-- Imported history rows populate it during `import_query_scope`.
-- `export_transaction(tx_id)` now reads distinct table names from
-  `jazz_tx_write` instead of scanning every schema table.
+Verified:
 
-Discovery: write effects, sync closure, and tx export want the same durable
-write-set fact. The in-memory effect log is listener-oriented; `jazz_tx_write`
-is protocol/runtime metadata and should survive restart.
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 11:45 PDT
+
+Made absence scope affect sync bundles.
+
+Red test: Bob first imports a todo with an optional project include, then Alice
+deletes the project and exports the same optional query. Without exporting the
+predicate-scoped project row history, Bob kept rendering the stale project.
+
+Fix: `export_query_scope` now follows `predicate_scopes` in addition to result
+and dependency row locators. This sends the delete history needed for Bob to
+reproduce the null optional include.
+
+Discovery: predicate/absence scope is not just listener metadata; it is part of
+the sync closure required to recreate query semantics.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 11:51 PDT
+
+Added first filter predicate scope and made it affect sync closure.
+
+Shape:
+
+- Query filters now emit `PredicateScope { table, column, op, value }`.
+- Filter predicate scopes currently have an empty `row_id`.
+- Empty `row_id` means broad table predicate closure during export: include all
+  row histories for that table.
+
+Red/green discovery:
+
+- A row entering a filtered result is already handled by result-row scope,
+  because the row appears in the new result.
+- A row leaving a filtered result is the important failure. The new result can
+  be empty, so result-row scope alone sends no history and the receiver keeps a
+  stale row.
+- Broad table predicate closure fixes correctness for that case, at obvious
+  overfetch cost.
+
+Next optimization target: replace broad table predicate closure with indexed
+old/new key ranges or a query-aware delta protocol, while preserving the
+row-leaving-filter test.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 11:53 PDT
+
+Added the first in-memory effect log for subscription invalidation.
+
+Shape:
+
+- `WriteTx` records touched row effects while appending history/current rows.
+- `Client` stores an in-memory ordered effect log.
+- Each subscription stores its last result rows, last query scope, last seen
+  effect sequence, and a rerun counter.
+- `poll_subscription` skips rerun when no new write effect overlaps the stored
+  result/dependency/predicate scope.
+
+Red/green test:
+
+- Subscribe to open todos.
+- Write an unrelated project row.
+- Poll returns an empty diff and does not increment rerun count.
+- Write a matching todo row.
+- Poll reruns and reports one added row.
+
+Discovery: the broad table predicate scope from filter reads makes simple
+table-level invalidation correct but conservative. That is a good baseline:
+indexed predicate/range scope can become a precision improvement without
+changing the subscription verb shape.
 
 Open debt:
 
-- Backfill for older stores is not handled in the prototype.
-- We still need column masks in the write-set.
-- `export_transaction` should probably fail loudly if the tx has no write-set
-  rows but does have history rows; that would catch index drift.
+- Effect log is not durable.
+- Import/rejection/projection repair do not emit effects yet.
+- Rerun counters are prototype test instrumentation, not a public API.
+- Column masks and old/new index keys are not recorded yet.
 
 Verified:
 
@@ -512,131 +565,29 @@ Verified:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
-### 2026-05-25 12:07 PDT
+### 2026-05-25 11:54 PDT
 
-Improved imported bundle effects from broad history effects to actual import
-delta effects.
+Made imported scope bundles emit effects.
 
-Red/green test:
+Red test: Alice subscribes to an optimistic row, authority rejects the tx, Alice
+imports the rejected tx bundle, and then polls the subscription. Before this
+change, projection repair happened but the subscription skipped rerun because
+import emitted no effects.
 
-- Bob imports a scope bundle and subscribes to the query.
-- Bob imports the same bundle again.
-- Polling the subscription should not rerun, because the second import changed
-  neither history nor tx fate.
+Fix: `import_query_scope` records write effects for bundled history rows after
+rebuilding projections. This is broad and can over-invalidate, but it makes
+remote sync/fate changes participate in the same subscription invalidation path
+as local writes.
 
-Implementation shape:
+Discovery: projection repair and import are effectful verbs. Treating effects
+as only local write output misses exactly the sync cases listeners care about.
 
-- `import_query_scope` now detects tx fate changes before upsert.
-- History row effects are emitted only when `INSERT OR IGNORE` actually inserts
-  a row.
-- If a tx fate changes, bundled history rows for that tx emit effects so
-  rejection/acceptance projection repair still wakes listeners.
+Open debt:
 
-Discovery: projection effects should be tied to import deltas, not protocol
-payload size. This keeps duplicate sync messages idempotent from the listener
-perspective while preserving rejection invalidation.
-
-Open debt: the best effect source is still probably projection diffing, because
-inserted history does not always imply changed current visibility.
-
-Verified:
-
-- `cargo fmt -p mini-jazz-sqlite`
-- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
-- `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 12:05 PDT
-
-Added the first pure-query branch read.
-
-API:
-
-- `create_branch(branch_id, base_global_epoch)`
-- `write_on_branch(branch_id, |tx| ...)`
-- `all_on_branch(query, branch_id)`
-
-Current limits:
-
-- one source: main at a global epoch
-- one table
-- filters/order/limit
-- no includes yet
-- branch-local inserts/overrides are visible even before global acceptance
-
-Implementation shape:
-
-- `jazz_branch` stores branch id and main base epoch.
-- `WriteTx` now carries a branch id; normal writes use `main`.
-- Branch reads are query-only:
-  - latest non-rejected row per row id from branch history
-  - union with latest accepted main row at the branch base epoch
-  - suppress main base rows when the branch has any non-rejected row for that
-    row id
-
-Discovery: the overlay query is straightforward for one source, but it already
-points at the need for a shared visible-row expression builder. Branches,
-snapshots, and future multi-source branch precedence are the same problem with
-different source stacks.
-
-Verified:
-
-- `cargo fmt -p mini-jazz-sqlite`
-- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
-- `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 12:02 PDT
-
-Started extracting visibility planning.
-
-Change:
-
-- Added `visibility.rs` with helpers for accepted-history visibility:
-  - join a row version to an accepted transaction at/before an epoch
-  - assert no newer accepted row version is visible at/before that epoch
-- Rewired `all_at_global_epoch` to use those helpers for both base and joined
-  dependency rows.
-
-Discovery: even this tiny extraction immediately exposed parameter-order
-coupling in generated SQL. A fuller query planner should return SQL fragments
-plus ordered bind params together, not as separate strings and hand-maintained
-parameter pushes.
-
-Verified no behavior change:
-
-- `cargo fmt -p mini-jazz-sqlite`
-- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
-- `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 11:59 PDT
-
-Extended pure-query historical snapshots to required includes.
-
-Red/green test:
-
-- Insert a project and todo, accept them at global epochs 1 and 2.
-- Update the project and accept at global epoch 3.
-- Query joined todos at epoch 2 and epoch 3.
-- The same todo sees the old project name at epoch 2 and the new project name
-  at epoch 3.
-
-Implementation shape:
-
-- `all_at_global_epoch` now lowers a required include by joining the dependency
-  history table through the same "latest accepted row at or before epoch"
-  predicate used for the base row.
-- Result scope and dependency scope are populated from history-backed rows.
-- Optional historical includes remain untested, but the SQL path is already
-  using `LEFT JOIN` when the query asks for optional.
-
-Discovery: history-backed joins are mechanically straightforward but duplicate
-the current-read lowering shape. This argues for extracting a reusable
-"visible table expression" builder before branches, where the visibility
-predicate becomes more complex.
-
-Also fixed a stale-read validation bug found by the full suite: validation must
-choose the latest accepted row by `global_epoch`, not by wall-clock update time.
-Same-millisecond writes could otherwise make the authority compare against the
-wrong accepted base.
+- Imported effects should probably be based on projection deltas, not every
+  bundled history row.
+- Fate-only tx imports without bundled history still need a principled effect
+  story.
 
 Verified:
 
@@ -689,68 +640,160 @@ Verified:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
-### 2026-05-25 11:54 PDT
+### 2026-05-25 11:59 PDT
 
-Made imported scope bundles emit effects.
-
-Red test: Alice subscribes to an optimistic row, authority rejects the tx, Alice
-imports the rejected tx bundle, and then polls the subscription. Before this
-change, projection repair happened but the subscription skipped rerun because
-import emitted no effects.
-
-Fix: `import_query_scope` records write effects for bundled history rows after
-rebuilding projections. This is broad and can over-invalidate, but it makes
-remote sync/fate changes participate in the same subscription invalidation path
-as local writes.
-
-Discovery: projection repair and import are effectful verbs. Treating effects
-as only local write output misses exactly the sync cases listeners care about.
-
-Open debt:
-
-- Imported effects should probably be based on projection deltas, not every
-  bundled history row.
-- Fate-only tx imports without bundled history still need a principled effect
-  story.
-
-Verified:
-
-- `cargo fmt -p mini-jazz-sqlite`
-- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
-- `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 11:53 PDT
-
-Added the first in-memory effect log for subscription invalidation.
-
-Shape:
-
-- `WriteTx` records touched row effects while appending history/current rows.
-- `Client` stores an in-memory ordered effect log.
-- Each subscription stores its last result rows, last query scope, last seen
-  effect sequence, and a rerun counter.
-- `poll_subscription` skips rerun when no new write effect overlaps the stored
-  result/dependency/predicate scope.
+Extended pure-query historical snapshots to required includes.
 
 Red/green test:
 
-- Subscribe to open todos.
-- Write an unrelated project row.
-- Poll returns an empty diff and does not increment rerun count.
-- Write a matching todo row.
-- Poll reruns and reports one added row.
+- Insert a project and todo, accept them at global epochs 1 and 2.
+- Update the project and accept at global epoch 3.
+- Query joined todos at epoch 2 and epoch 3.
+- The same todo sees the old project name at epoch 2 and the new project name
+  at epoch 3.
 
-Discovery: the broad table predicate scope from filter reads makes simple
-table-level invalidation correct but conservative. That is a good baseline:
-indexed predicate/range scope can become a precision improvement without
-changing the subscription verb shape.
+Implementation shape:
+
+- `all_at_global_epoch` now lowers a required include by joining the dependency
+  history table through the same "latest accepted row at or before epoch"
+  predicate used for the base row.
+- Result scope and dependency scope are populated from history-backed rows.
+- Optional historical includes remain untested, but the SQL path is already
+  using `LEFT JOIN` when the query asks for optional.
+
+Discovery: history-backed joins are mechanically straightforward but duplicate
+the current-read lowering shape. This argues for extracting a reusable
+"visible table expression" builder before branches, where the visibility
+predicate becomes more complex.
+
+Also fixed a stale-read validation bug found by the full suite: validation must
+choose the latest accepted row by `global_epoch`, not by wall-clock update time.
+Same-millisecond writes could otherwise make the authority compare against the
+wrong accepted base.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 12:02 PDT
+
+Started extracting visibility planning.
+
+Change:
+
+- Added `visibility.rs` with helpers for accepted-history visibility:
+  - join a row version to an accepted transaction at/before an epoch
+  - assert no newer accepted row version is visible at/before that epoch
+- Rewired `all_at_global_epoch` to use those helpers for both base and joined
+  dependency rows.
+
+Discovery: even this tiny extraction immediately exposed parameter-order
+coupling in generated SQL. A fuller query planner should return SQL fragments
+plus ordered bind params together, not as separate strings and hand-maintained
+parameter pushes.
+
+Verified no behavior change:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 12:05 PDT
+
+Added the first pure-query branch read.
+
+API:
+
+- `create_branch(branch_id, base_global_epoch)`
+- `write_on_branch(branch_id, |tx| ...)`
+- `all_on_branch(query, branch_id)`
+
+Current limits:
+
+- one source: main at a global epoch
+- one table
+- filters/order/limit
+- no includes yet
+- branch-local inserts/overrides are visible even before global acceptance
+
+Implementation shape:
+
+- `jazz_branch` stores branch id and main base epoch.
+- `WriteTx` now carries a branch id; normal writes use `main`.
+- Branch reads are query-only:
+  - latest non-rejected row per row id from branch history
+  - union with latest accepted main row at the branch base epoch
+  - suppress main base rows when the branch has any non-rejected row for that
+    row id
+
+Discovery: the overlay query is straightforward for one source, but it already
+points at the need for a shared visible-row expression builder. Branches,
+snapshots, and future multi-source branch precedence are the same problem with
+different source stacks.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 12:07 PDT
+
+Improved imported bundle effects from broad history effects to actual import
+delta effects.
+
+Red/green test:
+
+- Bob imports a scope bundle and subscribes to the query.
+- Bob imports the same bundle again.
+- Polling the subscription should not rerun, because the second import changed
+  neither history nor tx fate.
+
+Implementation shape:
+
+- `import_query_scope` now detects tx fate changes before upsert.
+- History row effects are emitted only when `INSERT OR IGNORE` actually inserts
+  a row.
+- If a tx fate changes, bundled history rows for that tx emit effects so
+  rejection/acceptance projection repair still wakes listeners.
+
+Discovery: projection effects should be tied to import deltas, not protocol
+payload size. This keeps duplicate sync messages idempotent from the listener
+perspective while preserving rejection invalidation.
+
+Open debt: the best effect source is still probably projection diffing, because
+inserted history does not always imply changed current visibility.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 12:08 PDT
+
+Added a persistent write-set index.
+
+Change:
+
+- New system table: `jazz_tx_write(tx_id, table_name, row_id)`.
+- Local writes populate it from `WriteTx` effects before commit.
+- Imported history rows populate it during `import_query_scope`.
+- `export_transaction(tx_id)` now reads distinct table names from
+  `jazz_tx_write` instead of scanning every schema table.
+
+Discovery: write effects, sync closure, and tx export want the same durable
+write-set fact. The in-memory effect log is listener-oriented; `jazz_tx_write`
+is protocol/runtime metadata and should survive restart.
 
 Open debt:
 
-- Effect log is not durable.
-- Import/rejection/projection repair do not emit effects yet.
-- Rerun counters are prototype test instrumentation, not a public API.
-- Column masks and old/new index keys are not recorded yet.
+- Backfill for older stores is not handled in the prototype.
+- We still need column masks in the write-set.
+- `export_transaction` should probably fail loudly if the tx has no write-set
+  rows but does have history rows; that would catch index drift.
 
 Verified:
 
@@ -758,95 +801,38 @@ Verified:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
-### 2026-05-25 11:51 PDT
+### 2026-05-25 12:10 PDT
 
-Added first filter predicate scope and made it affect sync closure.
+Added first conflict candidate projection.
 
-Shape:
+Red/green test:
 
-- Query filters now emit `PredicateScope { table, column, op, value }`.
-- Filter predicate scopes currently have an empty `row_id`.
-- Empty `row_id` means broad table predicate closure during export: include all
-  row histories for that table.
+- Core creates and accepts a base row.
+- Alice and Bob both import the base and update the same row independently.
+- Core imports both pending updates without validating/rejecting either.
+- Query returns one resolved current row, while `$conflicts` contains both
+  pending candidate tx ids.
 
-Red/green discovery:
+Implementation shape:
 
-- A row entering a filtered result is already handled by result-row scope,
-  because the row appears in the new result.
-- A row leaving a filtered result is the important failure. The new result can
-  be empty, so result-row scope alone sends no history and the receiver keeps a
-  stale row.
-- Broad table predicate closure fixes correctness for that case, at obvious
-  overfetch cost.
+- Current row views now expose `$conflicts` from `j_conflicts_json`.
+- Current projection rebuild resets conflict metadata, then detects rows with
+  multiple local-pending candidates on the same branch/row id.
+- For those rows, current projection stores:
+  `{ "candidates": [tx_id, ...] }`
 
-Next optimization target: replace broad table predicate closure with indexed
-old/new key ranges or a query-aware delta protocol, while preserving the
-row-leaving-filter test.
-
-Verified:
-
-- `cargo fmt -p mini-jazz-sqlite`
-- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
-- `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 11:45 PDT
-
-Made absence scope affect sync bundles.
-
-Red test: Bob first imports a todo with an optional project include, then Alice
-deletes the project and exports the same optional query. Without exporting the
-predicate-scoped project row history, Bob kept rendering the stale project.
-
-Fix: `export_query_scope` now follows `predicate_scopes` in addition to result
-and dependency row locators. This sends the delete history needed for Bob to
-reproduce the null optional include.
-
-Discovery: predicate/absence scope is not just listener metadata; it is part of
-the sync closure required to recreate query semantics.
-
-Verified:
-
-- `cargo fmt -p mini-jazz-sqlite`
-- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
-- `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 11:44 PDT
-
-Split integration tests by behavior:
-
-- `attempt2_local.rs`: local storage/query/reopen.
-- `subscriptions.rs`: dependency-driven subscription diffs and optional
-  absence scope.
-- `sync.rs`: scoped bundle export/import reproduction.
-- `authority.rs`: acceptance, rejection, and read-set validation.
-
-Verified:
-
-- `cargo fmt -p mini-jazz-sqlite`
-- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
-- `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 11:42 PDT
-
-Added the first explicit predicate/absence scope fact.
-
-Optional includes now record a `PredicateScope` when the referenced dependency
-row is missing. The current shape is intentionally narrow:
-
-- table
-- row id
-- reason: `OptionalIncludeMissing`
-
-Discovery: this is a useful stepping stone before full predicate/range read
-sets. It proves the query result can carry non-row-locator scope facts while
-still keeping row result/dependency scope separate.
+Discovery: this is enough to prove the "resolved current value plus conflict
+meta" shape, but the candidate detection is intentionally naive. It uses
+multiple local-pending versions as the conflict signal, not true causality from
+read/write sets.
 
 Open debt:
 
-- Predicate scope is not yet exported in sync bundles.
-- Predicate scope is not yet used for subscription invalidation.
-- Required includes and ordinary filters still do not record range/predicate
-  read facts.
+- Conflict candidate detection should use causality/read-write sets.
+- Conflict metadata should include per-column masks and candidate values, not
+  only tx ids.
+- Resolved value policy is currently whatever current projection selected
+  deterministically; it is not a real merge resolver.
 
 Verified:
 
@@ -854,17 +840,31 @@ Verified:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
-### 2026-05-25 11:41 PDT
+### 2026-05-25 12:12 PDT
 
-Extracted write transaction mechanics too.
+Refined predicate invalidation with local write column masks.
 
-- `write.rs` now owns `WriteTx`, `RowRef`, row read recording, current-row
-  reads for mutation, history append, and current projection writes.
-- `store.rs` keeps transaction orchestration and read-set validation metadata
-  for now, because authority validation/import/export still live there.
+Red/green test:
 
-This brings `store.rs` under 1k lines. It is still the runtime coordinator, but
-it no longer owns the mutation mechanics directly.
+- Subscribe to `todos where done = false`.
+- Keep a closed row outside the result.
+- Update only the closed row's `title`.
+- Polling the subscription should skip rerun, because neither result row scope
+  nor the `done` predicate scope overlaps the changed column.
+
+Implementation shape:
+
+- `WriteEffect` now carries changed user columns.
+- Inserts/deletes conservatively mark all user columns.
+- Updates mark only patched columns.
+- Predicate scope overlap checks table/row plus changed column:
+  - exact result/dependency row still invalidates regardless of column
+  - table-level predicate scope invalidates only when the predicate column was
+    changed, or when the effect has unknown columns
+
+Discovery: this keeps the broad table predicate closure correct while making it
+less noisy for common non-result payload updates. It is still not true old/new
+index-key range invalidation, but it is the first useful precision step.
 
 Verified:
 
