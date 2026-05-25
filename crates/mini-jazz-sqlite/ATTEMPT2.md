@@ -1019,3 +1019,32 @@ attractive: it pays almost the same storage overhead as indexed while keeping
 JSON parse on validation. This supports keeping JSON metadata as the baseline
 and only adding narrow side indexes when a specific hot authority operation
 needs them.
+
+### 2026-05-25 12:42 PDT
+
+Closed the branch sync/base-history hole.
+
+Red/green test:
+
+- Alice creates and accepts a main-base row.
+- Alice creates a branch at that base epoch but writes no branch-local overlay.
+- Alice exports the branch query scope to Bob.
+- Bob has never separately received the main-base row, but should still recreate
+  Alice's branch view.
+
+Implementation shape:
+
+- `QueryScope` now carries an optional `branch_id`.
+- Current/main/snapshot queries set it to `None`; branch queries set it to the
+  queried branch id.
+- `export_query_scope` includes branch records from the explicit scope branch,
+  not only from branch-local history rows discovered while exporting.
+
+Discovery: branch provenance cannot be inferred from result row tx ids. A branch
+view may contain only main-base rows, so the query scope itself needs to say
+which branch/base produced the view. The existing tx-id closure then supplies the
+main-base history rows needed by a receiver that has never seen that base.
+
+Verified focused test:
+
+- `cargo test -p mini-jazz-sqlite branch_query_scope_bundle_includes_main_base_history`

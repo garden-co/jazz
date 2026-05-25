@@ -548,6 +548,7 @@ impl Client {
         Ok(QueryResult {
             rows: result_rows,
             scope: QueryScope {
+                branch_id: None,
                 result_rows: result_scope,
                 dependency_rows: dependency_scope,
                 predicate_scopes,
@@ -745,6 +746,7 @@ impl Client {
         Ok(QueryResult {
             rows: result_rows,
             scope: QueryScope {
+                branch_id: None,
                 result_rows: result_scope,
                 dependency_rows: dependency_scope,
                 predicate_scopes: self.filter_predicate_scopes(table, &query),
@@ -903,6 +905,7 @@ impl Client {
         Ok(QueryResult {
             rows: result_rows,
             scope: QueryScope {
+                branch_id: Some(branch_id.to_owned()),
                 result_rows: result_scope,
                 dependency_rows: Vec::new(),
                 predicate_scopes: self.filter_predicate_scopes(table, &query),
@@ -984,6 +987,21 @@ impl Client {
         let mut branches = BTreeMap::new();
         let mut rows = Vec::new();
         let mut scoped_rows = BTreeMap::new();
+
+        if let Some(branch_id) = &scope.branch_id {
+            let base_global_epoch = self.conn.query_row(
+                "SELECT base_global_epoch FROM jazz_branch WHERE branch_id = ?1",
+                params![branch_id],
+                |row| row.get(0),
+            )?;
+            branches.insert(
+                branch_id.clone(),
+                BranchRecord {
+                    branch_id: branch_id.clone(),
+                    base_global_epoch,
+                },
+            );
+        }
 
         for locator in scope.result_rows.iter().chain(&scope.dependency_rows) {
             scoped_rows

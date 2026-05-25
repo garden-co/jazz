@@ -376,3 +376,41 @@ fn branch_query_scope_bundle_import_reproduces_branch_result() -> mini_jazz_sqli
 
     Ok(())
 }
+
+#[test]
+fn branch_query_scope_bundle_includes_main_base_history() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+        t.index("open_by_created", ["done", "$createdAt"]);
+    });
+
+    let mut alice = Harness::new()
+        .client("alice", schema.clone())
+        .durable_in_memory()?;
+    let mut bob = Harness::new().client("bob", schema).durable_in_memory()?;
+
+    alice.write(|tx| {
+        tx.insert("todos", json!({ "title": "Base only", "done": false }))?;
+        Ok(())
+    })?;
+
+    let open_todos = query("todos")
+        .filter(eq("done", false))
+        .order_by("$createdAt", Desc);
+    let base = alice.all(open_todos.clone())?;
+    let base_tx = base.scope.result_rows[0].tx_id.clone();
+    alice.accept_transaction(&base_tx, 1)?;
+
+    alice.create_branch("draft", 1)?;
+    let alice_result = alice.all_on_branch(open_todos.clone(), "draft")?;
+    let bundle = alice.export_query_scope(&alice_result.scope)?;
+
+    bob.import_query_scope(&bundle)?;
+    let bob_result = bob.all_on_branch(open_todos, "draft")?;
+
+    assert_eq!(bob_result.rows.len(), 1);
+    assert_eq!(bob_result.rows[0].get("title").unwrap(), "Base only");
+
+    Ok(())
+}

@@ -13,6 +13,7 @@ pub struct SubscriptionDiff {
 }
 
 pub struct QueryScope {
+    pub branch_id: Option<String>,
     pub result_rows: Vec<ScopeRow>,
     pub dependency_rows: Vec<ScopeRow>,
     pub predicate_scopes: Vec<PredicateScope>,
