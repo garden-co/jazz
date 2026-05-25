@@ -2945,6 +2945,71 @@ mod tests {
     }
 
     #[test]
+    fn branch_local_row_shadows_same_row_from_base_branch() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-main".into(),
+            node_id: "alice-device".into(),
+            title: "Base title".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-main".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+        db.create_branch(CreateBranch {
+            branch_id: "draft".into(),
+            tx_id: "tx-create-draft".into(),
+            node_id: "alice-device".into(),
+            name: "Alice draft".into(),
+            head_global_epoch: 1,
+            base_provenance_json: r#"[{"branch":"main","globalBase":1}]"#.into(),
+            now: 150,
+        })
+        .unwrap();
+        db.insert_todo_in_branch(
+            "draft",
+            InsertTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-draft-shadow".into(),
+                node_id: "alice-device".into(),
+                title: "Draft title".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            },
+        )
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-draft-shadow".into(),
+            global_epoch: 2,
+        })
+        .unwrap();
+
+        let draft_rows = db
+            .query_todos_on_branch(
+                &TodoQuery {
+                    branch_id: "draft".into(),
+                    done: Some(false),
+                    created_after: Some(0),
+                },
+                "draft",
+                2,
+            )
+            .unwrap();
+
+        assert_eq!(draft_rows.rows.len(), 1);
+        assert_eq!(draft_rows.rows[0].title, "Draft title");
+        assert_eq!(draft_rows.rows[0].visible_tx_id, "tx-draft-shadow");
+    }
+
+    #[test]
     fn transaction_bundle_import_can_be_accepted_by_an_authority_store() {
         let mut alice = MiniJazzSqlite::in_memory().unwrap();
         let mut authority = MiniJazzSqlite::in_memory().unwrap();

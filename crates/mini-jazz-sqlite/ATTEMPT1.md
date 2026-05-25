@@ -476,6 +476,19 @@ describes the absence or range condition that must remain true for the result to
 be reproducible. This should probably become a first-class read-set/sync-scope
 shape rather than being smuggled through JSON on a query result.
 
+### 2026-05-24 22:54 PDT
+
+Added branch-local shadowing:
+
+- branch created from `main@globalBase=1`
+- branch writes a row with the same row id as a base row
+- branch read returns only the branch-local row
+
+Discovery: even the crude branch reader needs source precedence. The current
+Rust combiner hard-codes "branch-local shadows base". A real SQL lowering
+probably wants a source relation with `(source_branch_id, vector, precedence)`
+so shadowing works uniformly for joins, pagination, and sync scope.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
