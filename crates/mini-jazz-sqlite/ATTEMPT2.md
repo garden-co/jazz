@@ -249,3 +249,43 @@ Open debt:
 - Import does a broad projection rebuild.
 - Only concrete row scope is handled; predicate/absence scope is still missing.
 - Only `main` branch history is exported.
+
+### 2026-05-25 11:26 PDT
+
+Starting authority loop with a red local-to-global mapping test:
+
+- Alice writes optimistically.
+- Alice exports query scope to core.
+- Core imports the same transaction/history.
+- Core accepts the transaction at global epoch 1.
+- Core exports the accepted scope back.
+- Alice imports it and sees the same tx id enriched with accepted fate/global
+  epoch.
+
+This intentionally skips read-set validation at first. The target is the
+identity/fate propagation shape.
+
+### 2026-05-25 11:27 PDT
+
+First authority acceptance loop is green.
+
+Implementation shape:
+
+- `Harness::authority` is currently role sugar over the same store type.
+- Core imports Alice's scoped tx/history bundle.
+- `accept_transaction(tx_id, global_epoch)` mutates `jazz_tx.status` and
+  `jazz_tx.global_epoch`.
+- Core exports the same query scope back.
+- Alice imports it and upserts fate on the existing tx id.
+
+Discovery: the mutable-fate baseline is enough for the first local-to-global
+mapping flow. The public tx id remains stable; authority acceptance enriches
+the existing transaction row.
+
+Open debt:
+
+- This is not yet authority validation. There are no read sets, policies, or
+  constraints in the acceptance path.
+- `authority` is not a distinct role yet.
+- Proposal-vs-authority-observation is only conceptual; there is no separate
+  observation payload beyond the updated tx record.

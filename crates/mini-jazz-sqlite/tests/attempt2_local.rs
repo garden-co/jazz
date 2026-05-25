@@ -304,3 +304,56 @@ fn query_scope_bundle_import_reproduces_joined_result() -> mini_jazz_sqlite::Res
 
     Ok(())
 }
+
+#[test]
+fn authority_acceptance_enriches_existing_transaction_identity() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new()
+        .table("projects", |t| {
+            t.text("name");
+        })
+        .table("todos", |t| {
+            t.text("title");
+            t.bool("done");
+            t.ref_("project_id", "projects");
+        });
+
+    let mut alice = Harness::new()
+        .client("alice", schema.clone())
+        .durable_in_memory()?;
+    let mut core = Harness::new()
+        .authority("core", schema)
+        .durable_in_memory()?;
+
+    alice.write(|tx| {
+        let project = tx.insert("projects", json!({ "name": "Authority Project" }))?;
+        tx.insert(
+            "todos",
+            json!({
+                "title": "Accept me",
+                "done": false,
+                "project_id": project.id()
+            }),
+        )?;
+        Ok(())
+    })?;
+
+    let open_todos = query("todos")
+        .filter(eq("done", false))
+        .include_required("project", "project_id");
+    let alice_result = alice.all(open_todos.clone())?;
+    let tx_id = alice_result.scope.result_rows[0].tx_id.clone();
+
+    let proposed = alice.export_query_scope(&alice_result.scope)?;
+    core.import_query_scope(&proposed)?;
+    core.accept_transaction(&tx_id, 1)?;
+
+    let accepted_result = core.all(open_todos)?;
+    let accepted = core.export_query_scope(&accepted_result.scope)?;
+    alice.import_query_scope(&accepted)?;
+
+    assert_eq!(alice.transaction_status(&tx_id)?, "global_durable_accepted");
+    assert_eq!(alice.transaction_global_epoch(&tx_id)?, Some(1));
+    assert_eq!(alice_result.scope.result_rows[0].tx_id, tx_id);
+
+    Ok(())
+}

@@ -219,6 +219,10 @@ impl Harness {
             schema,
         }
     }
+
+    pub fn authority(self, node_id: &str, schema: Schema) -> ClientBuilder {
+        self.client(node_id, schema)
+    }
 }
 
 impl Default for Harness {
@@ -823,6 +827,40 @@ impl Client {
         }
         sql_tx.commit()?;
         self.rebuild_current_projections()
+    }
+
+    pub fn accept_transaction(&self, tx_id: &str, global_epoch: i64) -> Result<()> {
+        self.conn.execute(
+            "
+            UPDATE jazz_tx
+            SET status = 'global_durable_accepted',
+                global_epoch = ?2,
+                rejection_reason_json = NULL
+            WHERE tx_id = ?1
+            ",
+            params![tx_id, global_epoch],
+        )?;
+        Ok(())
+    }
+
+    pub fn transaction_status(&self, tx_id: &str) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT status FROM jazz_tx WHERE tx_id = ?1",
+                params![tx_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn transaction_global_epoch(&self, tx_id: &str) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT global_epoch FROM jazz_tx WHERE tx_id = ?1",
+                params![tx_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     fn lower_include<'a>(
