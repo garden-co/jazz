@@ -107,8 +107,153 @@ and then have complex scenarios and assertions over the whole thing, Jepsen/prop
 
 ## SQLite schema, index and query concept overview
 
-TODO: this section should take an example Jazz schema with multiple tables, permissions, branches and schema versions and then spell out
-which corresponding SQLite schema would need to be generated, how high-level jazz queries would translate to expanded SQLite queries, etc.
+The worked examples below are the schema/index/query playground. Once the
+examples settle, this section should be collapsed into a precise implementation
+spec.
+
+## Design commitments
+
+These are the current design choices for the first implementation plan.
+
+### Storage baseline
+
+- User row history is required.
+- History tables are per logical table and per schema version, because schema
+  versions can have different column shapes.
+- `$rowId` is globally unique across all tables.
+- Main branch gets a current projection table for fast ordinary reads.
+- Non-main branches and arbitrary historical snapshots start as pure-query
+  history reads.
+- Current tables for non-main branches, sparse branch overlays, and other
+  projection tables are optional serving indexes for later hot paths.
+
+### Transactions
+
+Jazz combines today's batch and transaction concepts into one public concept:
+transactions.
+
+`$txId` is the public identity of a row version. A transaction can be:
+
+- **mergeable / eventually consistent**: can be accepted independently and later
+  merged per column
+- **exclusive / globally consistent**: authority-serialized and globally
+  validated; conflicts or foreign-key violations may reject the transaction
+
+Simple writes keep the friendly app behavior:
+
+```ts
+await db.insert(app.todos, { title: "Ship docs", done: false });
+```
+
+Each simple write call is one sealed transaction.
+
+For v0, merge resolution may be last-writer-wins, but it should already be
+per-column so later merge strategies can slot in without reshaping history.
+Merge strategy parity, such as counters, can come later.
+
+Transaction acceptance is where merge resolution happens. History can contain
+multiple visible candidate versions for a row; current-state projections store
+derived merge resolution for the branch/snapshot they serve.
+
+### Branches and visibility
+
+A branch's content is defined by a snapshot expression, not by copying the whole
+database.
+
+Accepted branch transactions become global history but remain isolated to their
+branch. Global history is not the same thing as visibility on `main`. Content
+becomes visible across branches only through explicit merge-commit
+transactions.
+
+Branches may include:
+
+- globally durable transactions
+- locally durable transactions
+- individual global/local transaction exceptions
+- other branches as bases
+
+This points toward dotted version vectors as the visibility model. The exact
+encoding and SQL lowering are still underspecified and need a dedicated worked
+example below.
+
+Arbitrary historical snapshots are important, but they are allowed to be slower
+than current `main` reads.
+
+### Queries and subscriptions
+
+Subscriptions are part of the first local implementation slice.
+
+The first subscription engine should rerun compiled SQL and diff full result
+rows. Full-row diffs are intentional because listeners should eventually be able
+to receive semantic row diffs.
+
+Subscription invalidation is emitted by the Jazz transaction applicator after
+SQLite commit. We do not want SQLite triggers or hooks to be semantic machinery;
+the applicator already knows the touched tables, rows, columns, branches,
+schemas, and transaction ids.
+
+System columns such as `$createdAt`, `$updatedAt`, `$createdBy`, and
+`$updatedBy` are queryable anywhere ordinary user columns are queryable.
+
+For paginated queries, sync scope initially includes only the current page.
+
+### Sync scope
+
+Sync scope means all rows needed for the receiver to reproduce the query result
+locally.
+
+For v0, sync can send the full history of:
+
+- rows in the result set
+- joined/include dependency rows
+- policy dependency rows
+- any other rows needed to recreate the query result
+
+Policy dependency rows are sent to ordinary clients for now. Opaque
+authorization proofs are a future exploration.
+
+Reconnect can start by replaying desired subscriptions and comparing known
+transaction ids. We should still design this path with efficiency in mind.
+
+### Relations, policies, and constraints
+
+Includes are read in the same consistency snapshot as their parent query.
+
+If an included child is required by the type, a missing child filters out the
+parent. If the child is optional, a missing child produces `null`.
+
+Foreign-key constraints are enforced by the authority for exclusive/globally
+consistent transactions. Mergeable transactions can be accepted and reconciled
+without local SQLite FK enforcement.
+
+### Schemas and lenses
+
+Each schema version gets its own physical SQLite history/current table shape.
+
+Lenses must be SQL-lowerable for the first implementation. A write through a
+lens creates a new row version in the writer's current schema table.
+
+If same logical row versions exist in different schema tables:
+
+- mergeable transactions merge with translation
+- exclusive transactions are authority-decided; conflicting same-row updates can
+  be rejected just like same-schema exclusive conflicts
+
+Schema, catalogue, permissions, and lens changes should ideally be represented
+as transactions in the same history/sync system.
+
+### Implementation scope
+
+The first implementation target is native Rust SQLite.
+
+The first local slice should include local CRUD, current `main` reads, and
+subscriptions. Sync comes after local transactional/query semantics are proven.
+
+Initial performance targets are approximate:
+
+- current reads should be comfortably below 1 ms for early datasets
+- pure-query branch/time-travel snapshot reads below roughly 50 ms at 100k rows
+  are acceptable
 
 ## Worked examples playground
 
@@ -240,7 +385,7 @@ CREATE TABLE todos__schema_v1_history (
 );
 ```
 
-Optional current-state projection table:
+Main current-state projection table:
 
 ```sql
 CREATE TABLE todos__schema_v1_current (
@@ -265,14 +410,11 @@ CREATE INDEX todos__schema_v1_current_done_created_at
   ON todos__schema_v1_current($branchId, done, $createdAt DESC);
 ```
 
-The current table is a serving optimization, not a semantic requirement. The
-simplest implementation can answer ordinary reads, branch reads, and time-travel
-reads directly from history using snapshot predicates. Benchmarks suggest that
-pure-query snapshot reads are acceptable for the row counts we expect early on.
-
-We should therefore start with history as the only required row store. Current
-tables, sparse branch overlays, and per-hot-branch projections can be introduced
-later as serving indexes for hot paths without changing the logical model.
+The `main` current table is part of the first implementation because ordinary
+current reads should be fast. It is derived state, not the source of truth.
+History is the required source of truth; branch/time-travel reads can start by
+querying history directly, and additional projections can be added later as
+serving indexes.
 
 #### Insert lowering
 
@@ -327,8 +469,8 @@ changed columns: $rowId, title, done, $createdAt, $updatedAt
 changed tx: $txId
 ```
 
-Open question: should invalidation be derived from SQLite hooks/triggers, or
-from the Jazz write path after the SQLite transaction commits?
+Invalidation is emitted by the Jazz transaction applicator after SQLite commit.
+We avoid SQLite triggers/hooks for semantic coupling.
 
 #### One-shot read lowering
 
@@ -391,8 +533,9 @@ ORDER BY $createdAt DESC;
 The app never sees the `$resultScopeJson` or `$policyScopeJson` columns. They are for local
 subscription diffing and upstream query-scope capture.
 
-Open question: should scope be encoded as JSON for simplicity, or returned as a
-second result set / temp table for speed?
+Scope should use whatever representation is most efficient in practice. JSON is
+readable for examples; a second result set or temp table may be better for the
+implementation.
 
 #### Subscription lowering
 
@@ -428,8 +571,8 @@ This is intentionally less clever than the current query graph. The bet is that
 SQLite's planner and indexes make rerun+diff fast enough for many workloads, and
 we can later add query-specific invalidation shortcuts where needed.
 
-Open question: do subscriptions diff full result rows, row ids plus visible tx
-ids, or a stable result hash per row?
+Subscriptions diff full result rows so listeners can receive semantic diffs, not
+only membership changes.
 
 #### Upstream query sync lowering
 
@@ -466,8 +609,8 @@ FROM visible_result;
 The sender then expands `(table, schema, branch, $rowId, $txId)` into the
 corresponding history/current messages required by the sync protocol.
 
-Open question: does sync transmit the exact visible tx, all frontier txs, or the
-minimal history slice needed to reconstruct the visible row?
+For v0, sync transmits the full history of rows in the result set and dependency
+rows required to reproduce the query locally.
 
 ### Example 2: same query with pagination
 
@@ -519,8 +662,7 @@ after a delete/update. The simple rerun+diff model handles that locally because
 the full SQL is rerun. For sync, the upper tier can also rerun and send the new
 page scope after each relevant upstream change.
 
-Open question: should paginated sync scope include only the current page, or an
-extra lookahead row/page to reduce churn?
+For v0, paginated sync scope includes only the current page.
 
 ### Example 3: two tables and explicit result provenance
 
@@ -597,8 +739,8 @@ WHERE t.$branchId = :branchId
 This makes the sync contract explicit: the query result is not reproducible
 unless both the todo rows and joined project rows are present locally.
 
-Open question: for `include`, should missing joined rows filter out the parent,
-or produce `null`/pending nested data while sync catches up?
+If the included child is required by the type, a missing child filters out the
+parent. If it is optional, the included value is `null`.
 
 ### Example 4: simple row policy with separate policy scope
 
@@ -703,8 +845,8 @@ For sync, both scopes may need to be sent down. A client cannot safely reproduce
 the query at the requested tier unless it has the result rows and the policy
 dependency rows that prove visibility.
 
-Open question: should policy dependencies be synced to ordinary clients, or
-should some clients receive opaque authorization proofs instead of policy rows?
+For v0, policy dependency rows are synced to ordinary clients. Opaque
+authorization proofs are future work.
 
 ### Example 5: schema v2 with a rename lens
 
@@ -773,10 +915,98 @@ v2 history/current row rather than mutating the v1 table. That matches the
 current intent: read old rows through a lens, write new versions in the current
 schema.
 
-Open question: how do we prevent duplicate logical rows from appearing in both
-v1-translated and native-v2 branches after a row has been upgraded?
+Duplicate logical rows across schema tables are resolved by transaction
+semantics. Mergeable transactions merge with translation; exclusive
+transactions are authority-decided and conflicting same-row updates may be
+rejected.
 
-### Example 6: branch/snapshot filter sketch
+### Example 6: dotted version vector skeleton
+
+This is the most underspecified part of the design.
+
+A snapshot should be able to describe:
+
+- a contiguous global base
+- a contiguous local base for one or more sites
+- individual global transactions beyond the global base
+- individual local transactions beyond local bases
+- other branches as bases
+
+Sketch:
+
+```text
+snapshot feature_branch:
+  global_base_epoch: g42
+
+  local_bases:
+    alice_device: a17
+    bob_device: b9
+
+  include_global:
+    g45
+    g51
+
+  include_local:
+    alice_device: a21
+    carol_device: c3
+
+  base_branches:
+    design_branch@<snapshot-id>
+    import_branch@<snapshot-id>
+```
+
+Possible normalized tables:
+
+```sql
+CREATE TABLE jazz_snapshot (
+  $snapshotId TEXT PRIMARY KEY,
+  $globalBaseEpoch INTEGER,
+  $metadataJson TEXT NOT NULL
+);
+
+CREATE TABLE jazz_snapshot_local_base (
+  $snapshotId TEXT NOT NULL,
+  $siteId TEXT NOT NULL,
+  $localBaseEpoch INTEGER NOT NULL,
+  PRIMARY KEY ($snapshotId, $siteId)
+);
+
+CREATE TABLE jazz_snapshot_include_tx (
+  $snapshotId TEXT NOT NULL,
+  $txId TEXT NOT NULL,
+  PRIMARY KEY ($snapshotId, $txId)
+);
+
+CREATE TABLE jazz_snapshot_base_branch (
+  $snapshotId TEXT NOT NULL,
+  $baseSnapshotId TEXT NOT NULL,
+  PRIMARY KEY ($snapshotId, $baseSnapshotId)
+);
+```
+
+Visibility predicate sketch:
+
+```sql
+-- A transaction is visible in snapshot S if:
+-- 1. it is globally durable with $globalEpoch <= S.$globalBaseEpoch, or
+-- 2. it is local to a site with $localEpoch <= S.local_base(site), or
+-- 3. it is explicitly included by S, or
+-- 4. it is visible in one of S's base branches.
+```
+
+Open questions:
+
+- Does this representation need both local bases and explicit local includes, or
+  can local durability be represented as explicit tx inclusions only?
+- How do we prevent branch-base recursion from making every query expensive?
+- Should branch bases be flattened into each snapshot at creation time, or kept
+  normalized and expanded at query time?
+- Can most visibility checks compile to indexed range predicates, or do we need
+  custom SQLite functions / side tables?
+- What is the exact authority story when branch-local txs become globally known
+  but remain isolated from `main`?
+
+### Example 7: branch/snapshot filter sketch
 
 This is deliberately less settled than the earlier examples.
 
@@ -806,10 +1036,6 @@ lets the exact snapshot semantics stay visible in SQL. Early benchmarks over
 100k base rows, 1k branches, and 200k total history versions put indexed
 history snapshot reads in the tens of milliseconds. That is acceptable for the
 row counts we are targeting initially.
-
-Open question: can dotted-version-vector visibility be compiled into ordinary
-range predicates over `($globalEpoch, $siteId, $siteTx)` often enough, or does it
-require custom SQLite functions / side tables?
 
 Later optimization options:
 
