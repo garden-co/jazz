@@ -412,6 +412,45 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 12:05 PDT
+
+Added the first pure-query branch read.
+
+API:
+
+- `create_branch(branch_id, base_global_epoch)`
+- `write_on_branch(branch_id, |tx| ...)`
+- `all_on_branch(query, branch_id)`
+
+Current limits:
+
+- one source: main at a global epoch
+- one table
+- filters/order/limit
+- no includes yet
+- branch-local inserts/overrides are visible even before global acceptance
+
+Implementation shape:
+
+- `jazz_branch` stores branch id and main base epoch.
+- `WriteTx` now carries a branch id; normal writes use `main`.
+- Branch reads are query-only:
+  - latest non-rejected row per row id from branch history
+  - union with latest accepted main row at the branch base epoch
+  - suppress main base rows when the branch has any non-rejected row for that
+    row id
+
+Discovery: the overlay query is straightforward for one source, but it already
+points at the need for a shared visible-row expression builder. Branches,
+snapshots, and future multi-source branch precedence are the same problem with
+different source stacks.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 12:02 PDT
 
 Started extracting visibility planning.

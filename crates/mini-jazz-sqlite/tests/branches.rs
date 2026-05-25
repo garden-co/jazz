@@ -1,0 +1,38 @@
+use mini_jazz_sqlite::{eq, query, Desc, Harness, Schema};
+use serde_json::json;
+
+#[test]
+fn branch_query_overlays_branch_rows_on_main_base_epoch() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+        t.index("open_by_created", ["done", "$createdAt"]);
+    });
+
+    let mut alice = Harness::new().client("alice", schema).durable_in_memory()?;
+
+    alice.write(|tx| {
+        tx.insert("todos", json!({ "title": "Base row", "done": false }))?;
+        Ok(())
+    })?;
+    let open_todos = query("todos")
+        .filter(eq("done", false))
+        .order_by("$createdAt", Desc);
+    let base = alice.all(open_todos.clone())?;
+    let base_tx = base.scope.result_rows[0].tx_id.clone();
+    alice.accept_transaction(&base_tx, 1)?;
+
+    alice.create_branch("draft", 1)?;
+    alice.write_on_branch("draft", |tx| {
+        tx.insert("todos", json!({ "title": "Draft row", "done": false }))?;
+        Ok(())
+    })?;
+
+    let draft = alice.all_on_branch(open_todos, "draft")?;
+
+    assert_eq!(draft.rows.len(), 2);
+    assert_eq!(draft.rows[0].get("title").unwrap(), "Draft row");
+    assert_eq!(draft.rows[1].get("title").unwrap(), "Base row");
+
+    Ok(())
+}

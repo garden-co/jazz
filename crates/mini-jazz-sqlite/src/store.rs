@@ -144,6 +144,11 @@ impl Client {
 
             CREATE INDEX IF NOT EXISTS jazz_tx_status_global_epoch
               ON jazz_tx(status, global_epoch, tx_id);
+
+            CREATE TABLE IF NOT EXISTS jazz_branch (
+              branch_id TEXT PRIMARY KEY,
+              base_global_epoch INTEGER NOT NULL
+            );
             ",
         )?;
 
@@ -229,6 +234,22 @@ impl Client {
     }
 
     pub fn write(&mut self, write: impl FnOnce(&mut WriteTx<'_>) -> Result<()>) -> Result<()> {
+        self.write_in_branch("main", write)
+    }
+
+    pub fn write_on_branch(
+        &mut self,
+        branch_id: &str,
+        write: impl FnOnce(&mut WriteTx<'_>) -> Result<()>,
+    ) -> Result<()> {
+        self.write_in_branch(branch_id, write)
+    }
+
+    fn write_in_branch(
+        &mut self,
+        branch_id: &str,
+        write: impl FnOnce(&mut WriteTx<'_>) -> Result<()>,
+    ) -> Result<()> {
         let node_num = self.ensure_node()?;
         let local_epoch = self.next_local_epoch(node_num)?;
         let tx_id = format!("{}:{local_epoch}", self.node_id);
@@ -248,6 +269,7 @@ impl Client {
             schema: &self.schema,
             conn: &sql_tx,
             tx_id: tx_id.clone(),
+            branch_id: branch_id.to_owned(),
             local_epoch,
             now,
             read_set: Vec::new(),
@@ -268,6 +290,19 @@ impl Client {
         )?;
         sql_tx.commit()?;
         self.record_write_effects(write_effects);
+        Ok(())
+    }
+
+    pub fn create_branch(&self, branch_id: &str, base_global_epoch: i64) -> Result<()> {
+        self.conn.execute(
+            "
+            INSERT INTO jazz_branch (branch_id, base_global_epoch)
+            VALUES (?1, ?2)
+            ON CONFLICT(branch_id) DO UPDATE SET
+              base_global_epoch = excluded.base_global_epoch
+            ",
+            params![branch_id, base_global_epoch],
+        )?;
         Ok(())
     }
 
@@ -666,6 +701,164 @@ impl Client {
             scope: QueryScope {
                 result_rows: result_scope,
                 dependency_rows: dependency_scope,
+                predicate_scopes: self.filter_predicate_scopes(table, &query),
+            },
+        })
+    }
+
+    pub fn all_on_branch(&self, query: Query, branch_id: &str) -> Result<QueryResult> {
+        if query.include.is_some() {
+            return Err(Error::new("branch includes are not implemented yet"));
+        }
+
+        let base_global_epoch: i64 = self.conn.query_row(
+            "SELECT base_global_epoch FROM jazz_branch WHERE branch_id = ?1",
+            params![branch_id],
+            |row| row.get(0),
+        )?;
+        let table = self.schema.table_def(&query.table)?;
+        let plan = TablePlan::new(table);
+
+        let mut cte_cols = vec![
+            "h.j_row_id".to_owned(),
+            "h.j_tx_id".to_owned(),
+            "h.j_created_at".to_owned(),
+        ];
+        cte_cols.extend(plan.user_columns.iter().map(|column| format!("h.{column}")));
+        let mut select_cols = vec![
+            "base.j_row_id".to_owned(),
+            "base.j_tx_id".to_owned(),
+            "base.j_created_at".to_owned(),
+        ];
+        for field in &table.fields {
+            select_cols.push(format!("base.{}", quote_ident(&field.name)));
+        }
+
+        let mut sql = format!(
+            "
+            WITH visible AS (
+              SELECT {cols}
+              FROM {history} h
+              JOIN jazz_tx tx ON tx.tx_id = h.j_tx_id
+              WHERE h.j_branch_id = ?
+                AND h.j_op != 'delete'
+                AND tx.status != 'rejected'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM {history} newer
+                  JOIN jazz_tx newer_tx ON newer_tx.tx_id = newer.j_tx_id
+                  WHERE newer.j_branch_id = h.j_branch_id
+                    AND newer.j_row_id = h.j_row_id
+                    AND newer_tx.status != 'rejected'
+                    AND (newer.j_updated_at, newer.j_tx_id) > (h.j_updated_at, h.j_tx_id)
+                )
+              UNION ALL
+              SELECT {cols}
+              FROM {history} h
+              JOIN jazz_tx tx ON tx.tx_id = h.j_tx_id
+              WHERE h.j_branch_id = 'main'
+                AND h.j_op != 'delete'
+                AND tx.status = 'global_durable_accepted'
+                AND tx.global_epoch <= ?
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM {history} newer
+                  JOIN jazz_tx newer_tx ON newer_tx.tx_id = newer.j_tx_id
+                  WHERE newer.j_branch_id = h.j_branch_id
+                    AND newer.j_row_id = h.j_row_id
+                    AND newer_tx.status = 'global_durable_accepted'
+                    AND newer_tx.global_epoch <= ?
+                    AND (newer_tx.global_epoch, newer.j_tx_id) > (tx.global_epoch, h.j_tx_id)
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM {history} branch_row
+                  JOIN jazz_tx branch_tx ON branch_tx.tx_id = branch_row.j_tx_id
+                  WHERE branch_row.j_branch_id = ?
+                    AND branch_row.j_row_id = h.j_row_id
+                    AND branch_tx.status != 'rejected'
+                )
+            )
+            SELECT {select_cols}
+            FROM visible base
+            WHERE 1 = 1
+            ",
+            cols = cte_cols.join(", "),
+            history = plan.history,
+            select_cols = select_cols.join(", ")
+        );
+
+        let mut sql_params = vec![
+            SqlValue::Text(branch_id.to_owned()),
+            SqlValue::Integer(base_global_epoch),
+            SqlValue::Integer(base_global_epoch),
+            SqlValue::Text(branch_id.to_owned()),
+        ];
+        for filter in &query.filters {
+            sql.push_str(" AND ");
+            sql.push_str(&filter_sql("base", filter));
+            sql_params.push(filter.value.to_sql_value());
+        }
+
+        if let Some(order) = &query.order {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&plan.aliased_column("base", &order.column));
+            sql.push(' ');
+            sql.push_str(match order.direction {
+                SortDirection::Asc => "ASC",
+                SortDirection::Desc => "DESC",
+            });
+        }
+
+        if let Some(limit) = query.limit {
+            sql.push_str(" LIMIT ?");
+            sql_params.push(SqlValue::Integer(limit as i64));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(sql_params), |row| {
+            let mut idx = 0;
+            let row_id: String = row.get(idx)?;
+            idx += 1;
+            let visible_tx_id: String = row.get(idx)?;
+            idx += 1;
+            let created_at: i64 = row.get(idx)?;
+            idx += 1;
+            let mut values = BTreeMap::new();
+            values.insert("$rowId".to_owned(), JsonValue::String(row_id.clone()));
+            values.insert("$txId".to_owned(), JsonValue::String(visible_tx_id.clone()));
+            values.insert("$createdAt".to_owned(), JsonValue::from(created_at));
+            for field in &table.fields {
+                values.insert(field.name.clone(), read_field(row, idx, field)?);
+                idx += 1;
+            }
+            Ok((
+                RowView {
+                    values,
+                    includes: BTreeMap::new(),
+                },
+                ScopeRow {
+                    table: table.name.clone(),
+                    row_id,
+                    tx_id: visible_tx_id,
+                    reason: ScopeReason::Result,
+                },
+            ))
+        })?;
+
+        let mut result_rows = Vec::new();
+        let mut result_scope = Vec::new();
+        for row in rows {
+            let (view, result_locator) = row?;
+            result_rows.push(view);
+            result_scope.push(result_locator);
+        }
+
+        Ok(QueryResult {
+            rows: result_rows,
+            scope: QueryScope {
+                result_rows: result_scope,
+                dependency_rows: Vec::new(),
                 predicate_scopes: self.filter_predicate_scopes(table, &query),
             },
         })

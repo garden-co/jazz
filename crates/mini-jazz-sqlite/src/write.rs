@@ -17,6 +17,7 @@ pub struct WriteTx<'a> {
     pub(crate) schema: &'a Schema,
     pub(crate) conn: &'a rusqlite::Transaction<'a>,
     pub(crate) tx_id: String,
+    pub(crate) branch_id: String,
     pub(crate) local_epoch: i64,
     pub(crate) now: i64,
     pub(crate) read_set: Vec<ReadSetEntry>,
@@ -187,7 +188,7 @@ impl WriteTx<'_> {
 
         let mut history_values = vec![
             SqlValue::Text(row_id.to_owned()),
-            SqlValue::Text("main".to_owned()),
+            SqlValue::Text(self.branch_id.clone()),
             SqlValue::Text(self.tx_id.clone()),
             SqlValue::Text(op.to_owned()),
         ];
@@ -208,7 +209,7 @@ impl WriteTx<'_> {
 
         let mut current_values = vec![
             SqlValue::Text(row_id.to_owned()),
-            SqlValue::Text("main".to_owned()),
+            SqlValue::Text(self.branch_id.clone()),
             SqlValue::Text(self.tx_id.clone()),
             SqlValue::Integer(i64::from(op == "delete")),
         ];
