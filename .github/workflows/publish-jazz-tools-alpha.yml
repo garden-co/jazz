@@ -357,6 +357,7 @@ jobs:
                     "jazz-napi-binding-darwin-arm64",
                     "jazz-napi-binding-darwin-x64",
                     "jazz-napi-binding-linux-x64-gnu",
+                    "jazz-napi-binding-win32-x64-msvc",
                     "jazz-rn-ios-payload",
                     "jazz-rn-android-payload-arm64-v8a",
                     "jazz-rn-android-payload-armeabi-v7a",
@@ -583,6 +584,10 @@ jobs:
             target: aarch64-apple-darwin
             platform: darwin-arm64
             use_sccache: false
+          - os: blacksmith-2vcpu-windows-2025
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64-msvc
+            use_sccache: false
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -638,6 +643,10 @@ jobs:
 
       - name: Build jazz-napi binding (macOS)
         if: runner.os == 'macOS'
+        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+
+      - name: Build jazz-napi binding (Windows)
+        if: runner.os == 'Windows'
         run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -990,14 +999,13 @@ jobs:
           cd crates/jazz-napi
           pnpm exec napi create-npm-dirs
           pnpm exec napi artifacts -d artifacts --npm-dir npm
-          rm -rf npm/win32-*
 
       - name: Verify staged jazz-napi platform artifacts
         run: |
           test -f crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node
           test -f crates/jazz-napi/npm/darwin-x64/jazz-napi.darwin-x64.node
           test -f crates/jazz-napi/npm/darwin-arm64/jazz-napi.darwin-arm64.node
-          test ! -d crates/jazz-napi/npm/win32-x64-msvc
+          test -f crates/jazz-napi/npm/win32-x64-msvc/jazz-napi.win32-x64-msvc.node
 
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build
@@ -1095,7 +1103,7 @@ jobs:
           TARBALL=$(ls "${TMP_DIR}"/jazz-napi-*.tgz | head -n 1)
           tar -tf "${TARBALL}" | grep -q "package/index.js"
           tar -tf "${TARBALL}" | grep -q "package/index.d.ts"
-          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["@garden-co/jazz-napi-linux-x64-gnu","@garden-co/jazz-napi-darwin-x64","@garden-co/jazz-napi-darwin-arm64"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}if(optional["@garden-co/jazz-napi-win32-x64-msvc"]){throw new Error("packed manifest still includes Windows native package");}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["@garden-co/jazz-napi-linux-x64-gnu","@garden-co/jazz-napi-darwin-x64","@garden-co/jazz-napi-darwin-arm64","@garden-co/jazz-napi-win32-x64-msvc"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
           tar -xOf "${TARBALL}" package/index.js | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const unscoped=[...s.matchAll(/require\((["\x27])((?!\.\/)jazz-napi-[^"\x27)]+)\1\)/g)].map((m)=>m[2]);if(unscoped.length){throw new Error(`packed index.js still references unscoped native packages: ${[...new Set(unscoped)].join(", ")}`);}if(!s.includes("@garden-co")){throw new Error("packed index.js is missing the @garden-co package scope");}console.log("Packed loader uses scoped native package names");});'
 
       - name: Verify packed jazz-tools manifest
