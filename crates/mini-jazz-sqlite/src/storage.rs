@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::codec::{EncodedRowRead, decode_first_row_read, encode_row_read};
+use crate::codec::{
+    EncodedAbsenceRead, EncodedRowRead, decode_first_absence_read, decode_first_row_read,
+    encode_row_read,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1757,7 +1760,41 @@ impl MiniJazzSqlite {
                 });
             }
         }
+        if let Some(absence_read) = decode_first_absence_read(&read_set)
+            && let Some(visible_tx_id) = self.visible_current_tx_for_absence_read(&absence_read)?
+        {
+            return self.reject_tx(RejectTx {
+                tx_id: input.tx_id,
+                reason_json: format!(
+                    r#"{{"code":"stale_range","table":"{}","rowId":"{}","actual":"{}"}}"#,
+                    absence_read.table, absence_read.row_id, visible_tx_id
+                ),
+            });
+        }
         self.accept_tx(input)
+    }
+
+    fn visible_current_tx_for_absence_read(
+        &self,
+        read: &EncodedAbsenceRead,
+    ) -> rusqlite::Result<Option<String>> {
+        match read.table.as_str() {
+            "projects" => self
+                .conn
+                .query_row(
+                    r#"
+                    SELECT visible_tx_id
+                    FROM projects__schema_v1_current
+                    WHERE branch_id = 'main'
+                      AND row_id = ?1
+                      AND is_deleted = 0
+                    "#,
+                    params![read.row_id],
+                    |row| row.get(0),
+                )
+                .optional(),
+            _ => Ok(None),
+        }
     }
 
     pub fn reject_tx(&mut self, input: RejectTx) -> rusqlite::Result<()> {
@@ -2900,6 +2937,7 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::encode_absence_read;
     use std::fs;
     use std::time::Instant;
 
@@ -3975,6 +4013,61 @@ mod tests {
             .unwrap();
         assert!(rejection.contains("stale_read"));
         assert!(rejection.contains("tx-alice-title"));
+    }
+
+    #[test]
+    fn validated_acceptance_rejects_stale_absence_read_sets() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-missing".into(),
+            title: "Depends on missing project".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE jazz_tx SET read_set_jsonb = ?2 WHERE tx_id = ?1",
+                params![
+                    "tx-todo-1",
+                    encode_absence_read(&EncodedAbsenceRead {
+                        table: "projects".into(),
+                        row_id: "project-missing".into(),
+                        reason: "optional_join_absence".into(),
+                    })
+                ],
+            )
+            .unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-missing".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "bob-device".into(),
+            name: "Now exists".into(),
+            actor_id: "bob".into(),
+            now: 110,
+        })
+        .unwrap();
+
+        db.accept_todo_tx_validating_reads(AcceptTx {
+            tx_id: "tx-todo-1".into(),
+            global_epoch: 2,
+        })
+        .unwrap();
+
+        let rejection: String = db
+            .conn
+            .query_row(
+                "SELECT rejection_reason_json FROM jazz_tx WHERE tx_id = 'tx-todo-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(rejection.contains("stale_range"));
+        assert_eq!(db.get_todo("main", "todo-1").unwrap(), None);
     }
 
     #[test]

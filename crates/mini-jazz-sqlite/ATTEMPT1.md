@@ -700,6 +700,22 @@ tiny equality predicate over `rowId` and `isDeleted`, but the shape is useful:
 predicate/range read sets are the correctness contract for "I observed that no
 required row existed."
 
+### 2026-05-24 23:18 PDT
+
+Pushed absence/range validation through storage acceptance:
+
+- added a tiny absence-read codec shape
+- `accept_todo_tx_validating_reads` now checks whether a previously absent
+  project is visible in `projects__schema_v1_current`
+- if it is visible, the transaction is rejected with `stale_range` and current
+  projections are repaired
+
+Discovery: this makes predicate scope more than sync bookkeeping. The same
+shape can become an authority-side acceptance guard for optional joins, policy
+dependencies, and uniqueness-like checks. The prototype is still table-specific
+and only recognizes project absence, but it proves where the validation hook
+lives.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
