@@ -636,6 +636,25 @@ too much work per candidate row. This is the clearest performance warning so
 far: pure-query snapshots may be acceptable for small branch reads, but the
 lowering needs serious planner attention before we rely on it for hot paths.
 
+### 2026-05-24 23:08 PDT
+
+Rewrote the temp-table snapshot query from correlated `NOT EXISTS` to a grouped
+latest-visible-version CTE.
+
+Same debug ballpark test:
+
+- 2,000 inserted rows
+- 1,333 matching open rows
+- current projection query: about 2.3 ms
+- temp-table snapshot query: about 17.2 ms
+- previous temp-table snapshot shape: about 603 ms
+
+Discovery: this is the first strong performance-positive result of the night.
+The visibility relation can be SQL-shaped in ways the planner handles much
+better. Pure-query snapshots are still slower than current projections, but the
+difference between "obviously too slow" and "plausibly acceptable for cold
+branches/snapshots" may be mostly query shape, not the whole SQLite approach.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

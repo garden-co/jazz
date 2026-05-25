@@ -2255,26 +2255,27 @@ impl MiniJazzSqlite {
         let rows = {
             let mut stmt = sql_tx.prepare(
                 r#"
+                WITH latest AS (
+                  SELECT h.branch_id, h.row_id, MAX(tx.local_epoch) AS local_epoch
+                  FROM todos__schema_v1_history h
+                  JOIN jazz_tx tx ON tx.tx_id = h.tx_id
+                  JOIN temp_visible_tx visible ON visible.tx_id = h.tx_id
+                  WHERE h.branch_id = ?1
+                  GROUP BY h.branch_id, h.row_id, tx.node_num
+                )
                 SELECT h.row_id, h.title, h.done, h.created_at, h.updated_at, h.tx_id
-                FROM todos__schema_v1_history h
-                JOIN jazz_tx tx ON tx.tx_id = h.tx_id
+                FROM latest
+                JOIN todos__schema_v1_history h
+                  ON h.branch_id = latest.branch_id
+                 AND h.row_id = latest.row_id
+                JOIN jazz_tx tx
+                  ON tx.tx_id = h.tx_id
+                 AND tx.local_epoch = latest.local_epoch
                 JOIN temp_visible_tx visible ON visible.tx_id = h.tx_id
                 WHERE h.branch_id = ?1
                   AND h.op != 'delete'
                   AND (?2 IS NULL OR h.done = ?2)
                   AND h.created_at > ?3
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM todos__schema_v1_history newer_h
-                    JOIN jazz_tx newer_tx ON newer_tx.tx_id = newer_h.tx_id
-                    JOIN temp_visible_tx newer_visible
-                      ON newer_visible.tx_id = newer_h.tx_id
-                    WHERE newer_h.branch_id = h.branch_id
-                      AND newer_h.row_id = h.row_id
-                      AND newer_h.tx_id != h.tx_id
-                      AND newer_tx.node_num = tx.node_num
-                      AND newer_tx.local_epoch > tx.local_epoch
-                  )
                 ORDER BY h.created_at DESC, h.row_id ASC
                 "#,
             )?;
