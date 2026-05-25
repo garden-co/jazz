@@ -161,6 +161,13 @@ pub struct MergeBranchTodosIntoMain {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchSource {
+    pub branch_id: String,
+    pub global_epoch: i64,
+    pub precedence: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateTodo {
     pub row_id: String,
     pub tx_id: String,
@@ -2688,6 +2695,28 @@ impl MiniJazzSqlite {
             params![branch_id],
             |row| row.get(0),
         )?;
+        self.query_todos_with_branch_sources(
+            query,
+            &[
+                BranchSource {
+                    branch_id: branch_id.to_owned(),
+                    global_epoch,
+                    precedence: 0,
+                },
+                BranchSource {
+                    branch_id: "main".to_owned(),
+                    global_epoch: base_global_epoch,
+                    precedence: 1,
+                },
+            ],
+        )
+    }
+
+    pub fn query_todos_with_branch_sources(
+        &self,
+        query: &TodoQuery,
+        sources: &[BranchSource],
+    ) -> rusqlite::Result<QueryResult> {
         self.conn.execute_batch(
             r#"
             CREATE TEMP TABLE IF NOT EXISTS temp_branch_todo_sources (
@@ -2699,16 +2728,16 @@ impl MiniJazzSqlite {
             DELETE FROM temp_branch_todo_sources;
             "#,
         )?;
-        self.conn.execute(
-            r#"
-            INSERT INTO temp_branch_todo_sources (
-              source_branch_id, source_global_epoch, precedence
-            ) VALUES
-              (?1, ?2, 0),
-              ('main', ?3, 1)
-            "#,
-            params![branch_id, global_epoch, base_global_epoch],
-        )?;
+        for source in sources {
+            self.conn.execute(
+                r#"
+                INSERT INTO temp_branch_todo_sources (
+                  source_branch_id, source_global_epoch, precedence
+                ) VALUES (?1, ?2, ?3)
+                "#,
+                params![source.branch_id, source.global_epoch, source.precedence],
+            )?;
+        }
 
         let done = query.done.map(bool_to_sql);
         let created_after = query.created_after;
@@ -4122,6 +4151,93 @@ mod tests {
         assert_eq!(
             sources,
             vec![("draft".to_owned(), 3, 0), ("main".to_owned(), 2, 1)]
+        );
+    }
+
+    #[test]
+    fn explicit_branch_sources_can_represent_multiple_branch_bases() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-main".into(),
+            tx_id: "tx-main".into(),
+            node_id: "alice-device".into(),
+            title: "Main base".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-main".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+        for (branch_id, tx_id, title, epoch) in [
+            ("draft-a", "tx-draft-a", "Draft A", 2),
+            ("draft-b", "tx-draft-b", "Draft B", 3),
+        ] {
+            db.insert_todo_in_branch(
+                branch_id,
+                InsertTodo {
+                    row_id: "todo-shared".into(),
+                    tx_id: tx_id.into(),
+                    node_id: "alice-device".into(),
+                    title: title.into(),
+                    done: false,
+                    actor_id: "alice".into(),
+                    now: 100 + epoch,
+                },
+            )
+            .unwrap();
+            db.accept_tx(AcceptTx {
+                tx_id: tx_id.into(),
+                global_epoch: epoch,
+            })
+            .unwrap();
+        }
+
+        let result = db
+            .query_todos_with_branch_sources(
+                &TodoQuery {
+                    branch_id: "synthetic".into(),
+                    done: Some(false),
+                    created_after: Some(0),
+                },
+                &[
+                    BranchSource {
+                        branch_id: "draft-b".into(),
+                        global_epoch: 3,
+                        precedence: 0,
+                    },
+                    BranchSource {
+                        branch_id: "draft-a".into(),
+                        global_epoch: 2,
+                        precedence: 1,
+                    },
+                    BranchSource {
+                        branch_id: "main".into(),
+                        global_epoch: 1,
+                        precedence: 2,
+                    },
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| (row.row_id.as_str(), row.title.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("todo-shared", "Draft B"), ("todo-main", "Main base")]
+        );
+        assert_eq!(
+            result
+                .scope
+                .iter()
+                .map(|locator| (locator.row_id.as_str(), locator.branch_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("todo-shared", "draft-b"), ("todo-main", "main")]
         );
     }
 

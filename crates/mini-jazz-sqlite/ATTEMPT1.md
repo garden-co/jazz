@@ -800,6 +800,19 @@ history/current-table shape. Resolution can be represented as just another data
 transaction that reads the conflicted current version, writes the chosen value,
 and clears candidate metadata in the current projection.
 
+### 2026-05-24 23:28 PDT
+
+Generalized branch source reads to an explicit source list:
+
+- callers can pass multiple `(branch, globalEpoch, precedence)` sources
+- SQL chooses the highest-precedence visible row per row id
+- the same machinery represents "branch B over branch A over main"
+
+Discovery: multiple branch bases do not need a fundamentally different query
+shape from the earlier one-branch-plus-main source table. The hard part is not
+the SQL precedence rule; it is deriving the exact source list from durable
+branch provenance and conflict rules.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
