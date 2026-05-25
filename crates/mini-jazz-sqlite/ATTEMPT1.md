@@ -826,6 +826,20 @@ source list can coexist. The prototype stores the precise list directly as
 queryable rows; a later branch metadata layer can derive flattened effective
 sources from this table plus merge/conflict rules.
 
+### 2026-05-24 23:31 PDT
+
+Added full-row-history expansion for query scopes:
+
+- normal query scope still points at visible row versions
+- `export_query_scope_full_history` expands each scoped row to every transaction
+  that touched that row on that branch
+- predicate scope rides alongside unchanged
+
+Discovery: this is a straightforward extension of tx-bundle sync, but it can
+get expensive quickly. It gives listeners/sync enough material for semantic
+diffs and historical reconstruction, while making it obvious that production
+will need policy-aware pruning and/or per-query history limits.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

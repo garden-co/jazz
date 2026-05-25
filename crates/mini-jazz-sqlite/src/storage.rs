@@ -1432,6 +1432,62 @@ impl MiniJazzSqlite {
         Ok(())
     }
 
+    pub fn export_query_scope_full_history(
+        &self,
+        row_scope: &[RowVersionLocator],
+        predicate_scope: &[PredicateScope],
+    ) -> rusqlite::Result<QueryScopeBundle> {
+        let mut tx_ids = Vec::new();
+        for locator in row_scope {
+            let mut row_tx_ids = self.history_tx_ids_for_locator(locator)?;
+            tx_ids.append(&mut row_tx_ids);
+        }
+        tx_ids.sort();
+        tx_ids.dedup();
+
+        let mut row_bundles = Vec::new();
+        for tx_id in tx_ids {
+            row_bundles.push(self.export_tx(&tx_id)?);
+        }
+        Ok(QueryScopeBundle {
+            row_bundles,
+            predicate_scope: predicate_scope.to_vec(),
+        })
+    }
+
+    fn history_tx_ids_for_locator(
+        &self,
+        locator: &RowVersionLocator,
+    ) -> rusqlite::Result<Vec<String>> {
+        match locator.table.as_str() {
+            "todos" => {
+                let mut stmt = self.conn.prepare(
+                    r#"
+                    SELECT tx_id
+                    FROM todos__schema_v1_history
+                    WHERE branch_id = ?1 AND row_id = ?2
+                    ORDER BY updated_at ASC, tx_id ASC
+                    "#,
+                )?;
+                stmt.query_map(params![locator.branch_id, locator.row_id], |row| row.get(0))?
+                    .collect()
+            }
+            "projects" => {
+                let mut stmt = self.conn.prepare(
+                    r#"
+                    SELECT tx_id
+                    FROM projects__schema_v1_history
+                    WHERE branch_id = ?1 AND row_id = ?2
+                    ORDER BY updated_at ASC, tx_id ASC
+                    "#,
+                )?;
+                stmt.query_map(params![locator.branch_id, locator.row_id], |row| row.get(0))?
+                    .collect()
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
     pub fn import_tx(&mut self, bundle: &TxBundle) -> rusqlite::Result<()> {
         let sql_tx = self.conn.transaction()?;
         let node_num = ensure_node(&sql_tx, &bundle.tx.node_id)?;
@@ -5618,6 +5674,57 @@ mod tests {
             vec![("todos", "todo-1")]
         );
         assert_eq!(received_predicate_scope, scope_bundle.predicate_scope);
+    }
+
+    #[test]
+    fn query_scope_can_expand_to_full_row_history() {
+        let mut alice = MiniJazzSqlite::in_memory().unwrap();
+        alice
+            .insert_todo(InsertTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-todo-1".into(),
+                node_id: "alice-device".into(),
+                title: "Draft".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+        alice
+            .update_todo(UpdateTodo {
+                row_id: "todo-1".into(),
+                tx_id: "tx-todo-2".into(),
+                node_id: "alice-device".into(),
+                title: Some("Edited".into()),
+                done: None,
+                actor_id: "alice".into(),
+                now: 200,
+            })
+            .unwrap();
+
+        let query = alice.query_todos(&TodoQuery::open_since(0)).unwrap();
+        assert_eq!(query.scope[0].tx_id, "tx-todo-2");
+
+        let bundle = alice
+            .export_query_scope_full_history(&query.scope, &[])
+            .unwrap();
+        assert_eq!(
+            bundle
+                .row_bundles
+                .iter()
+                .map(|bundle| bundle.tx.tx_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tx-todo-1", "tx-todo-2"]
+        );
+        assert_eq!(
+            bundle
+                .row_bundles
+                .iter()
+                .flat_map(|bundle| bundle.todo_history.iter())
+                .map(|history| history.title.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>(),
+            vec!["Draft", "Edited"]
+        );
     }
 
     #[test]
