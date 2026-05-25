@@ -597,6 +597,20 @@ rather than incidental column mutations. The denormalized `jazz_tx.status` still
 drives query speed, but receipts are now available for audit, replay, and
 eventual append-only authority semantics.
 
+### 2026-05-24 23:05 PDT
+
+Added a top-N joined query ordered by dependency data:
+
+- query open todos joined to projects
+- order by project name
+- limit to first two rows
+- rename a third project's name so it crosses into the first page
+
+Discovery: pagination makes dependency invalidation nastier than simple joined
+rerun+diff. A dependency row can change page membership without changing the
+result row itself. Page subscriptions need to retain enough boundary scope to
+know when off-page rows can enter the page.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

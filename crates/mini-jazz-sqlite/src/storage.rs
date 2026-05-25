@@ -1973,6 +1973,48 @@ impl MiniJazzSqlite {
         Ok((rows, scope, predicate_scope))
     }
 
+    pub fn query_top_open_todos_by_project_name(
+        &self,
+        branch_id: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<TodoWithProject>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+              t.row_id, t.title, t.done, t.created_at, t.updated_at, t.visible_tx_id,
+              p.row_id, p.name, p.visible_tx_id
+            FROM todos__schema_v1_current t
+            JOIN projects__schema_v1_current p
+              ON p.branch_id = t.branch_id
+             AND p.row_id = t.project_id
+             AND p.is_deleted = 0
+            WHERE t.branch_id = ?1
+              AND t.is_deleted = 0
+              AND t.done = 0
+            ORDER BY p.name ASC, t.row_id ASC
+            LIMIT ?2
+            "#,
+        )?;
+        stmt.query_map(params![branch_id, limit], |row| {
+            Ok(TodoWithProject {
+                todo: Todo {
+                    row_id: row.get(0)?,
+                    title: row.get(1)?,
+                    done: sql_to_bool(row.get(2)?),
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    visible_tx_id: row.get(5)?,
+                },
+                project: Project {
+                    row_id: row.get(6)?,
+                    name: row.get(7)?,
+                    visible_tx_id: row.get(8)?,
+                },
+            })
+        })?
+        .collect()
+    }
+
     pub fn query_todos_at_local_epoch(
         &self,
         query: &TodoQuery,
@@ -3934,6 +3976,83 @@ mod tests {
                 .unwrap()
                 .0
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn top_joined_query_changes_page_when_dependency_sort_key_changes() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        for (project_id, tx_id, name, todo_id, todo_tx) in [
+            (
+                "project-a",
+                "tx-project-a",
+                "Aardvark",
+                "todo-a",
+                "tx-todo-a",
+            ),
+            (
+                "project-b",
+                "tx-project-b",
+                "Beehive",
+                "todo-b",
+                "tx-todo-b",
+            ),
+            (
+                "project-c",
+                "tx-project-c",
+                "Catapult",
+                "todo-c",
+                "tx-todo-c",
+            ),
+        ] {
+            db.insert_project(InsertProject {
+                row_id: project_id.into(),
+                tx_id: tx_id.into(),
+                node_id: "alice-device".into(),
+                name: name.into(),
+                actor_id: "alice".into(),
+                now: 100,
+            })
+            .unwrap();
+            db.insert_todo_for_project(InsertTodoForProject {
+                row_id: todo_id.into(),
+                tx_id: todo_tx.into(),
+                node_id: "alice-device".into(),
+                project_id: project_id.into(),
+                title: format!("Todo for {name}"),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            })
+            .unwrap();
+        }
+
+        let before = db.query_top_open_todos_by_project_name("main", 2).unwrap();
+        assert_eq!(
+            before
+                .iter()
+                .map(|row| row.todo.row_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo-a", "todo-b"]
+        );
+
+        db.update_project(UpdateProject {
+            row_id: "project-c".into(),
+            tx_id: "tx-project-c-rename".into(),
+            node_id: "alice-device".into(),
+            name: "Aardwolf".into(),
+            actor_id: "alice".into(),
+            now: 300,
+        })
+        .unwrap();
+
+        let after = db.query_top_open_todos_by_project_name("main", 2).unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .map(|row| row.todo.row_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo-a", "todo-c"]
         );
     }
 
