@@ -51,6 +51,12 @@ pub struct AcceptTx {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectTx {
+    pub tx_id: String,
+    pub reason_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoQuery {
     pub branch_id: String,
     pub done: Option<bool>,
@@ -431,6 +437,24 @@ impl MiniJazzSqlite {
               AND (global_epoch IS NULL OR global_epoch = ?2)
             "#,
             params![input.tx_id, input.global_epoch],
+        )?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    pub fn reject_tx(&self, input: RejectTx) -> rusqlite::Result<()> {
+        let changed = self.conn.execute(
+            r#"
+            UPDATE jazz_tx
+            SET status = 'rejected',
+                rejection_reason_json = ?2
+            WHERE tx_id = ?1
+              AND status IN ('local_pending', 'edge_durable')
+              AND global_epoch IS NULL
+            "#,
+            params![input.tx_id, input.reason_json],
         )?;
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -1128,6 +1152,61 @@ mod tests {
         let at_second_global = db.query_todos_at_global_epoch(&query, 2).unwrap();
         assert_eq!(at_second_global.rows[0].title, "Accepted update");
         assert_eq!(at_second_global.rows[0].visible_tx_id, "tx-2");
+    }
+
+    #[test]
+    fn rejected_transaction_stays_in_history_but_out_of_snapshots() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        let query = TodoQuery::open_since(0);
+
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-1".into(),
+            node_id: "alice-device".into(),
+            title: "Rejected insert".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.reject_tx(RejectTx {
+            tx_id: "tx-1".into(),
+            reason_json: r#"{"code":"permission_denied"}"#.into(),
+        })
+        .unwrap();
+
+        assert!(
+            db.query_todos_at_local_epoch(&query, "alice-device", 1)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert!(
+            db.query_todos_at_global_epoch(&query, 1)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+
+        let rejection_reason: String = db
+            .conn
+            .query_row(
+                "SELECT rejection_reason_json FROM jazz_tx WHERE tx_id = 'tx-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(rejection_reason.contains("permission_denied"));
+
+        let history_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM todos__schema_v1_history WHERE tx_id = 'tx-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_count, 1);
     }
 
     #[test]

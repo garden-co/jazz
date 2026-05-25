@@ -128,8 +128,17 @@ Open fuzziness:
 - `accept_tx` currently mutates the transaction row directly. The real system
   may want an append-only authority receipt table, with `jazz_tx` holding the
   denormalized current acceptance state.
-- There is no rejection API yet, so the status state machine is only partially
-  represented in storage.
+
+Added storage-level rejection:
+
+- `reject_tx(tx_id, reason_json)` marks pending/edge transactions rejected
+- rejected history remains stored
+- local and global snapshot reads filter rejected transactions out
+
+Discovery: this validates the "no vector excludes for rejected txs" instinct.
+Rejected txs can remain in history and simply fail the visibility predicate.
+The hard remaining problem is not historical visibility; it is repairing the
+optimistic current projection after a local write is later rejected.
 
 ### 2026-05-24 23:05 PDT
 
