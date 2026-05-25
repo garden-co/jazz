@@ -26,6 +26,31 @@ pub enum Delivery {
     NodeStopped(Envelope),
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeliveryCounters {
+    pub delivered: usize,
+    pub dropped: usize,
+    pub no_such_node: usize,
+    pub node_stopped: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NodeCounters {
+    pub id: NodeId,
+    pub role: NodeRole,
+    pub generation: u64,
+    pub running: bool,
+    pub inbox_len: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HarnessTrace {
+    pub deliveries: DeliveryCounters,
+    pub nodes: Vec<NodeCounters>,
+    pub pending: usize,
+    pub dropped: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Node {
     pub id: NodeId,
@@ -116,6 +141,7 @@ impl Network {
 pub struct Harness {
     nodes: BTreeMap<NodeId, Node>,
     network: Network,
+    deliveries: DeliveryCounters,
 }
 
 impl Harness {
@@ -151,7 +177,9 @@ impl Harness {
 
     pub fn deliver_next(&mut self) -> Option<Delivery> {
         let envelope = self.network.pop_next()?;
-        Some(self.deliver_envelope(envelope))
+        let delivery = self.deliver_envelope(envelope);
+        self.record_delivery(&delivery);
+        Some(delivery)
     }
 
     pub fn deliver_all(&mut self) -> Vec<Delivery> {
@@ -163,11 +191,34 @@ impl Harness {
     }
 
     pub fn drop_next(&mut self) -> Option<Delivery> {
-        self.network.drop_next().map(Delivery::Dropped)
+        let delivery = self.network.drop_next().map(Delivery::Dropped)?;
+        self.record_delivery(&delivery);
+        Some(delivery)
     }
 
     pub fn drop_where(&mut self, predicate: impl FnMut(&Envelope) -> bool) -> Option<Delivery> {
-        self.network.drop_where(predicate).map(Delivery::Dropped)
+        let delivery = self.network.drop_where(predicate).map(Delivery::Dropped)?;
+        self.record_delivery(&delivery);
+        Some(delivery)
+    }
+
+    pub fn trace(&self) -> HarnessTrace {
+        HarnessTrace {
+            deliveries: self.deliveries.clone(),
+            nodes: self
+                .nodes
+                .values()
+                .map(|node| NodeCounters {
+                    id: node.id,
+                    role: node.role,
+                    generation: node.generation,
+                    running: node.running,
+                    inbox_len: node.inbox.len(),
+                })
+                .collect(),
+            pending: self.network.pending_len(),
+            dropped: self.network.dropped().len(),
+        }
     }
 
     pub fn stop_node(&mut self, id: NodeId) -> bool {
@@ -197,6 +248,15 @@ impl Harness {
         }
         node.inbox.push(envelope.clone());
         Delivery::Delivered(envelope)
+    }
+
+    fn record_delivery(&mut self, delivery: &Delivery) {
+        match delivery {
+            Delivery::Delivered(_) => self.deliveries.delivered += 1,
+            Delivery::Dropped(_) => self.deliveries.dropped += 1,
+            Delivery::NoSuchNode(_) => self.deliveries.no_such_node += 1,
+            Delivery::NodeStopped(_) => self.deliveries.node_stopped += 1,
+        }
     }
 }
 
@@ -329,6 +389,71 @@ mod tests {
         assert_eq!(
             harness.node(bob()).expect("bob exists").inbox(),
             &[after_restart]
+        );
+    }
+
+    #[test]
+    fn trace_counts_deliveries_and_nodes() {
+        let mut harness = Harness::new();
+        harness.add_node(alice(), NodeRole::Client);
+        harness.add_node(bob(), NodeRole::Replica);
+        harness.add_node(carol(), NodeRole::Coordinator);
+
+        harness.stop_node(carol());
+        harness.send(alice(), bob(), b"create invoice".to_vec());
+        harness.send(alice(), carol(), b"sync invoice".to_vec());
+        harness.send(bob(), NodeId(99), b"notify missing device".to_vec());
+        harness.send(alice(), bob(), b"discard stale cursor".to_vec());
+
+        assert!(matches!(
+            harness.deliver_next(),
+            Some(Delivery::Delivered(_))
+        ));
+        assert!(matches!(
+            harness.deliver_next(),
+            Some(Delivery::NodeStopped(_))
+        ));
+        assert!(matches!(
+            harness.deliver_next(),
+            Some(Delivery::NoSuchNode(_))
+        ));
+        assert!(matches!(harness.drop_next(), Some(Delivery::Dropped(_))));
+
+        assert_eq!(
+            harness.trace(),
+            HarnessTrace {
+                deliveries: DeliveryCounters {
+                    delivered: 1,
+                    dropped: 1,
+                    no_such_node: 1,
+                    node_stopped: 1,
+                },
+                nodes: vec![
+                    NodeCounters {
+                        id: alice(),
+                        role: NodeRole::Client,
+                        generation: 0,
+                        running: true,
+                        inbox_len: 0,
+                    },
+                    NodeCounters {
+                        id: bob(),
+                        role: NodeRole::Replica,
+                        generation: 0,
+                        running: true,
+                        inbox_len: 1,
+                    },
+                    NodeCounters {
+                        id: carol(),
+                        role: NodeRole::Coordinator,
+                        generation: 0,
+                        running: false,
+                        inbox_len: 0,
+                    },
+                ],
+                pending: 0,
+                dropped: 1,
+            }
         );
     }
 }

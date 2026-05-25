@@ -368,3 +368,76 @@ enough to recover the important concurrency fact here: both writes depended on
 the same previous row version. That supports the "no explicit parents for now"
 decision. A real merge layer still needs per-column candidate metadata rather
 than one row-level `conflict_tx_ids_jsonb` array.
+
+### 2026-05-24 22:45 PDT
+
+Added the first joined query:
+
+- second hard-coded table: `projects`
+- project insert path with history/current projection
+- todo insert path with `project_id`
+- `query_open_todos_with_projects`
+- scope output contains result todo locators and dependency project locators
+
+Discovery: result scope and dependency scope should be distinct in the public
+contract. The joined row's todo version is the result identity, while the
+project version is necessary to reproduce the displayed result and to send a
+complete sync payload. This makes the "visited rows" idea concrete without
+SQLite exposing visited rows natively.
+
+## Next pressure points after joins
+
+Once two-table joins/includes and explicit result scope are green, the next
+risks are less about proving that SQLite can join rows and more about proving
+that the joined answer is reproducible, subscribable, and syncable.
+
+1. Scope representation must become a first-class output contract.
+   The spec sketches `$resultScopeJson`/`$policyScopeJson`, but JSON hidden
+   columns may be the wrong durable shape. Try three tiny variants for the same
+   todos-with-project query: JSON column, second SQL result/side table, and Rust
+   side-channel collection from projected locators. Judge by deterministic
+   ordering, duplicate elimination, and how naturally the sender expands scope
+   into history bundles.
+
+2. Dependency rows need separate invalidation semantics from result rows.
+   A project rename can update a joined todo result without changing todo
+   membership; a project delete or authorization failure can remove it. Add a
+   subscription test where only the joined project changes, then one where the
+   todo's `project_id` changes, and require rerun+diff to report the same final
+   answer as a fresh query.
+
+3. Branch provenance will stress joins harder than single-table reads.
+   The current branch query hard-codes one main base plus branch-local rows.
+   A joined query should prove that parent and dependency rows are read from the
+   same effective branch source set, including branch-local shadowing on either
+   side of the join. If this gets awkward, materialize a SQL-visible
+   `(source_branch_id, snapshot_vector, precedence)` relation before adding more
+   relation features.
+
+4. Scope must survive durability transitions and rejection repair.
+   A joined result may include an optimistic todo and an accepted project, or
+   vice versa. Exercise authority acceptance and rejection after a scoped join
+   subscription is established, and assert that scope locators move from local
+   coordinates to stable tx ids/global metadata without leaving stale dependency
+   rows in the subscription state.
+
+5. Policy dependencies should not be folded into result dependencies.
+   The first join implementation will be tempting to reuse for inherited read
+   policies. Keep a separate policy-scope experiment: Alice can read todos only
+   through project ownership, then Bob changes ownership. The expected output is
+   not just row membership; it is a changed authorization explanation and sync
+   payload.
+
+6. Pagination/order-by over joined dependencies is the first performance cliff.
+   Current v0 can rerun SQL and diff full rows, but page scope is unstable when
+   dependency rows change sort keys or filters. Add a top-N joined query and
+   compare `EXPLAIN QUERY PLAN` before introducing generic lowering. The useful
+   experiment is whether existing current-table indexes are enough or whether
+   relation-specific serving indexes appear immediately.
+
+7. Conflict candidates need an app-facing read shape before sync bakes it in.
+   A joined row whose parent or dependency has multiple visible candidates
+   should not silently pick one value forever. Before adding more sync protocol
+   surface, create one test with concurrent project-name updates and decide
+   whether query results expose conflict metadata, resolved values only, or both
+   plus scope entries for every candidate tx.

@@ -14,10 +14,45 @@ pub struct Todo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Project {
+    pub row_id: String,
+    pub name: String,
+    pub visible_tx_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoWithProject {
+    pub todo: Todo,
+    pub project: Project,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertTodo {
     pub row_id: String,
     pub tx_id: String,
     pub node_id: String,
+    pub title: String,
+    pub done: bool,
+    pub actor_id: String,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertProject {
+    pub row_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub name: String,
+    pub actor_id: String,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertTodoForProject {
+    pub row_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub project_id: String,
     pub title: String,
     pub done: bool,
     pub actor_id: String,
@@ -307,6 +342,7 @@ impl MiniJazzSqlite {
               branch_id TEXT NOT NULL,
               tx_id TEXT NOT NULL,
               op TEXT NOT NULL,
+              project_id TEXT NOT NULL DEFAULT '',
               title TEXT,
               done INTEGER,
               conflict_tx_ids_jsonb BLOB NOT NULL,
@@ -324,6 +360,7 @@ impl MiniJazzSqlite {
               branch_id TEXT NOT NULL,
               visible_tx_id TEXT NOT NULL,
               is_deleted INTEGER NOT NULL,
+              project_id TEXT NOT NULL DEFAULT '',
               title TEXT,
               done INTEGER,
               conflict_tx_ids_jsonb BLOB NOT NULL,
@@ -340,6 +377,35 @@ impl MiniJazzSqlite {
 
             CREATE INDEX IF NOT EXISTS todos__schema_v1_history_branch_row_updated
               ON todos__schema_v1_history(branch_id, row_id, updated_at DESC, tx_id);
+
+            CREATE TABLE IF NOT EXISTS projects__schema_v1_history (
+              row_id TEXT NOT NULL,
+              branch_id TEXT NOT NULL,
+              tx_id TEXT NOT NULL,
+              op TEXT NOT NULL,
+              name TEXT,
+              created_by TEXT,
+              created_at INTEGER NOT NULL,
+              updated_by TEXT,
+              updated_at INTEGER NOT NULL,
+              edit_metadata_json TEXT NOT NULL,
+              PRIMARY KEY (row_id, branch_id, tx_id),
+              FOREIGN KEY (tx_id) REFERENCES jazz_tx(tx_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS projects__schema_v1_current (
+              row_id TEXT NOT NULL,
+              branch_id TEXT NOT NULL,
+              visible_tx_id TEXT NOT NULL,
+              is_deleted INTEGER NOT NULL,
+              name TEXT,
+              created_by TEXT,
+              created_at INTEGER NOT NULL,
+              updated_by TEXT,
+              updated_at INTEGER NOT NULL,
+              edit_metadata_json TEXT NOT NULL,
+              PRIMARY KEY (row_id, branch_id)
+            );
             "#,
         )
     }
@@ -493,6 +559,117 @@ impl MiniJazzSqlite {
             )?;
         }
 
+        sql_tx.commit()
+    }
+
+    pub fn insert_project(&mut self, input: InsertProject) -> rusqlite::Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let write_set = format!(
+            r#"[{{"table":"projects","rowId":"{}","op":"insert","columns":["name","created_at","updated_at"]}}]"#,
+            input.row_id
+        );
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'data', 0, '[]', '[]', '[]', ?4, 'local_pending', ?5, ?5, '{}')
+            "#,
+            params![input.tx_id, node_num, local_epoch, write_set, input.now],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT INTO projects__schema_v1_history (
+              row_id, branch_id, tx_id, op, name, created_by, created_at, updated_by,
+              updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 'insert', ?3, ?4, ?5, ?4, ?5, '{}')
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                input.name,
+                input.actor_id,
+                input.now
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT INTO projects__schema_v1_current (
+              row_id, branch_id, visible_tx_id, is_deleted, name, created_by, created_at,
+              updated_by, updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 0, ?3, ?4, ?5, ?4, ?5, '{}')
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                input.name,
+                input.actor_id,
+                input.now
+            ],
+        )?;
+        sql_tx.commit()
+    }
+
+    pub fn insert_todo_for_project(&mut self, input: InsertTodoForProject) -> rusqlite::Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let done = bool_to_sql(input.done);
+        let conflict_tx_ids = format!(r#"["{}"]"#, input.tx_id);
+        let write_set = format!(
+            r#"[{{"table":"todos","rowId":"{}","op":"insert","columns":["project_id","title","done","created_at","updated_at"]}}]"#,
+            input.row_id
+        );
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'data', 0, '[]', '[]', '[]', ?4, 'local_pending', ?5, ?5, '{}')
+            "#,
+            params![input.tx_id, node_num, local_epoch, write_set, input.now],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT INTO todos__schema_v1_history (
+              row_id, branch_id, tx_id, op, project_id, title, done, conflict_tx_ids_jsonb,
+              created_by, created_at, updated_by, updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 'insert', ?3, ?4, ?5, ?6, ?7, ?8, ?7, ?8, '{}')
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                input.project_id,
+                input.title,
+                done,
+                conflict_tx_ids,
+                input.actor_id,
+                input.now
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT INTO todos__schema_v1_current (
+              row_id, branch_id, visible_tx_id, is_deleted, project_id, title, done,
+              conflict_tx_ids_jsonb, created_by, created_at, updated_by, updated_at,
+              edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?7, ?8, '{}')
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                input.project_id,
+                input.title,
+                done,
+                conflict_tx_ids,
+                input.actor_id,
+                input.now
+            ],
+        )?;
         sql_tx.commit()
     }
 
@@ -1027,6 +1204,67 @@ impl MiniJazzSqlite {
             })
             .collect();
         Ok(QueryResult { rows, scope })
+    }
+
+    pub fn query_open_todos_with_projects(
+        &self,
+        branch_id: &str,
+    ) -> rusqlite::Result<(Vec<TodoWithProject>, Vec<RowVersionLocator>)> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+              t.row_id, t.title, t.done, t.created_at, t.updated_at, t.visible_tx_id,
+              p.row_id, p.name, p.visible_tx_id
+            FROM todos__schema_v1_current t
+            JOIN projects__schema_v1_current p
+              ON p.branch_id = t.branch_id
+             AND p.row_id = t.project_id
+             AND p.is_deleted = 0
+            WHERE t.branch_id = ?1
+              AND t.is_deleted = 0
+              AND t.done = 0
+            ORDER BY t.created_at DESC, t.row_id ASC
+            "#,
+        )?;
+        let rows: Vec<TodoWithProject> = stmt
+            .query_map(params![branch_id], |row| {
+                Ok(TodoWithProject {
+                    todo: Todo {
+                        row_id: row.get(0)?,
+                        title: row.get(1)?,
+                        done: sql_to_bool(row.get(2)?),
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        visible_tx_id: row.get(5)?,
+                    },
+                    project: Project {
+                        row_id: row.get(6)?,
+                        name: row.get(7)?,
+                        visible_tx_id: row.get(8)?,
+                    },
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut scope = Vec::new();
+        for row in &rows {
+            scope.push(RowVersionLocator {
+                table: "todos".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: branch_id.to_owned(),
+                row_id: row.todo.row_id.clone(),
+                tx_id: row.todo.visible_tx_id.clone(),
+                reason: "result".to_owned(),
+            });
+            scope.push(RowVersionLocator {
+                table: "projects".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: branch_id.to_owned(),
+                row_id: row.project.row_id.clone(),
+                tx_id: row.project.visible_tx_id.clone(),
+                reason: "dependency".to_owned(),
+            });
+        }
+        Ok((rows, scope))
     }
 
     pub fn query_todos_at_local_epoch(
@@ -2320,6 +2558,54 @@ mod tests {
             )
             .unwrap();
         assert!(read_set.contains(r#""visibleTxId":"tx-base""#));
+    }
+
+    #[test]
+    fn joined_query_returns_result_rows_and_dependency_scope() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "alice-device".into(),
+            name: "Launch".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-1".into(),
+            title: "Wire sync scope".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+
+        let (rows, scope) = db.query_open_todos_with_projects("main").unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].todo.title, "Wire sync scope");
+        assert_eq!(rows[0].project.name, "Launch");
+        assert_eq!(
+            scope
+                .iter()
+                .map(|locator| {
+                    (
+                        locator.table.as_str(),
+                        locator.row_id.as_str(),
+                        locator.tx_id.as_str(),
+                        locator.reason.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("todos", "todo-1", "tx-todo-1", "result"),
+                ("projects", "project-1", "tx-project-1", "dependency"),
+            ]
+        );
     }
 
     #[test]
