@@ -171,3 +171,34 @@ jobs:
       - run: pnpm exec playwright install chromium
       - run: pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!jazz-rn --concurrency=2
       - run: pnpm --filter jazz-tools test:browser
+
+  build-napi-windows:
+    name: Build jazz-napi (windows-x64-msvc)
+    runs-on: blacksmith-2vcpu-windows-2025
+    timeout-minutes: 30
+    env:
+      JAZZ_SKIP_RN_DEPS: "1"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-napi-windows
+
+      - name: Build jazz-napi binding (Windows)
+        run: pnpm --filter jazz-napi exec napi build --platform --release --target x86_64-pc-windows-msvc
