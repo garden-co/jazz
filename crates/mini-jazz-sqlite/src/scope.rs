@@ -20,7 +20,13 @@ pub struct QueryScope {
 
 pub struct QueryScopeBundle {
     pub txs: Vec<TxRecord>,
+    pub branches: Vec<BranchRecord>,
     pub history_rows: Vec<HistoryRecord>,
+}
+
+pub struct BranchRecord {
+    pub branch_id: String,
+    pub base_global_epoch: i64,
 }
 
 pub struct TxRecord {

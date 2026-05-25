@@ -2,8 +2,8 @@ use crate::layout::{json_to_sql, placeholders, quote_ident, read_field, TablePla
 use crate::query::{filter_scope_parts, filter_sql, Include, LoweredInclude, Query, SortDirection};
 use crate::schema::{FieldKind, Schema, TableDef};
 use crate::scope::{
-    diff_rows, HistoryRecord, PredicateReason, PredicateScope, QueryResult, QueryScope,
-    QueryScopeBundle, RowView, ScopeReason, ScopeRow, SubscriptionDiff, TxRecord,
+    diff_rows, BranchRecord, HistoryRecord, PredicateReason, PredicateScope, QueryResult,
+    QueryScope, QueryScopeBundle, RowView, ScopeReason, ScopeRow, SubscriptionDiff, TxRecord,
 };
 use crate::visibility::{accepted_history_join, latest_accepted_history_predicate};
 use crate::write::WriteTx;
@@ -103,6 +103,9 @@ struct Effect {
     seq: u64,
     write: WriteEffect,
 }
+
+type ProjectionKey = (String, String, String);
+type ProjectionSnapshot = BTreeMap<ProjectionKey, Option<Vec<String>>>;
 
 impl Client {
     fn open(node_id: String, schema: Schema, conn: Connection) -> Result<Self> {
@@ -960,23 +963,31 @@ impl Client {
 
     pub fn export_query_scope(&self, scope: &QueryScope) -> Result<QueryScopeBundle> {
         let mut txs = BTreeMap::new();
+        let mut branches = BTreeMap::new();
         let mut rows = Vec::new();
         let mut scoped_rows = BTreeMap::new();
 
         for locator in scope.result_rows.iter().chain(&scope.dependency_rows) {
-            scoped_rows.insert((locator.table.clone(), locator.row_id.clone()), ());
+            scoped_rows
+                .entry((locator.table.clone(), locator.row_id.clone()))
+                .or_insert_with(BTreeMap::new)
+                .insert(locator.tx_id.clone(), ());
         }
         for predicate in &scope.predicate_scopes {
             if predicate.row_id.is_empty() {
                 for row_id in self.table_row_ids(&predicate.table)? {
-                    scoped_rows.insert((predicate.table.clone(), row_id), ());
+                    scoped_rows
+                        .entry((predicate.table.clone(), row_id))
+                        .or_insert_with(BTreeMap::new);
                 }
             } else {
-                scoped_rows.insert((predicate.table.clone(), predicate.row_id.clone()), ());
+                scoped_rows
+                    .entry((predicate.table.clone(), predicate.row_id.clone()))
+                    .or_insert_with(BTreeMap::new);
             }
         }
 
-        for ((table_name, row_id), ()) in scoped_rows {
+        for ((table_name, row_id), scoped_tx_ids) in scoped_rows {
             let table = self.schema.table_def(&table_name)?;
             let plan = TablePlan::new(table);
             let mut select_cols = vec![
@@ -999,19 +1010,27 @@ impl Client {
             ];
             select_cols.extend(plan.user_columns.iter().map(|column| format!("h.{column}")));
 
+            let mut sql_params = vec![SqlValue::Text(row_id)];
+            let tx_filter = if scoped_tx_ids.is_empty() {
+                String::new()
+            } else {
+                sql_params.extend(scoped_tx_ids.keys().cloned().map(SqlValue::Text));
+                format!(" OR h.j_tx_id IN ({})", placeholders(scoped_tx_ids.len()))
+            };
+
             let mut stmt = self.conn.prepare(&format!(
                 "
                 SELECT {}
                 FROM {} h
                 JOIN jazz_tx tx ON tx.tx_id = h.j_tx_id
                 JOIN jazz_node node ON node.node_num = tx.node_num
-                WHERE h.j_branch_id = 'main' AND h.j_row_id = ?
-                ORDER BY h.j_updated_at, h.j_tx_id
+                WHERE h.j_row_id = ? AND (h.j_branch_id = 'main'{tx_filter})
+                ORDER BY h.j_branch_id, h.j_updated_at, h.j_tx_id
                 ",
                 select_cols.join(", "),
                 plan.history
             ))?;
-            let history_rows = stmt.query_map(params![row_id], |row| {
+            let history_rows = stmt.query_map(params_from_iter(sql_params), |row| {
                 let mut idx = 0;
                 let row_id: String = row.get(idx)?;
                 idx += 1;
@@ -1081,12 +1100,27 @@ impl Client {
             for row in history_rows {
                 let (tx, history) = row?;
                 txs.entry(tx.tx_id.clone()).or_insert(tx);
+                if history.branch_id != "main" && !branches.contains_key(&history.branch_id) {
+                    let base_global_epoch = self.conn.query_row(
+                        "SELECT base_global_epoch FROM jazz_branch WHERE branch_id = ?1",
+                        params![history.branch_id],
+                        |row| row.get(0),
+                    )?;
+                    branches.insert(
+                        history.branch_id.clone(),
+                        BranchRecord {
+                            branch_id: history.branch_id.clone(),
+                            base_global_epoch,
+                        },
+                    );
+                }
                 rows.push(history);
             }
         }
 
         Ok(QueryScopeBundle {
             txs: txs.into_values().collect(),
+            branches: branches.into_values().collect(),
             history_rows: rows,
         })
     }
@@ -1107,7 +1141,31 @@ impl Client {
     }
 
     pub fn import_query_scope(&mut self, bundle: &QueryScopeBundle) -> Result<()> {
+        let mut affected_rows = BTreeMap::new();
+        for history in &bundle.history_rows {
+            affected_rows.insert(
+                (
+                    history.table.clone(),
+                    history.row_id.clone(),
+                    history.branch_id.clone(),
+                ),
+                (),
+            );
+        }
+        let before_projection = self.current_projection_for_rows(&affected_rows)?;
+
         let sql_tx = self.conn.transaction()?;
+        for branch in &bundle.branches {
+            sql_tx.execute(
+                "
+                INSERT INTO jazz_branch (branch_id, base_global_epoch)
+                VALUES (?1, ?2)
+                ON CONFLICT(branch_id) DO UPDATE SET
+                  base_global_epoch = excluded.base_global_epoch
+                ",
+                params![branch.branch_id, branch.base_global_epoch],
+            )?;
+        }
         let mut changed_tx_ids = BTreeMap::new();
         for tx in &bundle.txs {
             sql_tx.execute(
@@ -1160,7 +1218,6 @@ impl Client {
             )?;
         }
 
-        let mut write_effects = Vec::new();
         for history in &bundle.history_rows {
             sql_tx.execute(
                 "
@@ -1211,15 +1268,28 @@ impl Client {
                 params_from_iter(values),
             )?;
             if inserted > 0 || changed_tx_ids.contains_key(&history.tx_id) {
-                write_effects.push(WriteEffect {
-                    table: history.table.clone(),
-                    row_id: history.row_id.clone(),
-                    columns: Vec::new(),
-                });
+                affected_rows.insert(
+                    (
+                        history.table.clone(),
+                        history.row_id.clone(),
+                        history.branch_id.clone(),
+                    ),
+                    (),
+                );
             }
         }
         sql_tx.commit()?;
         self.rebuild_current_projections()?;
+        let after_projection = self.current_projection_for_rows(&affected_rows)?;
+        let write_effects = affected_rows
+            .keys()
+            .filter(|row| before_projection.get(*row) != after_projection.get(*row))
+            .map(|(table, row_id, _branch_id)| WriteEffect {
+                table: table.clone(),
+                row_id: row_id.clone(),
+                columns: Vec::new(),
+            })
+            .collect();
         self.record_write_effects(write_effects);
         Ok(())
     }
@@ -1394,8 +1464,38 @@ impl Client {
 
         Ok(QueryScopeBundle {
             txs: vec![tx],
+            branches: self.transaction_branch_records(tx_id)?,
             history_rows,
         })
+    }
+
+    fn transaction_branch_records(&self, tx_id: &str) -> Result<Vec<BranchRecord>> {
+        let mut branches = BTreeMap::new();
+        for table_name in self.transaction_write_tables(tx_id)? {
+            let table = self.schema.table_def(&table_name)?;
+            let plan = TablePlan::new(table);
+            let mut stmt = self.conn.prepare(&format!(
+                "
+                SELECT DISTINCT branch.branch_id, branch.base_global_epoch
+                FROM {} h
+                JOIN jazz_branch branch ON branch.branch_id = h.j_branch_id
+                WHERE h.j_tx_id = ?1
+                ORDER BY branch.branch_id
+                ",
+                plan.history
+            ))?;
+            let rows = stmt.query_map(params![tx_id], |row| {
+                Ok(BranchRecord {
+                    branch_id: row.get(0)?,
+                    base_global_epoch: row.get(1)?,
+                })
+            })?;
+            for row in rows {
+                let branch = row?;
+                branches.insert(branch.branch_id.clone(), branch);
+            }
+        }
+        Ok(branches.into_values().collect())
     }
 
     fn transaction_write_tables(&self, tx_id: &str) -> Result<Vec<String>> {
@@ -1408,6 +1508,47 @@ impl Client {
             table_names.push(row?);
         }
         Ok(table_names)
+    }
+
+    fn current_projection_for_rows(
+        &self,
+        rows: &BTreeMap<ProjectionKey, ()>,
+    ) -> Result<ProjectionSnapshot> {
+        let mut projection = BTreeMap::new();
+        for (table_name, row_id, branch_id) in rows.keys() {
+            let table = self.schema.table_def(table_name)?;
+            let plan = TablePlan::new(table);
+            let mut columns = vec![
+                "j_visible_tx_id".to_owned(),
+                "j_is_deleted".to_owned(),
+                "j_conflicts_json".to_owned(),
+            ];
+            columns.extend(plan.user_columns.iter().cloned());
+            let row_values = self
+                .conn
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM {} WHERE j_row_id = ?1 AND j_branch_id = ?2",
+                        columns.join(", "),
+                        plan.current
+                    ),
+                    params![row_id, branch_id],
+                    |row| {
+                        let mut values = Vec::new();
+                        for idx in 0..columns.len() {
+                            let value: SqlValue = row.get(idx)?;
+                            values.push(format!("{value:?}"));
+                        }
+                        Ok(values)
+                    },
+                )
+                .optional()?;
+            projection.insert(
+                (table_name.clone(), row_id.clone(), branch_id.clone()),
+                row_values,
+            );
+        }
+        Ok(projection)
     }
 
     pub fn transaction_status(&self, tx_id: &str) -> Result<String> {

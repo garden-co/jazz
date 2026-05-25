@@ -206,6 +206,23 @@ Remaining architecture debt before sync/authority:
 - relation intent still leaks through `include_required(alias, fk_column)`.
 - no explicit `EffectLog` yet.
 
+### 2026-05-25 12:21 PDT
+
+Added branch/sync coverage for exporting a branch query scope and importing it
+into another store, then reading it back with `all_on_branch`.
+
+Implementation shape:
+
+- `QueryScopeBundle` now carries branch records alongside tx and history rows.
+- `export_query_scope` expands scoped rows by their visible tx ids, so branch
+  overlay history is included instead of only `main` history.
+- `import_query_scope` upserts bundled branch metadata before inserting history
+  and rebuilding current projections.
+
+Discovery: branch sync needs two distinct facts, not just row history. The
+branch-local tx supplies the overlay row, while `jazz_branch.base_global_epoch`
+supplies the accepted main base that `all_on_branch` overlays against.
+
 ### 2026-05-25 11:24 PDT
 
 Starting sync slice with a red query-scope bundle test:
@@ -428,6 +445,73 @@ Verified:
 
 - `cargo fmt -p mini-jazz-sqlite`
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 12:21 PDT
+
+Added a whole-system scenario test for the Alice/Bob/authority loop.
+
+Red/green shape:
+
+- Authority creates and accepts the base todo, then scoped-syncs it to Alice
+  and Bob.
+- Bob subscribes to the open todo query.
+- Alice writes an optimistic update; Bob independently writes a stale
+  optimistic update from the old base.
+- Bob's local optimistic write updates his subscription immediately.
+- Authority imports both scoped writes and exposes conflict candidate metadata
+  while both txs are pending.
+- Authority accepts Alice, rejects Bob via read-set validation, and Bob imports
+  both fates.
+- Bob's subscription updates to Alice's accepted value once Bob's rejected fate
+  removes his optimistic projection.
+
+Runtime adjustment:
+
+- Query-scope and transaction exports now carry branch records required by the
+  current `QueryScopeBundle` shape.
+- Import invalidation compares current projections before and after sync so
+  fate-only imports only rerun subscriptions when visible rows actually change.
+
+Verified:
+
+- `cargo test -p mini-jazz-sqlite --test whole_system -- --nocapture`
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 12:21 PDT
+
+Pushed three composition slices together because the worker outputs overlapped
+cleanly with the projection-diff work.
+
+Projection-diff effects:
+
+- Red/green test: importing an older accepted transaction after the receiver
+  already has a newer visible projection should not wake a subscription.
+- `import_query_scope` now snapshots affected current rows before import,
+  rebuilds projections, snapshots them again, and emits listener effects only
+  for rows whose visible current projection changed.
+- Discovery: inserted history and changed tx fate are too low-level as listener
+  effect sources. Projection deltas are closer to what subscribers observe.
+
+Branch sync:
+
+- `QueryScopeBundle` now carries branch records.
+- Branch-local rows can travel through scoped export/import and remain readable
+  with `all_on_branch`.
+- Discovery: branch provenance needs to be protocol payload, not only local
+  catalog state, even in the query-only branch overlay model.
+
+Whole-system composition:
+
+- Added an integration flow for authority, Alice, and Bob:
+  base sync -> local optimistic edits -> authority import -> conflict metadata
+  -> accepted/rejected fate import -> subscription repair.
+- Discovery: fate import order matters. Importing the accepted winner while the
+  local stale candidate is still visible may not produce a semantic diff until
+  the stale candidate's rejection arrives.
+
+Verified:
+
 - `cargo test -p mini-jazz-sqlite`
 
 ### 2026-05-25 11:42 PDT

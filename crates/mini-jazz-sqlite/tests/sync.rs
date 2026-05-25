@@ -94,6 +94,52 @@ fn duplicate_scope_import_does_not_invalidate_subscription() -> mini_jazz_sqlite
 }
 
 #[test]
+fn importing_non_visible_history_does_not_invalidate_subscription() -> mini_jazz_sqlite::Result<()>
+{
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+    });
+
+    let mut core = Harness::new()
+        .authority("core", schema.clone())
+        .durable_in_memory()?;
+    let mut bob = Harness::new().client("bob", schema).durable_in_memory()?;
+
+    core.write(|tx| {
+        tx.insert("todos", json!({ "title": "First", "done": false }))?;
+        Ok(())
+    })?;
+    let open_todos = query("todos").filter(eq("done", false));
+    let first = core.all(open_todos.clone())?;
+    let row_id = first.scope.result_rows[0].row_id.clone();
+    let first_tx = first.scope.result_rows[0].tx_id.clone();
+    core.accept_transaction(&first_tx, 1)?;
+
+    core.write(|tx| {
+        tx.update("todos", &row_id, json!({ "title": "Second" }))?;
+        Ok(())
+    })?;
+    let second = core.all(open_todos.clone())?;
+    let second_tx = second.scope.result_rows[0].tx_id.clone();
+    core.accept_transaction(&second_tx, 2)?;
+
+    bob.import_query_scope(&core.export_transaction(&second_tx)?)?;
+    let subscription = bob.subscribe(open_todos)?;
+    assert_eq!(bob.subscription_rerun_count(subscription)?, 1);
+
+    bob.import_query_scope(&core.export_transaction(&first_tx)?)?;
+    let diff = bob.poll_subscription(subscription)?;
+
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.updated.len(), 0);
+    assert_eq!(diff.removed.len(), 0);
+    assert_eq!(bob.subscription_rerun_count(subscription)?, 1);
+
+    Ok(())
+}
+
+#[test]
 fn query_scope_bundle_import_reproduces_optional_missing_include() -> mini_jazz_sqlite::Result<()> {
     let schema = Schema::new()
         .table("projects", |t| {
@@ -278,6 +324,50 @@ fn query_scope_bundle_import_reproduces_row_leaving_filter() -> mini_jazz_sqlite
 
     bob.import_query_scope(&alice.export_query_scope(&after_update.scope)?)?;
     assert_eq!(bob.all(open_todos)?.rows.len(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn branch_query_scope_bundle_import_reproduces_branch_result() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+        t.index("open_by_created", ["done", "$createdAt"]);
+    });
+
+    let mut alice = Harness::new()
+        .client("alice", schema.clone())
+        .durable_in_memory()?;
+    let mut bob = Harness::new().client("bob", schema).durable_in_memory()?;
+
+    alice.write(|tx| {
+        tx.insert("todos", json!({ "title": "Base row", "done": false }))?;
+        Ok(())
+    })?;
+
+    let open_todos = query("todos")
+        .filter(eq("done", false))
+        .order_by("$createdAt", Desc);
+    let base = alice.all(open_todos.clone())?;
+    let base_tx = base.scope.result_rows[0].tx_id.clone();
+    alice.accept_transaction(&base_tx, 1)?;
+
+    alice.create_branch("draft", 1)?;
+    alice.write_on_branch("draft", |tx| {
+        tx.insert("todos", json!({ "title": "Draft row", "done": false }))?;
+        Ok(())
+    })?;
+
+    let alice_result = alice.all_on_branch(open_todos.clone(), "draft")?;
+    let bundle = alice.export_query_scope(&alice_result.scope)?;
+
+    bob.import_query_scope(&bundle)?;
+    let bob_result = bob.all_on_branch(open_todos, "draft")?;
+
+    assert_eq!(bob_result.rows.len(), 2);
+    assert_eq!(bob_result.rows[0].get("title").unwrap(), "Draft row");
+    assert_eq!(bob_result.rows[1].get("title").unwrap(), "Base row");
 
     Ok(())
 }

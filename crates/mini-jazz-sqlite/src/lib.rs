@@ -13,8 +13,8 @@ pub use error::{Error, Result};
 pub use query::{eq, gt, query, Desc, Filter, FilterValue, Query, SortDirection};
 pub use schema::{Schema, TableBuilder};
 pub use scope::{
-    HistoryRecord, PredicateReason, PredicateScope, QueryResult, QueryScope, QueryScopeBundle,
-    RowView, ScopeReason, ScopeRow, SubscriptionDiff, TxRecord,
+    BranchRecord, HistoryRecord, PredicateReason, PredicateScope, QueryResult, QueryScope,
+    QueryScopeBundle, RowView, ScopeReason, ScopeRow, SubscriptionDiff, TxRecord,
 };
 pub use store::*;
 pub use write::{RowRef, WriteTx};
