@@ -366,6 +366,13 @@ pub struct TopJoinedPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyScopedJoinedRows {
+    pub rows: Vec<TodoWithProject>,
+    pub result_scope: Vec<RowVersionLocator>,
+    pub policy_scope: Vec<RowVersionLocator>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryResult {
     pub rows: Vec<Todo>,
     pub scope: Vec<RowVersionLocator>,
@@ -2238,6 +2245,29 @@ impl MiniJazzSqlite {
             })
         })?
         .collect()
+    }
+
+    pub fn query_open_todos_with_projects_and_policy_scope(
+        &self,
+        branch_id: &str,
+    ) -> rusqlite::Result<PolicyScopedJoinedRows> {
+        let (rows, result_scope) = self.query_open_todos_with_projects(branch_id)?;
+        let policy_scope = rows
+            .iter()
+            .map(|row| RowVersionLocator {
+                table: "projects".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: branch_id.to_owned(),
+                row_id: row.project.row_id.clone(),
+                tx_id: row.project.visible_tx_id.clone(),
+                reason: "policy_dependency".to_owned(),
+            })
+            .collect();
+        Ok(PolicyScopedJoinedRows {
+            rows,
+            result_scope,
+            policy_scope,
+        })
     }
 
     pub fn query_open_todos_with_optional_projects(
@@ -4926,6 +4956,59 @@ mod tests {
                 ("todos", "todo-1", "tx-todo-1", "result"),
                 ("projects", "project-1", "tx-project-1", "dependency"),
             ]
+        );
+    }
+
+    #[test]
+    fn joined_policy_scope_stays_separate_from_result_scope() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "alice-device".into(),
+            name: "Launch".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-1".into(),
+            title: "Policy-gated todo".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+
+        let scoped = db
+            .query_open_todos_with_projects_and_policy_scope("main")
+            .unwrap();
+
+        assert_eq!(scoped.rows[0].todo.row_id, "todo-1");
+        assert_eq!(
+            scoped
+                .result_scope
+                .iter()
+                .map(|locator| locator.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["result", "dependency"]
+        );
+        assert_eq!(
+            scoped
+                .policy_scope
+                .iter()
+                .map(|locator| {
+                    (
+                        locator.table.as_str(),
+                        locator.row_id.as_str(),
+                        locator.reason.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![("projects", "project-1", "policy_dependency")]
         );
     }
 

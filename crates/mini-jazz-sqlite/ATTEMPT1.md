@@ -840,6 +840,20 @@ get expensive quickly. It gives listeners/sync enough material for semantic
 diffs and historical reconstruction, while making it obvious that production
 will need policy-aware pruning and/or per-query history limits.
 
+### 2026-05-24 23:32 PDT
+
+Added a first policy-scope separation spike:
+
+- a joined todo/project result can expose result/dependency scope separately
+  from policy scope
+- policy scope can point at the same underlying project row with a different
+  reason
+
+Discovery: policy dependencies should stay as a separate output channel even
+when they happen to reference rows already needed by the result. This avoids
+making sync and invalidation semantics guess whether a dependency was needed to
+render a value, enforce a policy, or both.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
