@@ -1101,3 +1101,84 @@ Discovery:
   layouts, but compressed page/VFS work would need to justify CPU and random
   access complexity. A compact layout captures much of the win without adding a
   compression layer.
+
+### 2026-05-25 13:09 PDT
+
+Added two more layout/performance experiments focused on micro-representations and
+index shapes.
+
+Commands:
+
+- `cargo run -p mini-jazz-sqlite --example system_micro_layouts --release`
+- `cargo run -p mini-jazz-sqlite --example index_shape_layouts --release`
+
+System micro layout workload:
+
+- 30,000 rows.
+- 6,000 updates.
+- Same current/history mechanics across variants.
+- Compare text ids vs integer ids, normal rowid tables vs `WITHOUT ROWID`, and
+  conflict metadata as `'{}'`, `NULL`, or omitted.
+
+Latest `system_micro_layouts` run:
+
+- `text_rowid`: 11,128,832 bytes, current 2.631 ms, snapshot 13.147 ms.
+- `text_without_rowid`: 8,302,592 bytes, current 3.139 ms, snapshot 11.025 ms.
+- `int_rowid`: 5,787,648 bytes, current 2.299 ms, snapshot 7.309 ms.
+- `int_without_rowid`: 4,521,984 bytes, current 2.165 ms, snapshot 8.302 ms.
+- `int_without_rowid_null_conflict`: 4,382,720 bytes, current 2.701 ms,
+  snapshot 8.099 ms.
+- `int_without_rowid_no_conflict`: 4,317,184 bytes, current 2.130 ms,
+  snapshot 7.945 ms.
+
+Micro layout discoveries:
+
+- Integer system ids are the big win: `int_rowid` is 0.52x the text baseline,
+  with faster current, snapshot, and tx lookup timings.
+- `WITHOUT ROWID` helps composite-primary-key tables a lot: text drops to 0.75x
+  baseline, integer drops to 0.41x baseline.
+- Storing empty conflict metadata as `'{}'` has measurable but small cost in the
+  compact layout. `NULL` saves about 3%, omitting the column saves about 4.5%
+  versus compact `'{}'`.
+- In this benchmark, integer normal rowid tables had the best snapshot time, but
+  integer `WITHOUT ROWID` had the best size. The difference is small enough that
+  the storage win is probably more important unless a hot query says otherwise.
+
+Index shape workload:
+
+- 50,000 rows.
+- 10,000 updates.
+- Compact integer `WITHOUT ROWID` tables.
+- Compare minimal ordering indexes, covering current indexes, covering history
+  indexes, covering both, and a partial current index for open rows.
+
+Latest `index_shape_layouts` run:
+
+- `minimal_indexes`: 6,508,544 bytes, current 4.099 ms, snapshot 13.223 ms.
+- `covering_current`: 7,069,696 bytes, current 2.738 ms, snapshot 12.935 ms.
+- `covering_history`: 7,159,808 bytes, current 4.124 ms, snapshot 12.017 ms.
+- `covering_both`: 7,720,960 bytes, current 2.647 ms, snapshot 11.795 ms.
+- `partial_current_covering_history`: 7,290,880 bytes, current 2.430 ms,
+  snapshot 11.831 ms.
+
+Index shape discoveries:
+
+- Covering the current-page query improved current query time to 0.67x baseline
+  for about 1.09x disk.
+- Covering the history snapshot order improved snapshot query time to 0.91x
+  baseline for about 1.10x disk.
+- Covering both improved both query paths but cost about 1.19x disk.
+- A partial current index for the common open-row predicate gave the best current
+  query time in this workload while staying at 1.12x disk when paired with a
+  covering history index.
+- This suggests user/schema-derived indexes should probably be lowered to
+  concrete covering/partial SQLite indexes when the query shape is known, instead
+  of relying only on generic system indexes.
+
+Compression note:
+
+- Local SQLite compile options show `ENABLE_DBPAGE_VTAB` and `ENABLE_DBSTAT_VTAB`
+  but no zstd/zlib/page compression option. Page compression would likely require
+  a custom VFS/extension or file-level compression layer. Given the compact-id
+  wins above, reducing stringly system columns seems like the lower-risk first
+  move.
