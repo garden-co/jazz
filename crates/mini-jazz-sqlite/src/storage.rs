@@ -27,6 +27,12 @@ pub struct TodoWithProject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoWithOptionalProject {
+    pub todo: Todo,
+    pub project: Option<Project>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertTodo {
     pub row_id: String,
     pub tx_id: String,
@@ -1587,6 +1593,73 @@ impl MiniJazzSqlite {
                 tx_id: row.project.visible_tx_id.clone(),
                 reason: "dependency".to_owned(),
             });
+        }
+        Ok((rows, scope))
+    }
+
+    pub fn query_open_todos_with_optional_projects(
+        &self,
+        branch_id: &str,
+    ) -> rusqlite::Result<(Vec<TodoWithOptionalProject>, Vec<RowVersionLocator>)> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+              t.row_id, t.title, t.done, t.created_at, t.updated_at, t.visible_tx_id,
+              p.row_id, p.name, p.visible_tx_id
+            FROM todos__schema_v1_current t
+            LEFT JOIN projects__schema_v1_current p
+              ON p.branch_id = t.branch_id
+             AND p.row_id = t.project_id
+             AND p.is_deleted = 0
+            WHERE t.branch_id = ?1
+              AND t.is_deleted = 0
+              AND t.done = 0
+            ORDER BY t.created_at DESC, t.row_id ASC
+            "#,
+        )?;
+        let rows: Vec<TodoWithOptionalProject> = stmt
+            .query_map(params![branch_id], |row| {
+                let project_id: Option<String> = row.get(6)?;
+                Ok(TodoWithOptionalProject {
+                    todo: Todo {
+                        row_id: row.get(0)?,
+                        title: row.get(1)?,
+                        done: sql_to_bool(row.get(2)?),
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        visible_tx_id: row.get(5)?,
+                    },
+                    project: match project_id {
+                        Some(row_id) => Some(Project {
+                            row_id,
+                            name: row.get(7)?,
+                            visible_tx_id: row.get(8)?,
+                        }),
+                        None => None,
+                    },
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut scope = Vec::new();
+        for row in &rows {
+            scope.push(RowVersionLocator {
+                table: "todos".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: branch_id.to_owned(),
+                row_id: row.todo.row_id.clone(),
+                tx_id: row.todo.visible_tx_id.clone(),
+                reason: "result".to_owned(),
+            });
+            if let Some(project) = &row.project {
+                scope.push(RowVersionLocator {
+                    table: "projects".to_owned(),
+                    schema: "schema_v1".to_owned(),
+                    branch_id: branch_id.to_owned(),
+                    row_id: project.row_id.clone(),
+                    tx_id: project.visible_tx_id.clone(),
+                    reason: "dependency".to_owned(),
+                });
+            }
         }
         Ok((rows, scope))
     }
@@ -3204,6 +3277,52 @@ mod tests {
                 .unwrap()
                 .0
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn optional_join_nulls_deleted_dependency_instead_of_removing_result() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "alice-device".into(),
+            name: "Launch".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-1".into(),
+            title: "Can survive missing project".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.delete_project(DeleteProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-delete".into(),
+            node_id: "alice-device".into(),
+            actor_id: "alice".into(),
+            now: 300,
+        })
+        .unwrap();
+
+        let (rows, scope) = db.query_open_todos_with_optional_projects("main").unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].todo.row_id, "todo-1");
+        assert_eq!(rows[0].project, None);
+        assert_eq!(
+            scope
+                .iter()
+                .map(|locator| (locator.table.as_str(), locator.row_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("todos", "todo-1")]
         );
     }
 

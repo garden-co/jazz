@@ -446,6 +446,21 @@ disappearance. For optional relations we will need a left-join/nulling variant,
 and the scope contract will need to distinguish "dependency absent" from "not
 visited".
 
+### 2026-05-24 22:51 PDT
+
+Added optional dependency behavior for joins:
+
+- optional project query uses `LEFT JOIN`
+- deleted/missing project becomes `None`
+- todo remains in the result
+- scope includes the todo result locator but no project dependency locator
+
+Discovery: optional dependencies need a distinct scope shape. If the joined row
+contains `project = None`, there is no project version to send, but there may
+still be a semantic dependency on the absence of a project. That absence is not
+captured by row-version locators, so correctness for optional relations will
+eventually need range/predicate scope, not just visited row scope.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
