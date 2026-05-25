@@ -206,23 +206,6 @@ Remaining architecture debt before sync/authority:
 - relation intent still leaks through `include_required(alias, fk_column)`.
 - no explicit `EffectLog` yet.
 
-### 2026-05-25 12:21 PDT
-
-Added branch/sync coverage for exporting a branch query scope and importing it
-into another store, then reading it back with `all_on_branch`.
-
-Implementation shape:
-
-- `QueryScopeBundle` now carries branch records alongside tx and history rows.
-- `export_query_scope` expands scoped rows by their visible tx ids, so branch
-  overlay history is included instead of only `main` history.
-- `import_query_scope` upserts bundled branch metadata before inserting history
-  and rebuilding current projections.
-
-Discovery: branch sync needs two distinct facts, not just row history. The
-branch-local tx supplies the overlay row, while `jazz_branch.base_global_epoch`
-supplies the accepted main base that `all_on_branch` overlays against.
-
 ### 2026-05-25 11:24 PDT
 
 Starting sync slice with a red query-scope bundle test:
@@ -446,102 +429,6 @@ Verified:
 - `cargo fmt -p mini-jazz-sqlite`
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 12:21 PDT
-
-Added a whole-system scenario test for the Alice/Bob/authority loop.
-
-Red/green shape:
-
-- Authority creates and accepts the base todo, then scoped-syncs it to Alice
-  and Bob.
-- Bob subscribes to the open todo query.
-- Alice writes an optimistic update; Bob independently writes a stale
-  optimistic update from the old base.
-- Bob's local optimistic write updates his subscription immediately.
-- Authority imports both scoped writes and exposes conflict candidate metadata
-  while both txs are pending.
-- Authority accepts Alice, rejects Bob via read-set validation, and Bob imports
-  both fates.
-- Bob's subscription updates to Alice's accepted value once Bob's rejected fate
-  removes his optimistic projection.
-
-Runtime adjustment:
-
-- Query-scope and transaction exports now carry branch records required by the
-  current `QueryScopeBundle` shape.
-- Import invalidation compares current projections before and after sync so
-  fate-only imports only rerun subscriptions when visible rows actually change.
-
-Verified:
-
-- `cargo test -p mini-jazz-sqlite --test whole_system -- --nocapture`
-- `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 12:21 PDT
-
-Pushed three composition slices together because the worker outputs overlapped
-cleanly with the projection-diff work.
-
-Projection-diff effects:
-
-- Red/green test: importing an older accepted transaction after the receiver
-  already has a newer visible projection should not wake a subscription.
-- `import_query_scope` now snapshots affected current rows before import,
-  rebuilds projections, snapshots them again, and emits listener effects only
-  for rows whose visible current projection changed.
-- Discovery: inserted history and changed tx fate are too low-level as listener
-  effect sources. Projection deltas are closer to what subscribers observe.
-
-Branch sync:
-
-- `QueryScopeBundle` now carries branch records.
-- Branch-local rows can travel through scoped export/import and remain readable
-  with `all_on_branch`.
-- Discovery: branch provenance needs to be protocol payload, not only local
-  catalog state, even in the query-only branch overlay model.
-
-Whole-system composition:
-
-- Added an integration flow for authority, Alice, and Bob:
-  base sync -> local optimistic edits -> authority import -> conflict metadata
-  -> accepted/rejected fate import -> subscription repair.
-- Discovery: fate import order matters. Importing the accepted winner while the
-  local stale candidate is still visible may not produce a semantic diff until
-  the stale candidate's rejection arrives.
-
-Verified:
-
-- `cargo test -p mini-jazz-sqlite`
-
-### 2026-05-25 12:24 PDT
-
-Refined conflict detection and made predicate facts part of sync payloads.
-
-Conflict semantics:
-
-- Red/green test: two concurrent pending updates to the same row but different
-  columns should not expose conflict candidates.
-- Transaction metadata now stores a per-row, per-column write set in addition
-  to row read sets.
-- Current conflict metadata now includes pending candidates only when candidate
-  write column sets overlap. Empty column sets remain conservative wildcards.
-- Discovery: this is enough semantic signal for conflict UI shape, but the
-  authority will eventually want indexed durable write/read-set tables for hot
-  paths instead of parsing tx metadata.
-
-Predicate/read-scope representation:
-
-- `QueryScopeBundle` now carries predicate scopes explicitly.
-- Export still uses broad table closure for filter scopes, but the receiver can
-  now inspect which predicates caused that closure.
-- Discovery: this gives the protocol a place to carry future true range facts
-  without changing the bundle shape again.
-
-Verified focused tests:
-
-- `cargo test -p mini-jazz-sqlite --test sync query_scope_records_filter_predicates`
-- `cargo test -p mini-jazz-sqlite --test conflicts`
 
 ### 2026-05-25 11:42 PDT
 
@@ -984,3 +871,110 @@ Verified:
 - `cargo fmt -p mini-jazz-sqlite`
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 12:21 PDT
+
+Pushed three composition slices together because the worker outputs overlapped
+cleanly with the projection-diff work.
+
+Projection-diff effects:
+
+- Red/green test: importing an older accepted transaction after the receiver
+  already has a newer visible projection should not wake a subscription.
+- `import_query_scope` now snapshots affected current rows before import,
+  rebuilds projections, snapshots them again, and emits listener effects only
+  for rows whose visible current projection changed.
+- Discovery: inserted history and changed tx fate are too low-level as listener
+  effect sources. Projection deltas are closer to what subscribers observe.
+
+Branch sync:
+
+- `QueryScopeBundle` now carries branch records alongside tx and history rows.
+- `export_query_scope` expands scoped rows by their visible tx ids, so branch
+  overlay history is included instead of only `main` history.
+- `import_query_scope` upserts bundled branch metadata before inserting history
+  and rebuilding current projections.
+- Branch-local rows can travel through scoped export/import and remain readable
+  with `all_on_branch`.
+- Discovery: branch provenance needs to be protocol payload, not only local
+  catalog state, even in the query-only branch overlay model. Branch sync needs
+  two distinct facts: the branch-local tx supplies the overlay row, while
+  `jazz_branch.base_global_epoch` supplies the accepted main base.
+
+Whole-system composition:
+
+- Added an integration flow for authority, Alice, and Bob.
+- Authority creates and accepts the base todo, then scoped-syncs it to Alice
+  and Bob.
+- Bob subscribes to the open todo query.
+- Alice writes an optimistic update; Bob independently writes a stale
+  optimistic update from the old base.
+- Bob's local optimistic write updates his subscription immediately.
+- Authority imports both scoped writes and exposes conflict candidate metadata
+  while both txs are pending.
+- Authority accepts Alice, rejects Bob via read-set validation, and Bob imports
+  both fates.
+- Bob's subscription updates to Alice's accepted value once Bob's rejected fate
+  removes his optimistic projection.
+- Discovery: fate import order matters. Importing the accepted winner while the
+  local stale candidate is still visible may not produce a semantic diff until
+  the stale candidate's rejection arrives.
+
+Verified:
+
+- `cargo test -p mini-jazz-sqlite`
+
+### 2026-05-25 12:24 PDT
+
+Refined conflict detection and made predicate facts part of sync payloads.
+
+Conflict semantics:
+
+- Red/green test: two concurrent pending updates to the same row but different
+  columns should not expose conflict candidates.
+- Transaction metadata now stores a per-row, per-column write set in addition
+  to row read sets.
+- Current conflict metadata now includes pending candidates only when candidate
+  write column sets overlap. Empty column sets remain conservative wildcards.
+- Discovery: this is enough semantic signal for conflict UI shape, but the
+  authority will eventually want indexed durable write/read-set tables for hot
+  paths instead of parsing tx metadata.
+
+Predicate/read-scope representation:
+
+- `QueryScopeBundle` now carries predicate scopes explicitly.
+- Export still uses broad table closure for filter scopes, but the receiver can
+  now inspect which predicates caused that closure.
+- Discovery: this gives the protocol a place to carry future true range facts
+  without changing the bundle shape again.
+
+Verified focused tests:
+
+- `cargo test -p mini-jazz-sqlite --test sync query_scope_records_filter_predicates`
+- `cargo test -p mini-jazz-sqlite --test conflicts`
+
+### 2026-05-25 12:32 PDT
+
+Cleaned up the decision log ordering again and consolidated duplicate 12:21
+entries from overlapping worker/parent writes. Going forward, new entries should
+be appended only at the end after calling `date`.
+
+Added a branch causality/base-pinning test.
+
+Red/green shape:
+
+- Main creates and accepts a base row at epoch 1.
+- A branch is created with base epoch 1.
+- Main advances the same row and accepts that update at epoch 2.
+- Reading the branch still sees the epoch-1 base value, proving the branch base
+  is pinned instead of floating with main.
+- A branch-local overlay update then replaces the pinned base row.
+
+Discovery: the current query-only branch overlay already handles this narrow
+base-pinning case. The next branch risks are multi-base provenance, merge
+visibility, and branch sync of main-base history the receiver does not already
+have.
+
+Verified focused test:
+
+- `cargo test -p mini-jazz-sqlite branch_base_stays_pinned_when_main_advances`
