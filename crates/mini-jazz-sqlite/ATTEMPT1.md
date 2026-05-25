@@ -895,6 +895,19 @@ recreate historical snapshots for rows that are inside the query's result scope.
 This supports semantic diffs and time-travel inspection without needing a
 separate snapshot payload.
 
+### 2026-05-24 23:39 PDT
+
+Added a metadata-only branch-base merge:
+
+- a merge transaction can add a source branch to a target branch's base list
+- target branch reads then see source rows through branch provenance
+- no row history is copied into the target branch
+
+Discovery: this better matches the design than the earlier data-copy merge
+spike. Data-copy merge is still useful for one concrete strategy, but
+metadata-only visibility through branch sources keeps global history isolated
+while letting merge transactions define cross-branch visibility.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

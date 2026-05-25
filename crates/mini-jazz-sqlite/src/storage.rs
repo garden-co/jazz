@@ -160,6 +160,17 @@ pub struct MergeBranchTodosIntoMain {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeBranchBase {
+    pub target_branch_id: String,
+    pub source_branch_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub source_global_epoch: i64,
+    pub precedence: i64,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchSource {
     pub branch_id: String,
     pub global_epoch: i64,
@@ -1299,6 +1310,48 @@ impl MiniJazzSqlite {
                 ],
             )?;
         }
+        sql_tx.commit()
+    }
+
+    pub fn merge_branch_base(&mut self, input: MergeBranchBase) -> rusqlite::Result<()> {
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let metadata_json = format!(
+            r#"{{"targetBranch":"{}","sourceBranch":"{}","sourceGlobalEpoch":{}}}"#,
+            input.target_branch_id, input.source_branch_id, input.source_global_epoch
+        );
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'branch_metadata', ?4, '[]', '[]', '[]', '[]',
+                     'local_pending', ?5, ?5, ?6)
+            "#,
+            params![
+                input.tx_id,
+                node_num,
+                local_epoch,
+                input.source_global_epoch,
+                input.now,
+                metadata_json
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT OR REPLACE INTO jazz_branch_base (
+              branch_id, source_branch_id, source_global_epoch, precedence
+            ) VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                input.target_branch_id,
+                input.source_branch_id,
+                input.source_global_epoch,
+                input.precedence
+            ],
+        )?;
         sql_tx.commit()
     }
 
@@ -4644,6 +4697,71 @@ mod tests {
         let main_current = db.query_todos(&TodoQuery::open_since(0)).unwrap();
         assert_eq!(main_current.rows[0].row_id, "todo-draft");
         assert_eq!(main_current.rows[0].visible_tx_id, "tx-merge-draft");
+    }
+
+    #[test]
+    fn branch_base_merge_makes_source_visible_without_copying_rows() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.create_branch(CreateBranch {
+            branch_id: "review".into(),
+            tx_id: "tx-create-review".into(),
+            node_id: "alice-device".into(),
+            name: "Review".into(),
+            head_global_epoch: 0,
+            base_provenance_json: r#"[{"branch":"main","globalBase":0}]"#.into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_in_branch(
+            "draft",
+            InsertTodo {
+                row_id: "todo-draft".into(),
+                tx_id: "tx-draft".into(),
+                node_id: "alice-device".into(),
+                title: "Draft row".into(),
+                done: false,
+                actor_id: "alice".into(),
+                now: 200,
+            },
+        )
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-draft".into(),
+            global_epoch: 1,
+        })
+        .unwrap();
+
+        assert!(
+            db.query_todos_on_recorded_branch_bases(&TodoQuery::open_since(0), "review")
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        db.merge_branch_base(MergeBranchBase {
+            target_branch_id: "review".into(),
+            source_branch_id: "draft".into(),
+            tx_id: "tx-merge-base".into(),
+            node_id: "alice-device".into(),
+            source_global_epoch: 1,
+            precedence: 0,
+            now: 300,
+        })
+        .unwrap();
+
+        let review = db
+            .query_todos_on_recorded_branch_bases(&TodoQuery::open_since(0), "review")
+            .unwrap();
+        assert_eq!(review.rows[0].row_id, "todo-draft");
+        assert_eq!(review.scope[0].branch_id, "draft");
+        let copied_rows: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM todos__schema_v1_history WHERE branch_id = 'review'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(copied_rows, 0);
     }
 
     #[test]
