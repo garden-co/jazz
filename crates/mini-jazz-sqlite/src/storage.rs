@@ -276,6 +276,16 @@ pub struct RowVersionLocator {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredicateScope {
+    pub table: String,
+    pub schema: String,
+    pub branch_id: String,
+    pub index: String,
+    pub predicate: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryResult {
     pub rows: Vec<Todo>,
     pub scope: Vec<RowVersionLocator>,
@@ -1601,10 +1611,23 @@ impl MiniJazzSqlite {
         &self,
         branch_id: &str,
     ) -> rusqlite::Result<(Vec<TodoWithOptionalProject>, Vec<RowVersionLocator>)> {
+        let (rows, row_scope, _) =
+            self.query_open_todos_with_optional_projects_and_scope(branch_id)?;
+        Ok((rows, row_scope))
+    }
+
+    pub fn query_open_todos_with_optional_projects_and_scope(
+        &self,
+        branch_id: &str,
+    ) -> rusqlite::Result<(
+        Vec<TodoWithOptionalProject>,
+        Vec<RowVersionLocator>,
+        Vec<PredicateScope>,
+    )> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
-              t.row_id, t.title, t.done, t.created_at, t.updated_at, t.visible_tx_id,
+              t.row_id, t.project_id, t.title, t.done, t.created_at, t.updated_at, t.visible_tx_id,
               p.row_id, p.name, p.visible_tx_id
             FROM todos__schema_v1_current t
             LEFT JOIN projects__schema_v1_current p
@@ -1619,21 +1642,21 @@ impl MiniJazzSqlite {
         )?;
         let rows: Vec<TodoWithOptionalProject> = stmt
             .query_map(params![branch_id], |row| {
-                let project_id: Option<String> = row.get(6)?;
+                let project_id: Option<String> = row.get(7)?;
                 Ok(TodoWithOptionalProject {
                     todo: Todo {
                         row_id: row.get(0)?,
-                        title: row.get(1)?,
-                        done: sql_to_bool(row.get(2)?),
-                        created_at: row.get(3)?,
-                        updated_at: row.get(4)?,
-                        visible_tx_id: row.get(5)?,
+                        title: row.get(2)?,
+                        done: sql_to_bool(row.get(3)?),
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        visible_tx_id: row.get(6)?,
                     },
                     project: match project_id {
                         Some(row_id) => Some(Project {
                             row_id,
-                            name: row.get(7)?,
-                            visible_tx_id: row.get(8)?,
+                            name: row.get(8)?,
+                            visible_tx_id: row.get(9)?,
                         }),
                         None => None,
                     },
@@ -1641,6 +1664,7 @@ impl MiniJazzSqlite {
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut scope = Vec::new();
+        let mut predicate_scope = Vec::new();
         for row in &rows {
             scope.push(RowVersionLocator {
                 table: "todos".to_owned(),
@@ -1659,9 +1683,23 @@ impl MiniJazzSqlite {
                     tx_id: project.visible_tx_id.clone(),
                     reason: "dependency".to_owned(),
                 });
+            } else {
+                let project_id: String = self.conn.query_row(
+                    "SELECT project_id FROM todos__schema_v1_current WHERE branch_id = ?1 AND row_id = ?2",
+                    params![branch_id, row.todo.row_id],
+                    |row| row.get(0),
+                )?;
+                predicate_scope.push(PredicateScope {
+                    table: "projects".to_owned(),
+                    schema: "schema_v1".to_owned(),
+                    branch_id: branch_id.to_owned(),
+                    index: "primary".to_owned(),
+                    predicate: format!(r#"{{"rowId":"{project_id}","isDeleted":0}}"#),
+                    reason: "optional_dependency_absence".to_owned(),
+                });
             }
         }
-        Ok((rows, scope))
+        Ok((rows, scope, predicate_scope))
     }
 
     pub fn query_todos_at_local_epoch(
@@ -3323,6 +3361,40 @@ mod tests {
                 .map(|locator| (locator.table.as_str(), locator.row_id.as_str()))
                 .collect::<Vec<_>>(),
             vec![("todos", "todo-1")]
+        );
+    }
+
+    #[test]
+    fn optional_join_records_predicate_scope_for_missing_dependency() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "missing-project".into(),
+            title: "Needs absence scope".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+
+        let (rows, row_scope, predicate_scope) = db
+            .query_open_todos_with_optional_projects_and_scope("main")
+            .unwrap();
+
+        assert_eq!(rows[0].project, None);
+        assert_eq!(row_scope.len(), 1);
+        assert_eq!(
+            predicate_scope,
+            vec![PredicateScope {
+                table: "projects".into(),
+                schema: "schema_v1".into(),
+                branch_id: "main".into(),
+                index: "primary".into(),
+                predicate: r#"{"rowId":"missing-project","isDeleted":0}"#.into(),
+                reason: "optional_dependency_absence".into(),
+            }]
         );
     }
 

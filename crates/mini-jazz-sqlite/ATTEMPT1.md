@@ -461,6 +461,21 @@ still be a semantic dependency on the absence of a project. That absence is not
 captured by row-version locators, so correctness for optional relations will
 eventually need range/predicate scope, not just visited row scope.
 
+### 2026-05-24 22:52 PDT
+
+Added first predicate scope for optional dependency absence:
+
+- optional project query can return `(rows, row_scope, predicate_scope)`
+- missing project produces a predicate dependency like
+  `{"rowId":"missing-project","isDeleted":0}`
+- row scope still only includes concrete row versions
+
+Discovery: this is the missing piece behind optional relations and policy
+dependencies. Row-version locators describe what was found. Predicate scope
+describes the absence or range condition that must remain true for the result to
+be reproducible. This should probably become a first-class read-set/sync-scope
+shape rather than being smuggled through JSON on a query result.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
