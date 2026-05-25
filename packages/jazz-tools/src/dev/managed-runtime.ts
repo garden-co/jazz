@@ -49,7 +49,11 @@ function printServerStartedBanner(opts: {
   dataDir?: string;
   adminSecret?: string;
 }): void {
-  const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined;
+  if (!process.stdout.isTTY) {
+    return;
+  }
+
+  const useColor = process.env.NO_COLOR === undefined;
   const bold = useColor ? "\x1b[1m" : "";
   const brand = useColor ? "\x1b[38;2;20;106;255m" : ""; // #146aff
   const reset = useColor ? "\x1b[0m" : "";
