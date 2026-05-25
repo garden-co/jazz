@@ -2078,6 +2078,62 @@ impl MiniJazzSqlite {
         .collect()
     }
 
+    pub fn rebuild_tx_fate_projection(&self, tx_id: &str) -> rusqlite::Result<()> {
+        let fate: Option<TxFateRecord> = self
+            .conn
+            .query_row(
+                r#"
+                SELECT tx_id, fate, global_epoch, reason_json, recorded_at
+                FROM jazz_tx_fate
+                WHERE tx_id = ?1
+                ORDER BY recorded_at DESC, fate DESC
+                LIMIT 1
+                "#,
+                params![tx_id],
+                |row| {
+                    Ok(TxFateRecord {
+                        tx_id: row.get(0)?,
+                        fate: row.get(1)?,
+                        global_epoch: row.get(2)?,
+                        reason_json: row.get(3)?,
+                        recorded_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(fate) = fate else {
+            return Ok(());
+        };
+        match fate.fate.as_str() {
+            "accepted" => {
+                self.conn.execute(
+                    r#"
+                    UPDATE jazz_tx
+                    SET status = 'global_durable_accepted',
+                        global_epoch = ?2,
+                        rejection_reason_json = NULL
+                    WHERE tx_id = ?1
+                    "#,
+                    params![tx_id, fate.global_epoch],
+                )?;
+            }
+            "rejected" => {
+                self.conn.execute(
+                    r#"
+                    UPDATE jazz_tx
+                    SET status = 'rejected',
+                        global_epoch = NULL,
+                        rejection_reason_json = ?2
+                    WHERE tx_id = ?1
+                    "#,
+                    params![tx_id, fate.reason_json],
+                )?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub fn open_todos_since(
         &self,
         branch_id: &str,
@@ -3889,6 +3945,44 @@ mod tests {
             db.tx_fate_log("tx-2").unwrap(),
             vec![r#"rejected|-1|{"code":"permission_denied"}"#]
         );
+    }
+
+    #[test]
+    fn tx_fate_projection_can_be_rebuilt_from_receipts() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-1".into(),
+            node_id: "alice-device".into(),
+            title: "Accepted".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-1".into(),
+            global_epoch: 7,
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE jazz_tx SET status = 'local_pending', global_epoch = NULL WHERE tx_id = 'tx-1'",
+                [],
+            )
+            .unwrap();
+
+        db.rebuild_tx_fate_projection("tx-1").unwrap();
+
+        let rebuilt: (String, i64) = db
+            .conn
+            .query_row(
+                "SELECT status, global_epoch FROM jazz_tx WHERE tx_id = 'tx-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rebuilt, ("global_durable_accepted".into(), 7));
     }
 
     #[test]

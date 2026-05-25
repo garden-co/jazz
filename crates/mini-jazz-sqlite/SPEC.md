@@ -1009,6 +1009,49 @@ benchmarks should be harness scenarios promoted into measurement mode rather
 than isolated microbenchmarks, with focused SQLite microbenchmarks added only
 when a scenario identifies a concrete hot path.
 
+## Implementation Spike Learnings
+
+The first native Rust/SQLite spike intentionally used hard-coded `todos` and
+`projects` tables. That proved useful: generic schema lowering can wait until
+transaction fate, projection rebuilds, query scope, and branch visibility have
+executable semantics.
+
+Concrete lessons so far:
+
+- SQLite treats bare `$name` identifiers like parameters in common contexts.
+  The implementation needs a system-column identifier codec even though this
+  spec keeps `$` names as semantic notation.
+- Current projections are the right fast path for ordinary `main` reads. They
+  must be byte-for-byte rebuildable from non-rejected history, and projection
+  repair should be table/schema-polymorphic rather than hand-coded at every
+  fate transition.
+- Rejection and authority acceptance work best as both denormalized transaction
+  state on `jazz_tx` and append-only fate receipts. The denormalized state keeps
+  visibility queries simple; receipts preserve replay/audit semantics.
+- Query scope should distinguish result rows, joined/include dependencies,
+  policy dependencies, and predicate/range dependencies. Optional missing
+  includes require predicate scope, because there is no concrete row locator for
+  the absence.
+- Required includes map cleanly to inner joins: a missing required dependency
+  removes the parent result. Optional includes map to left joins plus absence
+  scope.
+- Rerun-and-diff subscriptions can produce correct semantic results, including
+  joined dependency updates and page churn. Efficient invalidation still needs
+  richer metadata, especially old/new index keys for ordered pages.
+- Pure-query snapshot reads are viable as the correctness baseline, but query
+  shape matters enormously. A grouped latest-visible-version CTE was much
+  faster than a correlated `NOT EXISTS` shape in the first debug ballpark.
+- Branch reads want SQL-visible source/provenance relations. A source table with
+  `(source_branch_id, source_global_epoch, precedence)` lets SQLite perform
+  base-plus-branch shadowing and gives sync scope precise provenance.
+- Precise read/write sets can replace explicit parent pointers for the v0
+  causality and exclusive-acceptance checks. Row reads catch stale updates;
+  predicate/range reads catch absence and uniqueness-like hazards.
+- Conflict metadata belongs at the row/object that is conflicted, including
+  nested dependency objects in joined results. Conflict resolution can be
+  represented as an ordinary data transaction that writes the chosen value and
+  clears candidate metadata.
+
 ## Open Questions and Underspecified Areas
 
 ### Version Vectors

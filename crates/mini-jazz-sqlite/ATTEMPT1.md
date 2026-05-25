@@ -854,6 +854,19 @@ when they happen to reference rows already needed by the result. This avoids
 making sync and invalidation semantics guess whether a dependency was needed to
 render a value, enforce a policy, or both.
 
+### 2026-05-24 23:34 PDT
+
+Added fate-projection rebuild from append-only receipts:
+
+- `jazz_tx_fate` remains the append-only authority observation log
+- denormalized `jazz_tx.status/global_epoch/rejection_reason` can be repaired
+  from the latest receipt
+
+Discovery: the receipt/current split continues to feel right. Query speed can
+lean on denormalized columns, while audit/replay can lean on append-only fate
+events. The unresolved production question is how to order competing authority
+receipts if sharding or retries ever produce duplicate-looking observations.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
