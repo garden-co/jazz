@@ -2,12 +2,13 @@ import defaultMdxComponents from "fumadocs-ui/mdx";
 import * as TabsComponents from "./components/mdx/tabs";
 import type { MDXComponents } from "mdx/types";
 import type { ReactNode } from "react";
-import { Mermaid } from "./components/mdx/mermaid";
 import { GenerateAppId } from "./components/mdx/generate-app-id";
 import { CloudConfig } from "./components/mdx/cloud-config";
 import { DeployCommand } from "./components/mdx/deploy-command";
 import { LensDiagram } from "./components/mdx/lens-diagram";
 import { TierSyncDiagram } from "./components/mdx/tier-sync-diagram";
+import { Graph, Sequence } from "./components/mdx/diagram";
+import { WriteTierDiagram } from "./components/mdx/write-tier-diagram";
 import { JazzLogo } from "./components/brand/jazz-logo";
 
 function SlideCodeCell({ children, title }: { children: ReactNode; title: string }) {
@@ -25,12 +26,14 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
   return {
     ...defaultMdxComponents,
     ...TabsComponents,
-    Mermaid,
     GenerateAppId,
     CloudConfig,
     DeployCommand,
     LensDiagram,
     TierSyncDiagram,
+    Graph,
+    Sequence,
+    WriteTierDiagram,
     JazzLogo,
     SlideCodeCell,
     ...components,

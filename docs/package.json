@@ -8,6 +8,7 @@
     "prebuild": "fumadocs-mdx",
     "predev": "fumadocs-mdx",
     "start": "next start",
+    "test": "vitest run",
     "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
     "postinstall": "fumadocs-mdx"
   },
@@ -18,9 +19,7 @@
     "fumadocs-mdx": "14.2.7",
     "fumadocs-ui": "16.6.2",
     "lucide-react": "^0.563.0",
-    "mermaid": "^11.13.0",
     "next": "16.1.6",
-    "next-themes": "^0.4.6",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "simple-icons": "^16.17.0",
@@ -35,6 +34,7 @@
     "@types/react-dom": "^19.2.3",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
-    "typescript": "catalog:default"
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
   }
 }

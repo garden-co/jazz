@@ -1,7 +1,7 @@
 ---
 title: Advanced Internals
 description: "How Jazz works under the hood: raw tables, row histories, sync, the query pipeline, and the browser architecture."
-reviewedAt: "6027cae2"
+reviewedAt: "2e983ef11"
 ---
 
 This page describes Jazz's internal architecture. You do not need any of this to use Jazz, but it
@@ -57,17 +57,47 @@ Both storage shapes are flat rows:
 - history rows use reserved `_jazz_*` columns plus the user columns
 - visible rows use a slightly larger `_jazz_*` prefix plus the same user columns
 
-### Automatic column indexing
+### Indexing
 
-Every column in every table gets a single-column index automatically. There is no manual index
-management.
+By default, **every column on every table is indexed**. This keeps `where`, `orderBy`, and
+join lookups fast on any column without you having to think about it, at the cost of one
+index entry per column per row. The `_id` index for each table doubles as the authoritative
+row manifest, so discovering all rows in a table is just an `_id` index scan.
 
-The `_id` index for each table doubles as the authoritative row manifest, so discovering all rows
-in a table is just an `_id` index scan.
+Sometimes you'll want to optimise for write performance or storage cost instead. Use
+`indexOnly()` to specify which columns in the table need indexes; only the columns you
+specify will be indexed.
 
-This is a deliberate trade-off: local-first databases are usually small enough that automatic
-indexing is worth the storage overhead, and it guarantees that ordinary `where(...)` filters do not
-fall back to surprise table scans.
+<Callout type="warn" title="Avoid overuse">
+  `table.indexOnly(["title", "done"])` does **not** mean "add indexes on `title` and `done`". It
+  means "**drop** the indexes on every other column on this table". Read it as _"index only these"_.
+  `indexOnly` is an optimisation that you're unlikely to need to begin with, and if not used
+  correctly, can significantly impact the performance of your app, especially on reads.
+</Callout>
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  todos: s
+    .table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      activityLog: s.string().optional(),
+    })
+    .indexOnly(["title", "done"]),
+};
+```
+
+In this example, `where({ title: ... })` and `where({ done: ... })` are still index-backed.
+A query that filters on `description` or `activityLog` works, but falls back to scanning
+every row in the table.
+
+Use `indexOnly` when you're seeing slow writes and:
+
+- The column holds large or rarely-queried data (long text, serialised metadata, audit logs).
+- The table is write-heavy and the per-column index cost is showing up in your performance data.
 
 ### Deletion
 
@@ -93,6 +123,47 @@ visible state, but it is not a normal application-facing feature yet.
 Each runtime instance maintains a small monotonic clock for direct writes. New row versions created
 by that runtime get strictly increasing local timestamps, which makes deterministic last-writer-wins
 ordering straightforward within a single device or process.
+
+### Merge strategies
+
+By default, Jazz adopts a per-column last-writer-wins strategy to resolve concurrent edits. This means that if
+two clients update the same column of the same row simultaneously, the one with the later timestamp overwrites the earlier one.
+
+This is a sensible default, but can cause some unexpected behaviour with certain types of data. For example,
+imagine a voting app. Alice and Bob both read the current `voteCount` value as 2. They each want to increment
+the value. If they simultaneously write 3, then the new value will be 3, even though they actually each wanted
+to increment by one.
+
+Use `.merge("counter")` on the column to keep deltas additive instead:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  votes: s.table({
+    proposal: s.string(),
+    voteCount: s.int().merge("counter"),
+  }),
+};
+```
+
+With `merge("counter")`, every `update(...)` on the column is recorded as a delta from the
+value the writer was looking at. When concurrent edits meet, the deltas are summed: Alice's
+`+1` and Bob's `+1` both apply, and the `voteCount` correctly lands on `4`.
+
+Counter merges are useful for things like:
+
+- A shared score or vote tally.
+- An inventory level being incremented and decremented from multiple devices.
+- Any other counter where you care about preserving every increment rather than which device
+  wrote last.
+
+<Callout type="warn">
+  `merge("counter")` is only valid on **non-nullable integer columns**. Calling it on a string, on a
+  nullable integer (`s.int().optional()`), or on any other type throws at schema construction time.
+  `"counter"` is currently the only non-default merge strategy, but more merge strategies are
+  planned in future.
+</Callout>
 
 ### Cold start
 

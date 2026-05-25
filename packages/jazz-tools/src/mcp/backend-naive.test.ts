@@ -91,18 +91,21 @@ describe("createNaiveBackend", () => {
     expect(typeof backend.listPages).toBe("function");
   });
 
-  it("emits the node:sqlite unavailable warning to stderr on construction", async () => {
+  it("emits a loud deprecation warning to stderr on construction", async () => {
     const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     await createNaiveBackend(txtPath);
-    const calls = spy.mock.calls.map((c) => String(c[0]));
-    expect(calls.some((msg) => msg.includes("node:sqlite not available"))).toBe(true);
+    const msg = spy.mock.calls.map((c) => String(c[0])).join("");
+    expect(spy).toHaveBeenCalled();
+    expect(msg).toContain("DEPRECATED");
+    expect(msg).toContain("node:sqlite");
   });
 
-  it("warning message names the missing capability", async () => {
+  it("warning names the missing capability and the supported runtime", async () => {
     const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     await createNaiveBackend(txtPath);
-    const calls = spy.mock.calls.map((c) => String(c[0]));
-    expect(calls.some((msg) => msg.includes("node:sqlite + FTS5"))).toBe(true);
+    const msg = spy.mock.calls.map((c) => String(c[0])).join("");
+    expect(msg).toContain("FTS5");
+    expect(msg).toContain("Node.js 22");
   });
 });
 

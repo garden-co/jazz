@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
 
-import { splitIntoSections, type Section } from "./build-index.js";
+// Import from parse.js, NOT build-index.js: build-index statically imports
+// node:sqlite, which would crash this fallback on Node < 22. parse.js is
+// deliberately sqlite-free.
+import { splitIntoSections, type Section } from "./parse.js";
 import type { DocResult, DocsBackend, PageInfo, SearchResult } from "./backend-sqlite.js";
 
 export type { DocResult, DocsBackend, PageInfo, SearchResult };
@@ -11,11 +14,26 @@ export type { DocResult, DocsBackend, PageInfo, SearchResult };
 // deduplication is not needed here.
 // ---------------------------------------------------------------------------
 
+const DEPRECATION_BANNER = [
+  "",
+  "════════════════════════════════════════════════════════════════════",
+  "  ⚠  DEPRECATED: Jazz MCP server running in text-search fallback mode",
+  "════════════════════════════════════════════════════════════════════",
+  "  node:sqlite is unavailable, so the server fell back to basic",
+  "  text search — results are markedly worse than SQLite FTS5.",
+  "",
+  "  This fallback is DEPRECATED and will be REMOVED in a future",
+  "  release. Node.js < 22 is no longer supported.",
+  "",
+  '  Upgrade to Node.js 22.12+ (the current "Jod" LTS) so the MCP',
+  "  server can use full-quality SQLite FTS5 search.",
+  "════════════════════════════════════════════════════════════════════",
+  "",
+  "",
+].join("\n");
+
 function emitWarning(): void {
-  process.stderr.write(
-    "node:sqlite not available — using basic text search. " +
-      "Full-text search requires a runtime with node:sqlite + FTS5.\n",
-  );
+  process.stderr.write(DEPRECATION_BANNER);
 }
 
 // ---------------------------------------------------------------------------

@@ -8,22 +8,24 @@ Jazz supports external JWT-based authentication for production use. This recipe 
 
 ## How it works
 
-<Mermaid chart={`
-sequenceDiagram
-    participant Browser
-    participant Auth as Auth provider
-
-    Browser->>Auth: Sign in
-    Auth-->>Browser: JWT token
-
-    create participant Jazz as Jazz server
-    Browser->>Jazz: Connect with JWT
-    Jazz->>Auth: Fetch JWKS
-    Auth-->>Jazz: Public keys
-    Jazz->>Jazz: Verify JWT
-    Jazz-->>Browser: Session ready
-
-`} />
+<Sequence
+  eyebrow="Provider sign-in"
+  description="An external JWT provider connecting to a Jazz server."
+  participants={[
+    { id: "browser", label: "Browser" },
+    { id: "auth", label: "Auth provider" },
+    { id: "jazz", label: "Jazz server", createAtStep: 2 },
+  ]}
+  steps={[
+    { kind: "message", from: "browser", to: "auth", text: "Sign in" },
+    { kind: "message", from: "auth", to: "browser", text: "JWT token", line: "dashed" },
+    { kind: "message", from: "browser", to: "jazz", text: "Connect with JWT" },
+    { kind: "message", from: "jazz", to: "auth", text: "Fetch JWKS" },
+    { kind: "message", from: "auth", to: "jazz", text: "Public keys", line: "dashed" },
+    { kind: "message", from: "jazz", to: "jazz", text: "Verify JWT" },
+    { kind: "message", from: "jazz", to: "browser", text: "Session ready", line: "dashed" },
+  ]}
+/>
 
 1. The user signs in with your auth provider and gets a JWT.
 2. Your client passes that JWT to Jazz.

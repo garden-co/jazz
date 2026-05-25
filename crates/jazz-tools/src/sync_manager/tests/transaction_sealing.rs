@@ -1182,7 +1182,7 @@ fn seal_batch_acceptance_stops_when_submission_persistence_fails() {
 }
 
 #[test]
-fn seal_batch_rejects_when_family_visible_frontier_changed() {
+fn seal_batch_accepts_when_unrelated_family_visible_frontier_changed() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
@@ -1263,24 +1263,25 @@ fn seal_batch_rejects_when_family_visible_frontier_changed() {
 
     assert_eq!(
         io.load_authoritative_batch_fate(batch_id).unwrap(),
-        Some(BatchFate::Rejected {
+        Some(BatchFate::AcceptedTransaction {
             batch_id,
-            code: "transaction_conflict".to_string(),
-            reason: "family-visible frontier changed since batch was sealed".to_string(),
+            confirmed_tier: DurabilityTier::Local,
         })
     );
+    let visible = io
+        .load_visible_region_row("users", target_branch, staged_row_id)
+        .unwrap()
+        .expect("accepted sealed batch should publish its staged row");
     assert_eq!(
-        io.load_visible_region_row("users", target_branch, staged_row_id)
-            .unwrap(),
-        None,
-        "conflicted sealed batch should not publish its staged row"
+        visible.state,
+        crate::row_histories::RowState::VisibleTransactional
     );
 
     let history_rows = io.scan_history_row_batches("users", staged_row_id).unwrap();
     assert_eq!(history_rows.len(), 1);
     assert_eq!(
         history_rows[0].state,
-        crate::row_histories::RowState::Rejected
+        crate::row_histories::RowState::VisibleTransactional
     );
 }
 
