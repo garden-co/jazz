@@ -454,21 +454,7 @@ impl Client {
         let mut result_rows = Vec::new();
         let mut result_scope = Vec::new();
         let mut dependency_scope = Vec::new();
-        let mut predicate_scopes = query
-            .filters
-            .iter()
-            .map(|filter| {
-                let (column, op, value) = filter_scope_parts(filter);
-                PredicateScope {
-                    table: table.name.clone(),
-                    row_id: String::new(),
-                    column: column.to_owned(),
-                    op: op.to_owned(),
-                    value,
-                    reason: PredicateReason::Filter,
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut predicate_scopes = self.filter_predicate_scopes(table, &query);
         for row in rows {
             let (view, result_locator, dependencies, predicates) = row?;
             result_rows.push(view);
@@ -483,6 +469,125 @@ impl Client {
                 result_rows: result_scope,
                 dependency_rows: dependency_scope,
                 predicate_scopes,
+            },
+        })
+    }
+
+    pub fn all_at_global_epoch(&self, query: Query, global_epoch: i64) -> Result<QueryResult> {
+        if query.include.is_some() {
+            return Err(Error::new("snapshot includes are not implemented yet"));
+        }
+
+        let table = self.schema.table_def(&query.table)?;
+        let plan = TablePlan::new(table);
+        let mut select_cols = vec![
+            "base.j_row_id".to_owned(),
+            "base.j_tx_id".to_owned(),
+            "base.j_created_at".to_owned(),
+        ];
+        for field in &table.fields {
+            select_cols.push(format!("base.{}", quote_ident(&field.name)));
+        }
+
+        let mut sql = format!(
+            "
+            SELECT {}
+            FROM {} base
+            JOIN jazz_tx base_tx ON base_tx.tx_id = base.j_tx_id
+            WHERE base.j_branch_id = ?
+              AND base.j_op != 'delete'
+              AND base_tx.status = 'global_durable_accepted'
+              AND base_tx.global_epoch <= ?
+              AND NOT EXISTS (
+                SELECT 1
+                FROM {} newer
+                JOIN jazz_tx newer_tx ON newer_tx.tx_id = newer.j_tx_id
+                WHERE newer.j_branch_id = base.j_branch_id
+                  AND newer.j_row_id = base.j_row_id
+                  AND newer_tx.status = 'global_durable_accepted'
+                  AND newer_tx.global_epoch <= ?
+                  AND (newer_tx.global_epoch, newer.j_tx_id) >
+                      (base_tx.global_epoch, base.j_tx_id)
+              )
+            ",
+            select_cols.join(", "),
+            plan.history,
+            plan.history
+        );
+
+        let mut sql_params = vec![
+            SqlValue::Text("main".to_owned()),
+            SqlValue::Integer(global_epoch),
+            SqlValue::Integer(global_epoch),
+        ];
+        for filter in &query.filters {
+            sql.push_str(" AND ");
+            sql.push_str(&filter_sql("base", filter));
+            sql_params.push(filter.value.to_sql_value());
+        }
+
+        if let Some(order) = &query.order {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&plan.aliased_column("base", &order.column));
+            sql.push(' ');
+            sql.push_str(match order.direction {
+                SortDirection::Asc => "ASC",
+                SortDirection::Desc => "DESC",
+            });
+        }
+
+        if let Some(limit) = query.limit {
+            sql.push_str(" LIMIT ?");
+            sql_params.push(SqlValue::Integer(limit as i64));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(sql_params), |row| {
+            let mut idx = 0;
+            let row_id: String = row.get(idx)?;
+            idx += 1;
+            let visible_tx_id: String = row.get(idx)?;
+            idx += 1;
+            let created_at: i64 = row.get(idx)?;
+            idx += 1;
+
+            let mut values = BTreeMap::new();
+            values.insert("$rowId".to_owned(), JsonValue::String(row_id.clone()));
+            values.insert("$txId".to_owned(), JsonValue::String(visible_tx_id.clone()));
+            values.insert("$createdAt".to_owned(), JsonValue::from(created_at));
+            for field in &table.fields {
+                values.insert(field.name.clone(), read_field(row, idx, field)?);
+                idx += 1;
+            }
+
+            Ok((
+                RowView {
+                    values,
+                    includes: BTreeMap::new(),
+                },
+                ScopeRow {
+                    table: table.name.clone(),
+                    row_id,
+                    tx_id: visible_tx_id,
+                    reason: ScopeReason::Result,
+                },
+            ))
+        })?;
+
+        let mut result_rows = Vec::new();
+        let mut result_scope = Vec::new();
+        for row in rows {
+            let (view, result_locator) = row?;
+            result_rows.push(view);
+            result_scope.push(result_locator);
+        }
+
+        Ok(QueryResult {
+            rows: result_rows,
+            scope: QueryScope {
+                result_rows: result_scope,
+                dependency_rows: Vec::new(),
+                predicate_scopes: self.filter_predicate_scopes(table, &query),
             },
         })
     }
@@ -1011,6 +1116,24 @@ impl Client {
             fk_field,
             table: self.schema.table_def(target)?,
         })
+    }
+
+    fn filter_predicate_scopes(&self, table: &TableDef, query: &Query) -> Vec<PredicateScope> {
+        query
+            .filters
+            .iter()
+            .map(|filter| {
+                let (column, op, value) = filter_scope_parts(filter);
+                PredicateScope {
+                    table: table.name.clone(),
+                    row_id: String::new(),
+                    column: column.to_owned(),
+                    op: op.to_owned(),
+                    value,
+                    reason: PredicateReason::Filter,
+                }
+            })
+            .collect()
     }
 
     pub fn rebuild_current_projections(&mut self) -> Result<()> {

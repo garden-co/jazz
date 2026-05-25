@@ -412,6 +412,51 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 11:56 PDT
+
+Added first pure-query historical snapshot read.
+
+API:
+
+- `all_at_global_epoch(query, global_epoch)`
+
+Current limits:
+
+- single table
+- filters/order/limit
+- no includes yet
+- only accepted global transactions
+- main branch only
+
+Implementation shape:
+
+- Read directly from the history table.
+- Join `jazz_tx`.
+- Keep only `global_durable_accepted` txs at or before the requested epoch.
+- Use `NOT EXISTS` to select the latest visible history row per row id at that
+  epoch.
+- Exclude deletes.
+- Reuse normal row result/scope and filter predicate scope construction.
+
+Discovery: this validates the query-only snapshot path for basic current-vs-old
+reads without any projection table. The SQL is simple enough for the prototype,
+and the test protects the important invariant: current projection can move on
+while a historical epoch still reconstructs the older accepted row version.
+
+Open debt:
+
+- Snapshot includes need the same history-backed lowering on both sides of the
+  join.
+- Branch snapshots need source-stack visibility, not just global epoch.
+- Tie-breaking should eventually use the precise transaction coordinate rules,
+  not just `(global_epoch, tx_id)`.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 11:54 PDT
 
 Made imported scope bundles emit effects.
