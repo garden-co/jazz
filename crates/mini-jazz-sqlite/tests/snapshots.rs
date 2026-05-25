@@ -46,3 +46,72 @@ fn accepted_global_epoch_snapshot_reads_history_without_projection() -> mini_jaz
 
     Ok(())
 }
+
+#[test]
+fn accepted_global_epoch_snapshot_reads_joined_history() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new()
+        .table("projects", |t| {
+            t.text("name");
+        })
+        .table("todos", |t| {
+            t.text("title");
+            t.bool("done");
+            t.ref_("project_id", "projects");
+        });
+
+    let mut alice = Harness::new().client("alice", schema).durable_in_memory()?;
+    let joined_todos = query("todos")
+        .filter(eq("done", false))
+        .include_required("project", "project_id")
+        .order_by("$createdAt", Desc);
+
+    let mut project_id = String::new();
+    alice.write(|tx| {
+        let project = tx.insert("projects", json!({ "name": "Old Project" }))?;
+        project_id = project.id().to_owned();
+        tx.insert(
+            "todos",
+            json!({
+                "title": "Joined snapshot",
+                "done": false,
+                "project_id": project.id()
+            }),
+        )?;
+        Ok(())
+    })?;
+    let first = alice.all(joined_todos.clone())?;
+    let project_tx = first.scope.dependency_rows[0].tx_id.clone();
+    let todo_tx = first.scope.result_rows[0].tx_id.clone();
+    alice.accept_transaction(&project_tx, 1)?;
+    alice.accept_transaction(&todo_tx, 2)?;
+
+    alice.write(|tx| {
+        tx.update("projects", &project_id, json!({ "name": "New Project" }))?;
+        Ok(())
+    })?;
+    let second = alice.all(joined_todos.clone())?;
+    let project_update_tx = second.scope.dependency_rows[0].tx_id.clone();
+    alice.accept_transaction(&project_update_tx, 3)?;
+
+    let at_epoch_two = alice.all_at_global_epoch(joined_todos.clone(), 2)?;
+    let at_epoch_three = alice.all_at_global_epoch(joined_todos, 3)?;
+
+    assert_eq!(
+        at_epoch_two.rows[0]
+            .include("project")
+            .unwrap()
+            .get("name")
+            .unwrap(),
+        "Old Project"
+    );
+    assert_eq!(
+        at_epoch_three.rows[0]
+            .include("project")
+            .unwrap()
+            .get("name")
+            .unwrap(),
+        "New Project"
+    );
+
+    Ok(())
+}

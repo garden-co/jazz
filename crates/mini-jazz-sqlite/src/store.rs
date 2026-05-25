@@ -474,10 +474,6 @@ impl Client {
     }
 
     pub fn all_at_global_epoch(&self, query: Query, global_epoch: i64) -> Result<QueryResult> {
-        if query.include.is_some() {
-            return Err(Error::new("snapshot includes are not implemented yet"));
-        }
-
         let table = self.schema.table_def(&query.table)?;
         let plan = TablePlan::new(table);
         let mut select_cols = vec![
@@ -489,11 +485,67 @@ impl Client {
             select_cols.push(format!("base.{}", quote_ident(&field.name)));
         }
 
+        let include = query
+            .include
+            .as_ref()
+            .map(|include| self.lower_include(table, include))
+            .transpose()?;
+
+        if let Some(include) = &include {
+            select_cols.push("dep.j_row_id".to_owned());
+            select_cols.push("dep.j_tx_id".to_owned());
+            select_cols.push("dep.j_created_at".to_owned());
+            for field in &include.table.fields {
+                select_cols.push(format!("dep.{}", quote_ident(&field.name)));
+            }
+        }
+
         let mut sql = format!(
             "
             SELECT {}
             FROM {} base
             JOIN jazz_tx base_tx ON base_tx.tx_id = base.j_tx_id
+            ",
+            select_cols.join(", "),
+            plan.history
+        );
+
+        if let Some(include) = &include {
+            let include_plan = TablePlan::new(include.table);
+            sql.push_str(&format!(
+                "
+                {} {} dep
+                  ON dep.j_branch_id = base.j_branch_id
+                 AND dep.j_row_id = base.{}
+                 AND dep.j_op != 'delete'
+                JOIN jazz_tx dep_tx ON dep_tx.tx_id = dep.j_tx_id
+                 AND dep_tx.status = 'global_durable_accepted'
+                 AND dep_tx.global_epoch <= ?
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM {} dep_newer
+                   JOIN jazz_tx dep_newer_tx ON dep_newer_tx.tx_id = dep_newer.j_tx_id
+                   WHERE dep_newer.j_branch_id = dep.j_branch_id
+                     AND dep_newer.j_row_id = dep.j_row_id
+                     AND dep_newer_tx.status = 'global_durable_accepted'
+                     AND dep_newer_tx.global_epoch <= ?
+                     AND (dep_newer_tx.global_epoch, dep_newer.j_tx_id) >
+                         (dep_tx.global_epoch, dep.j_tx_id)
+                 )
+                ",
+                if include.required {
+                    "INNER JOIN"
+                } else {
+                    "LEFT JOIN"
+                },
+                include_plan.history,
+                quote_ident(&include.fk_field.name),
+                include_plan.history
+            ));
+        }
+
+        sql.push_str(&format!(
+            "
             WHERE base.j_branch_id = ?
               AND base.j_op != 'delete'
               AND base_tx.status = 'global_durable_accepted'
@@ -510,16 +562,17 @@ impl Client {
                       (base_tx.global_epoch, base.j_tx_id)
               )
             ",
-            select_cols.join(", "),
-            plan.history,
             plan.history
-        );
+        ));
 
-        let mut sql_params = vec![
-            SqlValue::Text("main".to_owned()),
-            SqlValue::Integer(global_epoch),
-            SqlValue::Integer(global_epoch),
-        ];
+        let mut sql_params = Vec::new();
+        if include.is_some() {
+            sql_params.push(SqlValue::Integer(global_epoch));
+            sql_params.push(SqlValue::Integer(global_epoch));
+        }
+        sql_params.push(SqlValue::Text("main".to_owned()));
+        sql_params.push(SqlValue::Integer(global_epoch));
+        sql_params.push(SqlValue::Integer(global_epoch));
         for filter in &query.filters {
             sql.push_str(" AND ");
             sql.push_str(&filter_sql("base", filter));
@@ -560,33 +613,69 @@ impl Client {
                 idx += 1;
             }
 
+            let mut includes = BTreeMap::new();
+            let mut dependency_scope = Vec::new();
+            if let Some(include) = &include {
+                let dep_row_id: Option<String> = row.get(idx)?;
+                idx += 1;
+                let dep_tx_id: Option<String> = row.get(idx)?;
+                idx += 1;
+                let dep_created_at: Option<i64> = row.get(idx)?;
+                idx += 1;
+                if let (Some(dep_row_id), Some(dep_tx_id), Some(dep_created_at)) =
+                    (dep_row_id, dep_tx_id, dep_created_at)
+                {
+                    let mut dep_values = BTreeMap::new();
+                    dep_values.insert("$rowId".to_owned(), JsonValue::String(dep_row_id.clone()));
+                    dep_values.insert("$txId".to_owned(), JsonValue::String(dep_tx_id.clone()));
+                    dep_values.insert("$createdAt".to_owned(), JsonValue::from(dep_created_at));
+                    for field in &include.table.fields {
+                        dep_values.insert(field.name.clone(), read_field(row, idx, field)?);
+                        idx += 1;
+                    }
+                    includes.insert(
+                        include.alias.clone(),
+                        RowView {
+                            values: dep_values,
+                            includes: BTreeMap::new(),
+                        },
+                    );
+                    dependency_scope.push(ScopeRow {
+                        table: include.table.name.clone(),
+                        row_id: dep_row_id,
+                        tx_id: dep_tx_id,
+                        reason: ScopeReason::Dependency,
+                    });
+                }
+            }
+
             Ok((
-                RowView {
-                    values,
-                    includes: BTreeMap::new(),
-                },
+                RowView { values, includes },
                 ScopeRow {
                     table: table.name.clone(),
                     row_id,
                     tx_id: visible_tx_id,
                     reason: ScopeReason::Result,
                 },
+                dependency_scope,
             ))
         })?;
 
         let mut result_rows = Vec::new();
         let mut result_scope = Vec::new();
+        let mut dependency_scope = Vec::new();
         for row in rows {
-            let (view, result_locator) = row?;
+            let (view, result_locator, dependencies) = row?;
             result_rows.push(view);
             result_scope.push(result_locator);
+            dependency_scope.extend(dependencies);
         }
 
         Ok(QueryResult {
             rows: result_rows,
             scope: QueryScope {
                 result_rows: result_scope,
-                dependency_rows: Vec::new(),
+                dependency_rows: dependency_scope,
                 predicate_scopes: self.filter_predicate_scopes(table, &query),
             },
         })
@@ -945,7 +1034,7 @@ impl Client {
                           AND h.j_row_id = ?1
                           AND h.j_tx_id != ?2
                           AND tx.status = 'global_durable_accepted'
-                        ORDER BY h.j_updated_at DESC, h.j_tx_id DESC
+                        ORDER BY tx.global_epoch DESC, h.j_tx_id DESC
                         LIMIT 1
                         ",
                         plan.history

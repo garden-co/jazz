@@ -412,6 +412,43 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 11:59 PDT
+
+Extended pure-query historical snapshots to required includes.
+
+Red/green test:
+
+- Insert a project and todo, accept them at global epochs 1 and 2.
+- Update the project and accept at global epoch 3.
+- Query joined todos at epoch 2 and epoch 3.
+- The same todo sees the old project name at epoch 2 and the new project name
+  at epoch 3.
+
+Implementation shape:
+
+- `all_at_global_epoch` now lowers a required include by joining the dependency
+  history table through the same "latest accepted row at or before epoch"
+  predicate used for the base row.
+- Result scope and dependency scope are populated from history-backed rows.
+- Optional historical includes remain untested, but the SQL path is already
+  using `LEFT JOIN` when the query asks for optional.
+
+Discovery: history-backed joins are mechanically straightforward but duplicate
+the current-read lowering shape. This argues for extracting a reusable
+"visible table expression" builder before branches, where the visibility
+predicate becomes more complex.
+
+Also fixed a stale-read validation bug found by the full suite: validation must
+choose the latest accepted row by `global_epoch`, not by wall-clock update time.
+Same-millisecond writes could otherwise make the authority compare against the
+wrong accepted base.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 11:56 PDT
 
 Added first pure-query historical snapshot read.
