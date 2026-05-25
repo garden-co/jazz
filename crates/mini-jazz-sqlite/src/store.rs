@@ -64,6 +64,9 @@ pub struct SubscriptionId(u64);
 struct Subscription {
     query: Query,
     previous_rows: Vec<RowView>,
+    scope: QueryScope,
+    last_seen_effect_seq: u64,
+    rerun_count: u64,
 }
 
 pub struct Client {
@@ -72,6 +75,8 @@ pub struct Client {
     conn: Connection,
     subscriptions: BTreeMap<SubscriptionId, Subscription>,
     next_subscription_id: u64,
+    effects: Vec<Effect>,
+    next_effect_seq: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -87,6 +92,16 @@ pub(crate) struct ReadSetEntry {
     pub(crate) visible_tx_id: String,
 }
 
+pub(crate) struct WriteEffect {
+    pub(crate) table: String,
+    pub(crate) row_id: String,
+}
+
+struct Effect {
+    seq: u64,
+    write: WriteEffect,
+}
+
 impl Client {
     fn open(node_id: String, schema: Schema, conn: Connection) -> Result<Self> {
         let mut client = Client {
@@ -95,6 +110,8 @@ impl Client {
             conn,
             subscriptions: BTreeMap::new(),
             next_subscription_id: 1,
+            effects: Vec::new(),
+            next_effect_seq: 1,
         };
         client.bootstrap()?;
         Ok(client)
@@ -233,11 +250,13 @@ impl Client {
             local_epoch,
             now,
             read_set: Vec::new(),
+            write_effects: Vec::new(),
         };
         write(&mut write_tx)?;
         let metadata = TxMetadata {
             read_set: write_tx.read_set,
         };
+        let write_effects = write_tx.write_effects;
         sql_tx.execute(
             "UPDATE jazz_tx SET metadata_json = ?2 WHERE tx_id = ?1",
             params![
@@ -247,7 +266,16 @@ impl Client {
             ],
         )?;
         sql_tx.commit()?;
+        self.record_write_effects(write_effects);
         Ok(())
+    }
+
+    fn record_write_effects(&mut self, effects: Vec<WriteEffect>) {
+        for write in effects {
+            let seq = self.next_effect_seq;
+            self.next_effect_seq += 1;
+            self.effects.push(Effect { seq, write });
+        }
     }
 
     fn next_local_epoch(&self, node_num: i64) -> Result<i64> {
@@ -463,23 +491,40 @@ impl Client {
         let initial = self.all(query.clone())?;
         let id = SubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
+        let last_seen_effect_seq = self.latest_effect_seq();
         self.subscriptions.insert(
             id,
             Subscription {
                 query,
                 previous_rows: initial.rows,
+                scope: initial.scope,
+                last_seen_effect_seq,
+                rerun_count: 1,
             },
         );
         Ok(id)
     }
 
     pub fn poll_subscription(&mut self, id: SubscriptionId) -> Result<SubscriptionDiff> {
-        let query = self
+        let subscription = self
             .subscriptions
             .get(&id)
-            .ok_or_else(|| Error::new("unknown subscription"))?
-            .query
-            .clone();
+            .ok_or_else(|| Error::new("unknown subscription"))?;
+        let latest_effect_seq = self.latest_effect_seq();
+        if !self.subscription_has_overlapping_effect(subscription) {
+            let subscription = self
+                .subscriptions
+                .get_mut(&id)
+                .ok_or_else(|| Error::new("unknown subscription"))?;
+            subscription.last_seen_effect_seq = latest_effect_seq;
+            return Ok(SubscriptionDiff {
+                added: Vec::new(),
+                updated: Vec::new(),
+                removed: Vec::new(),
+            });
+        }
+
+        let query = subscription.query.clone();
         let next = self.all(query)?;
         let subscription = self
             .subscriptions
@@ -487,7 +532,28 @@ impl Client {
             .ok_or_else(|| Error::new("unknown subscription"))?;
         let diff = diff_rows(&subscription.previous_rows, &next.rows);
         subscription.previous_rows = next.rows;
+        subscription.scope = next.scope;
+        subscription.last_seen_effect_seq = latest_effect_seq;
+        subscription.rerun_count += 1;
         Ok(diff)
+    }
+
+    pub fn subscription_rerun_count(&self, id: SubscriptionId) -> Result<u64> {
+        self.subscriptions
+            .get(&id)
+            .map(|subscription| subscription.rerun_count)
+            .ok_or_else(|| Error::new("unknown subscription"))
+    }
+
+    fn latest_effect_seq(&self) -> u64 {
+        self.next_effect_seq.saturating_sub(1)
+    }
+
+    fn subscription_has_overlapping_effect(&self, subscription: &Subscription) -> bool {
+        self.effects
+            .iter()
+            .filter(|effect| effect.seq > subscription.last_seen_effect_seq)
+            .any(|effect| scope_overlaps_write(&subscription.scope, &effect.write))
     }
 
     pub fn export_query_scope(&self, scope: &QueryScope) -> Result<QueryScopeBundle> {
@@ -1043,4 +1109,16 @@ fn now_millis() -> i64 {
         .as_millis()
         .try_into()
         .unwrap_or(i64::MAX)
+}
+
+fn scope_overlaps_write(scope: &QueryScope, write: &WriteEffect) -> bool {
+    scope
+        .result_rows
+        .iter()
+        .chain(&scope.dependency_rows)
+        .any(|row| row.table == write.table && row.row_id == write.row_id)
+        || scope.predicate_scopes.iter().any(|predicate| {
+            predicate.table == write.table
+                && (predicate.row_id.is_empty() || predicate.row_id == write.row_id)
+        })
 }

@@ -1,6 +1,6 @@
 use crate::layout::{json_to_sql, placeholders, TablePlan};
 use crate::schema::{FieldKind, Schema, TableDef};
-use crate::store::ReadSetEntry;
+use crate::store::{ReadSetEntry, WriteEffect};
 use crate::{Error, Result};
 
 use rusqlite::types::Value as SqlValue;
@@ -20,6 +20,7 @@ pub struct WriteTx<'a> {
     pub(crate) local_epoch: i64,
     pub(crate) now: i64,
     pub(crate) read_set: Vec<ReadSetEntry>,
+    pub(crate) write_effects: Vec<WriteEffect>,
 }
 
 impl WriteTx<'_> {
@@ -160,6 +161,10 @@ impl WriteTx<'_> {
         updated_at: i64,
     ) -> Result<()> {
         let plan = TablePlan::new(table);
+        self.write_effects.push(WriteEffect {
+            table: table.name.clone(),
+            row_id: row_id.to_owned(),
+        });
 
         let history_cols = std::iter::once("j_row_id".to_owned())
             .chain(std::iter::once("j_branch_id".to_owned()))

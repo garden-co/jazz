@@ -412,6 +412,45 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 11:53 PDT
+
+Added the first in-memory effect log for subscription invalidation.
+
+Shape:
+
+- `WriteTx` records touched row effects while appending history/current rows.
+- `Client` stores an in-memory ordered effect log.
+- Each subscription stores its last result rows, last query scope, last seen
+  effect sequence, and a rerun counter.
+- `poll_subscription` skips rerun when no new write effect overlaps the stored
+  result/dependency/predicate scope.
+
+Red/green test:
+
+- Subscribe to open todos.
+- Write an unrelated project row.
+- Poll returns an empty diff and does not increment rerun count.
+- Write a matching todo row.
+- Poll reruns and reports one added row.
+
+Discovery: the broad table predicate scope from filter reads makes simple
+table-level invalidation correct but conservative. That is a good baseline:
+indexed predicate/range scope can become a precision improvement without
+changing the subscription verb shape.
+
+Open debt:
+
+- Effect log is not durable.
+- Import/rejection/projection repair do not emit effects yet.
+- Rerun counters are prototype test instrumentation, not a public API.
+- Column masks and old/new index keys are not recorded yet.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 11:51 PDT
 
 Added first filter predicate scope and made it affect sync closure.

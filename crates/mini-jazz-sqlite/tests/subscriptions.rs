@@ -179,3 +179,46 @@ fn optional_subscription_nulls_deleted_dependency() -> mini_jazz_sqlite::Result<
 
     Ok(())
 }
+
+#[test]
+fn subscription_reruns_only_when_write_effects_overlap_scope() -> mini_jazz_sqlite::Result<()> {
+    let schema = Schema::new()
+        .table("projects", |t| {
+            t.text("name");
+        })
+        .table("todos", |t| {
+            t.text("title");
+            t.bool("done");
+        });
+
+    let mut alice = Harness::new().client("alice", schema).durable_in_memory()?;
+
+    alice.write(|tx| {
+        tx.insert("todos", json!({ "title": "Watched", "done": false }))?;
+        Ok(())
+    })?;
+
+    let open_todos = query("todos").filter(eq("done", false));
+    let subscription = alice.subscribe(open_todos)?;
+    assert_eq!(alice.subscription_rerun_count(subscription)?, 1);
+
+    alice.write(|tx| {
+        tx.insert("projects", json!({ "name": "Unrelated" }))?;
+        Ok(())
+    })?;
+    let unrelated = alice.poll_subscription(subscription)?;
+    assert_eq!(unrelated.added.len(), 0);
+    assert_eq!(unrelated.updated.len(), 0);
+    assert_eq!(unrelated.removed.len(), 0);
+    assert_eq!(alice.subscription_rerun_count(subscription)?, 1);
+
+    alice.write(|tx| {
+        tx.insert("todos", json!({ "title": "Relevant", "done": false }))?;
+        Ok(())
+    })?;
+    let relevant = alice.poll_subscription(subscription)?;
+    assert_eq!(relevant.added.len(), 1);
+    assert_eq!(alice.subscription_rerun_count(subscription)?, 2);
+
+    Ok(())
+}
