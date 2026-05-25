@@ -786,6 +786,20 @@ both old and new index keys. A static predicate scope over the current page is
 not enough by itself; the invalidator needs to classify movement across that
 boundary.
 
+### 2026-05-24 23:27 PDT
+
+Added an explicit project conflict-resolution transaction:
+
+- concurrent project-name candidates remain visible until resolved
+- a resolution transaction writes the chosen value
+- current/project join results expose the chosen value with empty conflict meta
+- transaction metadata records which candidate tx ids were resolved
+
+Discovery: "resolved value plus conflict meta" composes naturally with the
+history/current-table shape. Resolution can be represented as just another data
+transaction that reads the conflicted current version, writes the chosen value,
+and clears candidate metadata in the current projection.
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

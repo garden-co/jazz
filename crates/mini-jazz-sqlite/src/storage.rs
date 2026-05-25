@@ -92,6 +92,17 @@ pub struct UpdateProject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveProjectConflict {
+    pub row_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub resolved_name: String,
+    pub resolved_candidate_tx_ids: Vec<String>,
+    pub actor_id: String,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteProject {
     pub row_id: String,
     pub tx_id: String,
@@ -929,6 +940,107 @@ impl MiniJazzSqlite {
             WHERE branch_id = 'main' AND row_id = ?1
             "#,
             params![input.row_id, input.tx_id, input.actor_id, input.now],
+        )?;
+        sql_tx.commit()
+    }
+
+    pub fn resolve_project_conflict(
+        &mut self,
+        input: ResolveProjectConflict,
+    ) -> rusqlite::Result<()> {
+        let previous = self.conn.query_row(
+            r#"
+            SELECT visible_tx_id, created_by, created_at
+            FROM projects__schema_v1_current
+            WHERE branch_id = 'main' AND row_id = ?1 AND is_deleted = 0
+            "#,
+            params![input.row_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let read_set = encode_row_read(&EncodedRowRead {
+            table: "projects".to_owned(),
+            row_id: input.row_id.clone(),
+            visible_tx_id: previous.0,
+            reason: "conflict_resolution_base".to_owned(),
+        });
+        let write_set = format!(
+            r#"[{{"table":"projects","rowId":"{}","op":"update","columns":["name","conflict_tx_ids","updated_at"]}}]"#,
+            input.row_id
+        );
+        let metadata_json = format!(
+            r#"{{"resolvedCandidateTxIds":[{}]}}"#,
+            input
+                .resolved_candidate_tx_ids
+                .iter()
+                .map(|tx_id| format!(r#""{tx_id}""#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'data', 0, '[]', '[]', ?4, ?5,
+                     'local_pending', ?6, ?6, ?7)
+            "#,
+            params![
+                input.tx_id,
+                node_num,
+                local_epoch,
+                read_set,
+                write_set,
+                input.now,
+                metadata_json
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT INTO projects__schema_v1_history (
+              row_id, branch_id, tx_id, op, name, conflict_tx_ids_jsonb, created_by,
+              created_at, updated_by, updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 'update', ?3, '[]', ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                input.resolved_name,
+                previous.1,
+                previous.2,
+                input.actor_id,
+                input.now,
+                metadata_json
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            UPDATE projects__schema_v1_current
+            SET visible_tx_id = ?2,
+                name = ?3,
+                conflict_tx_ids_jsonb = '[]',
+                updated_by = ?4,
+                updated_at = ?5,
+                edit_metadata_json = ?6
+            WHERE branch_id = 'main' AND row_id = ?1
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                input.resolved_name,
+                input.actor_id,
+                input.now,
+                metadata_json
+            ],
         )?;
         sql_tx.commit()
     }
@@ -4526,6 +4638,79 @@ mod tests {
             rows[0].project.conflict_tx_ids_jsonb,
             r#"["tx-project-alice","tx-project-bob"]"#
         );
+    }
+
+    #[test]
+    fn resolving_project_conflict_updates_joined_value_and_clears_conflict_meta() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-base".into(),
+            node_id: "alice-device".into(),
+            name: "Base".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-1".into(),
+            title: "Shows project".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 110,
+        })
+        .unwrap();
+        db.update_project(UpdateProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-alice".into(),
+            node_id: "alice-device".into(),
+            base_tx_id: Some("tx-project-base".into()),
+            name: "Alice name".into(),
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.update_project(UpdateProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-bob".into(),
+            node_id: "bob-phone".into(),
+            base_tx_id: Some("tx-project-base".into()),
+            name: "Bob name".into(),
+            actor_id: "bob".into(),
+            now: 210,
+        })
+        .unwrap();
+
+        db.resolve_project_conflict(ResolveProjectConflict {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-resolution".into(),
+            node_id: "alice-device".into(),
+            resolved_name: "Human-chosen name".into(),
+            resolved_candidate_tx_ids: vec!["tx-project-alice".into(), "tx-project-bob".into()],
+            actor_id: "alice".into(),
+            now: 300,
+        })
+        .unwrap();
+
+        let rows = db
+            .query_open_todos_with_project_conflict_meta("main")
+            .unwrap();
+        assert_eq!(rows[0].project.row.name, "Human-chosen name");
+        assert_eq!(rows[0].project.conflict_tx_ids_jsonb, "[]");
+
+        let metadata: String = db
+            .conn
+            .query_row(
+                "SELECT metadata_json FROM jazz_tx WHERE tx_id = 'tx-project-resolution'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(metadata.contains("tx-project-alice"));
+        assert!(metadata.contains("tx-project-bob"));
     }
 
     #[test]
