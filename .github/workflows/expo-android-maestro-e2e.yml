@@ -172,7 +172,7 @@ jobs:
           sdkmanager --install "ndk;27.1.12297006"
 
       - name: Install Vercel Sandbox CLI
-        run: npm install -g sandbox
+        run: npm install -g sandbox@3.0.0
 
       - name: Create sandbox and start jazz-tools server
         env:
@@ -201,8 +201,8 @@ jobs:
 
             printf '%s\n' "$CREATE_OUT" | tee -a vercel-sandbox.log
 
-            SANDBOX_ID="$(echo "$CREATE_OUT" | grep -Eo 'sbx_[[:alnum:]]+|sb_[[:alnum:]]+' | head -n1 || true)"
-            SERVER_PUBLIC_URL="$(echo "$CREATE_OUT" | grep -Eo 'https://[^[:space:]]+' | head -n1 || true)"
+            SANDBOX_ID="$(printf '%s\n' "$CREATE_OUT" | sed -nE 's/.*Sandbox ([[:alnum:]_-]+) created\..*/\1/p' | head -n1 || true)"
+            SERVER_PUBLIC_URL="$(printf '%s\n' "$CREATE_OUT" | grep -Eo 'https://[^[:space:]]+' | head -n1 || true)"
 
             if [ "$CREATE_STATUS" -eq 0 ] && [ -n "$SANDBOX_ID" ] && [ -n "$SERVER_PUBLIC_URL" ]; then
               break
@@ -220,7 +220,7 @@ jobs:
             sleep $((attempt * 5))
           done
 
-          if [ -z "$SANDBOX_ID" ]; then echo "::error::Could not parse sandbox ID"; exit 1; fi
+          if [ -z "$SANDBOX_ID" ]; then echo "::error::Could not parse sandbox name or ID"; exit 1; fi
           echo "SANDBOX_ID=$SANDBOX_ID" >> "$GITHUB_ENV"
 
           if [ -z "$SERVER_PUBLIC_URL" ]; then echo "::error::Could not parse sandbox public URL"; exit 1; fi
