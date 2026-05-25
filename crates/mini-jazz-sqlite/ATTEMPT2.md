@@ -978,3 +978,44 @@ have.
 Verified focused test:
 
 - `cargo test -p mini-jazz-sqlite branch_base_stays_pinned_when_main_advances`
+
+### 2026-05-25 12:36 PDT
+
+Added a quantitative read/write-set layout experiment.
+
+Command:
+
+- `cargo run -p mini-jazz-sqlite --example read_write_set_layouts --release`
+
+Synthetic workload:
+
+- 20,000 transactions.
+- 5,000 logical rows.
+- One row read and one row/column write set per transaction.
+- 5,000 validation lookups.
+
+Layouts compared:
+
+- JSON-only tx metadata.
+- Fully indexed `tx_read` plus `tx_write_column` tables.
+- Hybrid JSON metadata plus a pending write-row index.
+
+Latest run:
+
+- JSON: 4,055,040 bytes, 80.756 ms insert, 23.471 ms validation.
+- Indexed: 6,385,664 bytes, 163.868 ms insert, 16.448 ms validation.
+- Hybrid: 6,250,496 bytes, 122.670 ms insert, 21.749 ms validation.
+
+Ratios from that run:
+
+- Indexed used 1.57x JSON disk, took 2.03x insert time, and reduced validation
+  time to 0.70x JSON.
+- Hybrid used 1.54x JSON disk, took 1.52x insert time, and only reduced
+  validation time to 0.93x JSON.
+
+Discovery: for this tiny read-set shape, full indexing buys real validation
+speed but with a large write/storage tax. The naive hybrid shape is not very
+attractive: it pays almost the same storage overhead as indexed while keeping
+JSON parse on validation. This supports keeping JSON metadata as the baseline
+and only adding narrow side indexes when a specific hot authority operation
+needs them.
