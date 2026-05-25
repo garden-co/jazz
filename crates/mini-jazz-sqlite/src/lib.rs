@@ -417,8 +417,13 @@ impl Client {
 
         if let Some(include) = &include {
             sql.push_str(&format!(
-                " INNER JOIN {} dep ON dep.j_branch_id = base.j_branch_id \
+                " {} {} dep ON dep.j_branch_id = base.j_branch_id \
                  AND dep.j_row_id = base.{} AND dep.j_is_deleted = 0",
+                if include.required {
+                    "INNER JOIN"
+                } else {
+                    "LEFT JOIN"
+                },
                 current_table(&include.table.name),
                 quote_ident(&include.fk_field.name)
             ));
@@ -473,33 +478,37 @@ impl Client {
             let mut includes = BTreeMap::new();
             let mut dependency_scope = Vec::new();
             if let Some(include) = &include {
-                let dep_row_id: String = row.get(idx)?;
+                let dep_row_id: Option<String> = row.get(idx)?;
                 idx += 1;
-                let dep_tx_id: String = row.get(idx)?;
+                let dep_tx_id: Option<String> = row.get(idx)?;
                 idx += 1;
-                let dep_created_at: i64 = row.get(idx)?;
+                let dep_created_at: Option<i64> = row.get(idx)?;
                 idx += 1;
-                let mut dep_values = BTreeMap::new();
-                dep_values.insert("$rowId".to_owned(), JsonValue::String(dep_row_id.clone()));
-                dep_values.insert("$txId".to_owned(), JsonValue::String(dep_tx_id.clone()));
-                dep_values.insert("$createdAt".to_owned(), JsonValue::from(dep_created_at));
-                for field in &include.table.fields {
-                    dep_values.insert(field.name.clone(), read_field(row, idx, field)?);
-                    idx += 1;
+                if let (Some(dep_row_id), Some(dep_tx_id), Some(dep_created_at)) =
+                    (dep_row_id, dep_tx_id, dep_created_at)
+                {
+                    let mut dep_values = BTreeMap::new();
+                    dep_values.insert("$rowId".to_owned(), JsonValue::String(dep_row_id.clone()));
+                    dep_values.insert("$txId".to_owned(), JsonValue::String(dep_tx_id.clone()));
+                    dep_values.insert("$createdAt".to_owned(), JsonValue::from(dep_created_at));
+                    for field in &include.table.fields {
+                        dep_values.insert(field.name.clone(), read_field(row, idx, field)?);
+                        idx += 1;
+                    }
+                    includes.insert(
+                        include.alias.clone(),
+                        RowView {
+                            values: dep_values,
+                            includes: BTreeMap::new(),
+                        },
+                    );
+                    dependency_scope.push(ScopeRow {
+                        table: include.table.name.clone(),
+                        row_id: dep_row_id,
+                        tx_id: dep_tx_id,
+                        reason: ScopeReason::Dependency,
+                    });
                 }
-                includes.insert(
-                    include.alias.clone(),
-                    RowView {
-                        values: dep_values,
-                        includes: BTreeMap::new(),
-                    },
-                );
-                dependency_scope.push(ScopeRow {
-                    table: include.table.name.clone(),
-                    row_id: dep_row_id,
-                    tx_id: dep_tx_id,
-                    reason: ScopeReason::Dependency,
-                });
             }
 
             Ok((
@@ -581,6 +590,7 @@ impl Client {
         };
         Ok(LoweredInclude {
             alias: include.alias.clone(),
+            required: include.required,
             fk_field,
             table: self.schema.table_def(target)?,
         })
@@ -711,33 +721,7 @@ impl WriteTx<'_> {
         let object = patch
             .as_object()
             .ok_or_else(|| Error::new("update patch must be an object"))?;
-        let current = current_table(table_name);
-
-        let mut select_cols = vec!["j_created_at".to_owned()];
-        select_cols.extend(table.fields.iter().map(|field| quote_ident(&field.name)));
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM {current} WHERE j_branch_id = 'main' AND j_row_id = ?",
-            select_cols.join(", ")
-        ))?;
-        let existing = stmt
-            .query_row(params![row_id], |row| {
-                let created_at: i64 = row.get(0)?;
-                let mut values = Vec::new();
-                for (idx, field) in table.fields.iter().enumerate() {
-                    let sql_value = match field.kind {
-                        FieldKind::Text | FieldKind::Ref { .. } => {
-                            SqlValue::Text(row.get(idx + 1)?)
-                        }
-                        FieldKind::Bool => SqlValue::Integer(row.get(idx + 1)?),
-                    };
-                    values.push(sql_value);
-                }
-                Ok((created_at, values))
-            })
-            .optional()?
-            .ok_or_else(|| Error::new(format!("missing row {table_name}:{row_id}")))?;
-
-        let (created_at, mut values) = existing;
+        let (created_at, mut values) = self.current_values(table, row_id)?;
         for (idx, field) in table.fields.iter().enumerate() {
             if let Some(value) = object.get(&field.name) {
                 values[idx] = json_to_sql(value, &field.kind)?;
@@ -745,6 +729,37 @@ impl WriteTx<'_> {
         }
 
         self.write_version(table, row_id, "update", values, created_at, self.now)
+    }
+
+    pub fn delete(&mut self, table_name: &str, row_id: &str) -> Result<()> {
+        let table = self.schema.table_def(table_name)?;
+        let (created_at, values) = self.current_values(table, row_id)?;
+        self.write_version(table, row_id, "delete", values, created_at, self.now)
+    }
+
+    fn current_values(&self, table: &TableDef, row_id: &str) -> Result<(i64, Vec<SqlValue>)> {
+        let current = current_table(&table.name);
+
+        let mut select_cols = vec!["j_created_at".to_owned()];
+        select_cols.extend(table.fields.iter().map(|field| quote_ident(&field.name)));
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM {current} WHERE j_branch_id = 'main' AND j_row_id = ?",
+            select_cols.join(", ")
+        ))?;
+        stmt.query_row(params![row_id], |row| {
+            let created_at: i64 = row.get(0)?;
+            let mut values = Vec::new();
+            for (idx, field) in table.fields.iter().enumerate() {
+                let sql_value = match field.kind {
+                    FieldKind::Text | FieldKind::Ref { .. } => SqlValue::Text(row.get(idx + 1)?),
+                    FieldKind::Bool => SqlValue::Integer(row.get(idx + 1)?),
+                };
+                values.push(sql_value);
+            }
+            Ok((created_at, values))
+        })
+        .optional()?
+        .ok_or_else(|| Error::new(format!("missing row {}:{row_id}", table.name)))
     }
 
     fn row_count(&self, table_name: &str) -> Result<i64> {
@@ -837,7 +852,7 @@ impl WriteTx<'_> {
             SqlValue::Text(row_id.to_owned()),
             SqlValue::Text("main".to_owned()),
             SqlValue::Text(self.tx_id.clone()),
-            SqlValue::Integer(0),
+            SqlValue::Integer(i64::from(op == "delete")),
         ];
         current_values.extend(values);
         current_values.push(SqlValue::Text("{}".to_owned()));
@@ -896,6 +911,16 @@ impl Query {
         self.include = Some(Include {
             alias: alias.to_owned(),
             fk_column: fk_column.to_owned(),
+            required: true,
+        });
+        self
+    }
+
+    pub fn include_optional(mut self, alias: &str, fk_column: &str) -> Self {
+        self.include = Some(Include {
+            alias: alias.to_owned(),
+            fk_column: fk_column.to_owned(),
+            required: false,
         });
         self
     }
@@ -918,10 +943,12 @@ impl Query {
 struct Include {
     alias: String,
     fk_column: String,
+    required: bool,
 }
 
 struct LoweredInclude<'a> {
     alias: String,
+    required: bool,
     fk_field: &'a FieldDef,
     table: &'a TableDef,
 }

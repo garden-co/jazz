@@ -105,3 +105,75 @@ previous result stores decoded dependency payloads. The correctness boundary is
 Discovery: update support immediately made immutable creation metadata useful.
 `update` preserves `j_created_at`, writes a new history row, updates
 `j_updated_at`, and current rebuild still has enough data to stay deterministic.
+
+### 2026-05-25 11:18 PDT
+
+Adding the next subscription red test: required dependency deletion should
+remove the parent joined result. This keeps pressure on the generic write path:
+delete must be a history version, current projection state, and subscription
+semantic diff, not a table-specific special case.
+
+### 2026-05-25 11:19 PDT
+
+Required dependency deletion subscription test is green.
+
+Implementation shape:
+
+- `WriteTx::delete(table, row_id)` writes a `delete` history version.
+- The current projection keeps the row with `j_is_deleted = 1`.
+- Required includes remain `INNER JOIN ... dep.j_is_deleted = 0`.
+- Subscription rerun+diff reports the parent result as removed.
+
+Discovery: keeping deleted rows in current projection with an explicit
+`j_is_deleted` bit makes required-join semantics simple and matches the rebuild
+shape. The query plan, not the write path, decides whether deleted rows
+participate.
+
+Subagent review highlighted architecture debt to address soon:
+
+- DDL, query lowering, projection rebuild, and write execution still re-derive
+  table layout locally from `TableDef` instead of using explicit
+  `StorageLayout`/`TablePlan`/`WritePlan`/`QueryPlan` data.
+- System-column mapping is duplicated between index creation and query lowering.
+- The `main` branch is hard-coded in several execution paths.
+- `include_required(alias, fk_column)` leaks relation layout into the query API.
+- `RowView::get` only returns string values, which will get awkward for bools,
+  numbers, and system columns.
+- There is no explicit `EffectLog` yet; subscriptions poll by full rerun.
+
+Decision: continue through the subscription slice, but do not let these harden.
+Before sync/authority, carve out at least table/layout plans and centralized
+system-column mapping so later phases compose through data artifacts.
+
+### 2026-05-25 11:19 PDT
+
+Adding optional-include subscription red test:
+
+- subscribe to open todos with optional project include
+- delete the project
+- parent todo should remain in the result
+- nested project should become absent/null
+- subscription diff should report an updated row, not removed
+
+This is the left-join counterpart to the required dependency deletion test.
+
+### 2026-05-25 11:20 PDT
+
+Optional dependency deletion subscription test is green.
+
+Implementation shape:
+
+- `include_optional` lowers to `LEFT JOIN`.
+- Required and optional includes share the same schema relation resolution.
+- If the dependency side is absent/deleted, the parent row remains and the
+  nested include is omitted from `RowView`.
+- Full-row diff reports an updated semantic row.
+
+Discovery: optional nulling fits the same rerun+diff model with almost no
+subscription-specific logic. The important distinction is all in the query
+plan: `INNER JOIN` vs `LEFT JOIN`, and whether absent dependency columns decode
+to no nested row.
+
+Open debt: optional absence currently has no predicate/range scope. The result
+semantics are correct locally, but sync/authority will need explicit absence
+facts before this is a complete scope story.
