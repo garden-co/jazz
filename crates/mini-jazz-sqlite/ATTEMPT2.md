@@ -177,3 +177,31 @@ to no nested row.
 Open debt: optional absence currently has no predicate/range scope. The result
 semantics are correct locally, but sync/authority will need explicit absence
 facts before this is a complete scope story.
+
+### 2026-05-25 11:23 PDT
+
+After slices 1-3, carved out the first explicit `TablePlan`.
+
+It now owns:
+
+- physical history/current table names
+- user column list
+- generated index names
+- user/system column mapping for index/query lowering
+- user column DDL fragments
+
+This is intentionally modest, but it moved repeated physical layout decisions
+out of DDL, query, write, rebuild, and fingerprint code. Existing tests stayed
+green.
+
+Discovery: this is the right kind of abstraction for attempt2: not a manager,
+just data plus a few local derivation helpers. It reduces drift while keeping
+the execution verbs plain.
+
+Remaining architecture debt before sync/authority:
+
+- `main` is still hard-coded as an execution assumption.
+- write/query/rebuild are still large methods and should split into
+  `WritePlan`, `QueryPlan`, and `ProjectionPlan` shapes as pressure increases.
+- relation intent still leaks through `include_required(alias, fk_column)`.
+- no explicit `EffectLog` yet.

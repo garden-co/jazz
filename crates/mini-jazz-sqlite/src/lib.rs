@@ -103,6 +103,59 @@ struct IndexDef {
     columns: Vec<String>,
 }
 
+struct TablePlan<'a> {
+    table: &'a TableDef,
+    history: String,
+    current: String,
+    user_columns: Vec<String>,
+}
+
+impl<'a> TablePlan<'a> {
+    fn new(table: &'a TableDef) -> Self {
+        Self {
+            table,
+            history: quote_ident(&format!("{}__schema_v1_history", table.name)),
+            current: quote_ident(&format!("{}__schema_v1_current", table.name)),
+            user_columns: table
+                .fields
+                .iter()
+                .map(|field| quote_ident(&field.name))
+                .collect(),
+        }
+    }
+
+    fn user_column_defs(&self) -> String {
+        self.table
+            .fields
+            .iter()
+            .zip(&self.user_columns)
+            .map(|(field, column)| format!("{column} {}", sql_type(&field.kind)))
+            .collect::<Vec<_>>()
+            .join(",\n  ")
+    }
+
+    fn index_name(&self, suffix: &str) -> String {
+        quote_ident(&format!("{}__schema_v1_{suffix}", self.table.name))
+    }
+
+    fn current_index_name(&self, index: &IndexDef) -> String {
+        quote_ident(&format!(
+            "{}__schema_v1_current_{}",
+            self.table.name, index.name
+        ))
+    }
+
+    fn physical_column(&self, column: &str) -> String {
+        system_column(column)
+            .map(str::to_owned)
+            .unwrap_or_else(|| quote_ident(column))
+    }
+
+    fn aliased_column(&self, alias: &str, column: &str) -> String {
+        format!("{alias}.{}", self.physical_column(column))
+    }
+}
+
 pub struct TableBuilder {
     table: TableDef,
 }
@@ -271,14 +324,7 @@ impl Client {
     }
 
     fn create_table_storage(&self, table: &TableDef) -> Result<()> {
-        let history = history_table(&table.name);
-        let current = current_table(&table.name);
-        let user_columns = table
-            .fields
-            .iter()
-            .map(|field| format!("{} {}", quote_ident(&field.name), sql_type(&field.kind)))
-            .collect::<Vec<_>>()
-            .join(",\n  ");
+        let plan = TablePlan::new(table);
 
         self.conn.execute_batch(&format!(
             "
@@ -313,31 +359,24 @@ impl Client {
               PRIMARY KEY (j_row_id, j_branch_id)
             );
             ",
-            quote_ident(&format!(
-                "{}__schema_v1_history_branch_row_updated",
-                table.name
-            )),
-            quote_ident(&format!("{}__schema_v1_history_branch_tx", table.name))
+            plan.index_name("history_branch_row_updated"),
+            plan.index_name("history_branch_tx"),
+            history = plan.history,
+            current = plan.current,
+            user_columns = plan.user_column_defs()
         ))?;
 
         for index in &table.indexes {
             let cols = index
                 .columns
                 .iter()
-                .map(|column| {
-                    if column == "$createdAt" {
-                        "j_created_at".to_owned()
-                    } else if column == "$updatedAt" {
-                        "j_updated_at".to_owned()
-                    } else {
-                        quote_ident(column)
-                    }
-                })
+                .map(|column| plan.physical_column(column))
                 .collect::<Vec<_>>()
                 .join(", ");
             self.conn.execute_batch(&format!(
-                "CREATE INDEX IF NOT EXISTS {} ON {current}(j_branch_id, {cols});",
-                quote_ident(&format!("{}_{}", current, index.name))
+                "CREATE INDEX IF NOT EXISTS {} ON {}(j_branch_id, {cols});",
+                plan.current_index_name(index),
+                plan.current
             ))?;
         }
 
@@ -387,7 +426,7 @@ impl Client {
 
     pub fn all(&self, query: Query) -> Result<QueryResult> {
         let table = self.schema.table_def(&query.table)?;
-        let current = current_table(&table.name);
+        let plan = TablePlan::new(table);
 
         let mut select_cols = vec![
             "base.j_row_id".to_owned(),
@@ -413,9 +452,14 @@ impl Client {
             }
         }
 
-        let mut sql = format!("SELECT {} FROM {current} base", select_cols.join(", "));
+        let mut sql = format!(
+            "SELECT {} FROM {} base",
+            select_cols.join(", "),
+            plan.current
+        );
 
         if let Some(include) = &include {
+            let include_plan = TablePlan::new(include.table);
             sql.push_str(&format!(
                 " {} {} dep ON dep.j_branch_id = base.j_branch_id \
                  AND dep.j_row_id = base.{} AND dep.j_is_deleted = 0",
@@ -424,7 +468,7 @@ impl Client {
                 } else {
                     "LEFT JOIN"
                 },
-                current_table(&include.table.name),
+                include_plan.current,
                 quote_ident(&include.fk_field.name)
             ));
         }
@@ -443,7 +487,7 @@ impl Client {
 
         if let Some(order) = &query.order {
             sql.push_str(" ORDER BY ");
-            sql.push_str(&column_sql("base", &order.column));
+            sql.push_str(&plan.aliased_column("base", &order.column));
             sql.push(' ');
             sql.push_str(match order.direction {
                 SortDirection::Asc => "ASC",
@@ -599,25 +643,20 @@ impl Client {
     pub fn rebuild_current_projections(&mut self) -> Result<()> {
         let sql_tx = self.conn.transaction()?;
         for table in self.schema.tables.values() {
-            let current = current_table(&table.name);
-            let history = history_table(&table.name);
-            sql_tx.execute(&format!("DELETE FROM {current}"), [])?;
+            let plan = TablePlan::new(table);
+            sql_tx.execute(&format!("DELETE FROM {}", plan.current), [])?;
 
-            let user_cols = table
-                .fields
-                .iter()
-                .map(|field| quote_ident(&field.name))
-                .collect::<Vec<_>>();
             let insert_cols = std::iter::once("j_row_id".to_owned())
                 .chain(std::iter::once("j_branch_id".to_owned()))
                 .chain(std::iter::once("j_visible_tx_id".to_owned()))
                 .chain(std::iter::once("j_is_deleted".to_owned()))
-                .chain(user_cols.iter().cloned())
+                .chain(plan.user_columns.iter().cloned())
                 .chain(std::iter::once("j_conflicts_json".to_owned()))
                 .chain(std::iter::once("j_created_at".to_owned()))
                 .chain(std::iter::once("j_updated_at".to_owned()))
                 .collect::<Vec<_>>();
-            let select_user_cols = user_cols
+            let select_user_cols = plan
+                .user_columns
                 .iter()
                 .map(|col| format!("h.{col}"))
                 .collect::<Vec<_>>();
@@ -636,14 +675,14 @@ impl Client {
             sql_tx.execute(
                 &format!(
                     "
-                    INSERT INTO {current} ({})
+                    INSERT INTO {} ({})
                     SELECT {}
-                    FROM {history} h
+                    FROM {} h
                     JOIN jazz_tx tx ON tx.tx_id = h.j_tx_id
                     WHERE tx.status != 'rejected'
                       AND NOT EXISTS (
                         SELECT 1
-                        FROM {history} newer
+                        FROM {} newer
                         JOIN jazz_tx newer_tx ON newer_tx.tx_id = newer.j_tx_id
                         WHERE newer.j_branch_id = h.j_branch_id
                           AND newer.j_row_id = h.j_row_id
@@ -651,8 +690,11 @@ impl Client {
                           AND (newer.j_updated_at, newer.j_tx_id) > (h.j_updated_at, h.j_tx_id)
                       )
                     ",
+                    plan.current,
                     insert_cols.join(", "),
-                    select_cols.join(", ")
+                    select_cols.join(", "),
+                    plan.history,
+                    plan.history
                 ),
                 [],
             )?;
@@ -664,21 +706,22 @@ impl Client {
     pub fn current_projection_fingerprint(&self) -> Result<Vec<String>> {
         let mut lines = Vec::new();
         for table in self.schema.tables.values() {
-            let current = current_table(&table.name);
+            let plan = TablePlan::new(table);
             let mut columns = vec![
                 "j_row_id".to_owned(),
                 "j_branch_id".to_owned(),
                 "j_visible_tx_id".to_owned(),
                 "j_is_deleted".to_owned(),
             ];
-            columns.extend(table.fields.iter().map(|field| quote_ident(&field.name)));
+            columns.extend(plan.user_columns.iter().cloned());
             columns.push("j_conflicts_json".to_owned());
             columns.push("j_created_at".to_owned());
             columns.push("j_updated_at".to_owned());
 
             let mut stmt = self.conn.prepare(&format!(
-                "SELECT {} FROM {current} ORDER BY j_branch_id, j_row_id",
-                columns.join(", ")
+                "SELECT {} FROM {} ORDER BY j_branch_id, j_row_id",
+                columns.join(", "),
+                plan.current
             ))?;
             let rows = stmt.query_map([], |row| {
                 let mut values = Vec::new();
@@ -738,13 +781,14 @@ impl WriteTx<'_> {
     }
 
     fn current_values(&self, table: &TableDef, row_id: &str) -> Result<(i64, Vec<SqlValue>)> {
-        let current = current_table(&table.name);
+        let plan = TablePlan::new(table);
 
         let mut select_cols = vec!["j_created_at".to_owned()];
-        select_cols.extend(table.fields.iter().map(|field| quote_ident(&field.name)));
+        select_cols.extend(plan.user_columns.iter().cloned());
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM {current} WHERE j_branch_id = 'main' AND j_row_id = ?",
-            select_cols.join(", ")
+            "SELECT {} FROM {} WHERE j_branch_id = 'main' AND j_row_id = ?",
+            select_cols.join(", "),
+            plan.current
         ))?;
         stmt.query_row(params![row_id], |row| {
             let created_at: i64 = row.get(0)?;
@@ -763,9 +807,11 @@ impl WriteTx<'_> {
     }
 
     fn row_count(&self, table_name: &str) -> Result<i64> {
+        let table = self.schema.table_def(table_name)?;
+        let plan = TablePlan::new(table);
         self.conn
             .query_row(
-                &format!("SELECT COUNT(*) FROM {}", history_table(table_name)),
+                &format!("SELECT COUNT(*) FROM {}", plan.history),
                 [],
                 |row| row.get(0),
             )
@@ -801,19 +847,13 @@ impl WriteTx<'_> {
         created_at: i64,
         updated_at: i64,
     ) -> Result<()> {
-        let history = history_table(&table.name);
-        let current = current_table(&table.name);
-        let user_cols = table
-            .fields
-            .iter()
-            .map(|field| quote_ident(&field.name))
-            .collect::<Vec<_>>();
+        let plan = TablePlan::new(table);
 
         let history_cols = std::iter::once("j_row_id".to_owned())
             .chain(std::iter::once("j_branch_id".to_owned()))
             .chain(std::iter::once("j_tx_id".to_owned()))
             .chain(std::iter::once("j_op".to_owned()))
-            .chain(user_cols.iter().cloned())
+            .chain(plan.user_columns.iter().cloned())
             .chain(std::iter::once("j_conflicts_json".to_owned()))
             .chain(std::iter::once("j_created_at".to_owned()))
             .chain(std::iter::once("j_updated_at".to_owned()))
@@ -822,7 +862,7 @@ impl WriteTx<'_> {
             .chain(std::iter::once("j_branch_id".to_owned()))
             .chain(std::iter::once("j_visible_tx_id".to_owned()))
             .chain(std::iter::once("j_is_deleted".to_owned()))
-            .chain(user_cols)
+            .chain(plan.user_columns.iter().cloned())
             .chain(std::iter::once("j_conflicts_json".to_owned()))
             .chain(std::iter::once("j_created_at".to_owned()))
             .chain(std::iter::once("j_updated_at".to_owned()))
@@ -841,7 +881,8 @@ impl WriteTx<'_> {
 
         self.conn.execute(
             &format!(
-                "INSERT INTO {history} ({}) VALUES ({})",
+                "INSERT INTO {} ({}) VALUES ({})",
+                plan.history,
                 history_cols.join(", "),
                 placeholders(history_cols.len())
             ),
@@ -861,7 +902,8 @@ impl WriteTx<'_> {
 
         self.conn.execute(
             &format!(
-                "INSERT OR REPLACE INTO {current} ({}) VALUES ({})",
+                "INSERT OR REPLACE INTO {} ({}) VALUES ({})",
+                plan.current,
                 current_cols.join(", "),
                 placeholders(current_cols.len())
             ),
@@ -1127,17 +1169,13 @@ fn filter_sql(alias: &str, filter: &Filter) -> String {
         FilterOp::Eq => "=",
         FilterOp::Gt => ">",
     };
-    format!("{} {op} ?", column_sql(alias, &filter.column))
+    format!("{} {op} ?", aliased_column(alias, &filter.column))
 }
 
-fn column_sql(alias: &str, column: &str) -> String {
-    let col = match column {
-        "$createdAt" => "j_created_at".to_owned(),
-        "$updatedAt" => "j_updated_at".to_owned(),
-        "$rowId" => "j_row_id".to_owned(),
-        "$txId" => "j_visible_tx_id".to_owned(),
-        other => quote_ident(other),
-    };
+fn aliased_column(alias: &str, column: &str) -> String {
+    let col = system_column(column)
+        .map(str::to_owned)
+        .unwrap_or_else(|| quote_ident(column));
     format!("{alias}.{col}")
 }
 
@@ -1178,12 +1216,14 @@ fn sql_type(kind: &FieldKind) -> &'static str {
     }
 }
 
-fn history_table(table: &str) -> String {
-    quote_ident(&format!("{table}__schema_v1_history"))
-}
-
-fn current_table(table: &str) -> String {
-    quote_ident(&format!("{table}__schema_v1_current"))
+fn system_column(column: &str) -> Option<&'static str> {
+    match column {
+        "$createdAt" => Some("j_created_at"),
+        "$updatedAt" => Some("j_updated_at"),
+        "$rowId" => Some("j_row_id"),
+        "$txId" => Some("j_visible_tx_id"),
+        _ => None,
+    }
 }
 
 fn quote_ident(ident: &str) -> String {
