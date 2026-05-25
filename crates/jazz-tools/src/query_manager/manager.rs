@@ -932,12 +932,6 @@ impl QueryManager {
         // Recompile local subscriptions
         for (sub_id, sub) in &mut self.subscriptions {
             if sub.needs_recompile {
-                // Resolve next branches from current schema context.
-                let next_branches: Vec<String> = current_schema_context
-                    .all_branch_names()
-                    .into_iter()
-                    .map(|b| b.as_str().to_string())
-                    .collect();
                 let uses_explicit_authorization_filtering = sub.session.is_some()
                     && authorization_schema
                         .as_ref()
@@ -972,6 +966,11 @@ impl QueryManager {
                     Ok(new_graph) => {
                         let policy_context_tables =
                             Self::policy_context_tables_for_graph(&new_graph);
+                        let next_branches = Self::resolved_subscription_branches(
+                            &sub.query,
+                            &current_schema_context,
+                            &new_graph,
+                        );
                         sub.graph = new_graph;
                         sub.branches = next_branches;
                         sub.policy_context_tables = policy_context_tables;
@@ -1038,9 +1037,10 @@ impl QueryManager {
                     RowPolicyMode::PermissiveLocal,
                 ) {
                     Ok(new_graph) => {
-                        sub.branches = Self::resolved_server_query_branches(
+                        sub.branches = Self::resolved_server_query_branches_for_graph(
                             &query_for_compile,
                             &sub.schema_context,
+                            &new_graph,
                         );
                         sub.graph = new_graph;
                         sub.needs_recompile = false;

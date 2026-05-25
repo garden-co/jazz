@@ -615,6 +615,32 @@ impl QueryManager {
         let tip_provenance = row.row_provenance();
 
         let table_name = TableName::new(&table);
+        if ComposedBranchName::parse(&branch_name)
+            .is_some_and(|composed| composed.user_branch != "main")
+        {
+            let Some(session) = session else {
+                return false;
+            };
+            if let Some(allowed) = self.evaluate_branch_scoped_authorization_policy(
+                storage,
+                BranchScopedPolicyInput {
+                    object_id,
+                    branch_name,
+                    table_name,
+                    content: &tip_content,
+                    provenance: &tip_provenance,
+                    session,
+                    auth_schema,
+                    auth_context,
+                    source_branch_schema_map,
+                    operation: Operation::Select,
+                    update_check: false,
+                },
+            ) {
+                return allowed;
+            }
+        }
+
         let Some(select_policy) = auth_schema
             .get(&table_name)
             .and_then(|table_schema| table_schema.policies.select_policy())
@@ -669,9 +695,7 @@ impl QueryManager {
         };
 
         if !self.row_policy_mode.denies_missing_explicit_policy()
-            && auth_schema
-                .values()
-                .all(|table_schema| table_schema.policies.select.using.is_none())
+            && Self::schema_has_no_explicit_select_policies(&auth_schema)
         {
             return AuthorizedTuplesResult::Ready(graph.current_output_tuples());
         }
@@ -750,9 +774,7 @@ impl QueryManager {
         };
 
         if !self.row_policy_mode.denies_missing_explicit_policy()
-            && auth_schema
-                .values()
-                .all(|table_schema| table_schema.policies.select.using.is_none())
+            && Self::schema_has_no_explicit_select_policies(&auth_schema)
         {
             return Some(graph.sync_scope_object_ids());
         }
@@ -812,6 +834,19 @@ impl QueryManager {
         }
 
         query.branches.clone()
+    }
+
+    pub(super) fn resolved_server_query_branches_for_graph(
+        query: &crate::query_manager::query::Query,
+        schema_context: &crate::schema_manager::SchemaContext,
+        graph: &crate::query_manager::graph::QueryGraph,
+    ) -> Vec<String> {
+        let scan_branches = graph.scan_branches();
+        if !scan_branches.is_empty() {
+            return scan_branches;
+        }
+
+        Self::resolved_server_query_branches(query, schema_context)
     }
 
     pub(super) fn query_for_server_compile(
@@ -888,6 +923,17 @@ impl QueryManager {
                         && session.is_none()
             })
             .unwrap_or(false)
+    }
+
+    fn schema_has_no_explicit_select_policies(schema: &Schema) -> bool {
+        schema.values().all(|table_schema| {
+            table_schema.policies.select.using.is_none()
+                && table_schema
+                    .policies
+                    .for_branch
+                    .values()
+                    .all(|policies| policies.select.using.is_none())
+        })
     }
 
     fn scope_with_policy_context_rows_for_tables<H: Storage + ?Sized>(
@@ -1090,8 +1136,11 @@ impl QueryManager {
             // Initial settle to populate the graph
             let storage_ref: &dyn Storage = storage;
 
-            let branches =
-                Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
+            let branches = Self::resolved_server_query_branches_for_graph(
+                &query_for_compile,
+                &subscription_context,
+                &graph,
+            );
             let table = sub.query.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = sub.query.include_deleted;

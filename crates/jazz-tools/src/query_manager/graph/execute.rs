@@ -876,6 +876,7 @@ impl QueryGraph {
             .filter_map(|dep| match &self.nodes[dep.0 as usize].node {
                 GraphNode::IndexScan(n) => Some(n.current_tuples().clone()),
                 GraphNode::Union(n) => Some(n.current_tuples().clone()),
+                GraphNode::Output(n) => Some(n.current_tuples().clone()),
                 _ => None,
             })
             .collect()

@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, PolicyValue};
 use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::relation_ir::{
+    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+};
 use crate::query_manager::types::SchemaBuilder;
 use crate::query_manager::writes::RowBranchWrite;
 
@@ -87,6 +90,84 @@ fn branch_schema_with_approvals(todo_policies: TablePolicies) -> Schema {
         .build()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectPolicyMode {
+    True,
+    False,
+    Missing,
+}
+
+fn policies_with_select_mode(mode: SelectPolicyMode) -> TablePolicies {
+    match mode {
+        SelectPolicyMode::True => TablePolicies::new().with_select(PolicyExpr::True),
+        SelectPolicyMode::False => TablePolicies::new().with_select(PolicyExpr::False),
+        SelectPolicyMode::Missing => TablePolicies::new(),
+    }
+}
+
+fn branch_query_matrix_schema(
+    normal_select: SelectPolicyMode,
+    branch_select: SelectPolicyMode,
+    backing_select: SelectPolicyMode,
+) -> Schema {
+    let mut todo_policies = policies_with_select_mode(normal_select);
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        policies_with_select_mode(branch_select),
+    )]);
+
+    branch_schema_with_backing_and_todo_policies(
+        policies_with_select_mode(backing_select),
+        todo_policies,
+    )
+}
+
+fn branch_schema_with_backing_project_dependency() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("projects")
+                .column("ownerId", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::Cmp {
+                            column: "ownerId".into(),
+                            op: CmpOp::Eq,
+                            value: PolicyValue::SessionRef(vec!["user_id".into()]),
+                        })
+                        .with_insert(PolicyExpr::True)
+                        .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("branches")
+                .fk_column("projectId", "projects")
+                .column("ownerId", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::Inherits {
+                            operation: Operation::Select,
+                            via_column: "projectId".into(),
+                            max_depth: None,
+                        })
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .column("projectId", ColumnType::Uuid)
+                .column("title", ColumnType::Text)
+                .policies({
+                    let mut todo_policies = TablePolicies::new().with_insert(PolicyExpr::True);
+                    todo_policies.for_branch = HashMap::from([(
+                        TableName::new("branches"),
+                        TablePolicies::new().with_select(PolicyExpr::True),
+                    )]);
+                    todo_policies
+                }),
+        )
+        .build()
+}
+
 fn branch_schema(include_todo_branch_policy: bool) -> Schema {
     let mut todo_policies = TablePolicies::default();
     if include_todo_branch_policy {
@@ -126,6 +207,17 @@ fn branch_name_for(schema: &Schema, branch_id: ObjectId) -> String {
         .to_string()
 }
 
+fn strip_test_policies(schema: &Schema) -> Schema {
+    schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut structural = table_schema.clone();
+            structural.policies = TablePolicies::default();
+            (*table_name, structural)
+        })
+        .collect()
+}
+
 fn seed_branch_and_todo(
     qm: &mut QueryManager,
     storage: &mut MemoryStorage,
@@ -159,6 +251,15 @@ fn seed_branch_and_todo(
 }
 
 #[test]
+// Read path:
+//
+//   Session alice -> branches[ownerId=alice] -> todos on branch
+//
+//   Gate                         Expected
+//   ---------------------------  --------
+//   backing branch select        pass
+//   for_branch todos select      pass
+//   branch query result          1 row
 fn branch_read_requires_readable_backing_row_and_matching_branch_policy() {
     let (mut qm, mut storage, schema) = manager_with_branch_schema(true);
     let project_id = ObjectId::new();
@@ -176,6 +277,15 @@ fn branch_read_requires_readable_backing_row_and_matching_branch_policy() {
 }
 
 #[test]
+// Read path:
+//
+//   Session bob -> branches[ownerId=alice] -> todos on branch
+//
+//   Gate                         Expected
+//   ---------------------------  --------
+//   backing branch select        deny
+//   for_branch todos select      not enough
+//   branch query result          0 rows
 fn branch_read_denies_when_backing_row_is_not_readable() {
     let (mut qm, mut storage, schema) = manager_with_branch_schema(true);
     let project_id = ObjectId::new();
@@ -193,6 +303,14 @@ fn branch_read_denies_when_backing_row_is_not_readable() {
 }
 
 #[test]
+// Missing branch policy:
+//
+//   backing branch select passes
+//   todos.for_branch["branches"] is absent
+//
+//   Query                         Expected
+//   ----------------------------  --------
+//   todos.branch(branch_id)       0 rows
 fn branch_read_denies_when_for_branch_block_is_missing() {
     let (mut qm, mut storage, schema) = manager_with_branch_schema(false);
     let project_id = ObjectId::new();
@@ -210,6 +328,419 @@ fn branch_read_denies_when_for_branch_block_is_missing() {
 }
 
 #[test]
+// Matrix shape:
+//
+//   normal select  x  branch select  x  backing select
+//   true/false/missing for each axis
+//
+//   Query                         Controlling policy
+//   ----------------------------  ------------------
+//   todos on main                 normal select
+//   todos on branch               branch select AND backing select
+fn branch_read_matrix_covers_missing_normal_branch_and_backing_select_policies() {
+    let modes = [
+        SelectPolicyMode::True,
+        SelectPolicyMode::False,
+        SelectPolicyMode::Missing,
+    ];
+
+    for normal_select in modes {
+        for branch_select in modes {
+            for backing_select in modes {
+                let schema =
+                    branch_query_matrix_schema(normal_select, branch_select, backing_select);
+                let mut writer = create_query_manager_with_policy_mode(
+                    SyncManager::new(),
+                    schema.clone(),
+                    RowPolicyMode::PermissiveLocal,
+                );
+                let mut storage = seeded_memory_storage(&writer.schema_context().current_schema);
+                let project_id = ObjectId::new();
+                writer
+                    .insert(
+                        &mut storage,
+                        "todos",
+                        &[Value::Uuid(project_id), Value::Text("Main todo".into())],
+                    )
+                    .expect("seed main todo");
+                let branch_id =
+                    seed_branch_and_todo(&mut writer, &mut storage, &schema, project_id, "alice");
+                let branch_name = branch_name_for(&schema, branch_id);
+                let mut reader = create_query_manager_with_policy_mode(
+                    SyncManager::new(),
+                    schema,
+                    RowPolicyMode::Enforcing,
+                );
+
+                let main_rows = query_rows(
+                    &mut reader,
+                    &mut storage,
+                    QueryBuilder::new("todos").build(),
+                    Some(Session::new("alice")),
+                );
+                let expected_main = usize::from(normal_select == SelectPolicyMode::True);
+                assert_eq!(
+                    main_rows.len(),
+                    expected_main,
+                    "normal select mode {normal_select:?} should control main reads"
+                );
+
+                let branch_rows = query_rows(
+                    &mut reader,
+                    &mut storage,
+                    QueryBuilder::new("todos").branch(branch_name).build(),
+                    Some(Session::new("alice")),
+                );
+                let expected_branch = usize::from(
+                    branch_select == SelectPolicyMode::True
+                        && backing_select == SelectPolicyMode::True,
+                );
+                assert_eq!(
+                    branch_rows.len(),
+                    expected_branch,
+                    "branch select {branch_select:?} and backing select {backing_select:?} should control branch reads independently from normal select {normal_select:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+// Server subscription path:
+//
+//   structural schema compiles graph
+//             |
+//             v
+//   authorization schema applies for_branch select=false
+//
+//   Sent row batch for branch todo: no
+//   Settled scope: empty
+fn synced_branch_read_uses_branch_select_policy_after_structural_graph_compile() {
+    // Regression coverage for browser/dev-server subscriptions: the server
+    // compiles query scopes from the structural schema, then re-authorizes
+    // candidate rows with the separately published permissions head. Branch
+    // reads must therefore check the published `for_branch` select policy
+    // instead of falling back to the normal table select policy.
+    let mut todo_policies = TablePolicies::new()
+        .with_select(PolicyExpr::True)
+        .with_insert(PolicyExpr::True);
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new()
+            .with_select(PolicyExpr::False)
+            .with_insert(PolicyExpr::True),
+    )]);
+    let auth_schema = branch_schema_with_backing_and_todo_policies(
+        TablePolicies::new()
+            .with_select(PolicyExpr::True)
+            .with_insert(PolicyExpr::True),
+        todo_policies,
+    );
+    let structural_schema = strip_test_policies(&auth_schema);
+    let mut qm = create_query_manager(SyncManager::new(), structural_schema.clone());
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_id = ObjectId::new();
+    let branch_id = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_id), Value::Text("alice".into())],
+        )
+        .expect("seed branch row")
+        .row_id;
+    let branch_name = branch_name_for(&structural_schema, branch_id);
+    let branch_todo = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_name,
+            &[
+                Value::Uuid(project_id),
+                Value::Text("Hidden branch todo".into()),
+            ],
+            None,
+        )
+        .expect("seed branch todo");
+    qm.process(&mut storage);
+    qm.set_authorization_schema(auth_schema);
+
+    let client_id = ClientId::new();
+    connect_client(&mut qm, &storage, client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+    qm.sync_manager_mut().take_outbox();
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(QueryBuilder::new("todos").branch(branch_name).build()),
+            session: Some(Session::new("alice")),
+            required_tier: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let sent_rows: Vec<_> = outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            SyncPayload::RowBatchNeeded { row, .. } => Some(row.row_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !sent_rows.contains(&branch_todo.row_id),
+        "branch todo should not be sent when forBranch read is false"
+    );
+    let settled_scope = outbox.iter().find_map(|entry| match &entry.payload {
+        SyncPayload::QuerySettled {
+            query_id: QueryId(1),
+            scope,
+            ..
+        } => Some(scope),
+        _ => None,
+    });
+    assert_eq!(settled_scope, Some(&Vec::new()));
+}
+
+#[test]
+fn synced_union_branch_read_uses_branch_select_policy_after_structural_graph_compile() {
+    let mut todo_policies = TablePolicies::new()
+        .with_select(PolicyExpr::True)
+        .with_insert(PolicyExpr::True);
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new()
+            .with_select(PolicyExpr::False)
+            .with_insert(PolicyExpr::True),
+    )]);
+    let auth_schema = branch_schema_with_backing_and_todo_policies(
+        TablePolicies::new()
+            .with_select(PolicyExpr::True)
+            .with_insert(PolicyExpr::True),
+        todo_policies,
+    );
+    let structural_schema = strip_test_policies(&auth_schema);
+    let mut qm = create_query_manager(SyncManager::new(), structural_schema.clone());
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_id = ObjectId::new();
+    let branch_id = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_id), Value::Text("alice".into())],
+        )
+        .expect("seed branch row")
+        .row_id;
+    let branch_name = branch_name_for(&structural_schema, branch_id);
+    let branch_todo = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_name,
+            &[
+                Value::Uuid(project_id),
+                Value::Text("Hidden branch todo".into()),
+            ],
+            None,
+        )
+        .expect("seed branch todo");
+    qm.process(&mut storage);
+    qm.set_authorization_schema(auth_schema);
+
+    let client_id = ClientId::new();
+    connect_client(&mut qm, &storage, client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+    qm.sync_manager_mut().take_outbox();
+
+    let mut query = QueryBuilder::new("todos").build();
+    query.relation_ir = RelExpr::Union {
+        inputs: vec![RelExpr::Branch {
+            input: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("todos"),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("projectId"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Uuid(project_id)),
+                },
+            }),
+            branches: vec![branch_name],
+        }],
+    };
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: Some(Session::new("alice")),
+            required_tier: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let sent_rows: Vec<_> = outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            SyncPayload::RowBatchNeeded { row, .. } => Some(row.row_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !sent_rows.contains(&branch_todo.row_id),
+        "branch todo should not be sent from a union when forBranch read is false"
+    );
+    let settled_scope = outbox.iter().find_map(|entry| match &entry.payload {
+        SyncPayload::QuerySettled {
+            query_id: QueryId(1),
+            scope,
+            ..
+        } => Some(scope),
+        _ => None,
+    });
+    assert_eq!(settled_scope, Some(&Vec::new()));
+}
+
+#[test]
+fn local_union_branch_read_uses_branch_select_policy_after_structural_graph_compile() {
+    let mut todo_policies = TablePolicies::new()
+        .with_select(PolicyExpr::True)
+        .with_insert(PolicyExpr::True);
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new()
+            .with_select(PolicyExpr::False)
+            .with_insert(PolicyExpr::True),
+    )]);
+    let auth_schema = branch_schema_with_backing_and_todo_policies(
+        TablePolicies::new()
+            .with_select(PolicyExpr::True)
+            .with_insert(PolicyExpr::True),
+        todo_policies,
+    );
+    let structural_schema = strip_test_policies(&auth_schema);
+    let mut qm = create_query_manager(SyncManager::new(), structural_schema.clone());
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_id = ObjectId::new();
+    let branch_id = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_id), Value::Text("alice".into())],
+        )
+        .expect("seed branch row")
+        .row_id;
+    let branch_name = branch_name_for(&structural_schema, branch_id);
+    qm.insert_on_branch(
+        &mut storage,
+        "todos",
+        &branch_name,
+        &[
+            Value::Uuid(project_id),
+            Value::Text("Hidden branch todo".into()),
+        ],
+        None,
+    )
+    .expect("seed branch todo");
+    qm.process(&mut storage);
+    qm.set_authorization_schema(auth_schema);
+
+    let mut query = QueryBuilder::new("todos").build();
+    query.relation_ir = RelExpr::Union {
+        inputs: vec![RelExpr::Branch {
+            input: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("todos"),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("projectId"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Uuid(project_id)),
+                },
+            }),
+            branches: vec![branch_name],
+        }],
+    };
+    let sub_id = qm
+        .subscribe_with_session(query, Some(Session::new("alice")), None)
+        .expect("subscribe union branch query");
+    qm.process(&mut storage);
+
+    assert!(qm.get_subscription_results(sub_id).is_empty());
+}
+
+#[test]
+fn local_union_branch_read_uses_branch_select_policy_in_graph_filter() {
+    let schema = branch_query_matrix_schema(
+        SelectPolicyMode::True,
+        SelectPolicyMode::False,
+        SelectPolicyMode::True,
+    );
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager_with_policy_mode(
+        sync_manager,
+        schema.clone(),
+        RowPolicyMode::Enforcing,
+    );
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_id = ObjectId::new();
+    let branch_id = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_id), Value::Text("alice".into())],
+        )
+        .expect("seed branch row")
+        .row_id;
+    let branch_name = branch_name_for(&schema, branch_id);
+    qm.insert_on_branch(
+        &mut storage,
+        "todos",
+        &branch_name,
+        &[
+            Value::Uuid(project_id),
+            Value::Text("Hidden branch todo".into()),
+        ],
+        None,
+    )
+    .expect("seed branch todo");
+
+    let mut query = QueryBuilder::new("todos").build();
+    query.relation_ir = RelExpr::Union {
+        inputs: vec![RelExpr::Branch {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("todos"),
+            }),
+            branches: vec![branch_name],
+        }],
+    };
+    let sub_id = qm
+        .subscribe_with_session(query, Some(Session::new("alice")), None)
+        .expect("subscribe union branch query");
+    qm.process(&mut storage);
+
+    assert!(qm.get_subscription_results(sub_id).is_empty());
+}
+
+#[test]
+// Non-row-id branch path:
+//
+//   Branch name = dev/<schema-hash>/alice-draft
+//   No backing row can be resolved from the branch name.
+//
+//   Normal select = true
+//   Branch select = false
+//   Expected: normal select is not used as a fallback.
 fn branch_read_does_not_fall_back_to_normal_policy_for_non_row_id_branch() {
     let mut todo_policies = TablePolicies::new()
         .with_select(PolicyExpr::True)
@@ -253,6 +784,14 @@ fn branch_read_does_not_fall_back_to_normal_policy_for_non_row_id_branch() {
 }
 
 #[test]
+// Explicit-policy detection:
+//
+//   todos policies:
+//     normal select/insert/update/delete = missing
+//     for_branch insert                  = true
+//
+//   Schema should be enforcing because for_branch is explicit.
+//   Branch read with missing select must deny.
 fn for_branch_only_schema_infers_enforcing_policy_mode() {
     let mut todo_policies = TablePolicies::default();
     todo_policies.for_branch = HashMap::from([(
@@ -283,6 +822,13 @@ fn for_branch_only_schema_infers_enforcing_policy_mode() {
 }
 
 #[test]
+// Backing-row requirement:
+//
+//   for_branch todos select = true
+//   backing branches select = ownerId == session.user_id
+//
+//   Session bob cannot read alice's backing branch row,
+//   so branch todos remain hidden even though branch select is true.
 fn branch_select_true_still_requires_readable_backing_row() {
     let mut todo_policies = TablePolicies::default();
     todo_policies.for_branch = HashMap::from([(
@@ -312,6 +858,12 @@ fn branch_select_true_still_requires_readable_backing_row() {
 }
 
 #[test]
+// Subscription invalidation:
+//
+//   branch backing owner alice -> visible branch todo
+//   branch backing owner bob   -> unreadable branch todo
+//
+//   Update branches[ownerId] should dirty the branch policy filter.
 fn branch_select_reacts_when_backing_row_becomes_unreadable() {
     let backing_policies = TablePolicies::new()
         .with_select(PolicyExpr::Cmp {
@@ -361,6 +913,58 @@ fn branch_select_reacts_when_backing_row_becomes_unreadable() {
 }
 
 #[test]
+// Dependency invalidation:
+//
+//   projects[ownerId=alice]
+//          ^
+//          | branches.projectId inherits project select
+//          ` branch todo visibility
+//
+//   Changing project owner to bob should remove the branch todo from
+//   an alice subscription even though the branch row itself did not change.
+fn branch_select_reacts_when_backing_row_policy_dependency_changes() {
+    let schema = branch_schema_with_backing_project_dependency();
+    let mut qm = create_query_manager_with_policy_mode(
+        SyncManager::new(),
+        schema.clone(),
+        RowPolicyMode::Enforcing,
+    );
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_id = qm
+        .insert(&mut storage, "projects", &[Value::Text("alice".into())])
+        .expect("seed readable project")
+        .row_id;
+    qm.process(&mut storage);
+    let branch_id = seed_branch_and_todo(&mut qm, &mut storage, &schema, project_id, "alice");
+    let branch_name = branch_name_for(&schema, branch_id);
+    qm.process(&mut storage);
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("todos").branch(branch_name).build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .expect("subscribe branch query");
+
+    qm.process(&mut storage);
+    assert_eq!(qm.get_subscription_results(sub_id).len(), 1);
+
+    qm.update(&mut storage, project_id, &[Value::Text("bob".into())])
+        .expect("make backing branch row unreadable through project dependency");
+    qm.process(&mut storage);
+
+    assert!(qm.get_subscription_results(sub_id).is_empty());
+    qm.unsubscribe_with_sync(sub_id);
+}
+
+#[test]
+// BranchRef inside EXISTS:
+//
+//   branch row projectId = P
+//   approvals on branch contains projectId = P
+//   todos.for_branch select = exists approvals where projectId == $branch.projectId
+//
+//   Expected: branch todo is readable.
 fn branch_read_with_exists_branch_policy_can_match_branch_ref() {
     let mut todo_policies = TablePolicies::default();
     todo_policies.for_branch = HashMap::from([(
@@ -401,6 +1005,13 @@ fn branch_read_with_exists_branch_policy_can_match_branch_ref() {
 }
 
 #[test]
+// Branch insert:
+//
+//   branches[projectId=P] -> todos insert projectId=P
+//
+//   Insert target                    Policy used
+//   -------------------------------  -----------------------
+//   insert_on_branch("todos", ...)   for_branch insert policy
 fn branch_insert_uses_matching_branch_policy() {
     let (mut qm, mut storage, schema) = manager_with_branch_schema(true);
     let project_id = ObjectId::new();
@@ -432,6 +1043,13 @@ fn branch_insert_uses_matching_branch_policy() {
 }
 
 #[test]
+// Branch update with only WITH CHECK:
+//
+//   old clause = missing
+//   new clause = projectId == $branch.projectId
+//
+//   Expected: branch update can rely on the new-row check without requiring
+//   both old and new policy clauses to be present.
 fn branch_update_allows_missing_using_when_with_check_matches() {
     let mut todo_policies = TablePolicies::default();
     todo_policies.for_branch = HashMap::from([(
@@ -497,6 +1115,15 @@ fn branch_update_allows_missing_using_when_with_check_matches() {
 }
 
 #[test]
+// Synced branch insert:
+//
+//   Client write batch -> branch "dev/<schema>/<branch_id>"
+//
+//   Policy table
+//   -----------------------------  --------
+//   normal todos insert            missing
+//   for_branch todos insert        matches P
+//   expected server decision       accept
 fn synced_branch_insert_uses_branch_policy_without_normal_insert_policy() {
     let (mut qm, mut storage, schema) = manager_with_branch_schema(true);
     let project_id = ObjectId::new();
@@ -572,6 +1199,15 @@ fn synced_branch_insert_uses_branch_policy_without_normal_insert_policy() {
 }
 
 #[test]
+// Synced branch delete:
+//
+//   Existing branch todo -> client soft-delete batch
+//
+//   Policy table
+//   -----------------------------  --------
+//   normal todos delete            missing
+//   for_branch todos delete        matches P
+//   expected server decision       accept
 fn synced_branch_delete_uses_branch_policy_without_normal_delete_policy() {
     let mut todo_policies = TablePolicies::default();
     todo_policies.for_branch = HashMap::from([(
@@ -671,6 +1307,15 @@ fn synced_branch_delete_uses_branch_policy_without_normal_delete_policy() {
 }
 
 #[test]
+// Synced update bypass guard:
+//
+//   UUID branch has a readable backing row,
+//   but todos has no for_branch block.
+//
+//   Write path                      Expected
+//   ------------------------------  ----------------
+//   branch update from client       reject
+//   normal update policy            must not bypass
 fn synced_branch_update_on_uuid_branch_without_for_branch_denies_normal_policy_bypass() {
     let schema = SchemaBuilder::new()
         .table(
@@ -798,6 +1443,14 @@ fn synced_branch_update_on_uuid_branch_without_for_branch_denies_normal_policy_b
 }
 
 #[test]
+// Lens-aware local insert:
+//
+//   legacy todos(projectId,title)
+//        --lens adds ownerId=alice-->
+//   auth todos(projectId,title,ownerId)
+//
+//   Session alice insert: accept
+//   Session bob insert: deny
 fn local_branch_insert_uses_current_permissions_after_lens_transform() {
     let legacy = branch_schema_without_backing_policy(TablePolicies::new());
     let mut auth_todo_policies = TablePolicies::default();
@@ -960,6 +1613,13 @@ fn branch_ref_lens_schemas() -> (Schema, Schema, Lens, SchemaHash, SchemaHash) {
 }
 
 #[test]
+// BranchRef lens path for local write:
+//
+//   legacy branches(projectId)
+//        --lens adds ownerId=alice-->
+//   auth branch policy compares todo.createdBy == $branch.ownerId
+//
+//   Expected: transformed backing row supplies ownerId for BranchRef.
 fn local_branch_insert_transforms_backing_row_before_branch_ref_policy() {
     let (legacy, auth, lens, legacy_hash, auth_hash) = branch_ref_lens_schemas();
     let mut qm = create_query_manager_with_policy_mode(
@@ -995,6 +1655,13 @@ fn local_branch_insert_transforms_backing_row_before_branch_ref_policy() {
 }
 
 #[test]
+// BranchRef lens path for synced write:
+//
+//   client row batch on legacy branch
+//        -> server authorization schema
+//        -> transformed backing branch row
+//
+//   Expected: BranchRef reads ownerId after lens transform and accepts write.
 fn synced_branch_insert_transforms_backing_row_before_branch_ref_policy() {
     let (legacy, auth, lens, legacy_hash, auth_hash) = branch_ref_lens_schemas();
     let mut qm = create_query_manager_with_policy_mode(

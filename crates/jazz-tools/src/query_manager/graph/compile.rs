@@ -32,7 +32,7 @@ use super::super::index::ScanCondition;
 use super::super::magic_columns::{MagicColumnKind, magic_column_descriptor, magic_column_kind};
 use super::super::policy::PolicyExpr;
 use super::super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
-use super::super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
+use super::super::relation_ir::{OrderDirection, ProjectColumn, ProjectExpr, RelExpr};
 use super::super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::super::session::Session;
 use uuid::Uuid;
@@ -57,6 +57,66 @@ fn effective_select_policy(
             .denies_missing_explicit_policy()
             .then_some(PolicyExpr::False)
     })
+}
+
+struct QueryEnvelope {
+    order_by: Vec<(String, SortDirection)>,
+    offset: usize,
+    limit: Option<usize>,
+}
+
+fn unwrap_union_envelope(relation: &RelExpr) -> Option<(&[RelExpr], QueryEnvelope)> {
+    let mut current = relation;
+    let mut order_by = Vec::new();
+    let mut offset = 0;
+    let mut limit = None;
+
+    loop {
+        match current {
+            RelExpr::OrderBy { input, terms } => {
+                if order_by.is_empty() {
+                    order_by = terms
+                        .iter()
+                        .map(|term| {
+                            (
+                                term.column.column.clone(),
+                                match term.direction {
+                                    OrderDirection::Asc => SortDirection::Ascending,
+                                    OrderDirection::Desc => SortDirection::Descending,
+                                },
+                            )
+                        })
+                        .collect();
+                }
+                current = input;
+            }
+            RelExpr::Offset {
+                input,
+                offset: offset_value,
+            } => {
+                offset = *offset_value;
+                current = input;
+            }
+            RelExpr::Limit {
+                input,
+                limit: limit_value,
+            } => {
+                limit = Some(*limit_value);
+                current = input;
+            }
+            RelExpr::Union { inputs } => {
+                return Some((
+                    inputs.as_slice(),
+                    QueryEnvelope {
+                        order_by,
+                        offset,
+                        limit,
+                    },
+                ));
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn is_branch_scoped_user_branch(branches: &[String]) -> bool {
@@ -507,6 +567,17 @@ impl QueryGraph {
                 row_policy_mode,
             );
         }
+        if let Some((inputs, envelope)) = unwrap_union_envelope(relation) {
+            let graph = Self::compile_relation_ir_union_with_schema_context_and_features(
+                inputs,
+                schema,
+                branches,
+                session,
+                schema_context,
+                row_policy_mode,
+            )?;
+            return Self::append_query_envelope_to_graph(graph, envelope);
+        }
         let plan = lower_relation_to_execution_plan(
             relation,
             branches,
@@ -585,6 +656,48 @@ impl QueryGraph {
         let output_node = OutputNode::with_tuple_descriptor(first_output, OutputMode::Delta);
         let output_id = graph.add_node(GraphNode::Output(output_node));
         graph.add_edge(output_id, union_id);
+        graph.output_node = output_id;
+
+        Some(graph)
+    }
+
+    fn append_query_envelope_to_graph(mut graph: Self, envelope: QueryEnvelope) -> Option<Self> {
+        if envelope.order_by.is_empty() && envelope.offset == 0 && envelope.limit.is_none() {
+            return Some(graph);
+        }
+
+        let output_tuple_descriptor = match graph.get_node(graph.output_node) {
+            Some(GraphNode::Output(node)) => node.output_tuple_descriptor().clone(),
+            _ => return None,
+        };
+        let output_descriptor = output_tuple_descriptor.combined_descriptor();
+        let mut phase_input = graph.output_node;
+
+        let sort_keys = sort_keys_from_order_by(&envelope.order_by, &output_descriptor);
+        if !sort_keys.is_empty() {
+            let sort_node =
+                SortNode::with_tuple_descriptor(output_tuple_descriptor.clone(), sort_keys);
+            let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+            graph.add_edge(sort_id, phase_input);
+            phase_input = sort_id;
+        }
+
+        if envelope.limit.is_some() || envelope.offset > 0 {
+            let limit_offset_node = LimitOffsetNode::with_tuple_descriptor(
+                output_tuple_descriptor.clone(),
+                envelope.limit,
+                envelope.offset,
+            );
+            let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
+            graph.add_edge(limit_offset_id, phase_input);
+            graph.pagination_node = Some(limit_offset_id);
+            phase_input = limit_offset_id;
+        }
+
+        let output_node =
+            OutputNode::with_tuple_descriptor(output_tuple_descriptor, OutputMode::Delta);
+        let output_id = graph.add_node(GraphNode::Output(output_node));
+        graph.add_edge(output_id, phase_input);
         graph.output_node = output_id;
 
         Some(graph)
@@ -1035,26 +1148,17 @@ impl QueryGraph {
         };
         ensure_relation_tables_exist(&query.relation_ir, schema)?;
 
-        let plan = lower_relation_to_execution_plan(
+        Self::compile_relation_ir_with_schema_context_and_features(
             &query.relation_ir,
-            &branches,
-            query.include_deleted,
-            query.array_subqueries.clone(),
-            query.select_columns.clone(),
-        )
-        .ok_or_else(|| {
-            QueryCompileError::InvalidPlan(
-                "unsupported relation_ir shape for schema-context query compilation".to_string(),
-            )
-        })?;
-
-        validate_execution_plan(&plan, schema)?;
-
-        Self::compile_execution_plan_with_schema_context(
-            &plan,
             schema,
+            &branches,
             session,
             schema_context,
+            RelationCompileFeatures {
+                include_deleted: query.include_deleted,
+                array_subqueries: query.array_subqueries.clone(),
+                select_columns: query.select_columns.clone(),
+            },
             row_policy_mode,
         )
         .ok_or_else(|| {

@@ -11,6 +11,7 @@ use crate::sync_manager::{OutgoingQuerySubscription, QueryPropagation};
 
 #[cfg(test)]
 use super::encoding::decode_row;
+use super::graph::QueryGraph;
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::manager::{
     CatalogueUpdate, LocalUpdates, QueryError, QueryManager, QuerySubscription,
@@ -56,6 +57,27 @@ impl QueryManager {
     /// Create a query builder for a table.
     pub fn query(&self, table: &str) -> QueryBuilder {
         QueryBuilder::new(table)
+    }
+
+    pub(super) fn resolved_subscription_branches(
+        query: &Query,
+        schema_context: &crate::schema_manager::SchemaContext,
+        graph: &QueryGraph,
+    ) -> Vec<String> {
+        let scan_branches = graph.scan_branches();
+        if !scan_branches.is_empty() {
+            return scan_branches;
+        }
+
+        if !query.branches.is_empty() {
+            return query.branches.clone();
+        }
+
+        schema_context
+            .all_branch_names()
+            .into_iter()
+            .map(|b| b.as_str().to_string())
+            .collect()
     }
 
     /// Subscribe to query results (delta mode).
@@ -122,20 +144,11 @@ impl QueryManager {
         } = options;
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?durability_tier).entered();
-        // Determine branches
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
-        } else if self.schema_context.is_initialized() {
-            self.schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        } else {
+        if query.branches.is_empty() && !self.schema_context.is_initialized() {
             return Err(QueryError::QueryCompilationError(
                 "schema context not initialized - call set_current_schema() first".into(),
             ));
-        };
+        }
 
         let uses_explicit_authorization_filtering =
             self.local_subscription_uses_explicit_authorization(session.as_ref());
@@ -154,6 +167,7 @@ impl QueryManager {
         )
         .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
         let policy_context_tables = Self::policy_context_tables_for_graph(&graph);
+        let branches = Self::resolved_subscription_branches(&query, &self.schema_context, &graph);
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -226,17 +240,6 @@ impl QueryManager {
             })
             .collect();
 
-        // Determine branches from query or context
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
-        } else {
-            schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        };
-
         // Compile query graph with explicit schema context
         let graph = Self::compile_graph(
             &query,
@@ -247,6 +250,7 @@ impl QueryManager {
         )
         .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
         let policy_context_tables = Self::policy_context_tables_for_graph(&graph);
+        let branches = Self::resolved_subscription_branches(&query, schema_context, &graph);
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
