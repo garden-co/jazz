@@ -77,3 +77,29 @@ locally. Reconnect remains desired-state based.
 The SQLite design stores each schema version as its own physical SQLite table.
 Migration lenses lower translation work into reads, and writes through a lens
 create versions in the writer's current schema.
+
+## Deferred compatibility and migration notes
+
+Migration from current Jazz data and Jazz 1 concepts is intentionally deferred
+until the new core semantics are stable. The SQLite-backed design should avoid
+gratuitously changing product-facing APIs and public row ids, but detailed
+compatibility mapping is out of scope for the main spec.
+
+Status-quo concepts that will eventually need a migration story include:
+
+- grouped-write ids and row-batch history becoming sealed transactions
+- `_jazz_*` physical fields becoming new lowering-specific system columns
+- schema hashes, permission heads, and lens migration metadata
+- composed branch names and prefixes becoming explicit branch/source context
+- sync protocol compatibility windows
+
+| Current term                    | New design direction                                        |
+| ------------------------------- | ----------------------------------------------------------- |
+| `DurabilityTier`                | delivery target and authority/edge/global observation tier  |
+| `QuerySettled`                  | query settled signal                                        |
+| `Db`                            | product API facade over query/write/sync plans              |
+| `Session`                       | principal plus role plus policy context                     |
+| `VisibleRowEntry`               | current projection row                                      |
+| `branch_name` / composed prefix | branch/source/schema context                                |
+| `row_format`                    | physical row codec                                          |
+| `_jazz_*`                       | physical system fields; new lowering currently prefers `j_` |
