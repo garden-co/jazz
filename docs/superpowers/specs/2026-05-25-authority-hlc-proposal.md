@@ -51,6 +51,28 @@ authority_hlc:
    in the durable global sequence?"
 ```
 
+## Why This Is Additive
+
+This is not a replacement for wall-clock timestamps. It adds a second timeline
+because we need two different tools:
+
+```text
+client timestamp:
+  normal conflict resolution
+  existing LWW behavior
+  human-facing provenance
+
+authority_hlc:
+  global snapshot bookmark
+  deterministic global sequence
+  future "show me the database as of this global point" reads
+```
+
+Keeping conflict resolution on client time avoids mixing server receipt time
+into today's merge behavior. The authority HLC can stay simple: it is a durable
+bookmark for globally observed batches, not a new rule for deciding which local
+edit wins.
+
 ## What A Row Looks Like
 
 Before:
