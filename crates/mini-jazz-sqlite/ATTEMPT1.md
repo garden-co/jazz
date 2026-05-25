@@ -80,3 +80,29 @@ For now the prototype preserves `created_at` across update/delete rows. It still
 uses the write actor as `created_by` on update/delete history rows because the
 read model does not expose `created_by` yet; that should be corrected before
 this becomes a real projection invariant.
+
+### 2026-05-24 22:32 PDT
+
+Added model-level acceptance mapping:
+
+- local/edge durable transaction keeps its `tx_id`
+- authority maps `(tx_id, node, local_epoch)` to `global_epoch`
+- accepted transaction remains addressable by both old local coordinates and
+  new global epoch
+
+This supports the "txids first, epoch indexes later if useful" direction while
+still making the local-to-global upgrade explicit.
+
+Added first storage-level snapshot read:
+
+- `query_todos_at_local_epoch(query, node_id, local_epoch)`
+- implemented as a pure history query, not a projection table
+- chooses the latest non-rejected version per row at or below the requested
+  local epoch
+- delete rows suppress the row at that snapshot
+
+Fuzziness: this is intentionally only a same-node local snapshot. It does not
+yet evaluate a full dotted version vector across global base, local bases, and
+explicit tx includes. The SQL shape is useful, though: "latest visible version
+per row" can be expressed with history joins and `NOT EXISTS`, and the next
+step is to replace the same-node predicate with a visibility relation.

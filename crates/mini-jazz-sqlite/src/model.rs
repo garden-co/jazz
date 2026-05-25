@@ -129,6 +129,37 @@ pub struct TxCoordinate {
     pub status: TxStatus,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TxAccepted {
+    pub tx_id: TxId,
+    pub node_id: NodeId,
+    pub local_epoch: u64,
+    pub global_epoch: u64,
+}
+
+impl TxAccepted {
+    pub fn new(
+        tx_id: impl Into<TxId>,
+        node_id: impl Into<NodeId>,
+        local_epoch: u64,
+        global_epoch: u64,
+    ) -> Self {
+        Self {
+            tx_id: tx_id.into(),
+            node_id: node_id.into(),
+            local_epoch,
+            global_epoch,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TxAcceptanceError {
+    CoordinateMismatch { expected: TxRef, actual: TxRef },
+    GlobalEpochMismatch { existing: u64, accepted: u64 },
+    InvalidStatusTransition(TxStatusTransitionError),
+}
+
 impl TxCoordinate {
     pub fn local(
         tx_id: impl Into<TxId>,
@@ -158,6 +189,40 @@ impl TxCoordinate {
             global_epoch: Some(global_epoch),
             status: TxStatus::GlobalDurableAccepted,
         }
+    }
+
+    pub fn accept(&mut self, accepted: &TxAccepted) -> Result<(), TxAcceptanceError> {
+        if self.tx_id != accepted.tx_id {
+            return Err(TxAcceptanceError::CoordinateMismatch {
+                expected: TxRef::tx_id(self.tx_id.clone()),
+                actual: TxRef::tx_id(accepted.tx_id.clone()),
+            });
+        }
+
+        let expected_local = TxRef::node_local(self.node_id.clone(), self.local_epoch);
+        let actual_local = TxRef::node_local(accepted.node_id.clone(), accepted.local_epoch);
+        if expected_local != actual_local {
+            return Err(TxAcceptanceError::CoordinateMismatch {
+                expected: expected_local,
+                actual: actual_local,
+            });
+        }
+
+        if let Some(existing) = self.global_epoch
+            && existing != accepted.global_epoch
+        {
+            return Err(TxAcceptanceError::GlobalEpochMismatch {
+                existing,
+                accepted: accepted.global_epoch,
+            });
+        }
+
+        self.status = self
+            .status
+            .transition_to(TxStatus::GlobalDurableAccepted)
+            .map_err(TxAcceptanceError::InvalidStatusTransition)?;
+        self.global_epoch = Some(accepted.global_epoch);
+        Ok(())
     }
 }
 
@@ -423,6 +488,66 @@ mod tests {
     }
 
     #[test]
+    fn acceptance_maps_an_existing_local_transaction_to_a_global_epoch() {
+        let mut alice_tx = TxCoordinate::local(
+            "tx_alice_create_todo",
+            "alice_laptop",
+            21,
+            TxStatus::EdgeDurable,
+        );
+
+        alice_tx
+            .accept(&TxAccepted::new(
+                "tx_alice_create_todo",
+                "alice_laptop",
+                21,
+                1057,
+            ))
+            .unwrap();
+
+        assert_eq!(alice_tx.global_epoch, Some(1057));
+        assert_eq!(alice_tx.status, TxStatus::GlobalDurableAccepted);
+        assert!(TxRef::Global(1057).matches_coordinate(&alice_tx));
+        assert!(TxRef::node_local("alice_laptop", 21).matches_coordinate(&alice_tx));
+    }
+
+    #[test]
+    fn acceptance_rejects_mismatched_or_already_rejected_coordinates() {
+        let mut alice_tx = TxCoordinate::local(
+            "tx_alice_create_todo",
+            "alice_laptop",
+            21,
+            TxStatus::EdgeDurable,
+        );
+
+        assert_eq!(
+            alice_tx.accept(&TxAccepted::new(
+                "tx_alice_create_todo",
+                "alice_laptop",
+                22,
+                1057,
+            )),
+            Err(TxAcceptanceError::CoordinateMismatch {
+                expected: TxRef::node_local("alice_laptop", 21),
+                actual: TxRef::node_local("alice_laptop", 22),
+            })
+        );
+
+        let mut rejected =
+            TxCoordinate::local("tx_bob_update_todo", "bob_phone", 4, TxStatus::Rejected);
+
+        assert_eq!(
+            rejected.accept(&TxAccepted::new("tx_bob_update_todo", "bob_phone", 4, 1058)),
+            Err(TxAcceptanceError::InvalidStatusTransition(
+                TxStatusTransitionError {
+                    from: TxStatus::Rejected,
+                    to: TxStatus::GlobalDurableAccepted,
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn global_base_makes_accepted_global_transactions_visible() {
         let alice_tx = TxCoordinate::global("tx_alice_create_todo", "alice_laptop", 7, 42);
         let bob_tx = TxCoordinate::global("tx_bob_rename_todo", "bob_phone", 3, 43);
@@ -431,6 +556,33 @@ mod tests {
 
         assert!(snapshot.is_visible(&alice_tx));
         assert!(!snapshot.is_visible(&bob_tx));
+    }
+
+    #[test]
+    fn local_vector_references_still_see_accepted_transactions_after_global_mapping() {
+        let mut alice_tx = TxCoordinate::local(
+            "tx_alice_offline_create_todo",
+            "alice_laptop",
+            21,
+            TxStatus::EdgeDurable,
+        );
+        alice_tx
+            .accept(&TxAccepted::new(
+                "tx_alice_offline_create_todo",
+                "alice_laptop",
+                21,
+                1057,
+            ))
+            .unwrap();
+
+        let by_local_base = VersionVector::new(0).with_local_base("alice_laptop", 21);
+        let by_local_dot =
+            VersionVector::new(0).with_include(TxRef::node_local("alice_laptop", 21));
+        let by_global_base = VersionVector::new(1057);
+
+        assert!(by_local_base.is_visible(&alice_tx));
+        assert!(by_local_dot.is_visible(&alice_tx));
+        assert!(by_global_base.is_visible(&alice_tx));
     }
 
     #[test]
