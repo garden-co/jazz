@@ -432,6 +432,20 @@ The sync sender should expand locators into all relevant history rows by table
 and schema, while the receiver updates enough projections to answer ordinary
 current queries after import.
 
+### 2026-05-24 22:51 PDT
+
+Added required dependency deletion behavior for joins:
+
+- project delete writes project history/current
+- joined subscription reports the todo-with-project row as removed
+- fresh joined query returns no row
+
+Discovery: the "required child filters parent" rule has a clean SQL
+interpretation for inner joins: dependency disappearance is just membership
+disappearance. For optional relations we will need a left-join/nulling variant,
+and the scope contract will need to distinguish "dependency absent" from "not
+visited".
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next

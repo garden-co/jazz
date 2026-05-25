@@ -58,6 +58,15 @@ pub struct UpdateProject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteProject {
+    pub row_id: String,
+    pub tx_id: String,
+    pub node_id: String,
+    pub actor_id: String,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertTodoForProject {
     pub row_id: String,
     pub tx_id: String,
@@ -728,6 +737,80 @@ impl MiniJazzSqlite {
                 input.actor_id,
                 input.now
             ],
+        )?;
+        sql_tx.commit()
+    }
+
+    pub fn delete_project(&mut self, input: DeleteProject) -> rusqlite::Result<()> {
+        let previous = self.conn.query_row(
+            r#"
+            SELECT name, visible_tx_id, created_at
+            FROM projects__schema_v1_current
+            WHERE branch_id = 'main' AND row_id = ?1 AND is_deleted = 0
+            "#,
+            params![input.row_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let sql_tx = self.conn.transaction()?;
+        let node_num = ensure_node(&sql_tx, &input.node_id)?;
+        let local_epoch = next_local_epoch(&sql_tx, node_num)?;
+        let read_set = format!(
+            r#"[{{"kind":"row","table":"projects","rowId":"{}","visibleTxId":"{}","reason":"write_base"}}]"#,
+            input.row_id, previous.1
+        );
+        let write_set = format!(
+            r#"[{{"table":"projects","rowId":"{}","op":"delete","columns":["is_deleted","updated_at"]}}]"#,
+            input.row_id
+        );
+        sql_tx.execute(
+            r#"
+            INSERT INTO jazz_tx (
+              tx_id, node_num, local_epoch, kind, base_global_epoch,
+              base_local_jsonb, base_include_jsonb, read_set_jsonb, write_set_jsonb,
+              status, created_at, sealed_at, metadata_json
+            ) VALUES (?1, ?2, ?3, 'data', 0, '[]', '[]', ?4, ?5, 'local_pending', ?6, ?6, '{}')
+            "#,
+            params![
+                input.tx_id,
+                node_num,
+                local_epoch,
+                read_set,
+                write_set,
+                input.now
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            INSERT INTO projects__schema_v1_history (
+              row_id, branch_id, tx_id, op, name, created_by, created_at, updated_by,
+              updated_at, edit_metadata_json
+            ) VALUES (?1, 'main', ?2, 'delete', ?3, ?4, ?5, ?4, ?6, '{}')
+            "#,
+            params![
+                input.row_id,
+                input.tx_id,
+                previous.0,
+                input.actor_id,
+                previous.2,
+                input.now
+            ],
+        )?;
+        sql_tx.execute(
+            r#"
+            UPDATE projects__schema_v1_current
+            SET visible_tx_id = ?2,
+                is_deleted = 1,
+                updated_by = ?3,
+                updated_at = ?4
+            WHERE branch_id = 'main' AND row_id = ?1
+            "#,
+            params![input.row_id, input.tx_id, input.actor_id, input.now],
         )?;
         sql_tx.commit()
     }
@@ -3075,6 +3158,53 @@ mod tests {
                     && after.project.name == "Launch renamed"
                     && before.todo.visible_tx_id == after.todo.visible_tx_id
         ));
+    }
+
+    #[test]
+    fn joined_subscription_removes_row_when_required_dependency_is_deleted() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        db.insert_project(InsertProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-1".into(),
+            node_id: "alice-device".into(),
+            name: "Launch".into(),
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.insert_todo_for_project(InsertTodoForProject {
+            row_id: "todo-1".into(),
+            tx_id: "tx-todo-1".into(),
+            node_id: "alice-device".into(),
+            project_id: "project-1".into(),
+            title: "Depends on project".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+
+        let subscription = db.subscribe_joined_todos("main").unwrap();
+        db.delete_project(DeleteProject {
+            row_id: "project-1".into(),
+            tx_id: "tx-project-delete".into(),
+            node_id: "alice-device".into(),
+            actor_id: "alice".into(),
+            now: 300,
+        })
+        .unwrap();
+
+        assert!(matches!(
+            db.poll_joined_subscription(subscription).unwrap().as_slice(),
+            [JoinedSubscriptionChange::Removed(row)]
+                if row.todo.row_id == "todo-1" && row.project.row_id == "project-1"
+        ));
+        assert!(
+            db.query_open_todos_with_projects("main")
+                .unwrap()
+                .0
+                .is_empty()
+        );
     }
 
     #[test]
