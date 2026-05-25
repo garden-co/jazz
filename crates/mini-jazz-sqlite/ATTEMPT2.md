@@ -1048,3 +1048,56 @@ main-base history rows needed by a receiver that has never seen that base.
 Verified focused test:
 
 - `cargo test -p mini-jazz-sqlite branch_query_scope_bundle_includes_main_base_history`
+
+### 2026-05-25 12:49 PDT
+
+Added a layout overhead experiment for raw data vs current-style system columns
+vs compact integer system columns.
+
+Command:
+
+- `cargo run -p mini-jazz-sqlite --example layout_overhead --release`
+
+Synthetic workload:
+
+- 50,000 initial rows.
+- 10,000 updates.
+- Current projection table plus history table for system layouts.
+- 200 repeated current-page queries.
+- 200 repeated historical snapshot-page queries.
+- Page sizes: 4 KiB, 8 KiB, 16 KiB.
+- External `gzip` and `zstd` sizes measured as a proxy for page-compression
+  upside.
+
+Latest run after adding a history index for snapshot order/filter:
+
+- Raw @ 4 KiB: 2,342,912 bytes, current 3.083 ms, snapshot 3.083 ms.
+- Text-system @ 4 KiB: 28,225,536 bytes, current 3.488 ms, snapshot 16.162 ms.
+- Compact-system @ 4 KiB: 13,611,008 bytes, current 3.369 ms, snapshot 11.110 ms.
+- Text-system file/raw: 12.05x.
+- Compact-system file/raw: 5.81x.
+- Compact/text-system file size: 0.48x.
+- Text-system snapshot/raw: 5.24x.
+- Compact-system snapshot/raw: 3.60x.
+
+Compression observations:
+
+- Raw @ 4 KiB: 2.34 MB -> gzip 0.76 MB, zstd 0.72 MB.
+- Text-system @ 4 KiB: 28.23 MB -> gzip 6.05 MB, zstd 4.88 MB.
+- Compact-system @ 4 KiB: 13.61 MB -> gzip 3.54 MB, zstd 3.79 MB.
+
+Discovery:
+
+- The naive history indexes made snapshot reads catastrophically slow; the right
+  history index changed that from seconds to tens of milliseconds for the whole
+  repeated benchmark. Layout work and index work cannot be evaluated
+  independently.
+- Compact integer system columns roughly halve file size versus stringly system
+  columns while slightly improving snapshot reads.
+- Current projection reads are close to raw regardless of system layout when the
+  current index matches the query.
+- SQLite page size made little difference for this workload after `VACUUM`.
+- Compression could save a lot of disk, especially for string-heavy system
+  layouts, but compressed page/VFS work would need to justify CPU and random
+  access complexity. A compact layout captures much of the win without adding a
+  compression layer.
