@@ -381,8 +381,16 @@ impl ReadSet {
                         });
                     }
                 }
-                ReadSetEntry::Range(_) => {
-                    return Err(ReadValidationError::RangeValidationUnsupported);
+                ReadSetEntry::Range(read) => {
+                    let matching = state.matching_visible_rows(read);
+                    if !matching.is_empty() {
+                        return Err(ReadValidationError::StaleRange {
+                            table: read.table.clone(),
+                            index: read.index.clone(),
+                            predicate: read.predicate.clone(),
+                            matching_row_ids: matching,
+                        });
+                    }
                 }
             }
         }
@@ -406,6 +414,18 @@ impl AuthorityReadState {
             .find(|row| row.table == table && row.row_id == row_id)
             .and_then(|row| row.visible_tx_id.as_ref())
     }
+
+    pub fn matching_visible_rows(&self, read: &RangeRead) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter(|row| {
+                row.table == read.table
+                    && row.visible_tx_id.is_some()
+                    && predicate_matches_row(&read.predicate, row)
+            })
+            .map(|row| row.row_id.clone())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -413,6 +433,7 @@ pub struct AuthorityRowState {
     pub table: String,
     pub row_id: String,
     pub visible_tx_id: Option<TxId>,
+    pub is_deleted: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -423,7 +444,12 @@ pub enum ReadValidationError {
         expected: Option<TxId>,
         actual: Option<TxId>,
     },
-    RangeValidationUnsupported,
+    StaleRange {
+        table: String,
+        index: String,
+        predicate: JsonValue,
+        matching_row_ids: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -508,6 +534,18 @@ impl JsonField {
             value,
         }
     }
+}
+
+fn predicate_matches_row(predicate: &JsonValue, row: &AuthorityRowState) -> bool {
+    let JsonValue::Object(fields) = predicate else {
+        return false;
+    };
+
+    fields.iter().all(|field| match field.key.as_str() {
+        "rowId" => field.value == JsonValue::String(row.row_id.clone()),
+        "isDeleted" => field.value == JsonValue::Bool(row.is_deleted),
+        _ => false,
+    })
 }
 
 #[cfg(test)]
@@ -761,6 +799,7 @@ mod tests {
             table: "todos".to_owned(),
             row_id: "todo_launch_checklist".to_owned(),
             visible_tx_id: Some(TxId::from("tx_base")),
+            is_deleted: false,
         }]);
 
         assert_eq!(read_set.validate_against(&state), Ok(()));
@@ -778,6 +817,7 @@ mod tests {
             table: "todos".to_owned(),
             row_id: "todo_launch_checklist".to_owned(),
             visible_tx_id: Some(TxId::from("tx_newer")),
+            is_deleted: false,
         }]);
 
         assert_eq!(
@@ -787,6 +827,44 @@ mod tests {
                 row_id: "todo_launch_checklist".to_owned(),
                 expected: Some(TxId::from("tx_base")),
                 actual: Some(TxId::from("tx_newer")),
+            })
+        );
+    }
+
+    #[test]
+    fn absence_range_reads_validate_until_a_matching_row_appears() {
+        let absent_project_read = ReadSet::new(vec![ReadSetEntry::Range(RangeRead {
+            table: "projects".to_owned(),
+            index: "projects_by_row_id_deleted".to_owned(),
+            predicate: JsonValue::Object(vec![
+                JsonField::new("rowId", JsonValue::String("project_missing".to_owned())),
+                JsonField::new("isDeleted", JsonValue::Bool(false)),
+            ]),
+            snapshot: VersionVector::new(42),
+        })]);
+
+        assert_eq!(
+            absent_project_read.validate_against(&AuthorityReadState::new(vec![])),
+            Ok(())
+        );
+
+        let state_with_concurrent_insert = AuthorityReadState::new(vec![AuthorityRowState {
+            table: "projects".to_owned(),
+            row_id: "project_missing".to_owned(),
+            visible_tx_id: Some(TxId::from("tx_project_insert")),
+            is_deleted: false,
+        }]);
+
+        assert_eq!(
+            absent_project_read.validate_against(&state_with_concurrent_insert),
+            Err(ReadValidationError::StaleRange {
+                table: "projects".to_owned(),
+                index: "projects_by_row_id_deleted".to_owned(),
+                predicate: JsonValue::Object(vec![
+                    JsonField::new("rowId", JsonValue::String("project_missing".to_owned())),
+                    JsonField::new("isDeleted", JsonValue::Bool(false)),
+                ]),
+                matching_row_ids: vec!["project_missing".to_owned()],
             })
         );
     }

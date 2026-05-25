@@ -685,6 +685,21 @@ still hard-coded, but it moves repair coverage from "remember every table at
 every fate transition" to "register every current projection once." A real
 schema lowerer could generate this list per schema version.
 
+### 2026-05-24 23:16 PDT
+
+Added model-level absence/range validation:
+
+- range read sets can express a predicate such as
+  `projects.rowId = X AND isDeleted = false`
+- authority state can test whether any currently visible row now matches
+- a matching row turns the read set into a `StaleRange` rejection reason
+
+Discovery: this is enough to model the optional-join absence hazard without
+inventing explicit parent pointers. The first implementation only understands a
+tiny equality predicate over `rowId` and `isDeleted`, but the shape is useful:
+predicate/range read sets are the correctness contract for "I observed that no
+required row existed."
+
 ## Next pressure points after joins
 
 Once two-table joins/includes and explicit result scope are green, the next
