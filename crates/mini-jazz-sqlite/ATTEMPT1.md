@@ -197,3 +197,29 @@ Uncertainties to settle while implementing:
 - How much of read/write-set JSON needs to be durable in this pass. The useful
   minimum is exact previous visible row version for writes plus column masks;
   range reads can wait until exclusive validation is being modeled.
+
+### 2026-05-24 22:36 PDT
+
+Added a first storage `SnapshotVector`:
+
+- `global_base`
+- `local_bases`
+- `include_tx_ids`
+
+and `query_todos_at_snapshot(query, snapshot)`, which first resolves visible
+transaction ids, then queries history rows for the latest visible row versions.
+
+Discovery: txid includes are a very simple first representation. They avoid
+local-to-global coordinate rewrite inside serialized vectors and can be made to
+work before compact epoch encodings exist.
+
+Bad smell: the first implementation loops once per visible tx and uses dynamic
+`IN (?, ?, ...)` predicates. This is acceptable as an executable spec, but the
+real implementation should likely materialize the resolved visible tx set into a
+temporary table or use a generated CTE so SQLite can plan the whole snapshot
+query at once.
+
+Open fuzziness: ordering concurrent visible versions of the same row is not
+solved. The prototype only suppresses older versions from the same node. If two
+visible transactions from different nodes both write the same row, this should
+become conflict-candidate output rather than "pick one latest row".

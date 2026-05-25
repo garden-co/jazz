@@ -74,6 +74,42 @@ impl TodoQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotVector {
+    pub global_base: i64,
+    pub local_bases: Vec<LocalSnapshotBase>,
+    pub include_tx_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSnapshotBase {
+    pub node_id: String,
+    pub local_epoch: i64,
+}
+
+impl SnapshotVector {
+    pub fn new(global_base: i64) -> Self {
+        Self {
+            global_base,
+            local_bases: Vec::new(),
+            include_tx_ids: Vec::new(),
+        }
+    }
+
+    pub fn with_local_base(mut self, node_id: impl Into<String>, local_epoch: i64) -> Self {
+        self.local_bases.push(LocalSnapshotBase {
+            node_id: node_id.into(),
+            local_epoch,
+        });
+        self
+    }
+
+    pub fn with_include_tx_id(mut self, tx_id: impl Into<String>) -> Self {
+        self.include_tx_ids.push(tx_id.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowVersionLocator {
     pub table: String,
     pub schema: String,
@@ -637,6 +673,126 @@ impl MiniJazzSqlite {
         Ok(QueryResult { rows, scope })
     }
 
+    pub fn query_todos_at_snapshot(
+        &self,
+        query: &TodoQuery,
+        snapshot: &SnapshotVector,
+    ) -> rusqlite::Result<QueryResult> {
+        let mut visible_tx_ids = self.visible_tx_ids(snapshot)?;
+        visible_tx_ids.sort();
+        visible_tx_ids.dedup();
+
+        let done = query.done.map(bool_to_sql);
+        let created_after = query.created_after.unwrap_or(i64::MIN);
+        let mut visible_rows = Vec::new();
+        let in_list = placeholders(visible_tx_ids.len());
+        for tx_id in &visible_tx_ids {
+            let sql = format!(
+                r#"
+                SELECT h.row_id, h.title, h.done, h.created_at, h.updated_at, h.tx_id
+                FROM todos__schema_v1_history h
+                JOIN jazz_tx tx ON tx.tx_id = h.tx_id
+                WHERE h.branch_id = ?1
+                  AND h.tx_id = ?2
+                  AND h.op != 'delete'
+                  AND (?3 IS NULL OR h.done = ?3)
+                  AND h.created_at > ?4
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM todos__schema_v1_history newer_h
+                    JOIN jazz_tx newer_tx ON newer_tx.tx_id = newer_h.tx_id
+                    WHERE newer_h.branch_id = h.branch_id
+                      AND newer_h.row_id = h.row_id
+                      AND newer_h.tx_id IN ({in_list})
+                      AND newer_h.tx_id != h.tx_id
+                      AND newer_tx.node_num = tx.node_num
+                      AND newer_tx.local_epoch > tx.local_epoch
+                  )
+                ORDER BY h.created_at DESC, h.row_id ASC
+                "#
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> =
+                vec![&query.branch_id, &tx_id, &done, &created_after];
+            for visible_tx_id in &visible_tx_ids {
+                params.push(visible_tx_id);
+            }
+            let mut stmt = self.conn.prepare(&sql)?;
+            visible_rows.extend(
+                stmt.query_map(params.as_slice(), todo_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        visible_rows.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.row_id.cmp(&right.row_id))
+        });
+        let scope = visible_rows
+            .iter()
+            .map(|row| RowVersionLocator {
+                table: "todos".to_owned(),
+                schema: "schema_v1".to_owned(),
+                branch_id: query.branch_id.clone(),
+                row_id: row.row_id.clone(),
+                tx_id: row.visible_tx_id.clone(),
+                reason: "result".to_owned(),
+            })
+            .collect();
+        Ok(QueryResult {
+            rows: visible_rows,
+            scope,
+        })
+    }
+
+    fn visible_tx_ids(&self, snapshot: &SnapshotVector) -> rusqlite::Result<Vec<String>> {
+        let mut tx_ids = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT tx_id
+                FROM jazz_tx
+                WHERE status = 'global_durable_accepted'
+                  AND global_epoch <= ?1
+                "#,
+            )?;
+            tx_ids.extend(
+                stmt.query_map(params![snapshot.global_base], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        for base in &snapshot.local_bases {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT tx.tx_id
+                FROM jazz_tx tx
+                JOIN jazz_node node ON node.node_num = tx.node_num
+                WHERE node.node_id = ?1
+                  AND tx.local_epoch <= ?2
+                  AND tx.status != 'rejected'
+                "#,
+            )?;
+            tx_ids.extend(
+                stmt.query_map(params![base.node_id, base.local_epoch], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        for tx_id in &snapshot.include_tx_ids {
+            let exists: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT tx_id FROM jazz_tx WHERE tx_id = ?1 AND status != 'rejected'",
+                    params![tx_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(tx_id) = exists {
+                tx_ids.push(tx_id);
+            }
+        }
+        Ok(tx_ids)
+    }
+
     pub fn subscribe_todos(&mut self, query: TodoQuery) -> rusqlite::Result<SubscriptionId> {
         let id = SubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -832,6 +988,12 @@ fn bool_to_sql(value: bool) -> i64 {
 
 fn sql_to_bool(value: i64) -> bool {
     value != 0
+}
+
+fn placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -1207,6 +1369,80 @@ mod tests {
             )
             .unwrap();
         assert_eq!(history_count, 1);
+    }
+
+    #[test]
+    fn snapshot_vector_combines_global_base_local_bases_and_txid_includes() {
+        let mut db = MiniJazzSqlite::in_memory().unwrap();
+        let query = TodoQuery::open_since(0);
+
+        db.insert_todo(InsertTodo {
+            row_id: "todo-1".into(),
+            tx_id: "tx-global".into(),
+            node_id: "alice-device".into(),
+            title: "Accepted globally".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 100,
+        })
+        .unwrap();
+        db.accept_tx(AcceptTx {
+            tx_id: "tx-global".into(),
+            global_epoch: 7,
+        })
+        .unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-2".into(),
+            tx_id: "tx-local".into(),
+            node_id: "alice-device".into(),
+            title: "Local base".into(),
+            done: false,
+            actor_id: "alice".into(),
+            now: 200,
+        })
+        .unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-3".into(),
+            tx_id: "tx-include".into(),
+            node_id: "bob-phone".into(),
+            title: "Explicit include".into(),
+            done: false,
+            actor_id: "bob".into(),
+            now: 300,
+        })
+        .unwrap();
+        db.insert_todo(InsertTodo {
+            row_id: "todo-4".into(),
+            tx_id: "tx-hidden".into(),
+            node_id: "bob-phone".into(),
+            title: "Hidden".into(),
+            done: false,
+            actor_id: "bob".into(),
+            now: 400,
+        })
+        .unwrap();
+
+        let snapshot = SnapshotVector::new(7)
+            .with_local_base("alice-device", 2)
+            .with_include_tx_id("tx-include");
+        let result = db.query_todos_at_snapshot(&query, &snapshot).unwrap();
+
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| row.row_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo-3", "todo-2", "todo-1"]
+        );
+        assert_eq!(
+            result
+                .scope
+                .iter()
+                .map(|locator| locator.tx_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tx-include", "tx-local", "tx-global"]
+        );
     }
 
     #[test]
