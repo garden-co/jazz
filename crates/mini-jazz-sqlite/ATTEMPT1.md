@@ -106,3 +106,85 @@ yet evaluate a full dotted version vector across global base, local bases, and
 explicit tx includes. The SQL shape is useful, though: "latest visible version
 per row" can be expressed with history joins and `NOT EXISTS`, and the next
 step is to replace the same-node predicate with a visibility relation.
+
+### 2026-05-24 22:25 PDT
+
+Added storage-level global acceptance:
+
+- `accept_tx(tx_id, global_epoch)` updates `jazz_tx`
+- accepted transactions become `global_durable_accepted`
+- global snapshot reads only include accepted transactions at or below the
+  requested global epoch
+
+Discovery: the current projection and historical snapshot queries now
+deliberately answer different questions. `todos__schema_v1_current` shows the
+local optimistic main-branch state, including local pending writes. A global
+snapshot query is authority-shaped and only sees globally accepted writes. This
+seems right, but the API needs to make the read mode explicit so callers do not
+confuse "current local" with "globally durable at epoch N".
+
+Open fuzziness:
+
+- `accept_tx` currently mutates the transaction row directly. The real system
+  may want an append-only authority receipt table, with `jazz_tx` holding the
+  denormalized current acceptance state.
+- There is no rejection API yet, so the status state machine is only partially
+  represented in storage.
+
+### 2026-05-24 23:05 PDT
+
+Recommended next five rungs after the CRUD/query/subscription/snapshot basics,
+ordered for learning value:
+
+1. Full snapshot vector visibility over history.
+   Replace the same-node local snapshot predicate with the spec's closed vector
+   semantics: `globalBase`, sorted `localBases`, explicit `include` dots, and
+   rejected-transaction filtering. This should be the next pressure test because
+   branches, sync, reconnect, and read sets all depend on exactly the same
+   visibility relation.
+
+2. Two-node authority acceptance and fate propagation in the deterministic
+   harness.
+   Create local transactions on an "alice" node, forward them to an authority,
+   assign global epochs, broadcast the mapping, and assert that `$txId` remains
+   stable while compact coordinates become available. Include a rejected
+   transaction case so current projections and snapshots learn to remove or
+   ignore rejected local effects.
+
+3. Branch metadata and branch-local reads/writes.
+   Add `jazz_branch`/`jazz_branch_history`, create a branch from a closed vector,
+   write rows on that branch, and prove those globally accepted rows stay hidden
+   from `main` until a metadata-only merge updates the target branch head. This
+   is the smallest branch slice that tests the core "global history is not main
+   visibility" rule.
+
+4. Two-table joins/includes with result dependency scope.
+   Add a second hard-coded table, likely `projects`, and lower a realistic
+   todos-with-project query. Capture both result locators and dependency
+   locators, then make subscription diffs and sync-scope output prove that a
+   reproduced result has every row version it needs.
+
+5. Multi-write transactions plus per-column merge candidates.
+   Let one sealed transaction touch multiple rows/tables, record row+column
+   write sets, and run a small concurrent update scenario where `title` and
+   `done` can merge independently. Store resolved current values with ordered
+   conflict candidate tx ids so byte-for-byte projection rebuilds start covering
+   the merge contract instead of only last-write projection.
+
+Uncertainties to settle while implementing:
+
+- Whether decoded snapshot vectors should be represented as temp tables first
+  or compiled directly into generated predicates. Temp tables look slower but
+  will make the visibility contract easier to test and reuse.
+- What canonical ordering to use for mixed include dots before global mappings
+  exist. `$txId`-only includes may be the most stable prototype choice even if
+  not the final compact form.
+- How rejected local transactions should be undone in `main` current without
+  overfitting to the one-row CRUD path. A projection rebuild after rejection is
+  semantically clean; incremental repair can follow.
+- Whether branch merge metadata should be represented before app-level branch
+  rows. For this prototype, system metadata first is enough to test visibility,
+  but it leaves the permission-anchor story unexercised.
+- How much of read/write-set JSON needs to be durable in this pass. The useful
+  minimum is exact previous visible row version for writes plus column masks;
+  range reads can wait until exclusive validation is being modeled.
