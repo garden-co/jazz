@@ -44,9 +44,11 @@ impl WriteTx<'_> {
         let current = self.current_values(table, row_id)?;
         self.record_row_read(table, row_id, &current.visible_tx_id);
         let mut values = current.values;
+        let mut changed_columns = Vec::new();
         for (idx, field) in table.fields.iter().enumerate() {
             if let Some(value) = object.get(&field.name) {
                 values[idx] = json_to_sql(value, &field.kind)?;
+                changed_columns.push(field.name.clone());
             }
         }
 
@@ -55,8 +57,8 @@ impl WriteTx<'_> {
             row_id,
             "update",
             values,
-            current.created_at,
-            self.now,
+            (current.created_at, self.now),
+            changed_columns,
         )
     }
 
@@ -69,8 +71,12 @@ impl WriteTx<'_> {
             row_id,
             "delete",
             current.values,
-            current.created_at,
-            self.now,
+            (current.created_at, self.now),
+            table
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect(),
         )
     }
 
@@ -149,7 +155,18 @@ impl WriteTx<'_> {
             values.push(json_to_sql(json, &field.kind)?);
         }
 
-        self.write_version(table, row_id, "insert", values, self.now, self.now)
+        self.write_version(
+            table,
+            row_id,
+            "insert",
+            values,
+            (self.now, self.now),
+            table
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect(),
+        )
     }
 
     fn write_version(
@@ -158,13 +175,15 @@ impl WriteTx<'_> {
         row_id: &str,
         op: &str,
         values: Vec<SqlValue>,
-        created_at: i64,
-        updated_at: i64,
+        timestamps: (i64, i64),
+        changed_columns: Vec<String>,
     ) -> Result<()> {
+        let (created_at, updated_at) = timestamps;
         let plan = TablePlan::new(table);
         self.write_effects.push(WriteEffect {
             table: table.name.clone(),
             row_id: row_id.to_owned(),
+            columns: changed_columns,
         });
 
         let history_cols = std::iter::once("j_row_id".to_owned())

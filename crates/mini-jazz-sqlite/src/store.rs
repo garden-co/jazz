@@ -96,6 +96,7 @@ pub(crate) struct ReadSetEntry {
 pub(crate) struct WriteEffect {
     pub(crate) table: String,
     pub(crate) row_id: String,
+    pub(crate) columns: Vec<String>,
 }
 
 struct Effect {
@@ -1213,6 +1214,7 @@ impl Client {
                 write_effects.push(WriteEffect {
                     table: history.table.clone(),
                     row_id: history.row_id.clone(),
+                    columns: Vec::new(),
                 });
             }
         }
@@ -1643,5 +1645,11 @@ fn scope_overlaps_write(scope: &QueryScope, write: &WriteEffect) -> bool {
         || scope.predicate_scopes.iter().any(|predicate| {
             predicate.table == write.table
                 && (predicate.row_id.is_empty() || predicate.row_id == write.row_id)
+                && (write.columns.is_empty()
+                    || predicate.column.is_empty()
+                    || write
+                        .columns
+                        .iter()
+                        .any(|column| column == &predicate.column))
         })
 }

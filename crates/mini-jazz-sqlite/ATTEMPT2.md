@@ -412,6 +412,38 @@ Verified after the real split:
 - `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
 - `cargo test -p mini-jazz-sqlite`
 
+### 2026-05-25 12:12 PDT
+
+Refined predicate invalidation with local write column masks.
+
+Red/green test:
+
+- Subscribe to `todos where done = false`.
+- Keep a closed row outside the result.
+- Update only the closed row's `title`.
+- Polling the subscription should skip rerun, because neither result row scope
+  nor the `done` predicate scope overlaps the changed column.
+
+Implementation shape:
+
+- `WriteEffect` now carries changed user columns.
+- Inserts/deletes conservatively mark all user columns.
+- Updates mark only patched columns.
+- Predicate scope overlap checks table/row plus changed column:
+  - exact result/dependency row still invalidates regardless of column
+  - table-level predicate scope invalidates only when the predicate column was
+    changed, or when the effect has unknown columns
+
+Discovery: this keeps the broad table predicate closure correct while making it
+less noisy for common non-result payload updates. It is still not true old/new
+index-key range invalidation, but it is the first useful precision step.
+
+Verified:
+
+- `cargo fmt -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --tests --all-targets -- -D warnings`
+- `cargo test -p mini-jazz-sqlite`
+
 ### 2026-05-25 12:10 PDT
 
 Added first conflict candidate projection.

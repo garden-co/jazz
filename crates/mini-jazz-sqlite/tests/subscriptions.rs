@@ -222,3 +222,39 @@ fn subscription_reruns_only_when_write_effects_overlap_scope() -> mini_jazz_sqli
 
     Ok(())
 }
+
+#[test]
+fn subscription_skips_non_result_write_to_unrelated_filter_column() -> mini_jazz_sqlite::Result<()>
+{
+    let schema = Schema::new().table("todos", |t| {
+        t.text("title");
+        t.bool("done");
+    });
+
+    let mut alice = Harness::new().client("alice", schema).durable_in_memory()?;
+    let mut closed_id = String::new();
+
+    alice.write(|tx| {
+        tx.insert("todos", json!({ "title": "Open", "done": false }))?;
+        let closed = tx.insert("todos", json!({ "title": "Closed", "done": true }))?;
+        closed_id = closed.id().to_owned();
+        Ok(())
+    })?;
+
+    let open_todos = query("todos").filter(eq("done", false));
+    let subscription = alice.subscribe(open_todos)?;
+    assert_eq!(alice.subscription_rerun_count(subscription)?, 1);
+
+    alice.write(|tx| {
+        tx.update("todos", &closed_id, json!({ "title": "Still closed" }))?;
+        Ok(())
+    })?;
+    let diff = alice.poll_subscription(subscription)?;
+
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.updated.len(), 0);
+    assert_eq!(diff.removed.len(), 0);
+    assert_eq!(alice.subscription_rerun_count(subscription)?, 1);
+
+    Ok(())
+}
