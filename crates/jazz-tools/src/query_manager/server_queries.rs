@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
 use crate::row_histories::BatchId;
 use crate::schema_manager::LensTransformer;
@@ -20,7 +21,7 @@ use super::session::Session;
 use super::settlement_eval_cache::SettlementEvalCache;
 use super::types::{
     ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName, TableSchema,
-    Value,
+    Tuple, TupleElement, TupleProvenance, Value,
 };
 
 const MAX_INITIAL_QUERY_REPLAY_OUTBOX_PER_PASS: usize = 32;
@@ -660,6 +661,101 @@ impl QueryManager {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn authorized_tuple_provenance(
+        &mut self,
+        storage: &dyn Storage,
+        settlement_eval_cache: &mut SettlementEvalCache,
+        tuple: &Tuple,
+        session: Option<&Session>,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        authorization_cache: &mut HashMap<(ObjectId, BranchName), bool>,
+    ) -> Option<TupleProvenance> {
+        let mut authorized = TupleProvenance::new();
+        for (object_id, branch_name) in tuple.provenance().iter().copied() {
+            let allowed = *authorization_cache
+                .entry((object_id, branch_name))
+                .or_insert_with(|| {
+                    self.provenance_row_matches_current_select_policy(
+                        storage,
+                        settlement_eval_cache,
+                        object_id,
+                        branch_name,
+                        session,
+                        auth_schema,
+                        auth_context,
+                        source_branch_schema_map,
+                    )
+                });
+            if allowed {
+                authorized.insert((object_id, branch_name));
+            }
+        }
+
+        let output_rows_are_visible = tuple.iter().all(|element| {
+            authorized
+                .iter()
+                .any(|(object_id, _)| *object_id == element.id())
+        });
+        output_rows_are_visible.then_some(authorized)
+    }
+
+    fn filter_unauthorized_nested_rows(value: &mut Value, authorized_ids: &HashSet<ObjectId>) {
+        match value {
+            Value::Array(values) => {
+                values.retain_mut(|value| match value {
+                    Value::Row {
+                        id: Some(object_id),
+                        values,
+                    } => {
+                        if !authorized_ids.contains(object_id) {
+                            return false;
+                        }
+                        for value in values {
+                            Self::filter_unauthorized_nested_rows(value, authorized_ids);
+                        }
+                        true
+                    }
+                    other => {
+                        Self::filter_unauthorized_nested_rows(other, authorized_ids);
+                        true
+                    }
+                });
+            }
+            Value::Row { values, .. } => {
+                for value in values {
+                    Self::filter_unauthorized_nested_rows(value, authorized_ids);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn tuple_with_authorized_scope(
+        mut tuple: Tuple,
+        descriptor: &RowDescriptor,
+        authorized_provenance: TupleProvenance,
+    ) -> Option<Tuple> {
+        let authorized_ids: HashSet<ObjectId> = authorized_provenance
+            .iter()
+            .map(|(object_id, _)| *object_id)
+            .collect();
+
+        if tuple.len() == 1
+            && let Some(TupleElement::Row { content, .. }) = tuple.get_mut(0)
+        {
+            let mut values = decode_row(descriptor, content).ok()?;
+            for value in &mut values {
+                Self::filter_unauthorized_nested_rows(value, &authorized_ids);
+            }
+            *content = encode_row(descriptor, &values).ok()?.into();
+        }
+
+        Some(tuple.with_provenance(authorized_provenance))
+    }
+
     fn authorized_tuples_from_graph_result(
         &mut self,
         storage: &dyn Storage,
@@ -695,27 +791,21 @@ impl QueryManager {
                 .current_output_tuples()
                 .into_iter()
                 .filter_map(|tuple| {
-                    tuple
-                        .provenance()
-                        .iter()
-                        .copied()
-                        .all(|(object_id, branch_name)| {
-                            *authorization_cache
-                                .entry((object_id, branch_name))
-                                .or_insert_with(|| {
-                                    self.provenance_row_matches_current_select_policy(
-                                        storage,
-                                        settlement_eval_cache,
-                                        object_id,
-                                        branch_name,
-                                        session,
-                                        &auth_schema,
-                                        &auth_context,
-                                        source_branch_schema_map,
-                                    )
-                                })
-                        })
-                        .then_some(tuple)
+                    let authorized_provenance = self.authorized_tuple_provenance(
+                        storage,
+                        settlement_eval_cache,
+                        &tuple,
+                        session,
+                        &auth_schema,
+                        &auth_context,
+                        source_branch_schema_map,
+                        &mut authorization_cache,
+                    )?;
+                    Self::tuple_with_authorized_scope(
+                        tuple,
+                        &graph.combined_descriptor,
+                        authorized_provenance,
+                    )
                 })
                 .collect(),
         )
@@ -768,34 +858,37 @@ impl QueryManager {
         }
 
         let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
+        let mut authorized_scope_by_tuple: HashMap<Vec<ObjectId>, TupleProvenance> = HashMap::new();
 
         let authorized_scope_tuples = graph.filtered_sync_scope_tuples(|tuple| {
-            tuple
-                .provenance()
-                .iter()
-                .copied()
-                .all(|(object_id, branch_name)| {
-                    *authorization_cache
-                        .entry((object_id, branch_name))
-                        .or_insert_with(|| {
-                            self.provenance_row_matches_current_select_policy(
-                                storage,
-                                settlement_eval_cache,
-                                object_id,
-                                branch_name,
-                                session,
-                                &auth_schema,
-                                &auth_context,
-                                source_branch_schema_map,
-                            )
-                        })
-                })
+            let key = tuple.ids();
+            match self.authorized_tuple_provenance(
+                storage,
+                settlement_eval_cache,
+                tuple,
+                session,
+                &auth_schema,
+                &auth_context,
+                source_branch_schema_map,
+                &mut authorization_cache,
+            ) {
+                Some(provenance) => {
+                    authorized_scope_by_tuple.insert(key, provenance);
+                    true
+                }
+                None => false,
+            }
         });
 
         Some(
             authorized_scope_tuples
                 .into_iter()
-                .flat_map(|tuple| tuple.provenance().clone().into_iter())
+                .flat_map(|tuple| {
+                    authorized_scope_by_tuple
+                        .remove(&tuple.ids())
+                        .unwrap_or_default()
+                        .into_iter()
+                })
                 .collect(),
         )
     }
@@ -1091,22 +1184,22 @@ impl QueryManager {
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let query_for_compile =
                 Self::query_for_server_compile(&sub.query, &subscription_context);
-            let compile_row_policy_mode = if self
+            let authorization_schema = self
                 .authorization_schema_for_context(
                     &subscription_context.env,
                     &subscription_context.user_branch,
                 )
-                .as_ref()
-                .map(|(auth_schema, _)| auth_schema.as_ref() != schema_for_compile.as_ref())
-                .unwrap_or(false)
-            {
-                crate::query_manager::types::RowPolicyMode::PermissiveLocal
-            } else {
-                self.row_policy_mode
-            };
+                .map(|(auth_schema, _)| auth_schema);
+            let (compile_schema, compile_row_policy_mode, _) =
+                Self::compile_options_with_authorization_schema(
+                    schema_for_compile.as_ref(),
+                    authorization_schema.as_deref(),
+                    self.row_policy_mode,
+                    session_for_policy.as_ref(),
+                );
             let graph = Self::compile_graph(
                 &query_for_compile,
-                &schema_for_compile,
+                &compile_schema,
                 session_for_policy.clone(),
                 &subscription_context,
                 compile_row_policy_mode,

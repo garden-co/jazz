@@ -811,27 +811,53 @@ impl QueryManager {
         &self,
         session: Option<&Session>,
     ) -> bool {
-        session.is_some()
-            && self
-                .authorization_schema
-                .as_ref()
-                .map(|auth_schema| auth_schema.as_ref() != self.schema.as_ref())
-                .unwrap_or(false)
+        let (_, _, uses_explicit_authorization_filtering) =
+            self.local_subscription_compile_options(session);
+        uses_explicit_authorization_filtering
     }
 
-    pub(super) fn local_subscription_compile_schema(&self, session: Option<&Session>) -> Schema {
-        if self.local_subscription_uses_explicit_authorization(session) {
-            self.schema
-                .iter()
-                .map(|(table_name, table_schema)| {
-                    let mut structural = table_schema.clone();
-                    structural.policies = TablePolicies::default();
-                    (*table_name, structural)
-                })
-                .collect()
-        } else {
-            self.schema.as_ref().clone()
+    pub(super) fn local_subscription_compile_options(
+        &self,
+        session: Option<&Session>,
+    ) -> (Schema, RowPolicyMode, bool) {
+        Self::compile_options_with_authorization_schema(
+            self.schema.as_ref(),
+            self.authorization_schema.as_deref(),
+            self.row_policy_mode,
+            session,
+        )
+    }
+
+    pub(super) fn compile_options_with_authorization_schema(
+        structural_schema: &Schema,
+        authorization_schema: Option<&Schema>,
+        fallback_row_policy_mode: RowPolicyMode,
+        session: Option<&Session>,
+    ) -> (Schema, RowPolicyMode, bool) {
+        let Some(auth_schema) = authorization_schema.filter(|_| session.is_some()) else {
+            return (structural_schema.clone(), fallback_row_policy_mode, false);
+        };
+
+        if auth_schema == structural_schema {
+            return (structural_schema.clone(), fallback_row_policy_mode, false);
         }
+
+        (
+            Self::schema_without_policies(structural_schema),
+            RowPolicyMode::PermissiveLocal,
+            true,
+        )
+    }
+
+    pub(super) fn schema_without_policies(schema: &Schema) -> Schema {
+        schema
+            .iter()
+            .map(|(table_name, table_schema)| {
+                let mut structural = table_schema.clone();
+                structural.policies = TablePolicies::default();
+                (*table_name, structural)
+            })
+            .collect()
     }
 
     pub(crate) fn schema_has_any_explicit_policies(schema: &Schema) -> bool {
@@ -932,30 +958,18 @@ impl QueryManager {
         // Recompile local subscriptions
         for (sub_id, sub) in &mut self.subscriptions {
             if sub.needs_recompile {
-                let uses_explicit_authorization_filtering = sub.session.is_some()
-                    && authorization_schema
-                        .as_ref()
-                        .map(|auth_schema| auth_schema.as_ref() != current_schema.as_ref())
-                        .unwrap_or(false);
-                let compile_schema = if uses_explicit_authorization_filtering {
-                    current_schema
-                        .iter()
-                        .map(|(table_name, table_schema)| {
-                            let mut structural = table_schema.clone();
-                            structural.policies = TablePolicies::default();
-                            (*table_name, structural)
-                        })
-                        .collect()
-                } else {
-                    current_schema.as_ref().clone()
-                };
+                let (
+                    compile_schema,
+                    compile_row_policy_mode,
+                    uses_explicit_authorization_filtering,
+                ) = Self::compile_options_with_authorization_schema(
+                    current_schema.as_ref(),
+                    authorization_schema.as_deref(),
+                    self.row_policy_mode,
+                    sub.session.as_ref(),
+                );
 
                 // Recompile the graph
-                let compile_row_policy_mode = if uses_explicit_authorization_filtering {
-                    RowPolicyMode::PermissiveLocal
-                } else {
-                    self.row_policy_mode
-                };
                 match Self::compile_graph(
                     &sub.query,
                     &compile_schema,
@@ -1018,23 +1032,20 @@ impl QueryManager {
             if sub.needs_recompile {
                 let query_for_compile =
                     Self::query_for_server_compile(&sub.query, &sub.schema_context);
-                let compile_schema: Schema = sub
-                    .schema_context
-                    .current_schema
-                    .iter()
-                    .map(|(table_name, table_schema)| {
-                        let mut structural = table_schema.clone();
-                        structural.policies = TablePolicies::default();
-                        (*table_name, structural)
-                    })
-                    .collect();
+                let (compile_schema, compile_row_policy_mode, _) =
+                    Self::compile_options_with_authorization_schema(
+                        &sub.schema_context.current_schema,
+                        authorization_schema.as_deref(),
+                        self.row_policy_mode,
+                        sub.session.as_ref(),
+                    );
                 // Recompile the graph
                 match Self::compile_graph(
                     &query_for_compile,
                     &compile_schema,
                     sub.session.clone(),
                     &sub.schema_context,
-                    RowPolicyMode::PermissiveLocal,
+                    compile_row_policy_mode,
                 ) {
                     Ok(new_graph) => {
                         sub.branches = Self::resolved_server_query_branches_for_graph(

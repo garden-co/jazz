@@ -1005,6 +1005,232 @@ fn branch_read_with_exists_branch_policy_can_match_branch_ref() {
 }
 
 #[test]
+// Optional include with denied branch rows:
+//
+//   projects[P] on main
+//          |
+//          v
+//   include todos.branch(B) where branch todo read = false
+//
+//   Expected query result
+//   ---------------------
+//   project P remains visible with an empty todosViaProject array.
+fn branch_include_keeps_outer_row_when_inner_branch_read_denies() {
+    let mut todo_policies = TablePolicies::new().with_select(PolicyExpr::True);
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new()
+            .with_select(PolicyExpr::False)
+            .with_insert(PolicyExpr::True),
+    )]);
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("branches")
+                .fk_column("projectId", "projects")
+                .column("ownerId", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .fk_column("projectId", "projects")
+                .column("title", ColumnType::Text)
+                .policies(todo_policies),
+        )
+        .build();
+    let mut qm = create_query_manager_with_policy_mode(
+        SyncManager::new(),
+        schema.clone(),
+        RowPolicyMode::Enforcing,
+    );
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_id = qm
+        .insert(&mut storage, "projects", &[Value::Text("Project".into())])
+        .expect("insert project")
+        .row_id;
+    let branch_id = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_id), Value::Text("alice".into())],
+        )
+        .expect("insert branch row")
+        .row_id;
+    let branch_name = branch_name_for(&schema, branch_id);
+    qm.insert_on_branch(
+        &mut storage,
+        "todos",
+        &branch_name,
+        &[Value::Uuid(project_id), Value::Text("Hidden".into())],
+        None,
+    )
+    .expect("seed branch todo");
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("projects")
+            .with_array("todosViaProject", |sub| {
+                sub.from("todos")
+                    .branch(&branch_name)
+                    .correlate("projectId", "projects.id")
+            })
+            .build(),
+        Some(Session::new("alice")),
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1[1], Value::Array(vec![]));
+}
+
+#[test]
+// Server subscription include path:
+//
+//   structural schema compiles:
+//     projects[P] --include todos.branch(B)--> todos on branch B
+//
+//   authorization schema applies:
+//     projects.select = true
+//     todos.for_branch.select = false
+//
+//   Expected server result:
+//     project P remains in scope; branch todo is not sent.
+fn synced_branch_include_keeps_outer_row_when_inner_branch_read_denies() {
+    let mut todo_policies = TablePolicies::new()
+        .with_select(PolicyExpr::True)
+        .with_insert(PolicyExpr::True);
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new()
+            .with_select(PolicyExpr::False)
+            .with_insert(PolicyExpr::True),
+    )]);
+    let auth_schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("branches")
+                .fk_column("projectId", "projects")
+                .column("ownerId", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .fk_column("projectId", "projects")
+                .column("title", ColumnType::Text)
+                .policies(todo_policies),
+        )
+        .build();
+    let structural_schema = strip_test_policies(&auth_schema);
+    let mut qm = create_query_manager(SyncManager::new(), structural_schema.clone());
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_id = qm
+        .insert(&mut storage, "projects", &[Value::Text("Project".into())])
+        .expect("insert project")
+        .row_id;
+    let branch_id = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_id), Value::Text("alice".into())],
+        )
+        .expect("insert branch row")
+        .row_id;
+    let branch_name = branch_name_for(&structural_schema, branch_id);
+    let branch_todo = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_name,
+            &[Value::Uuid(project_id), Value::Text("Hidden".into())],
+            None,
+        )
+        .expect("seed branch todo");
+    qm.process(&mut storage);
+    qm.set_authorization_schema(auth_schema);
+
+    let client_id = ClientId::new();
+    connect_client(&mut qm, &storage, client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+    qm.sync_manager_mut().take_outbox();
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(
+                QueryBuilder::new("projects")
+                    .with_array("todosViaProject", |sub| {
+                        sub.from("todos")
+                            .branch(branch_name)
+                            .correlate("projectId", "projects.id")
+                    })
+                    .build(),
+            ),
+            session: Some(Session::new("alice")),
+            required_tier: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let sent_rows: Vec<_> = outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            SyncPayload::RowBatchNeeded { row, .. } => Some(row.row_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        sent_rows.contains(&project_id),
+        "server should send the visible outer project row"
+    );
+    assert!(
+        !sent_rows.contains(&branch_todo.row_id),
+        "server should not send branch todo denied by forBranch read"
+    );
+    let settled_scope = outbox.iter().find_map(|entry| match &entry.payload {
+        SyncPayload::QuerySettled {
+            query_id: QueryId(1),
+            scope,
+            ..
+        } => Some(scope),
+        _ => None,
+    });
+    assert!(
+        settled_scope.is_some_and(|scope| scope.iter().any(|(row_id, _)| *row_id == project_id)),
+        "server query scope should keep the visible outer project row"
+    );
+}
+
+#[test]
 // Branch insert:
 //
 //   branches[projectId=P] -> todos insert projectId=P

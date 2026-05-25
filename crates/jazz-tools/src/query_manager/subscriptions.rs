@@ -160,14 +160,8 @@ impl QueryManager {
             ));
         }
 
-        let uses_explicit_authorization_filtering =
-            self.local_subscription_uses_explicit_authorization(session.as_ref());
-        let compile_schema = self.local_subscription_compile_schema(session.as_ref());
-        let compile_row_policy_mode = if uses_explicit_authorization_filtering {
-            crate::query_manager::types::RowPolicyMode::PermissiveLocal
-        } else {
-            self.row_policy_mode
-        };
+        let (compile_schema, compile_row_policy_mode, uses_explicit_authorization_filtering) =
+            self.local_subscription_compile_options(session.as_ref());
         let graph = Self::compile_graph(
             &query,
             &compile_schema,

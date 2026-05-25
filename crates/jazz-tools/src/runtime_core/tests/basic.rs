@@ -56,6 +56,100 @@ fn runtime_query_composes_logical_branch_ids() {
 }
 
 #[test]
+fn runtime_branch_include_keeps_outer_row_when_inner_branch_read_denies() {
+    let mut todo_policies = TablePolicies::new()
+        .with_select(PolicyExpr::True)
+        .with_insert(PolicyExpr::True);
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new()
+            .with_select(PolicyExpr::False)
+            .with_insert(PolicyExpr::True),
+    )]);
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("branches")
+                .fk_column("projectId", "projects")
+                .column("ownerId", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .fk_column("projectId", "projects")
+                .column("title", ColumnType::Text)
+                .policies(todo_policies),
+        )
+        .build();
+    let mut core = create_runtime_with_schema(schema, "runtime-branch-include-denied");
+    let (project, _) = core
+        .insert(
+            "projects",
+            HashMap::from([("name".to_string(), Value::Text("Project".into()))]),
+            None,
+        )
+        .expect("insert project");
+    let (branch, _) = core
+        .insert(
+            "branches",
+            HashMap::from([
+                ("projectId".to_string(), Value::Uuid(project.0)),
+                ("ownerId".to_string(), Value::Text("alice".into())),
+            ]),
+            None,
+        )
+        .expect("insert branch row");
+    let branch_name = ComposedBranchName::new(
+        "dev",
+        core.schema_manager().current_hash(),
+        &branch.0.to_string(),
+    )
+    .to_branch_name()
+    .as_str()
+    .to_string();
+    let branch_write = WriteContext::default().with_target_branch_name(branch_name);
+    core.insert(
+        "todos",
+        HashMap::from([
+            ("projectId".to_string(), Value::Uuid(project.0)),
+            ("title".to_string(), Value::Text("Hidden".into())),
+        ]),
+        Some(&branch_write),
+    )
+    .expect("insert branch todo");
+
+    core.immediate_tick();
+    core.batched_tick();
+
+    let rows = execute_runtime_query(
+        &mut core,
+        QueryBuilder::new("projects")
+            .with_array("todosViaProject", |sub| {
+                sub.from("todos")
+                    .branch(&branch.0.to_string())
+                    .correlate("projectId", "projects.id")
+            })
+            .build(),
+        Some(Session::new("alice")),
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1[1], Value::Array(vec![]));
+}
+
+#[test]
 fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
     let mut old_runtime = create_runtime_with_schema(test_schema(), "restart-sync-test");
     let user_id = ObjectId::new();

@@ -3,8 +3,7 @@ use std::collections::HashSet;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{
     BranchPolicyContext, Operation, PolicyExpr, bind_branch_refs, bind_outer_row_refs,
-    bind_relation_refs, evaluate_expr_recursive_with_branch_context,
-    evaluate_expr_recursive_with_row_id, normalize_recursive_max_depth,
+    bind_relation_refs, evaluate_expr_recursive_with_context, normalize_recursive_max_depth,
 };
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
@@ -318,30 +317,16 @@ impl<'a> PolicyContextEvaluator<'a> {
                 visited,
                 visited_referencing,
             ),
-            _ => {
-                if let Some(branch_context) = self.branch_context {
-                    evaluate_expr_recursive_with_branch_context(
-                        expr,
-                        &row.data,
-                        &row.provenance,
-                        descriptor,
-                        self.session,
-                        Some(row.id),
-                        branch_context,
-                        depth,
-                    )
-                } else {
-                    evaluate_expr_recursive_with_row_id(
-                        expr,
-                        &row.data,
-                        &row.provenance,
-                        descriptor,
-                        self.session,
-                        Some(row.id),
-                        depth,
-                    )
-                }
-            }
+            _ => evaluate_expr_recursive_with_context(
+                expr,
+                &row.data,
+                &row.provenance,
+                descriptor,
+                self.session,
+                Some(row.id),
+                self.branch_context,
+                depth,
+            ),
         }
     }
 

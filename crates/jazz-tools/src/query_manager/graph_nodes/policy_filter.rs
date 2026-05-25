@@ -17,8 +17,8 @@ use crate::query_manager::policy::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ComposedBranchName, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple,
-    TupleDelta, TupleElement,
+    ComposedBranchName, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName,
+    TablePolicies, Tuple, TupleDelta, TupleElement,
 };
 
 use crate::storage::Storage;
@@ -208,51 +208,34 @@ impl PolicyFilterNode {
         table_name: impl Into<String>,
         options: PolicyFilterOptions,
     ) -> Self {
+        let PolicyFilterOptions {
+            branch,
+            initial_depth,
+            row_policy_mode,
+            policy_operation,
+        } = options;
         let table_name = table_name.into();
-        let branch = options.branch;
         let mut inherits_tables = collect_policy_dependency_tables(&policy, &descriptor);
-        let branch_scoped = ComposedBranchName::parse(&BranchName::new(&branch))
-            .is_some_and(|composed| composed.user_branch != "main");
-        let target_table = TableName::new(&table_name);
-        let has_branch_policy = branch_scoped
-            && schema
-                .get(&target_table)
-                .is_some_and(|table_schema| !table_schema.policies.for_branch.is_empty());
-        if has_branch_policy && let Some(table_schema) = schema.get(&target_table) {
-            for (backing_table, branch_policies) in &table_schema.policies.for_branch {
-                let branch_policy = match options.policy_operation {
-                    Operation::Select => branch_policies.select_policy(),
-                    Operation::Insert => branch_policies.insert_policy(),
-                    Operation::Update => branch_policies.update_using_policy(),
-                    Operation::Delete => branch_policies.effective_delete_using(),
-                };
-                if let Some(branch_policy) = branch_policy {
-                    inherits_tables
-                        .extend(collect_policy_dependency_tables(branch_policy, &descriptor));
-                }
-                inherits_tables.insert(backing_table.as_str().to_string());
-                if let Some(backing_schema) = schema.get(backing_table)
-                    && let Some(backing_select) = backing_schema.policies.select_policy()
-                {
-                    inherits_tables.extend(collect_policy_dependency_tables(
-                        backing_select,
-                        &backing_schema.columns,
-                    ));
-                }
-            }
-        }
+        let (has_branch_policy, branch_dependency_tables) = branch_policy_dependency_tables(
+            &schema,
+            &descriptor,
+            &table_name,
+            &branch,
+            policy_operation,
+        );
+        inherits_tables.extend(branch_dependency_tables);
         let has_inherits =
             has_branch_policy || !inherits_tables.is_empty() || policy_contains_branch_ref(&policy);
         Self {
             descriptor,
             policy,
-            policy_operation: options.policy_operation,
+            policy_operation,
             session,
             schema,
             table_name,
             branch,
-            row_policy_mode: options.row_policy_mode,
-            initial_depth: options.initial_depth,
+            row_policy_mode,
+            initial_depth,
             current_tuples: AHashSet::new(),
             input_tuples: AHashSet::new(),
             dirty: true,
@@ -655,6 +638,54 @@ impl PolicyFilterNode {
         // The graph settlement loop should use process_with_context() for PolicyFilters
         // that have INHERITS clauses.
         false
+    }
+}
+
+fn branch_policy_dependency_tables(
+    schema: &Schema,
+    descriptor: &RowDescriptor,
+    table_name: &str,
+    branch: &str,
+    policy_operation: Operation,
+) -> (bool, HashSet<String>) {
+    let branch_scoped = ComposedBranchName::parse(&BranchName::new(branch))
+        .is_some_and(|composed| composed.user_branch != "main");
+    if !branch_scoped {
+        return (false, HashSet::new());
+    }
+
+    let Some(table_schema) = schema.get(&TableName::new(table_name)) else {
+        return (false, HashSet::new());
+    };
+    if table_schema.policies.for_branch.is_empty() {
+        return (false, HashSet::new());
+    }
+
+    let mut dependency_tables = HashSet::new();
+    for (backing_table, branch_policies) in &table_schema.policies.for_branch {
+        if let Some(branch_policy) = operation_policy(branch_policies, policy_operation) {
+            dependency_tables.extend(collect_policy_dependency_tables(branch_policy, descriptor));
+        }
+        dependency_tables.insert(backing_table.as_str().to_string());
+        if let Some(backing_select) = schema.get(backing_table).and_then(|backing_schema| {
+            backing_schema
+                .policies
+                .select_policy()
+                .map(|policy| collect_policy_dependency_tables(policy, &backing_schema.columns))
+        }) {
+            dependency_tables.extend(backing_select);
+        }
+    }
+
+    (true, dependency_tables)
+}
+
+fn operation_policy(policies: &TablePolicies, operation: Operation) -> Option<&PolicyExpr> {
+    match operation {
+        Operation::Select => policies.select_policy(),
+        Operation::Insert => policies.insert_policy(),
+        Operation::Update => policies.update_using_policy(),
+        Operation::Delete => policies.effective_delete_using(),
     }
 }
 

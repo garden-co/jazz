@@ -985,35 +985,23 @@ pub fn evaluate_expr_recursive(
     session: &Session,
     depth: usize,
 ) -> bool {
-    evaluate_expr_recursive_with_row_id(expr, content, provenance, descriptor, session, None, depth)
-}
-
-pub fn evaluate_expr_recursive_with_row_id(
-    expr: &PolicyExpr,
-    content: &[u8],
-    provenance: &RowProvenance,
-    descriptor: &RowDescriptor,
-    session: &Session,
-    row_id: Option<ObjectId>,
-    depth: usize,
-) -> bool {
-    evaluate_expr_simple_with_row_id(
-        expr, content, provenance, descriptor, session, row_id, depth,
+    evaluate_expr_recursive_with_context(
+        expr, content, provenance, descriptor, session, None, None, depth,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn evaluate_expr_recursive_with_branch_context(
+pub fn evaluate_expr_recursive_with_context(
     expr: &PolicyExpr,
     content: &[u8],
     provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
     row_id: Option<ObjectId>,
-    branch_context: &BranchPolicyContext<'_>,
-    _depth: usize,
+    branch_context: Option<&BranchPolicyContext<'_>>,
+    depth: usize,
 ) -> bool {
-    let result = evaluate_simple_parts_with_branch_context(
+    let result = evaluate_simple_recursive(
         expr,
         content,
         provenance,
@@ -1021,6 +1009,7 @@ pub fn evaluate_expr_recursive_with_branch_context(
         session,
         row_id,
         branch_context,
+        depth,
     );
     result.passed && result.complex_clauses.is_empty()
 }
