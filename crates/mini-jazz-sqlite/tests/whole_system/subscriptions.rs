@@ -211,6 +211,56 @@ fn observed_created_by_not_equal_subscription_removes_deleted_remote_row() {
 }
 
 #[test]
+fn observed_id_not_equal_subscription_removes_deleted_remote_row() {
+    let schema = support::notes_schema();
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "upstream", "alice", schema.clone()).unwrap();
+    let mut worker =
+        Runtime::open_with_schema(Storage::Memory, "worker-node", "alice", schema).unwrap();
+
+    upstream
+        .insert_row(
+            "notes",
+            "note-keep",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Keep")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    upstream
+        .insert_row(
+            "notes",
+            "note-excluded",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Excluded")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    worker
+        .apply_bundle(
+            &upstream
+                .export_query_where_ne("notes", "id", json!("note-excluded"))
+                .unwrap(),
+        )
+        .unwrap();
+
+    let observed = worker.observed_query_reads().unwrap();
+    let mut subscription = worker.subscribe_observed_query(&observed[0]).unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+    assert_eq!(subscription.initial_rows()[0].id, "note-keep");
+
+    upstream.delete_row("notes", "note-keep").unwrap();
+    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+        worker.apply_bundle(&refresh).unwrap();
+    }
+
+    let diffs = worker.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "note-keep"));
+}
+
+#[test]
 fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");

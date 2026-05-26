@@ -1123,3 +1123,15 @@ facade, so broad magic-field predicates inherit correct remove diffs once scoped
 sync converges the worker projection.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 226 whole-system tests.
+
+## 2026-05-26 04:20 PDT
+
+Added the symmetric observed-subscription test for `id != ...` query scopes.
+A worker subscribes to an observed broad id predicate, receives an upstream
+delete repair, and emits a semantic removal diff for the deleted included row.
+
+Discovery: `id != ...` and `$createdBy != ...` now have the same listener-level
+shape: no extra subscription machinery is needed once the broad query repair
+paths are operator-aware and projection-convergent.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 227 whole-system tests.
