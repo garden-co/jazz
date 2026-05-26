@@ -1170,3 +1170,9 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Design note: this is still tx-history scoped, not query-predicate scoped. It is
 a meaningful improvement over "all reads everywhere" but not the final sync
 scope model.
+
+## 2026-05-25 18:58 PDT
+
+Verification checkpoint: `cargo test -p mini-jazz-sqlite` passes. This includes
+the full whole-system integration suite, now 60 tests, plus crate unit/doc test
+targets.
