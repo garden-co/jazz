@@ -154,6 +154,46 @@ fn branch_base_is_pinned_to_global_epoch() {
 }
 
 #[test]
+fn branch_base_snapshot_chooses_latest_row_version_within_same_global_epoch() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let first_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("First in epoch")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&first_tx, 7).unwrap();
+    let second_tx = alice
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Second in epoch")),
+                ("done".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&second_tx, 7).unwrap();
+
+    alice.create_branch("draft", Some(7)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Second in epoch"));
+}
+
+#[test]
 fn branch_delete_shadows_pinned_base_row() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

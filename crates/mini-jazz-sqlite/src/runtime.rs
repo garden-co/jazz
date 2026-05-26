@@ -1717,7 +1717,7 @@ fn export_main_base_snapshot_history(
                AND newer_tx.outcome != ?
                AND newer_tx.global_epoch IS NOT NULL
                AND newer_tx.global_epoch <= ?
-               AND newer_tx.global_epoch > tx.global_epoch
+               AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
            )",
         crate::schema::history_table(table_name),
         history_table = crate::schema::history_table(table_name),
@@ -1806,7 +1806,7 @@ fn export_snapshot_policy_dependency_history(
                AND newer_tx.outcome != {}
                AND newer_tx.global_epoch IS NOT NULL
                AND newer_tx.global_epoch <= {base_epoch}
-               AND newer_tx.global_epoch > tx.global_epoch
+               AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
            )",
         crate::schema::history_table(table_name),
         tx::OUTCOME_REJECTED,

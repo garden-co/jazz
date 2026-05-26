@@ -1500,3 +1500,21 @@ receipts can still attach.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system direct_`
 passes for the direct accept/reject ordering cases.
+
+## 2026-05-25 19:30 PDT
+
+Starting pinned branch base same-epoch tie-breaking coverage from sidecar
+review. We allow multiple transactions per global epoch, so snapshot selection
+must still choose one version of a row when two versions share the base epoch.
+
+## 2026-05-25 19:31 PDT
+
+Pinned branch base same-epoch tie-breaking is green and found a duplicate
+snapshot bug. Snapshot selection now treats `(global_epoch, tx_num)` as the
+version order, so multiple versions of one row in the same global epoch collapse
+to the latest local transaction version. Applied the same tie-breaker to
+snapshot policy dependency lowering/export.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+branch_base_snapshot_chooses_latest_row_version_within_same_global_epoch`
+passes.

@@ -246,7 +246,7 @@ fn lower_snapshot_policy(
                          AND {newer_tx_alias}.outcome != {}
                          AND {newer_tx_alias}.global_epoch IS NOT NULL
                          AND {newer_tx_alias}.global_epoch <= {base_epoch}
-                         AND {newer_tx_alias}.global_epoch > {parent_tx_alias}.global_epoch
+                         AND ({newer_tx_alias}.global_epoch > {parent_tx_alias}.global_epoch OR ({newer_tx_alias}.global_epoch = {parent_tx_alias}.global_epoch AND {newer_tx_alias}.tx_num > {parent_tx_alias}.tx_num))
                      )
                      AND {parent_policy}
                  )",

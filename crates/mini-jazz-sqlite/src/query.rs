@@ -425,7 +425,7 @@ impl QueryContext<'_> {
                    AND newer_tx.outcome != ?
                    AND newer_tx.global_epoch IS NOT NULL
                    AND newer_tx.global_epoch <= ?
-                   AND newer_tx.global_epoch > tx.global_epoch
+                   AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
                )
                AND NOT EXISTS (
                  SELECT 1
