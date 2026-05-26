@@ -105,6 +105,31 @@ fn schema_rejects_direct_recursive_policy_cycle() {
 }
 
 #[test]
+fn schema_rejects_indirect_recursive_policy_cycle() {
+    let schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.ref_("root_task", "tasks");
+            table.read_if_ref_readable("root_task");
+        })
+        .table("projects", |table| {
+            table.text("title");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+
+    let err = Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema)
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("policy cycle"));
+}
+
+#[test]
 fn recursive_policy_scoped_sync_includes_transitive_parent_rows() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {

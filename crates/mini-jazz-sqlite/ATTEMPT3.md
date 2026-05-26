@@ -1402,3 +1402,18 @@ name.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 user_columns_with_system_prefix_are_escaped_physically` passes.
+
+## 2026-05-25 19:20 PDT
+
+Starting arbitrary recursive policy-cycle rejection. Current validation only
+catches direct and simple two-table cycles; a longer `a -> b -> c -> a`
+permission chain should also fail before query lowering can recurse forever.
+
+## 2026-05-25 19:21 PDT
+
+Arbitrary recursive policy-cycle rejection is green. Replaced shallow cycle
+checks with a DFS over the `read_if_ref_readable` graph, and proved both direct
+self cycles and three-table cycles fail at schema install time.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+schema_rejects_` passes.

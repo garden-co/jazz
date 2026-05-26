@@ -1,6 +1,6 @@
 use crate::Result;
 use rusqlite::Connection;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 pub struct SchemaDef {
@@ -270,54 +270,43 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
 
 fn validate_policy_cycles(schema: &SchemaDef) -> Result<()> {
     for table in schema.tables() {
-        validate_policy_cycle(schema, table, &table.read_policy)?;
-        validate_policy_cycle(schema, table, &table.write_policy)?;
+        validate_policy_cycle(schema, table, &table.read_policy, &mut BTreeSet::new())?;
+        validate_policy_cycle(schema, table, &table.write_policy, &mut BTreeSet::new())?;
     }
     Ok(())
 }
 
-fn validate_policy_cycle(schema: &SchemaDef, table: &TableDef, policy: &PolicyDef) -> Result<()> {
+fn validate_policy_cycle(
+    schema: &SchemaDef,
+    table: &TableDef,
+    policy: &PolicyDef,
+    seen: &mut BTreeSet<String>,
+) -> Result<()> {
     let PolicyDef::RefReadable { field } = policy else {
         return Ok(());
     };
+    if !seen.insert(table.name.clone()) {
+        return Err(crate::Error::new(format!(
+            "policy cycle detected at {}",
+            table.name
+        )));
+    }
     let Some(field) = table
         .fields
         .iter()
         .find(|candidate| candidate.name == *field)
     else {
+        seen.remove(&table.name);
         return Ok(());
     };
     let FieldKind::Ref { table: parent } = &field.kind else {
+        seen.remove(&table.name);
         return Ok(());
     };
-    if parent == &table.name {
-        return Err(crate::Error::new(format!(
-            "policy cycle detected on {}.{}",
-            table.name, field.name
-        )));
-    }
     let parent_table = schema.table_def(parent)?;
-    if let PolicyDef::RefReadable {
-        field: parent_field,
-    } = &parent_table.read_policy
-    {
-        let Some(parent_field) = parent_table
-            .fields
-            .iter()
-            .find(|candidate| candidate.name == *parent_field)
-        else {
-            return Ok(());
-        };
-        if let FieldKind::Ref { table: grandparent } = &parent_field.kind {
-            if grandparent == &table.name {
-                return Err(crate::Error::new(format!(
-                    "policy cycle detected between {} and {}",
-                    table.name, parent_table.name
-                )));
-            }
-        }
-    }
-    Ok(())
+    let result = validate_policy_cycle(schema, parent_table, &parent_table.read_policy, seen);
+    seen.remove(&table.name);
+    result
 }
 
 fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
