@@ -69,6 +69,102 @@ impl QueryContext<'_> {
             .collect()
     }
 
+    pub(crate) fn read_recursive_refs(
+        &self,
+        table_name: &str,
+        root_id: &str,
+        parent_field: &str,
+    ) -> Result<Vec<RowView>> {
+        let table = self.schema.table_def(table_name)?;
+        let parent_field = table
+            .fields
+            .iter()
+            .find(|field| field.name == parent_field)
+            .ok_or_else(|| crate::Error::new(format!("unknown ref field {parent_field}")))?;
+        let FieldKind::Ref { table: ref_table } = &parent_field.kind else {
+            return Err(crate::Error::new(format!(
+                "recursive query field {} is not a ref",
+                parent_field.name
+            )));
+        };
+        if ref_table != table_name {
+            return Err(crate::Error::new(format!(
+                "recursive query field {} must reference {}",
+                parent_field.name, table_name
+            )));
+        }
+        let root_num = row_num(self.conn, root_id)?;
+        let parent_column =
+            crate::schema::quote_ident(&crate::schema::storage_column(parent_field));
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        select_columns.extend(
+            field_columns
+                .iter()
+                .map(|column| format!("current.{column}")),
+        );
+        select_columns.push("current.j_created_by".to_owned());
+        let policy_sql = self.read_policy_sql(table)?;
+        let sql = format!(
+            "WITH RECURSIVE subtree(row_num) AS (
+               SELECT current.row_num
+               FROM {current_table} current
+               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               WHERE current.row_num = ?
+                 AND current.j_branch_num = ?
+                 AND current.is_deleted = 0
+                 AND tx.outcome != ?
+                 AND {policy_sql}
+               UNION
+               SELECT child.row_num
+               FROM {current_table} child
+               JOIN jazz_tx child_tx ON child_tx.tx_num = child.visible_tx_num
+               JOIN subtree ON child.{parent_column} = subtree.row_num
+               WHERE child.j_branch_num = ?
+                 AND child.is_deleted = 0
+                 AND child_tx.outcome != ?
+                 AND {child_policy_sql}
+             )
+             SELECT {}
+             FROM subtree
+             JOIN {current_table} current ON current.row_num = subtree.row_num
+             JOIN jazz_row_id ids ON ids.row_num = current.row_num
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             ORDER BY CASE WHEN current.row_num = ? THEN 0 ELSE 1 END,
+                      current.j_created_at,
+                      current.row_num",
+            select_columns.join(", "),
+            current_table = crate::schema::current_table(table_name),
+            parent_column = parent_column,
+            policy_sql = policy_sql,
+            child_policy_sql =
+                policy::read_policy_sql_for_alias(self.schema, table, "child", self.principal)?,
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 2 + table.fields.len() + 1;
+        let rows = stmt.query_map(
+            params![
+                root_num,
+                self.branch_num,
+                tx::OUTCOME_REJECTED,
+                self.branch_num,
+                tx::OUTCOME_REJECTED,
+                root_num
+            ],
+            |row| {
+                (0..row_width)
+                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            },
+        )?;
+        rows.map(|row| row_to_view(self.conn, table_name, table, row?))
+            .collect()
+    }
+
     fn read_policy_sql(&self, table: &crate::schema::TableDef) -> Result<String> {
         if self.trusted {
             Ok("1 = 1".to_owned())

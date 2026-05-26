@@ -579,6 +579,16 @@ impl Runtime {
         self.query_context().read_rows(table_name)
     }
 
+    pub fn read_recursive_refs(
+        &self,
+        table_name: &str,
+        root_id: &str,
+        parent_field: &str,
+    ) -> Result<Vec<RowView>> {
+        self.query_context()
+            .read_recursive_refs(table_name, root_id, parent_field)
+    }
+
     pub fn subscribe_rows(&self, table_name: &str) -> Result<RowsSubscription> {
         Ok(RowsSubscription::new(
             table_name,

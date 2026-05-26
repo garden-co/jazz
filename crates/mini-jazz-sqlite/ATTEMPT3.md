@@ -715,3 +715,30 @@ Learning: table-scope export is intentionally narrower than query-scope export.
 In this test the todo row's project ref is represented as an ID/row mapping, but
 the project history row is not included because the export is not a todo query
 scope. This distinction is worth keeping explicit in the next spec.
+
+## 2026-05-25 18:11 PDT
+
+Starting recursive query lowering. Narrow target: a self-referential table with
+`parent -> same_table`, queried through a SQLite `WITH RECURSIVE` CTE from a
+root row. Policy should apply to both the anchor and recursive children, so the
+result is not just graph traversal but policy-filtered traversal.
+
+## 2026-05-25 18:13 PDT
+
+Recursive query lowering is green for a self-referential tree. `Runtime` now has
+`read_recursive_refs(table, root_id, parent_field)`, implemented with SQLite
+`WITH RECURSIVE` over current projection rows and read-policy predicates on both
+the anchor row and recursive child rows.
+
+Important learning: the first CTE hung because I tracked `(row_num, depth)` in
+the recursive set while the fixture had a self-parenting root. `UNION` only
+dedupes the full tuple, so the root kept reappearing at larger depths. The green
+version dedupes by `row_num` only. If we need depth/order/path metadata later, it
+must be computed without making visited identity include depth.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+42 tests.
+
+Open issues: current recursive query support is deliberately narrow. It does not
+yet cover branch base overlays, policy-scoped recursive query export, arbitrary
+recursive predicates, or visited-row/read-set capture.

@@ -728,6 +728,57 @@ fn recursive_policy_scoped_sync_includes_transitive_parent_rows() {
 }
 
 #[test]
+fn recursive_query_reads_policy_filtered_tree() {
+    let schema = SchemaDef::new().table("folders", |table| {
+        table.text("name");
+        table.ref_("parent", "folders");
+        table.read_if_created_by_principal();
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "child-alice",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Alice child")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "folders",
+        "child-bob",
+        BTreeMap::from([
+            ("name".to_owned(), json!("Bob child")),
+            ("parent".to_owned(), json!("root")),
+        ]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("folders").unwrap())
+        .unwrap();
+
+    let rows = alice
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap();
+    let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root", "child-alice"]);
+}
+
+#[test]
 fn policy_scoped_sync_includes_required_parent_rows_only() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
