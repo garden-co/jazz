@@ -4,6 +4,7 @@ mod error;
 mod policy;
 mod projection;
 mod query;
+mod query_predicate;
 mod rows;
 mod runtime;
 mod schema;

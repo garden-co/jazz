@@ -334,3 +334,14 @@ crate suite is green with 149 tests.
 
 Design lesson: physical ids are purely local cache keys. The public contract
 has to stay on row ids, tx ids, branch ids, and semantic query results.
+
+## 2026-05-26 00:39 PDT
+
+Small architecture step: extracted generic SQL/value lowering for schema-column
+query predicates into `query_predicate.rs`. Full mini crate suite remains green
+with 149 tests.
+
+This is only the first slice of the planner idea; `id` and `$createdBy` are
+still special repair branches in `runtime.rs`. But the direction is clearer:
+predicate descriptions should own their local SQL, history expansion, and
+repair behavior.

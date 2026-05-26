@@ -4,7 +4,8 @@ use crate::subscription::RowsSubscription;
 use crate::sync::{BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{
-    branch, effective, policy, projection, query, schema, stats, storage, tx, Result, Storage,
+    branch, effective, policy, projection, query, query_predicate, schema, stats, storage, tx,
+    Result, Storage,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
@@ -616,8 +617,8 @@ impl Runtime {
             })?;
         let branch_num = branch::checkout(db, &query_read.branch_id)?;
         let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-        let predicate_sql = query_predicate_sql(field, &predicate_column, &query_read.op)?;
-        let predicate_value = query_predicate_value(field, &query_read.op, &query_read.value, db)?;
+        let predicate_sql = query_predicate::sql(field, &predicate_column, &query_read.op)?;
+        let predicate_value = query_predicate::value(field, &query_read.op, &query_read.value, db)?;
         db.execute(
             &format!(
                 "DELETE FROM {}
@@ -638,7 +639,7 @@ impl Runtime {
                 crate::schema::current_table(&query_read.table),
                 history_table = crate::schema::history_table(&query_read.table),
                 history_predicate_sql =
-                    query_predicate_sql(field, &format!("h.{predicate_column}"), &query_read.op)?,
+                    query_predicate::sql(field, &format!("h.{predicate_column}"), &query_read.op)?,
             ),
             params![
                 branch_num,
@@ -2954,8 +2955,8 @@ fn query_scope_repair_row_nums(
         .find(|candidate| candidate.name == field_name)
         .ok_or_else(|| crate::Error::new(format!("unknown query field {field_name}")))?;
     let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    let predicate_sql = query_predicate_sql(field, &format!("h.{predicate_column}"), op)?;
-    let predicate_value = query_predicate_value(field, op, value, conn)?;
+    let predicate_sql = query_predicate::sql(field, &format!("h.{predicate_column}"), op)?;
+    let predicate_value = query_predicate::value(field, op, value, conn)?;
     let sql = format!(
         "SELECT DISTINCT h.row_num
          FROM {} h
@@ -2970,48 +2971,6 @@ fn query_scope_repair_row_nums(
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
-}
-
-fn query_predicate_sql(field: &FieldDef, column: &str, op: &str) -> Result<String> {
-    match op {
-        "eq" => Ok(format!("{column} = ?")),
-        "contains" if matches!(field.kind, FieldKind::Text) => {
-            Ok(format!("instr({column}, ?) > 0"))
-        }
-        "contains" => Err(crate::Error::new(format!(
-            "contains only supports text fields, got {}",
-            field.name
-        ))),
-        _ => Err(crate::Error::new(format!(
-            "unsupported query predicate {op}"
-        ))),
-    }
-}
-
-fn query_predicate_value(
-    field: &FieldDef,
-    op: &str,
-    value: &JsonValue,
-    conn: &Connection,
-) -> Result<rusqlite::types::Value> {
-    match op {
-        "eq" => crate::schema::field_sql_value(field, value, |ref_table, row_id| {
-            ensure_row_id(conn, ref_table, row_id)
-        }),
-        "contains" if matches!(field.kind, FieldKind::Text) => Ok(rusqlite::types::Value::Text(
-            value
-                .as_str()
-                .ok_or_else(|| crate::Error::new("contains expects a string value"))?
-                .to_owned(),
-        )),
-        "contains" => Err(crate::Error::new(format!(
-            "contains only supports text fields, got {}",
-            field.name
-        ))),
-        _ => Err(crate::Error::new(format!(
-            "unsupported query predicate {op}"
-        ))),
-    }
 }
 
 fn dedupe_history_records(records: &mut Vec<HistoryRecord>) {
