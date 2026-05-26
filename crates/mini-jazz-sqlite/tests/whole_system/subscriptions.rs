@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn rejection_subscription_reports_new_sync_rejections_with_detail_once() {
+    let schema = support::tasks_schema();
+    let mut authority =
+        Runtime::open_with_schema(Storage::Memory, "authority", "alice", schema.clone()).unwrap();
+    let mut worker = Runtime::open_with_schema(Storage::Memory, "worker", "alice", schema).unwrap();
+
+    let mut subscription = worker.subscribe_rejections().unwrap();
+    assert!(subscription.initial_rejections().is_empty());
+
+    let tx = authority
+        .insert_row(
+            "tasks",
+            "task-rejected",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Rejected async")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    worker
+        .apply_bundle(&authority.export_table_history("tasks").unwrap())
+        .unwrap();
+    assert!(worker
+        .poll_rejections(&mut subscription)
+        .unwrap()
+        .is_empty());
+
+    authority
+        .reject_transaction_with_detail(
+            &tx,
+            "policy_denied",
+            json!({"reason": "authority", "safe": true}),
+        )
+        .unwrap();
+    worker
+        .apply_bundle(&authority.export_table_history("tasks").unwrap())
+        .unwrap();
+
+    let events = worker.poll_rejections(&mut subscription).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tx_id, tx);
+    assert_eq!(events[0].code, "policy_denied");
+    assert_eq!(
+        events[0].detail,
+        Some(json!({"reason": "authority", "safe": true}))
+    );
+    assert!(worker
+        .poll_rejections(&mut subscription)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

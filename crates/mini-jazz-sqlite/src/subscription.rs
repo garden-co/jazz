@@ -1,5 +1,5 @@
 use crate::sync::QueryPredicateRecord;
-use crate::types::{RowDiff, RowView};
+use crate::types::{RejectionInfo, RowDiff, RowView};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
@@ -7,6 +7,11 @@ use std::collections::BTreeMap;
 pub struct RowsSubscription {
     pub(crate) query: RowsSubscriptionQuery,
     pub(crate) last_rows: Vec<RowView>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RejectionSubscription {
+    pub(crate) last_rejections: Vec<RejectionInfo>,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +148,36 @@ impl RowsSubscription {
 
         self.last_rows = next_rows;
         diffs
+    }
+}
+
+impl RejectionSubscription {
+    pub(crate) fn new(rejections: Vec<RejectionInfo>) -> Self {
+        Self {
+            last_rejections: rejections,
+        }
+    }
+
+    pub fn initial_rejections(&self) -> &[RejectionInfo] {
+        &self.last_rejections
+    }
+
+    pub(crate) fn replace_with_new(
+        &mut self,
+        next_rejections: Vec<RejectionInfo>,
+    ) -> Vec<RejectionInfo> {
+        let before = self
+            .last_rejections
+            .iter()
+            .map(|rejection| rejection.tx_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let events = next_rejections
+            .iter()
+            .filter(|rejection| !before.contains(rejection.tx_id.as_str()))
+            .cloned()
+            .collect();
+        self.last_rejections = next_rejections;
+        events
     }
 }
 

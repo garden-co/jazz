@@ -1,6 +1,6 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
-use crate::subscription::{RowsSubscription, RowsSubscriptionQuery};
+use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
@@ -2083,6 +2083,10 @@ impl Runtime {
         ))
     }
 
+    pub fn subscribe_rejections(&self) -> Result<RejectionSubscription> {
+        Ok(RejectionSubscription::new(self.rejected_transactions()?))
+    }
+
     pub fn subscribe_rows_where_eq(
         &self,
         table_name: &str,
@@ -2355,6 +2359,13 @@ impl Runtime {
             }
         };
         Ok(subscription.replace_with_diff(next_rows))
+    }
+
+    pub fn poll_rejections(
+        &self,
+        subscription: &mut RejectionSubscription,
+    ) -> Result<Vec<RejectionInfo>> {
+        Ok(subscription.replace_with_new(self.rejected_transactions()?))
     }
 
     pub fn storage_stats(&self) -> Result<StorageStats> {

@@ -1295,3 +1295,17 @@ branches created from source lists may be safely upgraded from unknown base to a
 known base, while known base epochs remain immutable.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 235 whole-system tests.
+
+## 2026-05-26 04:54 PDT
+
+Added a first global rejection subscription surface. A worker can subscribe to
+the current rejected transaction list, receive a later sync-delivered rejection
+with structured safe detail exactly once, and then poll again without duplicate
+events.
+
+Discovery: the existing durable rejection table is enough for a minimal global
+error callback substrate. It does not need to be tied to row subscriptions:
+rejection notifications are a transaction-fate stream keyed by public tx id,
+while semantic row subscriptions continue to report visibility diffs.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 236 whole-system tests.
