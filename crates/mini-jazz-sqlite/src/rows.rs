@@ -53,14 +53,14 @@ pub(crate) fn insert_project(
     let row_num = ensure_row_id(conn, "projects", id)?;
     conn.execute(
         "INSERT OR IGNORE INTO projects__schema_v1_history
-         (row_num, tx_num, op, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-         VALUES (?, ?, 1, ?, ?, ?, ?, ?)",
+         (row_num, tx_num, j_branch_num, op, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
+         VALUES (?, ?, 1, 1, ?, ?, ?, ?, ?)",
         params![row_num, tx_num, title, now, now, principal, principal],
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO projects__schema_v1_current
-         (row_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-         VALUES (?, ?, 0, ?, ?, ?, ?, ?)",
+         (row_num, j_branch_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
+         VALUES (?, 1, ?, 0, ?, ?, ?, ?, ?)",
         params![row_num, tx_num, title, now, now, principal, principal],
     )?;
     Ok(())
@@ -71,8 +71,8 @@ pub(crate) fn insert_todo(conn: &Connection, tx_num: i64, todo: NewTodo<'_>) -> 
     let project_row_num = ensure_row_id(conn, "projects", todo.project_id)?;
     conn.execute(
         "INSERT OR IGNORE INTO todos__schema_v1_history
-         (row_num, tx_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+         (row_num, tx_num, j_branch_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+         VALUES (?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?)",
         params![
             row_num,
             tx_num,
@@ -87,8 +87,8 @@ pub(crate) fn insert_todo(conn: &Connection, tx_num: i64, todo: NewTodo<'_>) -> 
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO todos__schema_v1_current
-         (row_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-         VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+         (row_num, j_branch_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+         VALUES (?, 1, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
         params![
             row_num,
             tx_num,

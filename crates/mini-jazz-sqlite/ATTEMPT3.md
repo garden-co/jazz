@@ -283,3 +283,19 @@ while leaving invalidation/indexing as an optimization layer.
 Open issue: the current subscription object is an in-process test harness, not a
 durable subscription protocol. It does not yet track read-set scope, policy
 facts, pagination windows, or reconnect delivery cursors.
+
+## 2026-05-25 17:21 PDT
+
+First branch slice is green. The physical layout now has `jazz_branch` plus
+`j_branch_num` on history/current rows, and `Runtime` can create/check out a
+branch. A branch-local write is visible on that branch and invisible on main.
+
+Decision: put branch identity directly on row versions/current projection
+instead of modeling branches as separate projection tables. This preserves the
+"many branches without many tables" direction.
+
+Major limitation: this is not yet true pinned-base overlay semantics. Branch
+reads currently filter to the active branch's current rows, so they prove
+isolation but not "base snapshot plus sparse overlay." Next branch work should
+make branch reads fall back to main/base rows when a row has no branch-local
+candidate, then add branch provenance to sync payloads.

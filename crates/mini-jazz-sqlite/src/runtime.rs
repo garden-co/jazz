@@ -15,6 +15,7 @@ pub struct Runtime {
     node_id: String,
     principal: String,
     node_num: i64,
+    branch_num: i64,
 }
 
 impl Runtime {
@@ -37,6 +38,7 @@ impl Runtime {
             node_id: node_id.to_owned(),
             principal: principal.to_owned(),
             node_num,
+            branch_num: 1,
         })
     }
 
@@ -48,11 +50,12 @@ impl Runtime {
         let row_num = ensure_row_id(&db, "projects", id)?;
         db.execute(
             "INSERT OR IGNORE INTO projects__schema_v1_history
-             (row_num, tx_num, op, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, 1, ?, ?, ?, ?, ?)",
+             (row_num, tx_num, j_branch_num, op, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
+             VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)",
             params![
                 row_num,
                 tx_num,
+                self.branch_num,
                 title,
                 now,
                 now,
@@ -62,9 +65,9 @@ impl Runtime {
         )?;
         db.execute(
             "INSERT OR REPLACE INTO projects__schema_v1_current
-             (row_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, 0, ?, ?, ?, ?, ?)",
-            params![row_num, tx_num, title, now, now, self.principal, self.principal],
+             (row_num, j_branch_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
+             VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            params![row_num, self.branch_num, tx_num, title, now, now, self.principal, self.principal],
         )?;
         db.commit()?;
         Ok(tx_id)
@@ -85,11 +88,12 @@ impl Runtime {
         let project_row_num = ensure_row_id(&db, "projects", project_id)?;
         db.execute(
             "INSERT OR IGNORE INTO todos__schema_v1_history
-             (row_num, tx_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+             (row_num, tx_num, j_branch_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+             VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 row_num,
                 tx_num,
+                self.branch_num,
                 title,
                 i64::from(done),
                 project_row_num,
@@ -101,10 +105,11 @@ impl Runtime {
         )?;
         db.execute(
             "INSERT OR REPLACE INTO todos__schema_v1_current
-             (row_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+             (row_num, j_branch_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+             VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 row_num,
+                self.branch_num,
                 tx_num,
                 title,
                 i64::from(done),
@@ -144,10 +149,16 @@ impl Runtime {
             tx::reject(&db, &tx_id, "policy_denied")?;
         }
 
-        let mut columns = vec!["row_num".to_owned(), "tx_num".to_owned(), "op".to_owned()];
+        let mut columns = vec![
+            "row_num".to_owned(),
+            "tx_num".to_owned(),
+            "j_branch_num".to_owned(),
+            "op".to_owned(),
+        ];
         let mut sql_values = vec![
             rusqlite::types::Value::Integer(row_num),
             rusqlite::types::Value::Integer(tx_num),
+            rusqlite::types::Value::Integer(self.branch_num),
             rusqlite::types::Value::Integer(1),
         ];
 
@@ -194,8 +205,10 @@ impl Runtime {
                 rusqlite::types::Value::Integer(tx_num),
                 rusqlite::types::Value::Integer(0),
             ];
-            current_columns.extend(columns.iter().skip(3).cloned());
-            current_values.extend(sql_values.iter().skip(3).cloned());
+            current_columns.insert(1, "j_branch_num".to_owned());
+            current_values.insert(1, rusqlite::types::Value::Integer(self.branch_num));
+            current_columns.extend(columns.iter().skip(4).cloned());
+            current_values.extend(sql_values.iter().skip(4).cloned());
             insert_dynamic(
                 &db,
                 &crate::schema::current_table(&table.name),
@@ -222,12 +235,13 @@ impl Runtime {
              LEFT JOIN projects__schema_v1_current p
                ON p.row_num = t.project_row_num AND p.is_deleted = 0
              JOIN jazz_tx tx ON tx.tx_num = t.visible_tx_num
-             WHERE t.is_deleted = 0
-               AND t.done = 0
-               AND tx.outcome != ?
+	             WHERE t.is_deleted = 0
+	               AND t.done = 0
+	               AND t.j_branch_num = ?
+	               AND tx.outcome != ?
              ORDER BY t.j_created_at DESC, t.row_num",
         )?;
-        let rows = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
+        let rows = stmt.query_map(params![self.branch_num, tx::OUTCOME_REJECTED], |row| {
             Ok(TodoView {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -291,10 +305,16 @@ impl Runtime {
         let row_num = ensure_row_id(db, &record.table, &record.row_id)?;
         let tx_num = tx::tx_num(db, &record.tx_id)?;
 
-        let mut columns = vec!["row_num".to_owned(), "tx_num".to_owned(), "op".to_owned()];
+        let mut columns = vec![
+            "row_num".to_owned(),
+            "tx_num".to_owned(),
+            "j_branch_num".to_owned(),
+            "op".to_owned(),
+        ];
         let mut values = vec![
             rusqlite::types::Value::Integer(row_num),
             rusqlite::types::Value::Integer(tx_num),
+            rusqlite::types::Value::Integer(1),
             rusqlite::types::Value::Integer(record.op),
         ];
         for field in &table.fields {
@@ -333,16 +353,18 @@ impl Runtime {
         if tx_outcome(db, tx_num)? != tx::OUTCOME_REJECTED && record.op != 3 {
             let mut current_columns = vec![
                 "row_num".to_owned(),
+                "j_branch_num".to_owned(),
                 "visible_tx_num".to_owned(),
                 "is_deleted".to_owned(),
             ];
             let mut current_values = vec![
                 rusqlite::types::Value::Integer(row_num),
+                rusqlite::types::Value::Integer(1),
                 rusqlite::types::Value::Integer(tx_num),
                 rusqlite::types::Value::Integer(0),
             ];
-            current_columns.extend(columns.iter().skip(3).cloned());
-            current_values.extend(values.iter().skip(3).cloned());
+            current_columns.extend(columns.iter().skip(4).cloned());
+            current_values.extend(values.iter().skip(4).cloned());
             insert_dynamic(
                 db,
                 &crate::schema::current_table(&record.table),
@@ -399,6 +421,25 @@ impl Runtime {
         tx::tx_num(&self.conn, tx_id)
     }
 
+    pub fn create_branch(&mut self, branch_id: &str, base_global_epoch: Option<i64>) -> Result<()> {
+        let now = now_ms();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO jazz_branch (branch_id, base_global_epoch, created_at)
+             VALUES (?, ?, ?)",
+            params![branch_id, base_global_epoch, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn checkout_branch(&mut self, branch_id: &str) -> Result<()> {
+        self.branch_num = self.conn.query_row(
+            "SELECT branch_num FROM jazz_branch WHERE branch_id = ?",
+            params![branch_id],
+            |row| row.get(0),
+        )?;
+        Ok(())
+    }
+
     pub fn transaction(&mut self) -> TransactionBuilder<'_> {
         TransactionBuilder {
             runtime: self,
@@ -413,15 +454,15 @@ impl Runtime {
         let row_num = row_num(&db, id)?;
         db.execute(
             "INSERT OR IGNORE INTO todos__schema_v1_history
-             (row_num, tx_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             SELECT row_num, ?, 3, title, done, project_row_num, j_created_at, ?, j_created_by, ?
-             FROM todos__schema_v1_current
-             WHERE row_num = ?",
-            params![tx_num, now, self.principal, row_num],
+	             (row_num, tx_num, j_branch_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+	             SELECT row_num, ?, j_branch_num, 3, title, done, project_row_num, j_created_at, ?, j_created_by, ?
+	             FROM todos__schema_v1_current
+	             WHERE row_num = ? AND j_branch_num = ?",
+            params![tx_num, now, self.principal, row_num, self.branch_num],
         )?;
         db.execute(
-            "DELETE FROM todos__schema_v1_current WHERE row_num = ?",
-            params![row_num],
+            "DELETE FROM todos__schema_v1_current WHERE row_num = ? AND j_branch_num = ?",
+            params![row_num, self.branch_num],
         )?;
         db.commit()?;
         Ok(tx_id)
@@ -439,7 +480,12 @@ impl Runtime {
             .iter()
             .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
             .collect::<Vec<_>>();
-        let mut insert_columns = vec!["row_num".to_owned(), "tx_num".to_owned(), "op".to_owned()];
+        let mut insert_columns = vec![
+            "row_num".to_owned(),
+            "tx_num".to_owned(),
+            "j_branch_num".to_owned(),
+            "op".to_owned(),
+        ];
         insert_columns.extend(field_columns.iter().cloned());
         insert_columns.extend([
             "j_created_at".to_owned(),
@@ -447,7 +493,12 @@ impl Runtime {
             "j_created_by".to_owned(),
             "j_updated_by".to_owned(),
         ]);
-        let mut select_columns = vec!["row_num".to_owned(), "?".to_owned(), "3".to_owned()];
+        let mut select_columns = vec![
+            "row_num".to_owned(),
+            "?".to_owned(),
+            "j_branch_num".to_owned(),
+            "3".to_owned(),
+        ];
         select_columns.extend(field_columns.iter().cloned());
         select_columns.extend([
             "j_created_at".to_owned(),
@@ -460,20 +511,20 @@ impl Runtime {
                 "INSERT OR IGNORE INTO {} ({})
                  SELECT {}
                  FROM {}
-                 WHERE row_num = ?",
+                 WHERE row_num = ? AND j_branch_num = ?",
                 crate::schema::history_table(&table.name),
                 insert_columns.join(", "),
                 select_columns.join(", "),
                 crate::schema::current_table(&table.name),
             ),
-            params![tx_num, now, self.principal, row_num],
+            params![tx_num, now, self.principal, row_num, self.branch_num],
         )?;
         db.execute(
             &format!(
-                "DELETE FROM {} WHERE row_num = ?",
+                "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
                 crate::schema::current_table(&table.name)
             ),
-            params![row_num],
+            params![row_num, self.branch_num],
         )?;
         db.commit()?;
         Ok(tx_id)
@@ -511,6 +562,7 @@ impl Runtime {
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
             WHERE current.is_deleted = 0
+               AND current.j_branch_num = ?
                AND tx.outcome != ?
                AND {policy_sql}
              ORDER BY current.j_created_at DESC, current.row_num",
@@ -520,7 +572,7 @@ impl Runtime {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
-        let rows = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
+        let rows = stmt.query_map(params![self.branch_num, tx::OUTCOME_REJECTED], |row| {
             let raw_values = (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
                 .collect::<rusqlite::Result<Vec<_>>>()?;

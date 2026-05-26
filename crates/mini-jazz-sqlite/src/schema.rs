@@ -204,6 +204,17 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           table_name TEXT NOT NULL,
           row_id TEXT NOT NULL UNIQUE
         );
+
+        CREATE TABLE IF NOT EXISTS jazz_branch (
+          branch_num INTEGER PRIMARY KEY,
+          branch_id TEXT NOT NULL UNIQUE,
+          base_global_epoch INTEGER,
+          created_at INTEGER NOT NULL
+        );
+
+        INSERT OR IGNORE INTO jazz_branch
+          (branch_num, branch_id, base_global_epoch, created_at)
+          VALUES (1, 'main', NULL, 0);
         "#,
     )?;
 
@@ -231,6 +242,7 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
         CREATE TABLE IF NOT EXISTS {history} (
           row_num INTEGER NOT NULL,
           tx_num INTEGER NOT NULL,
+          j_branch_num INTEGER NOT NULL,
           op INTEGER NOT NULL,
           {user_columns},
           j_created_at INTEGER NOT NULL,
@@ -241,14 +253,16 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
         ) WITHOUT ROWID;
 
         CREATE TABLE IF NOT EXISTS {current} (
-          row_num INTEGER PRIMARY KEY,
+          row_num INTEGER NOT NULL,
+          j_branch_num INTEGER NOT NULL,
           visible_tx_num INTEGER NOT NULL,
           is_deleted INTEGER NOT NULL,
           {user_columns},
           j_created_at INTEGER NOT NULL,
           j_updated_at INTEGER NOT NULL,
           j_created_by TEXT NOT NULL,
-          j_updated_by TEXT NOT NULL
+          j_updated_by TEXT NOT NULL,
+          PRIMARY KEY (row_num, j_branch_num)
         );
         "#,
         history = history_table(&table.name),

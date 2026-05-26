@@ -444,3 +444,28 @@ fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
     let diffs = alice.poll_subscription(&mut subscription).unwrap();
     assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "task-2"));
 }
+
+#[test]
+fn branch_local_write_is_invisible_on_main() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    let mut task = BTreeMap::new();
+    task.insert("title".to_owned(), json!("Draft-only"));
+    task.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-draft", task).unwrap();
+
+    assert_eq!(alice.read_rows("tasks").unwrap().len(), 1);
+
+    alice.checkout_branch("main").unwrap();
+    assert!(alice.read_rows("tasks").unwrap().is_empty());
+
+    alice.checkout_branch("draft").unwrap();
+    assert_eq!(alice.read_rows("tasks").unwrap()[0].id, "task-draft");
+}

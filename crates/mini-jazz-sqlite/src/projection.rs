@@ -26,6 +26,7 @@ fn rebuild_table(conn: &Connection, table: &crate::schema::TableDef) -> Result<(
     let mut select_columns = vec![
         "h.row_num".to_owned(),
         "h.tx_num".to_owned(),
+        "h.j_branch_num".to_owned(),
         "h.op".to_owned(),
     ];
     select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
@@ -45,7 +46,7 @@ fn rebuild_table(conn: &Connection, table: &crate::schema::TableDef) -> Result<(
         history_table(&table.name),
     );
     let mut stmt = conn.prepare(&sql)?;
-    let row_width = 3 + table.fields.len() + 4;
+    let row_width = 4 + table.fields.len() + 4;
     let rows = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
         (0..row_width)
             .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -56,20 +57,22 @@ fn rebuild_table(conn: &Connection, table: &crate::schema::TableDef) -> Result<(
         let values = row?;
         let row_num = integer_value(&values[0], "row_num")?;
         let tx_num = integer_value(&values[1], "tx_num")?;
-        let op = integer_value(&values[2], "op")?;
+        let branch_num = integer_value(&values[2], "j_branch_num")?;
+        let op = integer_value(&values[3], "op")?;
         if op == 3 {
             conn.execute(
                 &format!(
-                    "DELETE FROM {} WHERE row_num = ?",
+                    "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
                     current_table(&table.name)
                 ),
-                params![row_num],
+                params![row_num, branch_num],
             )?;
             continue;
         }
 
         let mut columns = vec![
             "row_num".to_owned(),
+            "j_branch_num".to_owned(),
             "visible_tx_num".to_owned(),
             "is_deleted".to_owned(),
         ];
@@ -83,10 +86,11 @@ fn rebuild_table(conn: &Connection, table: &crate::schema::TableDef) -> Result<(
 
         let mut current_values = vec![
             rusqlite::types::Value::Integer(row_num),
+            rusqlite::types::Value::Integer(branch_num),
             rusqlite::types::Value::Integer(tx_num),
             rusqlite::types::Value::Integer(0),
         ];
-        current_values.extend(values.into_iter().skip(3));
+        current_values.extend(values.into_iter().skip(4));
         insert_dynamic(conn, &current_table(&table.name), &columns, &current_values)?;
     }
     Ok(())
