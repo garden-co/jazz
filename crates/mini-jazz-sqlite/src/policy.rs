@@ -56,6 +56,7 @@ pub(crate) fn write_allowed(
                 "current",
                 &ref_table.read_policy,
                 principal,
+                0,
             )?;
             let count: i64 = db.query_row(
                 &format!(
@@ -82,7 +83,7 @@ pub(crate) fn read_policy_sql(
     table: &TableDef,
     principal: &str,
 ) -> Result<String> {
-    lower_policy(schema, table, "current", &table.read_policy, principal)
+    lower_policy(schema, table, "current", &table.read_policy, principal, 0)
 }
 
 fn lower_policy(
@@ -91,7 +92,11 @@ fn lower_policy(
     alias: &str,
     policy: &PolicyDef,
     principal: &str,
+    depth: usize,
 ) -> Result<String> {
+    if depth > 16 {
+        return Err(crate::Error::new("policy recursion depth exceeded"));
+    }
     match policy {
         PolicyDef::AllowAll => Ok("1 = 1".to_owned()),
         PolicyDef::CreatedByPrincipal => Ok(format!(
@@ -114,25 +119,25 @@ fn lower_policy(
                 )));
             };
             let ref_table = schema.table_def(ref_table_name)?;
-            let parent_policy = match &ref_table.read_policy {
-                PolicyDef::AllowAll => "1 = 1".to_owned(),
-                PolicyDef::CreatedByPrincipal => {
-                    format!("parent.j_created_by = '{}'", principal.replace('\'', "''"))
-                }
-                PolicyDef::RefReadable { .. } => {
-                    return Err(crate::Error::new(
-                        "recursive ref-readable policy not implemented yet",
-                    ))
-                }
-            };
+            let parent_alias = format!("policy_parent_{depth}");
+            let parent_tx_alias = format!("policy_parent_tx_{depth}");
+            let parent_policy = lower_policy(
+                schema,
+                ref_table,
+                &parent_alias,
+                &ref_table.read_policy,
+                principal,
+                depth + 1,
+            )?;
             Ok(format!(
                 "EXISTS (
                    SELECT 1
-                   FROM {} parent
-                   JOIN jazz_tx parent_tx ON parent_tx.tx_num = parent.visible_tx_num
-                   WHERE parent.row_num = {alias}.{}
-                     AND parent.is_deleted = 0
-                     AND parent_tx.outcome != {}
+                   FROM {} {parent_alias}
+                   JOIN jazz_tx {parent_tx_alias}
+                     ON {parent_tx_alias}.tx_num = {parent_alias}.visible_tx_num
+                   WHERE {parent_alias}.row_num = {alias}.{}
+                     AND {parent_alias}.is_deleted = 0
+                     AND {parent_tx_alias}.outcome != {}
                      AND {parent_policy}
                  )",
                 crate::schema::current_table(&ref_table.name),

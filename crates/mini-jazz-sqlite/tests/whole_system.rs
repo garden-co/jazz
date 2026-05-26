@@ -434,6 +434,96 @@ fn policy_filters_reads_through_required_parent_ref() {
 }
 
 #[test]
+fn recursive_policy_filters_reads_through_grandparent_ref() {
+    let schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("projects", |table| {
+            table.text("title");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "orgs",
+            "org-alice",
+            BTreeMap::from([("name".to_owned(), json!("Alice org"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-alice",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Alice project")),
+                ("org".to_owned(), json!("org-alice")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-visible",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible")),
+                ("project".to_owned(), json!("project-alice")),
+            ]),
+        )
+        .unwrap();
+
+    bob.insert_row(
+        "orgs",
+        "org-bob",
+        BTreeMap::from([("name".to_owned(), json!("Bob org"))]),
+    )
+    .unwrap();
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([
+            ("title".to_owned(), json!("Bob project")),
+            ("org".to_owned(), json!("org-bob")),
+        ]),
+    )
+    .unwrap();
+    bob.insert_row(
+        "todos",
+        "todo-hidden",
+        BTreeMap::from([
+            ("title".to_owned(), json!("Hidden")),
+            ("project".to_owned(), json!("project-bob")),
+        ]),
+    )
+    .unwrap();
+
+    alice
+        .apply_bundle(&bob.export_table_history("orgs").unwrap())
+        .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let visible = alice.read_rows("todos").unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, "todo-visible");
+    assert_eq!(visible[0].values["project"], json!("project-alice"));
+}
+
+#[test]
 fn policy_scoped_sync_includes_required_parent_rows_only() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

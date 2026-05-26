@@ -536,3 +536,27 @@ Next targets:
 - move sync import/export out of `runtime.rs`
 - lens + policy composition
 - better module boundaries around generic mutations
+
+## 2026-05-25 17:57 PDT
+
+Starting recursive permission derisking with a narrow chain:
+`todos.project -> projects.org -> orgs.created_by`. This should answer whether
+our policy lowering can compose without introducing a separate policy runtime.
+First target is read filtering. Transitive sync dependency export may become a
+second step after the read path is green.
+
+## 2026-05-25 17:58 PDT
+
+Recursive read-policy lowering is green for a grandparent chain. The generated
+predicate is still plain SQLite: nested `EXISTS` subqueries with fresh aliases
+and a bounded recursion depth. This is not yet recursive CTE support, but it
+proves that policy composition can remain SQL-lowerable for common parent-chain
+permissions.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+34 tests.
+
+Next obvious derisk: sync dependency export is still direct-parent only. A
+recursive policy read can filter through grandparent rows, but a policy-scoped
+bundle likely does not yet include all transitive rows needed to recreate the
+query elsewhere.
