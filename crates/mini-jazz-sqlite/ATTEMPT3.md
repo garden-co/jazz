@@ -1590,3 +1590,22 @@ branch view itself changes.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 subscription_` passes.
+
+## 2026-05-25 19:39 PDT
+
+Starting deleted-row export scope coverage from sidecar review. Deleted history
+is necessary for table sync, but branch/query scopes should not leak unrelated
+tombstones beyond the requested result/scope.
+
+## 2026-05-25 19:39 PDT
+
+Deleted-row query-scope coverage is green. The generic equality query export
+does not leak an unrelated deleted row in the same branch; it exports only the
+matching live row. This did not require a runtime change.
+
+Design note: full table history export intentionally includes table tombstones
+so peers can remove deleted rows. Query-scoped export is the path where deleted
+row leakage would be wrong.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+branch_scoped_export_excludes_unrelated_deleted_rows` passes.

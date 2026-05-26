@@ -73,6 +73,54 @@ fn branch_scoped_export_excludes_unrelated_branch_rows() {
 }
 
 #[test]
+fn branch_scoped_export_excludes_unrelated_deleted_rows() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-live",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Live")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-deleted",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Deleted")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.delete_row("tasks", "task-deleted").unwrap();
+
+    let rows = alice
+        .export_query_where_eq("tasks", "title", json!("Live"))
+        .unwrap()
+        .history
+        .into_iter()
+        .map(|record| row_id_with_op(record.row_id, record.op))
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows, vec!["task-live:1"]);
+}
+
+fn row_id_with_op(row_id: String, op: i64) -> String {
+    format!("{row_id}:{op}")
+}
+
+#[test]
 fn branch_reads_main_base_with_sparse_overlay() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
