@@ -258,3 +258,14 @@ Design lesson: patch/effective-row semantics must be centralized. The current
 double-check shape is a smell; the future write-lowering module should return
 or own the effective row and validation result so callers cannot accidentally
 validate a different value set.
+
+## 2026-05-26 00:31 PDT
+
+Follow-up architecture cleanup after the patch-update bug: extracted
+`effective_write_values` and used it in both the outer write path and the inner
+history/current lowerer. Full mini crate suite remains green with 142 tests.
+
+Design lesson: this is the write-path equivalent of `effective.rs`. The
+eventual module should probably be organized around lowering a write into
+`effective_values`, `policy_reads`, `history_row`, `current_projection_effect`,
+and `fate`, rather than around table/transaction nouns.

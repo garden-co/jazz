@@ -201,15 +201,16 @@ impl Runtime {
             op,
         })?;
         let row_num = row_num(&db, id)?;
-        let effective_values = if op == 1 {
-            values.clone()
-        } else {
-            let mut current =
-                effective::row_values(&db, &self.schema, table_name, row_num, self.branch_num)?
-                    .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?;
-            current.extend(values.clone());
-            current
-        };
+        let effective_values = effective_write_values(EffectiveWriteValues {
+            db: &db,
+            schema: &self.schema,
+            table_name,
+            id,
+            row_num,
+            branch_num: self.branch_num,
+            patch_values: &values,
+            op,
+        })?;
         let allowed = self.trusted
             || local_write_allowed(LocalWriteCheck {
                 db: &db,
@@ -1245,23 +1246,46 @@ struct InsertRowInTx<'a> {
     op: i64,
 }
 
+struct EffectiveWriteValues<'a> {
+    db: &'a Connection,
+    schema: &'a SchemaDef,
+    table_name: &'a str,
+    id: &'a str,
+    row_num: i64,
+    branch_num: i64,
+    patch_values: &'a BTreeMap<String, JsonValue>,
+    op: i64,
+}
+
+fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<String, JsonValue>> {
+    if args.op == 1 {
+        return Ok(args.patch_values.clone());
+    }
+    let mut current = effective::row_values(
+        args.db,
+        args.schema,
+        args.table_name,
+        args.row_num,
+        args.branch_num,
+    )?
+    .ok_or_else(|| crate::Error::new(format!("row {} is not visible", args.id)))?;
+    current.extend(args.patch_values.clone());
+    Ok(current)
+}
+
 fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
     let table = args.schema.table_def(args.table_name)?;
     let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
-    let effective_values = if args.op == 1 {
-        args.values.clone()
-    } else {
-        let mut current = effective::row_values(
-            args.db,
-            args.schema,
-            args.table_name,
-            row_num,
-            args.branch_num,
-        )?
-        .ok_or_else(|| crate::Error::new(format!("row {} is not visible", args.id)))?;
-        current.extend(args.values.clone());
-        current
-    };
+    let effective_values = effective_write_values(EffectiveWriteValues {
+        db: args.db,
+        schema: args.schema,
+        table_name: args.table_name,
+        id: args.id,
+        row_num,
+        branch_num: args.branch_num,
+        patch_values: args.values,
+        op: args.op,
+    })?;
     if args.op != 1 {
         record_tx_read(args.db, args.tx_num, args.table_name, row_num, 2)?;
     }
