@@ -1259,6 +1259,56 @@ fn write_policy_parent_check_records_policy_read_set() {
 }
 
 #[test]
+fn patch_update_uses_preserved_ref_for_write_policy_validation() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Before")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    let tx = alice
+        .update_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([("title".to_owned(), json!("After"))]),
+        )
+        .unwrap();
+
+    let rows = alice.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("After"));
+    assert_eq!(rows[0].values["project"], json!("project-1"));
+    assert_eq!(
+        alice.transaction_policy_read_rows(&tx).unwrap(),
+        vec![("projects".to_owned(), "project-1".to_owned())]
+    );
+}
+
+#[test]
 fn recursive_write_policy_records_transitive_policy_read_set() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {

@@ -201,6 +201,15 @@ impl Runtime {
             op,
         })?;
         let row_num = row_num(&db, id)?;
+        let effective_values = if op == 1 {
+            values.clone()
+        } else {
+            let mut current =
+                effective::row_values(&db, &self.schema, table_name, row_num, self.branch_num)?
+                    .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?;
+            current.extend(values.clone());
+            current
+        };
         let allowed = self.trusted
             || local_write_allowed(LocalWriteCheck {
                 db: &db,
@@ -208,7 +217,7 @@ impl Runtime {
                 table: &table,
                 row_num,
                 branch_num: self.branch_num,
-                values: &values,
+                values: &effective_values,
                 principal: &self.principal,
                 op,
             })?;

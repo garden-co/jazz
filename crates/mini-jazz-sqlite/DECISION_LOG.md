@@ -241,3 +241,20 @@ peer's refreshed query scope removes it. Full mini crate suite is green with
 Design lesson: observed facts should be a tiny relational predicate IR, not
 just `(field, value)`. This does not need to become a query graph; it can remain
 the replay/repair contract for the lowered SQL query shape.
+
+## 2026-05-26 00:30 PDT
+
+Found and fixed a real patch-update/write-policy bug. Red test:
+`patch_update_uses_preserved_ref_for_write_policy_validation`. A todo update
+that only changed `title` should preserve the existing `project` ref and pass
+`write_if_ref_readable("project")`, but the outer write path rechecked policy
+against the raw patch after the inner lowerer had already merged effective
+values. The second check failed with `expected ref id for project`.
+
+Fix: the outer post-insert rejection check now also computes the effective row
+values for updates. Full mini crate suite is green with 142 tests.
+
+Design lesson: patch/effective-row semantics must be centralized. The current
+double-check shape is a smell; the future write-lowering module should return
+or own the effective row and validation result so callers cannot accidentally
+validate a different value set.
