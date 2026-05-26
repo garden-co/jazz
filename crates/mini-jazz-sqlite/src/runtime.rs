@@ -1025,21 +1025,35 @@ impl Runtime {
         if query_read.field == "$createdBy" {
             let Some(created_by) = query_read.value.as_str() else {
                 return Err(crate::Error::new(
-                    "$createdBy equality expects a string value",
+                    "$createdBy predicate expects a string value",
                 ));
+            };
+            let created_by_sql = match query_read.op.as_str() {
+                "eq" => "j_created_by = ?",
+                "ne" => "j_created_by != ?",
+                op => {
+                    return Err(crate::Error::new(format!(
+                        "unsupported $createdBy predicate op {op}"
+                    )));
+                }
+            };
+            let history_created_by_sql = match query_read.op.as_str() {
+                "eq" => "h.j_created_by = ?",
+                "ne" => "h.j_created_by != ?",
+                _ => unreachable!("validated above"),
             };
             let branch_num = branch::checkout(db, &query_read.branch_id)?;
             db.execute(
                 &format!(
                     "DELETE FROM {}
                      WHERE j_branch_num = ?
-                       AND j_created_by = ?
+                       AND {created_by_sql}
                        AND row_num NOT IN (
                          SELECT h.row_num
                          FROM {history_table} h
                          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
                          WHERE h.j_branch_num = ?
-                           AND h.j_created_by = ?
+                           AND {history_created_by_sql}
                            AND h.op != 3
                            AND tx.outcome != ?
                        )",
@@ -4287,14 +4301,23 @@ fn query_scope_repair_row_nums(
     if field_name == "$createdBy" {
         let Some(created_by) = value.as_str() else {
             return Err(crate::Error::new(
-                "$createdBy equality expects a string value",
+                "$createdBy predicate expects a string value",
             ));
+        };
+        let created_by_sql = match op {
+            "eq" => "h.j_created_by = ?",
+            "ne" => "h.j_created_by != ?",
+            op => {
+                return Err(crate::Error::new(format!(
+                    "unsupported $createdBy predicate op {op}"
+                )));
+            }
         };
         let sql = format!(
             "SELECT DISTINCT h.row_num
              FROM {} h
              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-             WHERE h.j_created_by = ?
+             WHERE {created_by_sql}
                AND tx.outcome != ?",
             crate::schema::history_table(&table.name),
         );

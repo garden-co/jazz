@@ -1046,6 +1046,58 @@ fn created_by_not_equal_query_scope_syncs_and_refreshes() {
 }
 
 #[test]
+fn created_by_not_equal_query_scope_repairs_deleted_matching_row() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    bob.insert_row(
+        "notes",
+        "note-bob",
+        BTreeMap::from([
+            ("body".to_owned(), json!("Bob")),
+            ("pinned".to_owned(), json!(false)),
+        ]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("notes").unwrap())
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_ne("notes", "$createdBy", json!("alice"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer.read_rows_where_ne("notes", "$createdBy", json!("alice"))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice.delete_row("notes", "note-bob").unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(peer
+        .read_rows_where_ne("notes", "$createdBy", json!("alice"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn id_not_equal_query_scope_syncs_and_repairs_deleted_row() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");

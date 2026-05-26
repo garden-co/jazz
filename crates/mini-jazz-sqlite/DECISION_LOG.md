@@ -1098,3 +1098,16 @@ range predicates and pagination cursors: the descriptor has to encode enough to
 repair rows that leave a broad result set, not just rows named by the cursor.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 224 whole-system tests.
+
+## 2026-05-26 04:17 PDT
+
+Added deletion repair coverage for `$createdBy != ...` query scopes. The red
+test showed `$createdBy` repair was equality-shaped even though initial export,
+local reads, and update refreshes already handled `ne`.
+
+Discovery: broad magic-field predicates need operator-aware repair everywhere,
+not just for initial export. Apply-side repair and export-side row discovery now
+lower `eq` and `ne` separately, so rows created by other principals can leave a
+broad magic-field scope after deletion.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 225 whole-system tests.
