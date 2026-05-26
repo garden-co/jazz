@@ -1360,6 +1360,55 @@ fn branch_conflict_candidates_include_transitive_source_branch_rows() {
 }
 
 #[test]
+fn branch_conflict_metadata_counts_transitive_source_branch_candidates() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("middle-left", &["left"])
+        .unwrap();
+    alice
+        .create_branch_from_branches("middle-right", &["right"])
+        .unwrap();
+    alice
+        .create_branch_from_branches("merge", &["middle-left", "middle-right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let candidates = alice.read_row_candidates("tasks", "task-1").unwrap();
+    assert_eq!(candidates.len(), 2);
+    let rows = alice.read_rows_with_conflict_meta("tasks").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.conflict_count == 2));
+}
+
+#[test]
 fn branch_query_scope_sync_preserves_transitive_source_branch_rows() {
     let schema = support::tasks_schema();
     let mut alice =

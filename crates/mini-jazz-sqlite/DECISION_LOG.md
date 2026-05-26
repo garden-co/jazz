@@ -1611,3 +1611,17 @@ including conflict UI surfaces. Otherwise the ordinary row list and conflict
 candidate APIs can disagree about whether a row exists.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 259 whole-system tests.
+
+## 2026-05-26 05:32 PDT
+
+Added conflict-metadata coverage for two transitive source candidates. A merge
+branch sources `middle-left -> left` and `middle-right -> right`; both leaves
+write the same row id, and conflict metadata reports two candidates through the
+transitive graph.
+
+Discovery: conflict count now agrees with ordinary reads and candidate listing
+for transitive source graphs. This keeps the branch UI model coherent: if a row
+is visible through branch provenance, it is also visible to the conflict
+inspection path.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 260 whole-system tests.
