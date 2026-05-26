@@ -883,3 +883,19 @@ fail closed on real write-policy drift while still allowing semantic field
 renames that lower to the same physical policy dependency.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 212 whole-system tests.
+
+## 2026-05-26 03:33 PDT
+
+Added branch observed-query refresh coverage for source branch rows. A peer
+observes an initially empty query on a merge branch with `left` and `right`
+sources; the upstream later writes a matching row to `left`; reconnect refresh
+from the merge branch sends the source row and preserves merge branch source
+metadata on the peer.
+
+Discovery: source-branch content changes already flow through the durable
+query-read refresh loop as long as the upstream is checked out to the observed
+branch. The remaining, harder case is mutating the source set of an existing
+branch as a first-class operation; the current public API mostly creates branch
+provenance at branch creation time.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 213 whole-system tests.

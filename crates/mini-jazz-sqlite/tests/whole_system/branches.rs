@@ -1083,6 +1083,73 @@ fn branch_read_rows_includes_source_branch_candidates() {
 }
 
 #[test]
+fn branch_observed_query_refresh_includes_later_source_branch_rows() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.create_branch("right", None).unwrap();
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let initial = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert!(initial.history.is_empty());
+    peer.apply_bundle(&initial).unwrap();
+    peer.checkout_branch("merge").unwrap();
+    assert!(peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-left",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left later")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let rows = peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "task-left");
+    assert_eq!(
+        peer.branches().unwrap()[0].source_branch_ids,
+        Vec::<String>::new()
+    );
+    let merge = peer
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == "merge")
+        .unwrap();
+    assert_eq!(merge.source_branch_ids, vec!["left", "right"]);
+}
+
+#[test]
 fn branch_conflict_resolution_transaction_clears_conflict_meta_after_rebuild() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
