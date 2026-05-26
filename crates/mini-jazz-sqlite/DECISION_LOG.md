@@ -1151,6 +1151,21 @@ new repair mechanism.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
 
+## 2026-05-26 04:23 PDT
+
+Narrowed one todo-specific query descriptor wart. The legacy
+`export_query_scope_newest_open_todos` fixture method now records the generic
+`eq_top_created_at_desc` query-read descriptor instead of the old hardcoded
+`top_created_at_desc` op; the test pins the generic op at the observed-query
+boundary.
+
+Discovery: the todo fixture can keep existing ergonomic APIs while increasingly
+lowering through the same generic query descriptor path as non-demo schemas. The
+old apply-side `top_created_at_desc` repair branch is still present as
+compatibility ballast for bundles emitted before this cleanup.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
+
 ## 2026-05-26 04:22 PDT
 
 Pinned missing-policy-dependency rejection as permanent rather than parked. An

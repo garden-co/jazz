@@ -383,8 +383,11 @@ impl Runtime {
             branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
             table: "todos".to_owned(),
             field: "done".to_owned(),
-            op: "top_created_at_desc".to_owned(),
-            value: JsonValue::Number(serde_json::Number::from(limit)),
+            op: "eq_top_created_at_desc".to_owned(),
+            value: json!({
+                "eq": false,
+                "limit": limit,
+            }),
         }];
         Ok(make_bundle(
             &self.schema,

@@ -895,6 +895,10 @@ fn top_created_at_query_scope_refresh_replaces_displaced_page_boundary_row() {
     peer.apply_bundle(&alice.export_query_scope_newest_open_todos(2).unwrap())
         .unwrap();
     assert_eq!(
+        peer.observed_query_reads().unwrap()[0].op,
+        "eq_top_created_at_desc"
+    );
+    assert_eq!(
         peer.newest_open_todos(2)
             .unwrap()
             .iter()
