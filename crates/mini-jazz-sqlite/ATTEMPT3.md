@@ -2119,3 +2119,15 @@ no local overlay for the referenced row. The targeted test now passes and
 covers both authorization and read-set provenance.
 
 Full `cargo test -p mini-jazz-sqlite` passes with 114 whole-system tests.
+
+## 2026-05-25 20:38 PDT
+
+Starting the distributed version of the pinned-branch recursive write-policy
+case: an edge validating an untrusted branch write should make the same
+base-snapshot decision as the local branch author did.
+
+Result: the distributed edge-validation test passed without more implementation
+work. That gives confidence that the branch metadata and base-history export
+are sufficient for the edge to reproduce the pinned-base authorization decision.
+
+Full `cargo test -p mini-jazz-sqlite` passes with 115 whole-system tests.

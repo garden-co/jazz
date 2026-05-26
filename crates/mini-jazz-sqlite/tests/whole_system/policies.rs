@@ -743,6 +743,97 @@ fn branch_recursive_write_policy_uses_parent_state_from_pinned_base() {
 }
 
 #[test]
+fn trusted_edge_validates_branch_recursive_write_policy_against_pinned_base() {
+    let schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("projects", |table| {
+            table.text("title");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "bob-node", "bob", schema.clone())
+            .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    let alice_org_tx = alice
+        .insert_row(
+            "orgs",
+            "org-alice",
+            BTreeMap::from([("name".to_owned(), json!("Alice org"))]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&alice_org_tx, 1)
+        .unwrap();
+    let project_tx = alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base project")),
+                ("org".to_owned(), json!("org-alice")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&project_tx, 2).unwrap();
+    alice.create_branch("draft", Some(2)).unwrap();
+
+    edge.apply_bundle(&alice.export_table_history("projects").unwrap())
+        .unwrap();
+
+    bob.insert_row(
+        "orgs",
+        "org-bob",
+        BTreeMap::from([("name".to_owned(), json!("Bob org"))]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("orgs").unwrap())
+        .unwrap();
+    alice
+        .update_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main moved after branch")),
+                ("org".to_owned(), json!("org-bob")),
+            ]),
+        )
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let tx = alice
+        .insert_row(
+            "todos",
+            "todo-draft",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft todo")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    edge.apply_untrusted_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    edge.checkout_branch("draft").unwrap();
+    let rows = edge.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-draft");
+    assert_eq!(edge.transaction_info(&tx).unwrap().rejection_code, None);
+}
+
+#[test]
 fn trusted_edge_rejects_untrusted_delete_policy_violation() {
     let schema = SchemaDef::new().table("docs", |table| {
         table.text("title");
