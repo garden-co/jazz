@@ -50,6 +50,63 @@ fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
 }
 
 #[test]
+fn predicate_subscription_diffs_when_row_enters_and_leaves_query() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-open",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Open")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-closed",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Closed")),
+                ("done".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let mut subscription = alice
+        .subscribe_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+    assert_eq!(subscription.initial_rows()[0].id, "task-open");
+
+    alice
+        .update_row(
+            "tasks",
+            "task-closed",
+            BTreeMap::from([("done".to_owned(), json!(false))]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Added(row)] if row.id == "task-closed"));
+
+    alice
+        .update_row(
+            "tasks",
+            "task-open",
+            BTreeMap::from([("done".to_owned(), json!(true))]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "task-open"));
+}
+
+#[test]
 fn subscription_removes_child_when_parent_policy_dependency_changes() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

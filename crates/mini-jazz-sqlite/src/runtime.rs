@@ -1,6 +1,6 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
-use crate::subscription::RowsSubscription;
+use crate::subscription::{RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
@@ -1438,6 +1438,20 @@ impl Runtime {
         ))
     }
 
+    pub fn subscribe_rows_where_eq(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+    ) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::where_eq(
+            table_name,
+            field_name,
+            value.clone(),
+            self.read_rows_where_eq(table_name, field_name, value)?,
+        ))
+    }
+
     pub fn read_row_candidates(&self, table_name: &str, id: &str) -> Result<Vec<RowView>> {
         self.query_context().read_row_candidates(table_name, id)
     }
@@ -1446,7 +1460,14 @@ impl Runtime {
         &self,
         subscription: &mut RowsSubscription,
     ) -> Result<Vec<crate::types::RowDiff>> {
-        let next_rows = self.read_rows(&subscription.table)?;
+        let next_rows = match &subscription.query {
+            RowsSubscriptionQuery::Table { table } => self.read_rows(table)?,
+            RowsSubscriptionQuery::WhereEq {
+                table,
+                field,
+                value,
+            } => self.read_rows_where_eq(table, field, value.clone())?,
+        };
         Ok(subscription.replace_with_diff(next_rows))
     }
 

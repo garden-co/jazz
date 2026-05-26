@@ -470,3 +470,16 @@ should a scope-limited peer remove that row entirely, or retain it as a known
 fact outside this particular query? Existing equality tests mostly assert query
 results, not full table contraction. This needs a spec decision before making
 repair more aggressive.
+
+## 2026-05-26 01:01 PDT
+
+Added predicate subscriptions for equality queries. `RowsSubscription` now
+stores a query descriptor instead of only a table name, and polling reruns the
+same semantic query before diffing. The new test covers a row entering and
+leaving a `done = false` subscription. Full mini crate suite is green with 162
+tests.
+
+Design lesson: local listener semantics and sync query-scope semantics can share
+the same simple rerun/diff posture for now. The abstraction should probably
+become a common query descriptor instead of separate ad-hoc subscription and
+bundle predicate shapes.

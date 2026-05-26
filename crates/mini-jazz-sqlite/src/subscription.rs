@@ -1,16 +1,42 @@
 use crate::types::{RowDiff, RowView};
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
 pub struct RowsSubscription {
-    pub(crate) table: String,
+    pub(crate) query: RowsSubscriptionQuery,
     pub(crate) last_rows: Vec<RowView>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum RowsSubscriptionQuery {
+    Table {
+        table: String,
+    },
+    WhereEq {
+        table: String,
+        field: String,
+        value: JsonValue,
+    },
 }
 
 impl RowsSubscription {
     pub(crate) fn new(table: &str, rows: Vec<RowView>) -> Self {
         Self {
-            table: table.to_owned(),
+            query: RowsSubscriptionQuery::Table {
+                table: table.to_owned(),
+            },
+            last_rows: rows,
+        }
+    }
+
+    pub(crate) fn where_eq(table: &str, field: &str, value: JsonValue, rows: Vec<RowView>) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::WhereEq {
+                table: table.to_owned(),
+                field: field.to_owned(),
+                value,
+            },
             last_rows: rows,
         }
     }
