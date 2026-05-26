@@ -730,3 +730,9 @@ Design lesson: the same durable descriptor now supports current-row repair and l
 Split versioned read-set mechanics into a dedicated `read_set` module. Runtime still orchestrates transaction acceptance, but observed-read recording, stale exclusive validation, and bundle prevalidation now live behind named helpers. Full mini crate suite is green with 196 tests.
 
 Design lesson: read-set/version semantics are now a distinct subsystem rather than runtime glue. This should make the next slices around absent/range reads and branch source overlays easier to test without bloating `runtime.rs` further.
+
+## 2026-05-26 02:58 PDT
+
+Added transaction-scoped absent row reads for inserts. A create now records whether the target public row id was absent at write time, bundles preserve that read, and untrusted exclusive transactions are rejected with `stale_read_set` when the authority already has a visible version for that row. Full mini crate suite is green with 197 tests.
+
+Design lesson: absent reads fit better as transaction read-set facts than as durable query subscriptions. Reusing `jazz_tx_read` with a distinct reason kept the protocol simple, but it also made clear that reason codes should become named, documented integer enums before the next spec sync.

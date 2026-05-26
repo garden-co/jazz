@@ -2214,7 +2214,15 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
         patch_values: args.values,
         op: args.op,
     })?;
-    if args.op != 1 {
+    if args.op == 1 {
+        read_set::record_tx_create_read(
+            args.db,
+            args.tx_num,
+            args.table_name,
+            row_num,
+            args.branch_num,
+        )?;
+    } else {
         read_set::record_tx_read(
             args.db,
             args.tx_num,

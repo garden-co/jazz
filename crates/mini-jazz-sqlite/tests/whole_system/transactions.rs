@@ -517,6 +517,62 @@ fn untrusted_exclusive_transaction_rejects_stale_policy_read_set() {
 }
 
 #[test]
+fn untrusted_exclusive_transaction_rejects_stale_absent_row_read_set() {
+    let schema = support::notes_schema();
+    let mut authority =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
+    let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
+
+    let note_tx = writer
+        .transaction()
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("I saw this id as absent")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+    let mut bundle = writer.export_table_history("notes").unwrap();
+    let absent_read = bundle
+        .reads
+        .iter()
+        .find(|read| read.tx_id == note_tx && read.table == "notes" && read.row_id == "note-1")
+        .expect("insert should record an absent row read");
+    assert_eq!(absent_read.reason, 3);
+    assert_eq!(absent_read.observed_tx_id, None);
+    bundle
+        .txs
+        .iter_mut()
+        .find(|tx| tx.tx_id == note_tx)
+        .unwrap()
+        .conflict_mode = 2;
+
+    authority
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Authority got here first")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    authority.apply_untrusted_bundle(&bundle).unwrap();
+
+    let info = authority.transaction_info(&note_tx).unwrap();
+    assert_eq!(info.conflict_mode, "exclusive");
+    assert_eq!(info.rejection_code, Some("stale_read_set".to_owned()));
+    let rows = authority.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("Authority got here first"));
+}
+
+#[test]
 fn branch_exclusive_transaction_observes_inherited_base_read_version() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
@@ -564,14 +620,12 @@ fn branch_exclusive_transaction_observes_inherited_base_read_version() {
         .commit()
         .unwrap();
 
-    assert_eq!(
-        writer.transaction_observed_read_rows(&todo_tx).unwrap(),
-        vec![(
-            "projects".to_owned(),
-            "project-1".to_owned(),
-            Some(project_tx)
-        )]
-    );
+    let observed_reads = writer.transaction_observed_read_rows(&todo_tx).unwrap();
+    assert!(observed_reads.contains(&(
+        "projects".to_owned(),
+        "project-1".to_owned(),
+        Some(project_tx)
+    )));
 }
 
 #[test]

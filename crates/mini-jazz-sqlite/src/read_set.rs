@@ -5,6 +5,24 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(crate) const REASON_ABSENT: i64 = 3;
+
+pub(crate) fn record_tx_create_read(
+    conn: &Connection,
+    tx_num: i64,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<()> {
+    let observed_tx_num = current_visible_tx_num(conn, table_name, row_num, branch_num)?;
+    let reason = if observed_tx_num.is_some() {
+        2
+    } else {
+        REASON_ABSENT
+    };
+    record_tx_read_with_observed(conn, tx_num, table_name, row_num, reason, observed_tx_num)
+}
+
 pub(crate) fn record_tx_read(
     conn: &Connection,
     tx_num: i64,
@@ -41,27 +59,30 @@ pub(crate) fn tx_read_set_is_stale(
 ) -> Result<bool> {
     let branch_num = branch::ensure(conn, branch_id, None, now_ms())?;
     let mut stmt = conn.prepare(
-        "SELECT table_name, row_num, observed_tx_num
+        "SELECT table_name, row_num, reason, observed_tx_num
          FROM jazz_tx_read
          WHERE tx_num = ?
-           AND observed_tx_num IS NOT NULL
          ORDER BY table_name, row_num",
     )?;
     let reads = stmt.query_map(params![tx_num], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
-            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<i64>>(3)?,
         ))
     })?;
     for read in reads {
-        let (table_name, row_num, observed_tx_num) = read?;
-        let Some(observed_tx_num) = observed_tx_num else {
-            continue;
-        };
+        let (table_name, row_num, reason, observed_tx_num) = read?;
         let current_tx_num = current_visible_tx_num(conn, &table_name, row_num, branch_num)?;
-        if current_tx_num != Some(observed_tx_num) && current_tx_num != Some(tx_num) {
-            return Ok(true);
+        if reason == REASON_ABSENT {
+            if current_tx_num.is_some() && current_tx_num != Some(tx_num) {
+                return Ok(true);
+            }
+        } else if let Some(observed_tx_num) = observed_tx_num {
+            if current_tx_num != Some(observed_tx_num) && current_tx_num != Some(tx_num) {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -90,9 +111,6 @@ pub(crate) fn stale_exclusive_tx_ids_in_bundle(
         if !exclusive_pending.contains(read.tx_id.as_str()) {
             continue;
         }
-        let Some(observed_tx_id) = &read.observed_tx_id else {
-            continue;
-        };
         let Some(branch_id) = branch_by_tx.get(read.tx_id.as_str()) else {
             continue;
         };
@@ -104,11 +122,17 @@ pub(crate) fn stale_exclusive_tx_ids_in_bundle(
         let branch_num = branch::ensure(conn, branch_id, base_global_epoch, now_ms())?;
         let row_num = ensure_row_id(conn, &read.table, &read.row_id)?;
         let current_tx_num = current_visible_tx_num(conn, &read.table, row_num, branch_num)?;
-        let current_tx_id = current_tx_num
-            .map(|tx_num| tx_id_for_num(conn, tx_num))
-            .transpose()?;
-        if current_tx_id.as_deref() != Some(observed_tx_id.as_str()) {
-            stale.insert(read.tx_id.clone());
+        if read.reason == REASON_ABSENT {
+            if current_tx_num.is_some() {
+                stale.insert(read.tx_id.clone());
+            }
+        } else if let Some(observed_tx_id) = &read.observed_tx_id {
+            let current_tx_id = current_tx_num
+                .map(|tx_num| tx_id_for_num(conn, tx_num))
+                .transpose()?;
+            if current_tx_id.as_deref() != Some(observed_tx_id.as_str()) {
+                stale.insert(read.tx_id.clone());
+            }
         }
     }
     Ok(stale)
