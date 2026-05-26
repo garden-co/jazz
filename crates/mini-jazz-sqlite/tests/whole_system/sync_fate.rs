@@ -466,6 +466,48 @@ fn query_scope_excludes_rows_outside_current_result_set() {
 }
 
 #[test]
+fn top_created_at_query_scope_refresh_replaces_displaced_page_boundary_row() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-old", "Old boundary", false, "project-1")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .create_todo("todo-middle", "Middle", false, "project-1")
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_query_scope_newest_open_todos(2).unwrap())
+        .unwrap();
+    assert_eq!(
+        peer.newest_open_todos(2)
+            .unwrap()
+            .iter()
+            .map(|todo| todo.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["todo-middle", "todo-old"]
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .create_todo("todo-new", "Newest", false, "project-1")
+        .unwrap();
+    peer.apply_bundle(&alice.export_query_scope_newest_open_todos(2).unwrap())
+        .unwrap();
+
+    assert_eq!(
+        peer.newest_open_todos(3)
+            .unwrap()
+            .iter()
+            .map(|todo| todo.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["todo-new", "todo-middle"]
+    );
+}
+
+#[test]
 fn accepted_global_fate_update_reaches_peer_transaction_info() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();

@@ -310,6 +310,45 @@ impl Runtime {
         })
     }
 
+    pub fn newest_open_todos(&self, limit: usize) -> Result<Vec<TodoView>> {
+        let mut todos = self.open_todos()?;
+        let created_at_by_id = current_created_at_by_row_id(&self.conn, "todos")?;
+        todos.sort_by(|left, right| {
+            created_at_by_id
+                .get(&right.id)
+                .cmp(&created_at_by_id.get(&left.id))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        todos.truncate(limit);
+        Ok(todos)
+    }
+
+    pub fn export_query_scope_newest_open_todos(&self, limit: usize) -> Result<Bundle> {
+        let todo_ids = self
+            .newest_open_todos(limit)?
+            .into_iter()
+            .map(|todo| todo.id)
+            .collect::<Vec<_>>();
+        let txs = export_txs(&self.conn)?;
+        let history = export_open_todo_scope_history_for_ids(&self.conn, &todo_ids)?;
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let branches = export_branch_records_for_history(&self.conn, &history)?;
+        Ok(Bundle {
+            protocol_version: BUNDLE_PROTOCOL_VERSION,
+            branches,
+            txs,
+            reads,
+            query_reads: vec![QueryReadRecord {
+                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+                table: "todos".to_owned(),
+                field: "done".to_owned(),
+                op: "top_created_at_desc".to_owned(),
+                value: JsonValue::Number(serde_json::Number::from(limit)),
+            }],
+            history,
+        })
+    }
+
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
         let txs = export_txs(&self.conn)?;
@@ -518,6 +557,9 @@ impl Runtime {
         for record in &bundle.history {
             Self::apply_history_record(&schema, &db, self.node_num, record)?;
         }
+        for query_read in &bundle.query_reads {
+            Self::apply_query_scope_repair(&schema, &db, query_read)?;
+        }
         db.commit()?;
         Ok(())
     }
@@ -625,6 +667,38 @@ impl Runtime {
                     created_by,
                     tx::OUTCOME_REJECTED
                 ],
+            )?;
+            return Ok(());
+        }
+        if query_read.table == "todos"
+            && query_read.field == "done"
+            && query_read.op == "top_created_at_desc"
+        {
+            let Some(limit) = query_read.value.as_u64() else {
+                return Err(crate::Error::new(
+                    "top_created_at_desc expects numeric limit",
+                ));
+            };
+            let branch_num = branch::checkout(db, &query_read.branch_id)?;
+            db.execute(
+                &format!(
+                    "DELETE FROM {}
+                     WHERE j_branch_num = ?
+                       AND row_num NOT IN (
+                         SELECT todo.row_num
+                         FROM {current_table} todo
+                         JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
+                         WHERE todo.j_branch_num = ?
+                           AND todo.is_deleted = 0
+                           AND todo.done = 0
+                           AND todo_tx.outcome != ?
+                         ORDER BY todo.j_created_at DESC, todo.row_num
+                         LIMIT ?
+                       )",
+                    crate::schema::current_table("todos"),
+                    current_table = crate::schema::current_table("todos"),
+                ),
+                params![branch_num, branch_num, tx::OUTCOME_REJECTED, limit as i64],
             )?;
             return Ok(());
         }
@@ -2503,6 +2577,23 @@ fn branch_id_for_num(conn: &Connection, branch_num: i64) -> Result<String> {
     .map_err(Into::into)
 }
 
+fn current_created_at_by_row_id(
+    conn: &Connection,
+    table_name: &str,
+) -> Result<BTreeMap<String, i64>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT ids.row_id, current.j_created_at
+         FROM {} current
+         JOIN jazz_row_id ids ON ids.row_num = current.row_num",
+        crate::schema::current_table(table_name)
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
+        .map_err(Into::into)
+}
+
 fn export_open_todo_scope_history(conn: &Connection) -> Result<Vec<HistoryRecord>> {
     let mut records = Vec::new();
     records.extend(export_open_todo_projects(conn)?);
@@ -2510,8 +2601,30 @@ fn export_open_todo_scope_history(conn: &Connection) -> Result<Vec<HistoryRecord
     Ok(records)
 }
 
+fn export_open_todo_scope_history_for_ids(
+    conn: &Connection,
+    todo_ids: &[String],
+) -> Result<Vec<HistoryRecord>> {
+    let mut records = Vec::new();
+    let row_nums = todo_ids
+        .iter()
+        .map(|id| row_num(conn, id))
+        .collect::<Result<Vec<_>>>()?;
+    records.extend(export_open_todo_projects_for_row_nums(conn, &row_nums)?);
+    records.extend(export_open_todos_for_row_nums(conn, &row_nums)?);
+    Ok(records)
+}
+
 fn export_open_todo_projects(conn: &Connection) -> Result<Vec<HistoryRecord>> {
-    let mut stmt = conn.prepare(
+    export_open_todo_projects_for_row_nums(conn, &[])
+}
+
+fn export_open_todo_projects_for_row_nums(
+    conn: &Connection,
+    row_nums: &[i64],
+) -> Result<Vec<HistoryRecord>> {
+    let row_filter = sql_row_num_filter("todo", row_nums);
+    let mut stmt = conn.prepare(&format!(
         "SELECT ids.row_id,
                 tx.tx_id,
                 h.op,
@@ -2530,10 +2643,18 @@ fn export_open_todo_projects(conn: &Connection) -> Result<Vec<HistoryRecord>> {
            WHERE todo.is_deleted = 0
              AND todo.done = 0
              AND todo_tx.outcome != ?
+             {row_filter}
          )
          ORDER BY h.row_num, h.tx_num",
-    )?;
-    let records = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
+    ))?;
+    let mut query_params = vec![rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED)];
+    query_params.extend(
+        row_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer),
+    );
+    let records = stmt.query_map(params_from_iter(query_params.iter()), |row| {
         let mut values = BTreeMap::new();
         values.insert("title".to_owned(), JsonValue::String(row.get(3)?));
         Ok(HistoryRecord {
@@ -2555,7 +2676,15 @@ fn export_open_todo_projects(conn: &Connection) -> Result<Vec<HistoryRecord>> {
 }
 
 fn export_open_todos(conn: &Connection) -> Result<Vec<HistoryRecord>> {
-    let mut stmt = conn.prepare(
+    export_open_todos_for_row_nums(conn, &[])
+}
+
+fn export_open_todos_for_row_nums(
+    conn: &Connection,
+    row_nums: &[i64],
+) -> Result<Vec<HistoryRecord>> {
+    let row_filter = sql_row_num_filter("todo", row_nums);
+    let mut stmt = conn.prepare(&format!(
         "SELECT ids.row_id,
                 tx.tx_id,
                 h.op,
@@ -2577,10 +2706,18 @@ fn export_open_todos(conn: &Connection) -> Result<Vec<HistoryRecord>> {
            WHERE todo.is_deleted = 0
              AND todo.done = 0
              AND todo_tx.outcome != ?
+             {row_filter}
          )
          ORDER BY h.row_num, h.tx_num",
-    )?;
-    let records = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
+    ))?;
+    let mut query_params = vec![rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED)];
+    query_params.extend(
+        row_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer),
+    );
+    let records = stmt.query_map(params_from_iter(query_params.iter()), |row| {
         let mut values = BTreeMap::new();
         values.insert("title".to_owned(), JsonValue::String(row.get(3)?));
         values.insert(
@@ -2604,6 +2741,17 @@ fn export_open_todos(conn: &Connection) -> Result<Vec<HistoryRecord>> {
     records
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn sql_row_num_filter(alias: &str, row_nums: &[i64]) -> String {
+    if row_nums.is_empty() {
+        String::new()
+    } else {
+        let placeholders = std::iter::repeat_n("?", row_nums.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("AND {alias}.row_num IN ({placeholders})")
+    }
 }
 
 fn export_table_history(

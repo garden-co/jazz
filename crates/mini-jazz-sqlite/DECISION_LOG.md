@@ -426,3 +426,20 @@ Design lesson: array-valued predicate metadata fits the bundle shape cleanly.
 The implementation is intentionally narrow (`id` only) because general
 schema-column `IN` will need a more complete predicate planner that can produce
 variable-arity SQL and repair clauses without ad-hoc branches.
+
+## 2026-05-26 00:55 PDT
+
+Added a narrow ordered/limited query-scope slice: newest open todos by
+`j_created_at DESC LIMIT n`. A peer that had two rows receives a refresh with a
+newer matching row and removes the displaced boundary row. Full mini crate suite
+is green with 159 tests.
+
+Important discovery: query-scope repair must run after applying incoming
+history, not only before it. Delete repair can work before history, but page
+boundary repair needs the newly arrived row to be visible before deciding which
+old rows have left the result. The current implementation runs repair both
+before and after history apply.
+
+Design lesson: top-k subscriptions need explicit page-boundary semantics, not
+just row membership. This slice is fixture-specific, but the invariant is broad:
+scope repair depends on the post-apply result set.
