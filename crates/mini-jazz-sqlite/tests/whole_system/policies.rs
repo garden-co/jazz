@@ -710,6 +710,102 @@ fn trusted_edge_authoritatively_rejects_untrusted_policy_violation_on_apply() {
 }
 
 #[test]
+fn core_validates_forwarded_exclusive_transaction_with_session_principal() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut edge =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "edge", "service", schema.clone())
+            .unwrap();
+    let mut core =
+        Runtime::open_trusted_with_schema(Storage::Memory, "core", schema.clone()).unwrap();
+    let mut core_without_forwarded_auth =
+        Runtime::open_trusted_with_schema(Storage::Memory, "core-no-auth", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let project_bundle = alice.export_table_history("projects").unwrap();
+    edge.apply_bundle(&project_bundle).unwrap();
+    core.apply_bundle(&project_bundle).unwrap();
+    core_without_forwarded_auth
+        .apply_bundle(&project_bundle)
+        .unwrap();
+
+    let tx = edge
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Forwarded exclusive")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    let mut bundle = edge.export_table_history("todos").unwrap();
+    let tx_record = bundle
+        .txs
+        .iter_mut()
+        .find(|record| record.tx_id == tx)
+        .unwrap();
+    tx_record.conflict_mode = 2;
+    tx_record.outcome = 1;
+
+    core_without_forwarded_auth
+        .apply_untrusted_bundle(&bundle)
+        .unwrap();
+    assert_eq!(
+        core_without_forwarded_auth
+            .transaction_info(&tx)
+            .unwrap()
+            .rejection_code,
+        Some("policy_denied".to_owned())
+    );
+    assert!(core_without_forwarded_auth
+        .read_rows("todos")
+        .unwrap()
+        .is_empty());
+
+    bundle
+        .txs
+        .iter_mut()
+        .find(|record| record.tx_id == tx)
+        .unwrap()
+        .auth_principal = Some("alice".to_owned());
+
+    core.apply_untrusted_bundle(&bundle).unwrap();
+
+    let info = core.transaction_info(&tx).unwrap();
+    assert_eq!(info.conflict_mode, "exclusive");
+    assert_eq!(info.rejection_code, None);
+    assert_eq!(core.read_rows("todos").unwrap().len(), 1);
+    assert_eq!(
+        core.export_table_history("todos")
+            .unwrap()
+            .txs
+            .iter()
+            .find(|record| record.tx_id == tx)
+            .unwrap()
+            .auth_principal
+            .as_deref(),
+        Some("alice")
+    );
+}
+
+#[test]
 fn trusted_edge_rejects_untrusted_write_when_policy_dependency_is_missing() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

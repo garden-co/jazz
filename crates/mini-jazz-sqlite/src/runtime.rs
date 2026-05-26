@@ -339,14 +339,19 @@ impl Runtime {
         }
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
+            let metadata_json = tx_metadata_json(tx_record.auth_principal.as_deref())?;
             db.execute(
                 "INSERT INTO jazz_tx
                  (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(tx_id) DO UPDATE SET
                    outcome = MAX(jazz_tx.outcome, excluded.outcome),
                    global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
-                   conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode)",
+                   conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
+                   metadata_json = CASE
+                     WHEN excluded.metadata_json != '{}' THEN excluded.metadata_json
+                     ELSE jazz_tx.metadata_json
+                   END",
                 params![
                     tx_record.tx_id,
                     node_num,
@@ -355,7 +360,8 @@ impl Runtime {
                     tx::KIND_DATA,
                     tx_record.conflict_mode,
                     tx_record.outcome,
-                    tx_record.created_at
+                    tx_record.created_at,
+                    metadata_json
                 ],
             )?;
             if tx_record.outcome == tx::OUTCOME_REJECTED {
@@ -605,6 +611,16 @@ impl Runtime {
     pub fn apply_untrusted_bundle(&mut self, bundle: &Bundle) -> Result<()> {
         let stale_exclusive_tx_ids =
             read_set::stale_exclusive_tx_ids_in_bundle(&self.conn, bundle)?;
+        let forwarded_auth_principals = bundle
+            .txs
+            .iter()
+            .filter(|tx| tx.conflict_mode == tx::MODE_EXCLUSIVE)
+            .filter_map(|tx| {
+                tx.auth_principal
+                    .as_deref()
+                    .map(|principal| (tx.tx_id.as_str(), principal))
+            })
+            .collect::<BTreeMap<_, _>>();
         self.apply_bundle_inner(bundle, false)?;
         let mut rejected = BTreeSet::new();
         for tx_id in stale_exclusive_tx_ids {
@@ -640,8 +656,16 @@ impl Runtime {
             }
             let table = self.schema.table_def(&record.table)?;
             let row_num = ensure_row_id(&self.conn, &record.table, &record.row_id)?;
-            let allowed =
-                write_allowed_for_history_record(&self.conn, &self.schema, table, row_num, record)?;
+            let allowed = write_allowed_for_history_record(
+                &self.conn,
+                &self.schema,
+                table,
+                row_num,
+                record,
+                forwarded_auth_principals
+                    .get(record.tx_id.as_str())
+                    .copied(),
+            )?;
             if !allowed {
                 let detail =
                     policy_denial_detail_for_history_record(&self.conn, table, record, tx_num)?;
@@ -3327,15 +3351,17 @@ fn write_allowed_for_history_record(
     table: &crate::schema::TableDef,
     row_num: i64,
     record: &HistoryRecord,
+    forwarded_auth_principal: Option<&str>,
 ) -> Result<bool> {
-    let principal = if record.op == 1 {
+    let record_principal = if record.op == 1 {
         &record.created_by
     } else {
         &record.updated_by
     };
+    let principal = forwarded_auth_principal.unwrap_or(record_principal);
     let branch_num = branch::ensure(conn, &record.branch_id, None, now_ms())?;
     if record.op == 3 && matches!(table.write_policy, PolicyDef::CreatedByPrincipal) {
-        return Ok(record.created_by == *principal);
+        return Ok(record.created_by == principal);
     }
     policy::write_allowed(policy::WriteCheck {
         db: conn,
@@ -3382,7 +3408,7 @@ fn is_newest_version_for_current(
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at
+        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
          FROM jazz_tx tx
          JOIN jazz_node node ON node.node_num = tx.node_num
          LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
@@ -3407,6 +3433,7 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             global_epoch: row.get(3)?,
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
+            auth_principal: parse_tx_auth_principal_for_sqlite(&row.get::<_, String>(9)?, 9)?,
             rejection_code: row.get(6)?,
             rejection_detail: row
                 .get::<_, Option<String>>(7)?
@@ -3430,6 +3457,31 @@ fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
     } else {
         Ok(Some(detail))
     }
+}
+
+fn tx_metadata_json(auth_principal: Option<&str>) -> Result<String> {
+    let metadata = match auth_principal {
+        Some(principal) => json!({ "auth_principal": principal }),
+        None => json!({}),
+    };
+    serde_json::to_string(&metadata).map_err(|err| crate::Error::new(err.to_string()))
+}
+
+fn parse_tx_auth_principal_for_sqlite(
+    metadata_json: &str,
+    column: usize,
+) -> rusqlite::Result<Option<String>> {
+    let metadata = serde_json::from_str::<JsonValue>(metadata_json).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(err),
+        )
+    })?;
+    Ok(metadata
+        .get("auth_principal")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned))
 }
 
 fn parse_rejection_detail_for_sqlite(

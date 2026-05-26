@@ -50,6 +50,8 @@ pub struct TxRecord {
     pub global_epoch: Option<i64>,
     pub conflict_mode: i64,
     pub outcome: i64,
+    #[serde(default)]
+    pub auth_principal: Option<String>,
     pub rejection_code: Option<String>,
     #[serde(default)]
     pub rejection_detail: Option<JsonValue>,
