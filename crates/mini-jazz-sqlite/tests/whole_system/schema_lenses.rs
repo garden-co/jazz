@@ -144,6 +144,69 @@ fn rename_lens_updates_old_row_as_current_semantic_history() {
 }
 
 #[test]
+fn lens_branch_base_snapshot_survives_durable_reopen() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("lens-branch.sqlite");
+    let old_schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let new_schema = SchemaDef::new().table("tasks", |table| {
+        table.text_lens("name", "title");
+        table.bool("done");
+    });
+    let mut old_writer =
+        Runtime::open_with_schema(Storage::Memory, "old-node", "alice", old_schema).unwrap();
+
+    let base_tx = old_writer
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    old_writer
+        .accept_transaction_at_global(&base_tx, 1)
+        .unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(path.clone()),
+            "worker",
+            "alice",
+            new_schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(&old_writer.export_table_history("tasks").unwrap())
+            .unwrap();
+        worker.create_branch("draft", Some(1)).unwrap();
+        worker
+            .update_row(
+                "tasks",
+                "task-1",
+                BTreeMap::from([("name".to_owned(), json!("Main update"))]),
+            )
+            .unwrap();
+        assert_eq!(
+            worker.read_rows("tasks").unwrap()[0].values["name"],
+            json!("Main update")
+        );
+    }
+
+    let mut reopened =
+        Runtime::open_with_schema(Storage::File(path), "worker", "alice", new_schema).unwrap();
+    reopened.checkout_branch("draft").unwrap();
+    let rows = reopened.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["name"], json!("Base title"));
+    assert!(!rows[0].values.contains_key("title"));
+}
+
+#[test]
 fn renamed_field_lens_query_scope_syncs_and_repairs_rows() {
     let old_schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

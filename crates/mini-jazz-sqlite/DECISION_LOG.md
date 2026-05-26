@@ -1209,6 +1209,21 @@ missing dependency that actually made validation impossible.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 232 whole-system tests.
 
+## 2026-05-26 04:32 PDT
+
+Added a lens + branch snapshot + durability intersection test. Old-schema
+history writes `title`, a new-schema durable worker lenses that as `name`,
+creates a branch pinned at the base epoch, updates main, reopens, checks out the
+branch, and still reads the pinned base value as `name` without exposing
+`title`.
+
+Discovery: schema lenses compose with query-only branch snapshots and durable
+reopen. The branch snapshot machinery uses the same semantic row materialization
+path as current reads, so old physical storage names do not leak through pinned
+history.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 233 whole-system tests.
+
 ## 2026-05-26 04:31 PDT
 
 Pinned rejection detail durability through reconnect. The stale-pending replay
