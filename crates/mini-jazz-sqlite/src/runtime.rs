@@ -205,7 +205,7 @@ impl Runtime {
         let db = self.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        insert_row_in_tx(InsertRowInTx {
+        let allowed = insert_row_in_tx(InsertRowInTx {
             db: &db,
             schema: &self.schema,
             table_name,
@@ -219,27 +219,6 @@ impl Runtime {
             op,
         })?;
         let row_num = row_num(&db, id)?;
-        let effective_values = effective_write_values(EffectiveWriteValues {
-            db: &db,
-            schema: &self.schema,
-            table_name,
-            id,
-            row_num,
-            branch_num: self.branch_num,
-            patch_values: &values,
-            op,
-        })?;
-        let allowed = self.trusted
-            || local_write_allowed(LocalWriteCheck {
-                db: &db,
-                schema: &self.schema,
-                table: &table,
-                row_num,
-                branch_num: self.branch_num,
-                values: &effective_values,
-                principal: &self.principal,
-                op,
-            })?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
             db.execute(
@@ -1659,6 +1638,26 @@ impl Runtime {
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
         let row_num = row_num(&db, id)?;
+        record_policy_read_set_for_write(
+            &db,
+            &self.schema,
+            &table,
+            &table.write_policy,
+            &visible_row.values,
+            self.branch_num,
+            tx_num,
+        )?;
+        let allowed = self.trusted
+            || local_write_allowed(LocalWriteCheck {
+                db: &db,
+                schema: &self.schema,
+                table: &table,
+                row_num,
+                branch_num: self.branch_num,
+                values: &visible_row.values,
+                principal: &self.principal,
+                op: 3,
+            })?;
 
         let field_columns = table
             .fields
@@ -1787,6 +1786,10 @@ impl Runtime {
             )?;
         }
         record_tx_write(&db, tx_num, &table.name, row_num, 3)?;
+        if !allowed {
+            tx::reject(&db, &tx_id, "policy_denied")?;
+            projection::rebuild(&db, &self.schema, self.node_num)?;
+        }
         db.commit()?;
         Ok(tx_id)
     }
@@ -2483,7 +2486,7 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
     Ok(current)
 }
 
-fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
+fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     validate_write_fields(table, args.values)?;
     let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
@@ -2610,7 +2613,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
             &current_values,
         )?;
     }
-    Ok(())
+    Ok(allowed)
 }
 
 fn validate_write_fields(
@@ -3210,6 +3213,7 @@ impl<'a> TransactionBuilder<'a> {
             outcome,
             global_epoch,
         )?;
+        let mut allowed = true;
         for mutation in mutations {
             match mutation {
                 Mutation::Row {
@@ -3217,19 +3221,21 @@ impl<'a> TransactionBuilder<'a> {
                     id,
                     values,
                     op,
-                } => insert_row_in_tx(InsertRowInTx {
-                    db: &db,
-                    schema: &self.runtime.schema,
-                    table_name: &table,
-                    id: &id,
-                    values: &values,
-                    tx_num,
-                    branch_num: self.runtime.branch_num,
-                    now,
-                    principal: &self.runtime.principal,
-                    trusted: self.runtime.trusted,
-                    op,
-                })?,
+                } => {
+                    allowed &= insert_row_in_tx(InsertRowInTx {
+                        db: &db,
+                        schema: &self.runtime.schema,
+                        table_name: &table,
+                        id: &id,
+                        values: &values,
+                        tx_num,
+                        branch_num: self.runtime.branch_num,
+                        now,
+                        principal: &self.runtime.principal,
+                        trusted: self.runtime.trusted,
+                        op,
+                    })?;
+                }
                 Mutation::DeleteRow { table, id } => {
                     let table_def = self.runtime.schema.table_def(&table)?;
                     let row_num = row_num(&db, &id)?;
@@ -3245,6 +3251,26 @@ impl<'a> TransactionBuilder<'a> {
                         .get(&(table.clone(), id.clone()))
                         .ok_or_else(|| {
                             crate::Error::new(format!("missing delete snapshot {id}"))
+                        })?;
+                    record_policy_read_set_for_write(
+                        &db,
+                        &self.runtime.schema,
+                        table_def,
+                        &table_def.write_policy,
+                        &visible_row.values,
+                        self.runtime.branch_num,
+                        tx_num,
+                    )?;
+                    allowed &= self.runtime.trusted
+                        || local_write_allowed(LocalWriteCheck {
+                            db: &db,
+                            schema: &self.runtime.schema,
+                            table: table_def,
+                            row_num,
+                            branch_num: self.runtime.branch_num,
+                            values: &visible_row.values,
+                            principal: &self.runtime.principal,
+                            op: 3,
                         })?;
                     let field_columns = table_def
                         .fields
@@ -3405,6 +3431,10 @@ impl<'a> TransactionBuilder<'a> {
                     record_tx_write(&db, tx_num, "todos", row_num(&db, &id)?, 1)?;
                 }
             }
+        }
+        if !allowed {
+            tx::reject(&db, &tx_id, "policy_denied")?;
+            projection::rebuild(&db, &self.runtime.schema, self.runtime.node_num)?;
         }
         db.commit()?;
         Ok(tx_id)
