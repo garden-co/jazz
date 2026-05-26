@@ -308,6 +308,7 @@ impl Runtime {
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
+            policy_fingerprint: self.schema.policy_fingerprint(),
             branches,
             txs,
             reads,
@@ -361,6 +362,7 @@ impl Runtime {
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
+            policy_fingerprint: self.schema.policy_fingerprint(),
             branches,
             txs,
             reads,
@@ -392,6 +394,7 @@ impl Runtime {
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
+            policy_fingerprint: self.schema.policy_fingerprint(),
             branches,
             txs,
             reads,
@@ -478,6 +481,7 @@ impl Runtime {
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
+            policy_fingerprint: self.schema.policy_fingerprint(),
             branches,
             txs,
             reads,
@@ -696,6 +700,7 @@ impl Runtime {
             "absent" => Ok(Bundle {
                 protocol_version: BUNDLE_PROTOCOL_VERSION,
                 schema_fingerprint: self.schema.compatibility_fingerprint(),
+                policy_fingerprint: self.schema.policy_fingerprint(),
                 branches: Vec::new(),
                 txs: export_txs(&self.conn)?,
                 reads: Vec::new(),
@@ -1649,6 +1654,7 @@ impl Runtime {
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
+            policy_fingerprint: self.schema.policy_fingerprint(),
             branches,
             txs,
             reads,
@@ -1796,6 +1802,10 @@ impl Runtime {
 
     pub fn storage_format_version(&self) -> Result<i64> {
         storage::storage_version(&self.conn)
+    }
+
+    pub fn local_policy_fingerprint(&self) -> String {
+        self.schema.policy_fingerprint()
     }
 
     fn query_context(&self) -> query::QueryContext<'_> {

@@ -11,6 +11,8 @@ pub struct Bundle {
     pub protocol_version: i64,
     #[serde(default = "legacy_schema_fingerprint")]
     pub schema_fingerprint: String,
+    #[serde(default = "legacy_policy_fingerprint")]
+    pub policy_fingerprint: String,
     pub branches: Vec<BranchRecord>,
     pub txs: Vec<TxRecord>,
     pub reads: Vec<ReadRecord>,
@@ -24,6 +26,10 @@ fn default_bundle_protocol_version() -> i64 {
 }
 
 fn legacy_schema_fingerprint() -> String {
+    "legacy".to_owned()
+}
+
+fn legacy_policy_fingerprint() -> String {
     "legacy".to_owned()
 }
 

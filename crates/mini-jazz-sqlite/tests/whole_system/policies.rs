@@ -91,6 +91,55 @@ fn schema_rejects_ref_policy_that_does_not_point_at_ref_field() {
 }
 
 #[test]
+fn untrusted_acceptance_uses_authority_policy_not_sender_policy_fingerprint() {
+    let writer_schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let edge_schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+        table.write_if_created_by_principal();
+    });
+    let mut writer =
+        Runtime::open_with_schema(Storage::Memory, "writer", "alice", writer_schema).unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", edge_schema).unwrap();
+
+    let tx = writer
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("policy mismatch")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let bundle = writer.export_table_history("notes").unwrap();
+    assert_ne!(bundle.policy_fingerprint, edge.local_policy_fingerprint());
+
+    edge.apply_bundle(&bundle).unwrap();
+    assert_eq!(edge.read_rows("notes").unwrap().len(), 1);
+
+    let mut rejecting_edge = Runtime::open_trusted_with_schema(
+        Storage::Memory,
+        "rejecting-edge",
+        SchemaDef::new().table("notes", |table| {
+            table.text("body");
+            table.bool("pinned");
+            table.write_if_created_by_principal();
+        }),
+    )
+    .unwrap();
+    rejecting_edge.apply_untrusted_bundle(&bundle).unwrap();
+    assert_eq!(rejecting_edge.read_rows("notes").unwrap().len(), 1);
+    assert_eq!(
+        rejecting_edge.transaction_info(&tx).unwrap().rejection_code,
+        None
+    );
+}
+
+#[test]
 fn policy_scoped_sync_includes_required_parent_rows_only() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

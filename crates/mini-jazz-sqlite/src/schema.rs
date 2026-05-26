@@ -58,6 +58,23 @@ impl SchemaDef {
         }
         parts.join("|")
     }
+
+    pub(crate) fn policy_fingerprint(&self) -> String {
+        let mut parts = Vec::new();
+        for table in self.tables.values() {
+            parts.push(format!(
+                "{}:read:{}",
+                table.name,
+                table.read_policy.fingerprint_for_table(table)
+            ));
+            parts.push(format!(
+                "{}:write:{}",
+                table.name,
+                table.write_policy.fingerprint_for_table(table)
+            ));
+        }
+        parts.join("|")
+    }
 }
 
 impl Default for SchemaDef {
@@ -113,6 +130,24 @@ pub(crate) enum PolicyDef {
     RefReadable {
         field: String,
     },
+}
+
+impl PolicyDef {
+    fn fingerprint_for_table(&self, table: &TableDef) -> String {
+        match self {
+            PolicyDef::AllowAll => "allow_all".to_owned(),
+            PolicyDef::CreatedByPrincipal => "created_by_principal".to_owned(),
+            PolicyDef::RefReadable { field } => {
+                let storage_field = table
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == *field)
+                    .map(|field| field.storage_name.as_str())
+                    .unwrap_or(field);
+                format!("ref_readable:{storage_field}")
+            }
+        }
+    }
 }
 
 pub struct TableBuilder {

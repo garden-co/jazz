@@ -616,3 +616,9 @@ Design lesson: durable query state needs lifecycle, not just persistence. This i
 Covered reconnect refresh when query visibility changes through a policy dependency. A durable worker syncs an open task through a readable project, restarts, then refreshes its persisted query after the task is re-pointed to an unreadable project; the row is removed from the query result. Full mini crate suite is green with 178 tests.
 
 Design lesson: persisted query descriptors do not need to explicitly encode every policy dependency if refresh reruns semantic export against current policy state and sends repair history. Predicate descriptors plus policy-aware export are enough for this class of reconnect repair.
+
+## 2026-05-26 02:11 PDT
+
+Added policy fingerprints as bundle metadata and clarified their semantics. Bundles now carry a separate policy fingerprint from structural schema compatibility; untrusted acceptance still uses the authority runtime policy, not the sender policy fingerprint. Full mini crate suite is green with 179 tests.
+
+Design lesson: policy catalogue state is a separate lane, but sender policy metadata is not an authorization precondition for data bundles. The authority must evaluate its local trusted policy catalogue; remote policy fingerprints are useful for diagnostics/negotiation and future catalogue sync, not for replacing authority-side validation.

@@ -530,6 +530,7 @@ fn exported_bundles_carry_protocol_version() {
 
     assert_eq!(bundle.protocol_version, 1);
     assert_ne!(bundle.schema_fingerprint, "legacy");
+    assert_ne!(bundle.policy_fingerprint, "legacy");
 }
 
 #[test]
@@ -546,6 +547,7 @@ fn older_untagged_bundles_decode_as_protocol_version_one() {
 
     assert_eq!(bundle.protocol_version, 1);
     assert_eq!(bundle.schema_fingerprint, "legacy");
+    assert_eq!(bundle.policy_fingerprint, "legacy");
 }
 
 #[test]
