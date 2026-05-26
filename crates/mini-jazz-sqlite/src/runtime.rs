@@ -1452,6 +1452,34 @@ impl Runtime {
         ))
     }
 
+    pub fn subscribe_rows_where_contains(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        needle: &str,
+    ) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::where_contains(
+            table_name,
+            field_name,
+            needle,
+            self.read_rows_where_contains(table_name, field_name, needle)?,
+        ))
+    }
+
+    pub fn subscribe_rows_where_in(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+    ) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::where_in(
+            table_name,
+            field_name,
+            values.clone(),
+            self.read_rows_where_in(table_name, field_name, values)?,
+        ))
+    }
+
     pub fn read_row_candidates(&self, table_name: &str, id: &str) -> Result<Vec<RowView>> {
         self.query_context().read_row_candidates(table_name, id)
     }
@@ -1467,6 +1495,16 @@ impl Runtime {
                 field,
                 value,
             } => self.read_rows_where_eq(table, field, value.clone())?,
+            RowsSubscriptionQuery::WhereContains {
+                table,
+                field,
+                needle,
+            } => self.read_rows_where_contains(table, field, needle)?,
+            RowsSubscriptionQuery::WhereIn {
+                table,
+                field,
+                values,
+            } => self.read_rows_where_in(table, field, values.clone())?,
         };
         Ok(subscription.replace_with_diff(next_rows))
     }

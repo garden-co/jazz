@@ -18,6 +18,16 @@ pub(crate) enum RowsSubscriptionQuery {
         field: String,
         value: JsonValue,
     },
+    WhereContains {
+        table: String,
+        field: String,
+        needle: String,
+    },
+    WhereIn {
+        table: String,
+        field: String,
+        values: Vec<JsonValue>,
+    },
 }
 
 impl RowsSubscription {
@@ -36,6 +46,38 @@ impl RowsSubscription {
                 table: table.to_owned(),
                 field: field.to_owned(),
                 value,
+            },
+            last_rows: rows,
+        }
+    }
+
+    pub(crate) fn where_contains(
+        table: &str,
+        field: &str,
+        needle: &str,
+        rows: Vec<RowView>,
+    ) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::WhereContains {
+                table: table.to_owned(),
+                field: field.to_owned(),
+                needle: needle.to_owned(),
+            },
+            last_rows: rows,
+        }
+    }
+
+    pub(crate) fn where_in(
+        table: &str,
+        field: &str,
+        values: Vec<JsonValue>,
+        rows: Vec<RowView>,
+    ) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::WhereIn {
+                table: table.to_owned(),
+                field: field.to_owned(),
+                values,
             },
             last_rows: rows,
         }

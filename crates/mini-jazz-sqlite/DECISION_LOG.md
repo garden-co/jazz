@@ -516,3 +516,14 @@ crate suite is green with 164 tests.
 Design lesson: policy syntax validation is part of policy-first behavior. Bad
 policy declarations must fail loudly before any runtime can start accepting or
 serving data under the wrong assumptions.
+
+## 2026-05-26 01:36 PDT
+
+Extended local predicate subscriptions beyond equality. Subscriptions now cover
+`contains` and `in` predicates using the same rerun/diff model, with tests for
+rows entering and leaving both query shapes. Full mini crate suite is green with
+166 tests.
+
+Design lesson: the subscription object is turning into a query descriptor. That
+is good pressure toward unifying local subscriptions and sync query scopes
+around one semantic query representation instead of parallel ad-hoc APIs.

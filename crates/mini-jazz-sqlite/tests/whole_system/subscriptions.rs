@@ -107,6 +107,114 @@ fn predicate_subscription_diffs_when_row_enters_and_leaves_query() {
 }
 
 #[test]
+fn contains_subscription_diffs_when_text_starts_and_stops_matching() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("plain text")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("contains sqlite")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let mut subscription = alice
+        .subscribe_rows_where_contains("notes", "body", "sqlite")
+        .unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+    assert_eq!(subscription.initial_rows()[0].id, "note-2");
+
+    alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("now contains sqlite"))]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Added(row)] if row.id == "note-1"));
+
+    alice
+        .update_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([("body".to_owned(), json!("moved away"))]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "note-2"));
+}
+
+#[test]
+fn in_subscription_diffs_when_row_enters_and_leaves_value_set() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("alpha")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("gamma")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let mut subscription = alice
+        .subscribe_rows_where_in("notes", "body", vec![json!("alpha"), json!("beta")])
+        .unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+    assert_eq!(subscription.initial_rows()[0].id, "note-1");
+
+    alice
+        .update_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([("body".to_owned(), json!("beta"))]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Added(row)] if row.id == "note-2"));
+
+    alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("omega"))]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "note-1"));
+}
+
+#[test]
 fn subscription_removes_child_when_parent_policy_dependency_changes() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
