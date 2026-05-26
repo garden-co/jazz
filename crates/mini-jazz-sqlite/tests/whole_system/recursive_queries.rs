@@ -5,7 +5,7 @@ fn recursive_policy_filters_reads_through_grandparent_ref() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {
             table.text("name");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("projects", |table| {
             table.text("title");
@@ -105,7 +105,7 @@ fn long_acyclic_ref_policy_chain_reads_visible_leaf() {
                 table.ref_("parent", &parent_name);
                 table.read_if_ref_readable("parent");
             } else {
-                table.read_if_created_by_principal();
+                table.read_if_created_by_user();
             }
         });
     }
@@ -175,7 +175,7 @@ fn long_acyclic_recursive_policy_chain_is_sql_lowerable() {
         schema = schema.table(&table_name, |table| {
             table.text("name");
             if idx == 19 {
-                table.read_if_created_by_principal();
+                table.read_if_created_by_user();
             } else {
                 table.ref_("parent", &parent_name);
                 table.read_if_ref_readable("parent");
@@ -183,7 +183,7 @@ fn long_acyclic_recursive_policy_chain_is_sql_lowerable() {
         });
     }
     let mut writer =
-        Runtime::open_trusted_as_with_schema(Storage::Memory, "writer", "alice", schema.clone())
+        Runtime::open_trusted_with_session_user(Storage::Memory, "writer", "alice", schema.clone())
             .unwrap();
     let mut reader =
         Runtime::open_with_schema(Storage::Memory, "reader", "alice", schema.clone()).unwrap();
@@ -227,7 +227,7 @@ fn recursive_policy_scoped_sync_includes_transitive_parent_rows() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {
             table.text("name");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("projects", |table| {
             table.text("title");
@@ -591,7 +591,7 @@ fn recursive_observed_query_refresh_removes_policy_hidden_descendant_with_subscr
     let schema = SchemaDef::new()
         .table("orgs", |table| {
             table.text("name");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("folders", |table| {
             table.text("name");
@@ -915,7 +915,7 @@ fn recursive_query_scope_sync_includes_recursive_policy_ancestors() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {
             table.text("name");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("folders", |table| {
             table.text("name");
@@ -1185,7 +1185,7 @@ fn recursive_branch_query_export_includes_snapshot_policy_ancestors() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {
             table.text("name");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("folders", |table| {
             table.text("name");

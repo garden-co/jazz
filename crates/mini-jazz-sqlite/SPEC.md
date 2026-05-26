@@ -187,15 +187,17 @@ Physical ids are not part of API or wire semantics.
 A node is a local writer identity such as a device, process, browser worker, or
 authority participant. One user may have many nodes. A tab may either be its own
 node or use a shared worker node, depending on topology. Node ids are durable
-writer identities; principals are authorization identities.
+writer identities; users are authorization identities.
 
-### 5.4 Principal And Session
+### 5.4 User And Session
 
-A principal is the actor the database believes is acting: user, admin, service
-actor, or trusted runtime peer.
+A user is the authorization identity the database believes is acting. The
+identity may represent a human user, a service user, or an admin user. A trusted
+runtime peer is not itself a user merely because it is trusted; it executes work
+under an explicit session user or under an admin session.
 
 A session is the execution context for a query, write, or sync connection. It
-carries principal, trust role, auth mode, policy context, and runtime context.
+carries user, trust role, auth mode, policy context, and runtime context.
 
 ### 5.5 Trust Role
 
@@ -402,7 +404,7 @@ The core:
 Later, an edge or global authority may add durability receipts or reject the
 transaction. The public transaction id does not change.
 
-## 7. Auth, Principals, Sessions, And Roles
+## 7. Auth, Users, Sessions, And Roles
 
 Every query, write, and incoming sync application is evaluated under a session.
 The session feeds policy evaluation, observed facts, sync delivery, validation,
@@ -411,30 +413,83 @@ write provenance, and error reporting.
 Policy evaluation should see the same session context whether work is evaluated
 in a local client, browser worker, edge server, or global authority.
 
-Hosted auth integrations authenticate sessions and produce principals according
+An untrusted client always has an associated user for each live connection
+to a trusted peer. The trusted peer authenticates that connection and evaluates
+client-originated queries, sync requests, and writes under the authenticated
+session. A client may reconnect with refreshed auth, but the user for a
+live session must remain stable.
+
+A trusted peer, such as an edge worker or global core, has a node identity and
+authority role but no ambient user. It offers operations that execute
+either:
+
+- as a specific authenticated user, for ordinary user/service queries,
+  writes, and forwarded sync validation
+- as admin/system, for operational work that bypasses row policy and is
+  attributed to a reserved system actor
+- as a privileged backend operation attributed to a specific user, for work
+  that intentionally bypasses row policy but should preserve user-facing
+  provenance
+
+Trusted-peer-to-trusted-peer sync must preserve the initiating session context
+where policy validation is still pending. It must not rely on the receiving
+peer's own node identity as a stand-in user.
+
+Policy authority and write attribution are distinct concepts:
+
+- **As user** evaluates reads and writes under that user's policies and records
+  normal provenance for that user.
+- **Admin/system** bypasses row policy and records provenance under a reserved
+  system actor, not under an ordinary user id such as `admin`.
+- **Attributing to user** bypasses row policy as a privileged backend operation
+  while recording `$createdBy`/`$updatedBy` as the named user.
+
+Current Jazz already has this product distinction: backend request/session APIs
+evaluate policy with a request session, backend/admin credentials provide
+privileged transport or catalogue authority, and attribution helpers stamp
+write provenance without switching policy evaluation to that user. The new core
+should model this directly instead of deriving both policy input and provenance
+from one string.
+
+Runtime APIs and in-memory data structures should preserve this distinction.
+Opening an ordinary client runtime requires a user. Opening a trusted peer
+requires only node/storage/schema identity and starts in an admin session. In
+the prototype runtime API, "user" is also the protocol/security term for
+recorded authorization identity. Trusted peers may then execute scoped work as
+an authenticated user, but that user is session state, not part of the peer
+identity. The term "principal" should only appear when describing external auth
+standards, such as mapping a JWT principal/subject claim onto a Jazz user id.
+This shape should be visible in tests and harnesses: topology constructors model
+clients separately from trusted peers, and helpers that execute as a user must
+only be valid for trusted peers.
+
+Hosted auth integrations authenticate sessions and produce users according
 to app configuration. For JWT-based auth, the app configuration chooses which
-claim becomes the Jazz principal id.
+claim becomes the Jazz user id.
 
-Local anonymous users may have durable local principals, but account-linking or
-migration from anonymous principals to hosted principals is not specified here.
+Local anonymous users may have durable local users, but account-linking or
+migration from anonymous users to hosted users is not specified here.
 
-Local-first auth is a product mode. A device may mint a durable local principal
+Local-first auth is a product mode. A device may mint a durable local user
 from a platform-generated secret without requiring login. For compatibility with
 current Jazz, the baseline local-first identity is a 32-byte CSPRNG secret used
-to derive an Ed25519 signing key, a self-signed Jazz JWT, and a stable principal
+to derive an Ed25519 signing key, a self-signed Jazz JWT, and a stable user
 id derived from the public key, for example UUIDv5 over the public-key bytes in
 a Jazz namespace. Exact token fields may evolve, but the durable invariant is
-that the same local secret reproduces the same principal and clearing local
+that the same local secret reproduces the same user and clearing local
 storage can lose account continuity.
 
 Auth mode is policy input. Policies may distinguish hosted/external,
 local-first, anonymous, backend, service, and admin sessions. A live client must
-not hot-swap principals: token refresh may update auth state only when the
-principal remains the same. Hybrid account upgrade should preserve identity by
-binding hosted auth to the existing local-first Jazz principal where possible.
+not hot-swap users: token refresh may update auth state only when the
+user remains the same. Hybrid account upgrade should preserve identity by
+binding hosted auth to the existing local-first Jazz user where possible.
 
-Admin sessions bypass row policy entirely. They are still represented as
-sessions for audit, provenance, catalogue checks, and operational controls.
+Admin/system and privileged attribution sessions bypass row policy entirely.
+They are still represented as sessions for audit, provenance, catalogue checks,
+and operational controls. The reserved system actor namespace must not collide
+with app user ids; the Rust spike currently uses `@system/admin` for the admin
+session's provenance.
 
 Untrusted clients cannot forge authority-only facts such as global acceptance,
 rejection, durability receipts, or catalogue publication.
@@ -445,11 +500,19 @@ transaction, downstream clients may treat that acceptance as authoritative for
 visibility in the edge trust topology; the original session authentication does
 not have to be replayed by every downstream client.
 
+When a trusted peer receives sync from an untrusted connection, policy
+validation uses the authenticated user attached to that connection, not
+`$createdBy`, `$updatedBy`, or any other provenance field carried in the bundle.
+Bundle provenance is public data and cannot authorize a write. If the receiving
+trusted peer does not know the authenticated user for a pending mergeable
+transaction, it must reject or await auth context rather than infer authority
+from history rows.
+
 Exclusive transactions are different: they require final fate from the global
 authority. If an edge or other intermediary forwards an exclusive transaction
 instead of deciding it locally, it must forward enough authenticated session
 context for the global authority to evaluate the transaction under the same
-principal, admin/trust role, and policy context as the initiating session.
+user, admin/trust role, and policy context as the initiating session.
 
 Non-admin sessions fail closed when required policy metadata is missing.
 
@@ -464,7 +527,8 @@ Open issues:
 - valid JWT/auth claim configuration
 - exact local-first JWT validation and TTL/skew rules
 - anonymous-to-hosted and local-first-to-hosted migration UX
-- whether service actors and admins share one principal namespace with users
+- exact reserved namespace for system actors and whether service accounts are
+  ordinary app users or system actors
 - which provenance fields are visible by default under policy
 
 ## 8. Product Surface Goals
@@ -1492,11 +1556,11 @@ This is a security invariant: old locally observed policy facts do not authorize
 an exclusive transaction if current authority policy no longer allows it.
 
 Stale read-set comparison, however, must use the same effective policy-filtered
-view as the writer principal whose transaction is being validated. Hidden rows
+view as the writer user whose transaction is being validated. Hidden rows
 must not make a row, absence, predicate, or range read look stale merely because
 they exist in authority storage. This avoids false conflicts and avoids leaking
 the existence of rows the writer could not see. The validation read context is
-therefore parameterized by writer principal, branch/source view, current
+therefore parameterized by writer user, branch/source view, current
 catalogue/policy, and current authority-trusted history.
 
 Validation checks:
@@ -2508,7 +2572,7 @@ Recommended harness shape:
 - mix in-memory SQLite nodes and durable SQLite-file nodes
 - model multiple in-memory browser-tab nodes connected to one durable
   worker/tab-broker node
-- assign each runtime a node id, principal/session, catalogue revision, and
+- assign each runtime a node id, user/session, catalogue revision, and
   optional upstream peer
 - support local, edge, and global roles
 - allow explicit message passing rather than hidden synchronous replication
@@ -2610,7 +2674,7 @@ High-value things to try next:
 - add a small `COUNT` aggregate primitive over versioned/lensed tables
 - build an account-aggregator-shaped example that stresses aggregation, joins,
   policies, schema versions, sync scope, and subscriptions
-- validate exclusive predicate/range read sets under writer-principal policy
+- validate exclusive predicate/range read sets under writer-user policy
   context
 - compare column-history with JSON/BLOB-history layouts
 - test SQLite VFS/page or range compression for deep histories, including
@@ -2678,8 +2742,8 @@ feature exists.
 - Rehydrating the same public id on one replica returns the same physical id.
 - Different replicas may assign different physical ids to the same public id.
 - Logical row ids are globally unique.
-- Node ids are writer identities, not authorization principals.
-- One principal may write from multiple nodes.
+- Node ids are writer identities, not authorization users.
+- One user may write from multiple nodes.
 - Public-id/physical-id and branch-id/ordinal mappings are crash-atomic; a
   public identity cannot hydrate to two local physical identities after restart.
 
@@ -2866,14 +2930,20 @@ feature exists.
 
 - Policy sees the same session context across local, worker, edge, and global
   evaluation.
-- Local-first auth can derive a stable principal from a durable local secret.
-- Auth refresh may update session state only when principal identity is
+- Local-first auth can derive a stable user from a durable local secret.
+- Auth refresh may update session state only when user identity is
   preserved.
 - Auth mode is available as policy input.
 - Non-admin sessions fail closed when policy metadata is missing.
+- Trusted-peer policy authority and write attribution are distinct: running
+  as a user enforces that user's policies, admin/system work bypasses policy
+  with system attribution, and privileged attribution bypasses policy while
+  recording the named user as provenance.
+- System actor provenance uses a reserved namespace that cannot collide with
+  ordinary app user ids.
 - Admin sessions bypass row policy but remain auditable sessions.
 - Trusted peers may read applied policy-scoped facts without an end-user
-  principal when acting as infrastructure.
+  user when acting as infrastructure.
 - Read policy affects query results and sync delivery.
 - Insert/update/delete policy affects transaction acceptance.
 - Delete may fall back to update semantics where explicit delete rules are not
@@ -2885,7 +2955,7 @@ feature exists.
 - Exclusive transactions are validated by global authority against
   authority-visible history and the authority's current trusted policy
   catalogue.
-- Exclusive stale-read validation uses the writer principal's current
+- Exclusive stale-read validation uses the writer user's current
   policy-filtered view; rows hidden from that writer do not invalidate row,
   absence, predicate, or range reads.
 - Recursive policies over acyclic ref chains are SQL-lowerable.
@@ -2896,7 +2966,7 @@ feature exists.
 - Historical snapshot policy evaluates referenced parents at the same snapshot
   epoch recursively, not through current projection.
 - Branch-local parent rows override base parents for branch policy checks.
-- `write_if_created_by_principal` allows self-authored inserts and preserves
+- `write_if_created_by_user` allows self-authored inserts and preserves
   original `created_by` on updates.
 - Updates and deletes record the previously visible row as a read dependency.
 - Partial updates preserve omitted fields when constructing the proposed row for
@@ -2940,7 +3010,7 @@ feature exists.
   projections polluted by proposals.
 - Authority validation uses current authority policy, not stale locally observed
   policy, for security.
-- Stale-read comparison is parameterized by the writer principal's
+- Stale-read comparison is parameterized by the writer user's
   policy-filtered read context so hidden rows do not cause false conflicts or
   leak existence.
 - Row reads still observe the same visible version at validation time.
@@ -3122,7 +3192,7 @@ Coverage labels:
 
 | Group                      | Current status        | Notes                                                                                                                                                                                                                                              |
 | -------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D.1 Identity               | covered for prototype | Public row ids, physical id locality, replica-local physical ids, and one principal writing from multiple nodes are tested.                                                                                                                        |
+| D.1 Identity               | covered for prototype | Public row ids, physical id locality, replica-local physical ids, and one user writing from multiple nodes are tested.                                                                                                                             |
 | D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                    |
 | D.3 History/projection     | partial               | Append-only ordinary deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Hard delete/truncate and full merge/conflict projection semantics remain partial.                               |
 | D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                      |
@@ -3241,7 +3311,7 @@ Coverage labels:
 
 - `policy_filters_reads_through_required_parent_ref`: D.6, D.9
 - `policy_scoped_sync_includes_required_parent_rows_only`: D.6, D.7, D.9
-- `trusted_peer_can_read_applied_policy_scoped_facts_without_user_principal`:
+- `trusted_peer_can_read_applied_policy_scoped_facts_without_user_user`:
   D.7, D.9
 - `trusted_peer_generic_transaction_bypasses_user_write_policy`: D.9
 - `trusted_edge_accepts_mergeable_tx_then_untrusted_peers_enforce_policy`:
@@ -3337,11 +3407,11 @@ them concrete:
 - recursive query-scope export must include deleted descendant subtrees
 - recursive write-policy read sets are transitive
 - historical and branch policy evaluation must use the correct read context
-- `write_if_created_by_principal` has distinct create and update ownership
+- `write_if_created_by_user` has distinct create and update ownership
   semantics
 - generic schema installation must not be defined by the todo fixture
 - trusted infrastructure peers may read applied policy-scoped facts without a
-  user principal
+  user user
 - transaction-info APIs must propagate receipts, global epochs, and rejection
   details consistently after sync
 

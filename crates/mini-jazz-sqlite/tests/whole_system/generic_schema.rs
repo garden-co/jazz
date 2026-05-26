@@ -493,7 +493,7 @@ fn durable_in_query_read_refresh_repairs_row_that_left_value_set_after_restart()
 }
 
 #[test]
-fn created_by_magic_field_query_matches_creator_principal() {
+fn created_by_magic_field_query_matches_creator_user() {
     let schema = support::notes_schema();
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
@@ -825,7 +825,7 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("tasks", |table| {
             table.text("title");
@@ -904,7 +904,7 @@ fn query_scope_bundle_dedupes_shared_policy_dependency_history() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("tasks", |table| {
             table.text("title");
@@ -1854,7 +1854,7 @@ fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() 
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("tasks", |table| {
             table.text("title");
@@ -1941,7 +1941,7 @@ fn durable_query_read_refresh_repairs_policy_dependency_change_after_restart() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("tasks", |table| {
             table.text("title");
@@ -2381,7 +2381,7 @@ fn generic_required_ref_read_filters_parent_until_target_is_visible() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");

@@ -743,7 +743,7 @@ fn subscription_removes_child_when_parent_policy_dependency_changes() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");

@@ -352,7 +352,7 @@ fn renamed_ref_lens_participates_in_read_policy() {
     let old_schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -361,7 +361,7 @@ fn renamed_ref_lens_participates_in_read_policy() {
     let new_schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -435,7 +435,7 @@ fn renamed_ref_lens_participates_in_untrusted_write_policy_validation() {
     let old_schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -444,7 +444,7 @@ fn renamed_ref_lens_participates_in_untrusted_write_policy_validation() {
     let new_schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -455,7 +455,7 @@ fn renamed_ref_lens_participates_in_untrusted_write_policy_validation() {
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", old_schema.clone())
             .unwrap();
     let mut bob =
-        Runtime::open_trusted_as_with_schema(Storage::Memory, "bob-node", "bob", old_schema)
+        Runtime::open_trusted_with_session_user(Storage::Memory, "bob-node", "bob", old_schema)
             .unwrap();
     let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", new_schema).unwrap();
 
@@ -481,8 +481,11 @@ fn renamed_ref_lens_participates_in_untrusted_write_policy_validation() {
         )
         .unwrap();
 
-    edge.apply_untrusted_bundle(&bob.export_table_history("todos").unwrap())
-        .unwrap();
+    edge.apply_untrusted_bundle_as_user(
+        &bob.export_table_history("todos").unwrap(),
+        bob.session_user(),
+    )
+    .unwrap();
 
     assert!(edge.read_rows("todos").unwrap().is_empty());
     assert_eq!(
@@ -496,7 +499,7 @@ fn lens_compatible_write_policy_allows_ordinary_peer_sync() {
     let old_schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -506,7 +509,7 @@ fn lens_compatible_write_policy_allows_ordinary_peer_sync() {
     let new_schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -552,7 +555,7 @@ fn renamed_ref_lens_exports_transitive_write_policy_dependencies_for_untrusted_e
     let old_schema = SchemaDef::new()
         .table("orgs", |table| {
             table.text("name");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("projects", |table| {
             table.text("title");
@@ -567,7 +570,7 @@ fn renamed_ref_lens_exports_transitive_write_policy_dependencies_for_untrusted_e
     let new_schema = SchemaDef::new()
         .table("orgs", |table| {
             table.text("name");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("projects", |table| {
             table.text("title");
@@ -580,7 +583,7 @@ fn renamed_ref_lens_exports_transitive_write_policy_dependencies_for_untrusted_e
             table.write_if_ref_readable("workspace");
         });
     let mut alice =
-        Runtime::open_trusted_as_with_schema(Storage::Memory, "alice-node", "alice", old_schema)
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", old_schema)
             .unwrap();
     let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", new_schema).unwrap();
 
@@ -622,7 +625,8 @@ fn renamed_ref_lens_exports_transitive_write_policy_dependencies_for_untrusted_e
     assert!(exported.contains(&("projects", "project-1")));
     assert!(exported.contains(&("orgs", "org-1")));
 
-    edge.apply_untrusted_bundle(&bundle).unwrap();
+    edge.apply_untrusted_bundle_as_user(&bundle, alice.session_user())
+        .unwrap();
 
     assert_eq!(edge.transaction_info(&tx).unwrap().rejection_code, None);
     let rows = edge.read_rows("todos").unwrap();

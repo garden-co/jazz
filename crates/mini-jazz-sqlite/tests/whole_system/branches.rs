@@ -876,7 +876,7 @@ fn branch_base_snapshot_applies_row_policy() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
         table.bool("done");
-        table.read_if_created_by_principal();
+        table.read_if_created_by_user();
     });
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
@@ -922,7 +922,7 @@ fn branch_base_snapshot_ref_policy_uses_parent_at_base_epoch() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -978,7 +978,7 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -1011,7 +1011,7 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
     alice.checkout_branch("draft").unwrap();
     assert_eq!(alice.read_rows("todos").unwrap().len(), 1);
 
-    alice.principal_for_test("bob");
+    alice.session_user_for_test("bob");
     alice
         .update_row(
             "projects",
@@ -1019,7 +1019,7 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
             BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
         )
         .unwrap();
-    alice.principal_for_test("alice");
+    alice.session_user_for_test("alice");
 
     assert!(alice.read_rows("todos").unwrap().is_empty());
 }
@@ -1029,7 +1029,7 @@ fn branch_equality_query_uses_effective_branch_policy() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -1061,7 +1061,7 @@ fn branch_equality_query_uses_effective_branch_policy() {
     alice.create_branch("draft", Some(2)).unwrap();
     alice.checkout_branch("draft").unwrap();
 
-    alice.principal_for_test("bob");
+    alice.session_user_for_test("bob");
     alice
         .update_row(
             "projects",
@@ -1069,7 +1069,7 @@ fn branch_equality_query_uses_effective_branch_policy() {
             BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
         )
         .unwrap();
-    alice.principal_for_test("alice");
+    alice.session_user_for_test("alice");
 
     assert!(alice
         .read_rows_where_eq("todos", "title", json!("Find me"))
@@ -1082,7 +1082,7 @@ fn branch_base_export_preserves_ref_policy_at_base_epoch() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("todos", |table| {
             table.text("title");
@@ -2637,7 +2637,7 @@ fn branch_conflict_candidates_respect_effective_row_policy() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
             table.text("title");
-            table.read_if_created_by_principal();
+            table.read_if_created_by_user();
         })
         .table("tasks", |table| {
             table.text("title");
@@ -2669,7 +2669,7 @@ fn branch_conflict_candidates_respect_effective_row_policy() {
         )
         .unwrap();
 
-    alice.principal_for_test("bob");
+    alice.session_user_for_test("bob");
     alice.create_branch("right", None).unwrap();
     alice.checkout_branch("right").unwrap();
     alice
@@ -2691,7 +2691,7 @@ fn branch_conflict_candidates_respect_effective_row_policy() {
         )
         .unwrap();
 
-    alice.principal_for_test("alice");
+    alice.session_user_for_test("alice");
     alice
         .create_branch_from_branches("merge", &["left", "right"])
         .unwrap();

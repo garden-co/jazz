@@ -19,24 +19,46 @@ pub struct Runtime {
     conn: Connection,
     schema: SchemaDef,
     node_id: String,
-    principal: String,
+    auth: RuntimeAuth,
     node_num: i64,
     branch_num: i64,
-    trusted: bool,
+}
+
+pub const ADMIN_SYSTEM_USER: &str = "@system/admin";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeAuth {
+    Client(User),
+    TrustedPeer { session: TrustedSession },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct User(pub String);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrustedSession {
+    Admin,
+    AsUser(User),
+    AttributingToUser(User),
 }
 
 impl Runtime {
-    pub fn open(storage: Storage, node_id: &str, principal: &str) -> Result<Self> {
-        Self::open_with_schema(storage, node_id, principal, SchemaDef::attempt3_fixture())
+    pub fn open(storage: Storage, node_id: &str, user: &str) -> Result<Self> {
+        Self::open_with_schema(storage, node_id, user, SchemaDef::attempt3_fixture())
     }
 
     pub fn open_with_schema(
         storage: Storage,
         node_id: &str,
-        principal: &str,
+        user: &str,
         schema_def: SchemaDef,
     ) -> Result<Self> {
-        Self::open_with_schema_and_trust(storage, node_id, principal, schema_def, false)
+        Self::open_with_schema_and_auth(
+            storage,
+            node_id,
+            RuntimeAuth::Client(User(user.to_owned())),
+            schema_def,
+        )
     }
 
     pub fn open_trusted_with_schema(
@@ -44,24 +66,53 @@ impl Runtime {
         node_id: &str,
         schema_def: SchemaDef,
     ) -> Result<Self> {
-        Self::open_with_schema_and_trust(storage, node_id, "trusted", schema_def, true)
+        Self::open_with_schema_and_auth(
+            storage,
+            node_id,
+            RuntimeAuth::TrustedPeer {
+                session: TrustedSession::Admin,
+            },
+            schema_def,
+        )
     }
 
-    pub fn open_trusted_as_with_schema(
+    pub fn open_trusted_with_session_user(
         storage: Storage,
         node_id: &str,
-        principal: &str,
+        user: &str,
         schema_def: SchemaDef,
     ) -> Result<Self> {
-        Self::open_with_schema_and_trust(storage, node_id, principal, schema_def, true)
+        Self::open_with_schema_and_auth(
+            storage,
+            node_id,
+            RuntimeAuth::TrustedPeer {
+                session: TrustedSession::AsUser(User(user.to_owned())),
+            },
+            schema_def,
+        )
     }
 
-    fn open_with_schema_and_trust(
+    pub fn open_trusted_attributing_to_user(
         storage: Storage,
         node_id: &str,
-        principal: &str,
+        user: &str,
         schema_def: SchemaDef,
-        trusted: bool,
+    ) -> Result<Self> {
+        Self::open_with_schema_and_auth(
+            storage,
+            node_id,
+            RuntimeAuth::TrustedPeer {
+                session: TrustedSession::AttributingToUser(User(user.to_owned())),
+            },
+            schema_def,
+        )
+    }
+
+    fn open_with_schema_and_auth(
+        storage: Storage,
+        node_id: &str,
+        auth: RuntimeAuth,
+        schema_def: SchemaDef,
     ) -> Result<Self> {
         let conn = storage::open(storage)?;
         schema::install(&conn, &schema_def)?;
@@ -70,11 +121,87 @@ impl Runtime {
             conn,
             schema: schema_def,
             node_id: node_id.to_owned(),
-            principal: principal.to_owned(),
+            auth,
             node_num,
             branch_num: 1,
-            trusted,
         })
+    }
+
+    pub fn is_trusted(&self) -> bool {
+        matches!(self.auth, RuntimeAuth::TrustedPeer { .. })
+    }
+
+    pub fn session_user(&self) -> &str {
+        self.policy_user()
+    }
+
+    fn policy_user(&self) -> &str {
+        match &self.auth {
+            RuntimeAuth::Client(User(user)) => user,
+            RuntimeAuth::TrustedPeer {
+                session: TrustedSession::AsUser(User(user)),
+            } => user,
+            RuntimeAuth::TrustedPeer {
+                session: TrustedSession::AttributingToUser(User(user)),
+            } => user,
+            RuntimeAuth::TrustedPeer {
+                session: TrustedSession::Admin,
+            } => ADMIN_SYSTEM_USER,
+        }
+    }
+
+    fn attribution_user(&self) -> &str {
+        match &self.auth {
+            RuntimeAuth::Client(User(user)) => user,
+            RuntimeAuth::TrustedPeer {
+                session:
+                    TrustedSession::AsUser(User(user)) | TrustedSession::AttributingToUser(User(user)),
+            } => user,
+            RuntimeAuth::TrustedPeer {
+                session: TrustedSession::Admin,
+            } => ADMIN_SYSTEM_USER,
+        }
+    }
+
+    fn bypasses_policy(&self) -> bool {
+        matches!(
+            &self.auth,
+            RuntimeAuth::TrustedPeer {
+                session: TrustedSession::Admin | TrustedSession::AttributingToUser(_)
+            }
+        )
+    }
+
+    pub fn run_as_user<T>(&mut self, user: &str, f: impl FnOnce(&mut Runtime) -> T) -> T {
+        assert!(
+            self.is_trusted(),
+            "run_as_user is only valid for trusted peers"
+        );
+        let previous = self.auth.clone();
+        self.auth = RuntimeAuth::TrustedPeer {
+            session: TrustedSession::AsUser(User(user.to_owned())),
+        };
+        let result = f(self);
+        self.auth = previous;
+        result
+    }
+
+    pub fn run_attributing_to_user<T>(
+        &mut self,
+        user: &str,
+        f: impl FnOnce(&mut Runtime) -> T,
+    ) -> T {
+        assert!(
+            self.is_trusted(),
+            "run_attributing_to_user is only valid for trusted peers"
+        );
+        let previous = self.auth.clone();
+        self.auth = RuntimeAuth::TrustedPeer {
+            session: TrustedSession::AttributingToUser(User(user.to_owned())),
+        };
+        let result = f(self);
+        self.auth = previous;
+        result
     }
 
     pub fn insert_row(
@@ -118,6 +245,8 @@ impl Runtime {
         op: i64,
     ) -> Result<String> {
         let table = self.schema.table_def(table_name)?.clone();
+        let user = self.attribution_user().to_owned();
+        let bypass_policy = self.bypasses_policy();
         let db = self.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
@@ -130,8 +259,8 @@ impl Runtime {
             tx_num,
             branch_num: self.branch_num,
             now,
-            principal: &self.principal,
-            trusted: self.trusted,
+            user: &user,
+            bypass_policy,
             op,
         })?;
         let row_num = row_num(&db, id)?;
@@ -170,13 +299,15 @@ impl Runtime {
 
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
         let txs = export_txs(&self.conn)?;
         let history = export_table_history(
             &self.conn,
             &self.schema,
             table_name,
-            &self.principal,
-            self.trusted,
+            user,
+            bypass_policy,
             self.branch_num,
         )?;
         let reads = export_reads_for_history(&self.conn, &history)?;
@@ -196,7 +327,7 @@ impl Runtime {
         &self,
         table_name: &str,
         tx_id: &str,
-        auth_principal: &str,
+        auth_user: &str,
     ) -> Result<Bundle> {
         let mut bundle = self.export_table_history(table_name)?;
         let tx_record = bundle
@@ -213,7 +344,7 @@ impl Runtime {
         tx_record.outcome = tx::OUTCOME_PENDING;
         tx_record.global_epoch = None;
         tx_record.receipt_tiers.clear();
-        tx_record.auth_principal = Some(auth_principal.to_owned());
+        tx_record.auth_user = Some(auth_user.to_owned());
         Ok(bundle)
     }
 
@@ -224,6 +355,8 @@ impl Runtime {
         parent_field: &str,
     ) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
         let rows = self.read_recursive_refs(table_name, root_id, parent_field)?;
         let row_nums = rows
             .iter()
@@ -235,8 +368,8 @@ impl Runtime {
             &self.conn,
             &self.schema,
             table_name,
-            &self.principal,
-            self.trusted,
+            user,
+            bypass_policy,
             &branch_nums,
             Some(&row_nums),
         )?;
@@ -262,8 +395,8 @@ impl Runtime {
             PolicyDependencyExport {
                 table_name,
                 policy: &self.schema.table_def(table_name)?.read_policy,
-                principal: &self.principal,
-                trusted: self.trusted,
+                user,
+                bypass_policy,
                 branch_nums: &branch_nums,
                 child_row_nums: Some(&row_nums),
             },
@@ -281,8 +414,8 @@ impl Runtime {
                     &self.conn,
                     &self.schema,
                     table_name,
-                    &self.principal,
-                    self.trusted,
+                    user,
+                    bypass_policy,
                     base_epoch,
                     Some(&row_nums),
                 )?);
@@ -364,7 +497,7 @@ impl Runtime {
         }
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
-            let metadata_json = tx_metadata_json(tx_record.auth_principal.as_deref())?;
+            let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
             db.execute(
                 "INSERT INTO jazz_tx
                  (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
@@ -634,16 +767,28 @@ impl Runtime {
     }
 
     pub fn apply_untrusted_bundle(&mut self, bundle: &Bundle) -> Result<()> {
+        self.apply_untrusted_bundle_with_auth_user(bundle, None)
+    }
+
+    pub fn apply_untrusted_bundle_as_user(&mut self, bundle: &Bundle, user: &str) -> Result<()> {
+        self.apply_untrusted_bundle_with_auth_user(bundle, Some(user))
+    }
+
+    fn apply_untrusted_bundle_with_auth_user(
+        &mut self,
+        bundle: &Bundle,
+        bundle_auth_user: Option<&str>,
+    ) -> Result<()> {
         let stale_exclusive_tx_ids =
             read_set::stale_exclusive_tx_ids_in_bundle(&self.conn, bundle)?;
-        let forwarded_auth_principals = bundle
+        let forwarded_auth_users = bundle
             .txs
             .iter()
             .filter(|tx| tx.conflict_mode == tx::MODE_EXCLUSIVE)
             .filter_map(|tx| {
-                tx.auth_principal
+                tx.auth_user
                     .as_deref()
-                    .map(|principal| (tx.tx_id.as_str(), principal))
+                    .map(|user| (tx.tx_id.as_str(), user))
             })
             .collect::<BTreeMap<_, _>>();
         self.apply_bundle_inner(bundle, false)?;
@@ -666,30 +811,56 @@ impl Runtime {
             if tx_outcome(&self.conn, tx_num)? != tx::OUTCOME_PENDING {
                 continue;
             }
-            if tx_conflict_mode(&self.conn, tx_num)? == tx::MODE_EXCLUSIVE
-                && read_set::tx_read_set_is_stale(&self.conn, tx_num, &record.branch_id)?
-            {
+            let conflict_mode = tx_conflict_mode(&self.conn, tx_num)?;
+            if conflict_mode == tx::MODE_EXCLUSIVE {
+                if !forwarded_auth_users.contains_key(record.tx_id.as_str()) {
+                    self.reject_transaction_with_detail(
+                        &record.tx_id,
+                        "policy_denied",
+                        json!({
+                            "reason": "missing_auth_user",
+                        }),
+                    )?;
+                    rejected.insert(record.tx_id.clone());
+                    continue;
+                }
+                if read_set::tx_read_set_is_stale(&self.conn, tx_num, &record.branch_id)? {
+                    self.reject_transaction_with_detail(
+                        &record.tx_id,
+                        "stale_read_set",
+                        json!({
+                            "reason": "exclusive_read_dependency_changed",
+                        }),
+                    )?;
+                    rejected.insert(record.tx_id.clone());
+                    continue;
+                }
+            }
+            let table = self.schema.table_def(&record.table)?;
+            let row_num = ensure_row_id(&self.conn, &record.table, &record.row_id)?;
+            let auth_user = if conflict_mode == tx::MODE_EXCLUSIVE {
+                forwarded_auth_users.get(record.tx_id.as_str()).copied()
+            } else {
+                bundle_auth_user
+            };
+            if auth_user.is_none() {
                 self.reject_transaction_with_detail(
                     &record.tx_id,
-                    "stale_read_set",
+                    "policy_denied",
                     json!({
-                        "reason": "exclusive_read_dependency_changed",
+                        "reason": "missing_auth_user",
                     }),
                 )?;
                 rejected.insert(record.tx_id.clone());
                 continue;
             }
-            let table = self.schema.table_def(&record.table)?;
-            let row_num = ensure_row_id(&self.conn, &record.table, &record.row_id)?;
             let allowed = write_allowed_for_history_record(
                 &self.conn,
                 &self.schema,
                 table,
                 row_num,
                 record,
-                forwarded_auth_principals
-                    .get(record.tx_id.as_str())
-                    .copied(),
+                auth_user,
             )?;
             if !allowed {
                 let detail =
@@ -1431,8 +1602,13 @@ impl Runtime {
         Ok(branches)
     }
 
-    pub fn principal_for_test(&mut self, principal: &str) {
-        self.principal = principal.to_owned();
+    pub fn session_user_for_test(&mut self, user: &str) {
+        match &mut self.auth {
+            RuntimeAuth::Client(User(current)) => *current = user.to_owned(),
+            RuntimeAuth::TrustedPeer { session } => {
+                *session = TrustedSession::AsUser(User(user.to_owned()));
+            }
+        }
     }
 
     pub fn transaction(&mut self) -> TransactionBuilder<'_> {
@@ -1450,6 +1626,8 @@ impl Runtime {
             .into_iter()
             .find(|row| row.id == id)
             .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?;
+        let user = self.attribution_user().to_owned();
+        let bypass_policy = self.bypasses_policy();
         let db = self.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
@@ -1463,7 +1641,7 @@ impl Runtime {
             self.branch_num,
             tx_num,
         )?;
-        let allowed = self.trusted
+        let allowed = bypass_policy
             || local_write_allowed(LocalWriteCheck {
                 db: &db,
                 schema: &self.schema,
@@ -1471,7 +1649,7 @@ impl Runtime {
                 row_num,
                 branch_num: self.branch_num,
                 values: &visible_row.values,
-                principal: &self.principal,
+                user: &user,
                 op: 3,
             })?;
 
@@ -1517,7 +1695,7 @@ impl Runtime {
                 select_columns.join(", "),
                 crate::schema::current_table(&table.name),
             ),
-            params![tx_num, now, self.principal, row_num, self.branch_num],
+            params![tx_num, now, user, row_num, self.branch_num],
         )?;
         if inserted == 0 {
             let mut values = vec![
@@ -1540,8 +1718,8 @@ impl Runtime {
             values.extend([
                 rusqlite::types::Value::Integer(now),
                 rusqlite::types::Value::Integer(now),
-                rusqlite::types::Value::Text(self.principal.clone()),
-                rusqlite::types::Value::Text(self.principal.clone()),
+                rusqlite::types::Value::Text(user.to_owned()),
+                rusqlite::types::Value::Text(user.to_owned()),
             ]);
             insert_dynamic(
                 &db,
@@ -1591,8 +1769,8 @@ impl Runtime {
             current_values.extend([
                 rusqlite::types::Value::Integer(now),
                 rusqlite::types::Value::Integer(now),
-                rusqlite::types::Value::Text(self.principal.clone()),
-                rusqlite::types::Value::Text(self.principal.clone()),
+                rusqlite::types::Value::Text(user.to_owned()),
+                rusqlite::types::Value::Text(user.to_owned()),
             ]);
             insert_dynamic(
                 &db,
@@ -1891,6 +2069,8 @@ impl Runtime {
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
         let table = self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
         let mut row_nums = rows
             .iter()
             .map(|row| row_num(&self.conn, &row.id))
@@ -1906,8 +2086,8 @@ impl Runtime {
             &self.conn,
             &self.schema,
             table_name,
-            &self.principal,
-            self.trusted,
+            user,
+            bypass_policy,
             &branch_nums,
             Some(&row_nums),
         )?;
@@ -1924,8 +2104,8 @@ impl Runtime {
             PolicyDependencyExport {
                 table_name,
                 policy: &self.schema.table_def(table_name)?.read_policy,
-                principal: &self.principal,
-                trusted: self.trusted,
+                user,
+                bypass_policy,
                 branch_nums: &branch_nums,
                 child_row_nums: Some(&row_nums),
             },
@@ -1951,8 +2131,8 @@ impl Runtime {
                     &self.conn,
                     &self.schema,
                     table_name,
-                    &self.principal,
-                    self.trusted,
+                    user,
+                    bypass_policy,
                     base_epoch,
                     Some(&row_nums),
                 )?);
@@ -1986,6 +2166,8 @@ impl Runtime {
         ref_field_name: &str,
         branch_nums: &[i64],
     ) -> Result<Vec<HistoryRecord>> {
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
         let field = table
             .fields
             .iter()
@@ -2014,8 +2196,8 @@ impl Runtime {
             &self.conn,
             &self.schema,
             ref_table_name,
-            &self.principal,
-            self.trusted,
+            user,
+            bypass_policy,
             branch_nums,
             Some(&ref_row_nums),
         )?;
@@ -2032,8 +2214,8 @@ impl Runtime {
             PolicyDependencyExport {
                 table_name: ref_table_name,
                 policy: &self.schema.table_def(ref_table_name)?.read_policy,
-                principal: &self.principal,
-                trusted: self.trusted,
+                user,
+                bypass_policy,
                 branch_nums,
                 child_row_nums: Some(&ref_row_nums),
             },
@@ -2360,8 +2542,8 @@ impl Runtime {
             conn: &self.conn,
             schema: &self.schema,
             branch_num: self.branch_num,
-            principal: &self.principal,
-            trusted: self.trusted,
+            user: self.policy_user(),
+            bypass_policy: self.bypasses_policy(),
         }
     }
 }
@@ -2375,8 +2557,8 @@ struct InsertRowInTx<'a> {
     tx_num: i64,
     branch_num: i64,
     now: i64,
-    principal: &'a str,
-    trusted: bool,
+    user: &'a str,
+    bypass_policy: bool,
     op: i64,
 }
 
@@ -2457,7 +2639,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         args.branch_num,
         args.tx_num,
     )?;
-    let allowed = args.trusted
+    let allowed = args.bypass_policy
         || local_write_allowed(LocalWriteCheck {
             db: args.db,
             schema: args.schema,
@@ -2465,7 +2647,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
             row_num,
             branch_num: args.branch_num,
             values: &effective_values,
-            principal: args.principal,
+            user: args.user,
             op: args.op,
         })?;
 
@@ -2502,16 +2684,16 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         "j_updated_by".to_owned(),
     ]);
     let (created_at, created_by) = if args.op == 1 {
-        (args.now, args.principal.to_owned())
+        (args.now, args.user.to_owned())
     } else {
         current_creation_metadata(args.db, &table.name, row_num, args.branch_num)?
-            .unwrap_or((args.now, args.principal.to_owned()))
+            .unwrap_or((args.now, args.user.to_owned()))
     };
     sql_values.extend([
         rusqlite::types::Value::Integer(created_at),
         rusqlite::types::Value::Integer(args.now),
         rusqlite::types::Value::Text(created_by),
-        rusqlite::types::Value::Text(args.principal.to_owned()),
+        rusqlite::types::Value::Text(args.user.to_owned()),
     ]);
     insert_dynamic(
         args.db,
@@ -2573,12 +2755,12 @@ struct LocalWriteCheck<'a> {
     row_num: i64,
     branch_num: i64,
     values: &'a BTreeMap<String, JsonValue>,
-    principal: &'a str,
+    user: &'a str,
     op: i64,
 }
 
 fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
-    if check.op == 1 && matches!(check.table.write_policy, PolicyDef::CreatedByPrincipal) {
+    if check.op == 1 && matches!(check.table.write_policy, PolicyDef::CreatedByUser) {
         return Ok(true);
     }
     policy::write_allowed(policy::WriteCheck {
@@ -2588,7 +2770,7 @@ fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
         row_num: check.row_num,
         branch_num: check.branch_num,
         values: check.values,
-        principal: check.principal,
+        user: check.user,
     })
 }
 
@@ -3065,6 +3247,8 @@ impl<'a> TransactionBuilder<'a> {
 
     pub fn commit(self) -> Result<String> {
         let mutations = self.mutations;
+        let user = self.runtime.attribution_user().to_owned();
+        let bypass_policy = self.runtime.bypasses_policy();
         let mut delete_snapshots = BTreeMap::new();
         for mutation in &mutations {
             let Mutation::DeleteRow { table, id } = mutation else {
@@ -3131,8 +3315,8 @@ impl<'a> TransactionBuilder<'a> {
                         tx_num,
                         branch_num: self.runtime.branch_num,
                         now,
-                        principal: &self.runtime.principal,
-                        trusted: self.runtime.trusted,
+                        user: &user,
+                        bypass_policy,
                         op,
                     })?;
                 }
@@ -3161,7 +3345,7 @@ impl<'a> TransactionBuilder<'a> {
                         self.runtime.branch_num,
                         tx_num,
                     )?;
-                    allowed &= self.runtime.trusted
+                    allowed &= bypass_policy
                         || local_write_allowed(LocalWriteCheck {
                             db: &db,
                             schema: &self.runtime.schema,
@@ -3169,7 +3353,7 @@ impl<'a> TransactionBuilder<'a> {
                             row_num,
                             branch_num: self.runtime.branch_num,
                             values: &visible_row.values,
-                            principal: &self.runtime.principal,
+                            user: &user,
                             op: 3,
                         })?;
                     let field_columns = table_def
@@ -3216,13 +3400,7 @@ impl<'a> TransactionBuilder<'a> {
                             select_columns.join(", "),
                             crate::schema::current_table(&table),
                         ),
-                        params![
-                            tx_num,
-                            now,
-                            self.runtime.principal,
-                            row_num,
-                            self.runtime.branch_num
-                        ],
+                        params![tx_num, now, user, row_num, self.runtime.branch_num],
                     )?;
                     if inserted == 0 {
                         let mut values = vec![
@@ -3244,8 +3422,8 @@ impl<'a> TransactionBuilder<'a> {
                         values.extend([
                             rusqlite::types::Value::Integer(now),
                             rusqlite::types::Value::Integer(now),
-                            rusqlite::types::Value::Text(self.runtime.principal.clone()),
-                            rusqlite::types::Value::Text(self.runtime.principal.clone()),
+                            rusqlite::types::Value::Text(user.to_owned()),
+                            rusqlite::types::Value::Text(user.to_owned()),
                         ]);
                         insert_dynamic(
                             &db,
@@ -3294,8 +3472,8 @@ impl<'a> TransactionBuilder<'a> {
                         current_values.extend([
                             rusqlite::types::Value::Integer(now),
                             rusqlite::types::Value::Integer(now),
-                            rusqlite::types::Value::Text(self.runtime.principal.clone()),
-                            rusqlite::types::Value::Text(self.runtime.principal.clone()),
+                            rusqlite::types::Value::Text(user.to_owned()),
+                            rusqlite::types::Value::Text(user.to_owned()),
                         ]);
                         insert_dynamic(
                             &db,
@@ -3376,17 +3554,13 @@ fn write_allowed_for_history_record(
     table: &crate::schema::TableDef,
     row_num: i64,
     record: &HistoryRecord,
-    forwarded_auth_principal: Option<&str>,
+    auth_user: Option<&str>,
 ) -> Result<bool> {
-    let record_principal = if record.op == 1 {
-        &record.created_by
-    } else {
-        &record.updated_by
-    };
-    let principal = forwarded_auth_principal.unwrap_or(record_principal);
+    let user = auth_user
+        .ok_or_else(|| crate::Error::new("untrusted policy validation requires auth user"))?;
     let branch_num = branch::ensure(conn, &record.branch_id, None, now_ms())?;
-    if record.op == 3 && matches!(table.write_policy, PolicyDef::CreatedByPrincipal) {
-        return Ok(record.created_by == principal);
+    if record.op == 3 && matches!(table.write_policy, PolicyDef::CreatedByUser) {
+        return Ok(record.created_by == user);
     }
     policy::write_allowed(policy::WriteCheck {
         db: conn,
@@ -3395,7 +3569,7 @@ fn write_allowed_for_history_record(
         row_num,
         branch_num,
         values: &record.values,
-        principal,
+        user,
     })
 }
 
@@ -3458,7 +3632,7 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             global_epoch: row.get(3)?,
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
-            auth_principal: parse_tx_auth_principal_for_sqlite(&row.get::<_, String>(9)?, 9)?,
+            auth_user: parse_tx_auth_user_for_sqlite(&row.get::<_, String>(9)?, 9)?,
             rejection_code: row.get(6)?,
             rejection_detail: row
                 .get::<_, Option<String>>(7)?
@@ -3484,15 +3658,15 @@ fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
     }
 }
 
-fn tx_metadata_json(auth_principal: Option<&str>) -> Result<String> {
-    let metadata = match auth_principal {
-        Some(principal) => json!({ "auth_principal": principal }),
+fn tx_metadata_json(auth_user: Option<&str>) -> Result<String> {
+    let metadata = match auth_user {
+        Some(user) => json!({ "auth_user": user }),
         None => json!({}),
     };
     serde_json::to_string(&metadata).map_err(|err| crate::Error::new(err.to_string()))
 }
 
-fn parse_tx_auth_principal_for_sqlite(
+fn parse_tx_auth_user_for_sqlite(
     metadata_json: &str,
     column: usize,
 ) -> rusqlite::Result<Option<String>> {
@@ -3504,7 +3678,7 @@ fn parse_tx_auth_principal_for_sqlite(
         )
     })?;
     Ok(metadata
-        .get("auth_principal")
+        .get("auth_user")
         .and_then(JsonValue::as_str)
         .map(str::to_owned))
 }
@@ -3689,8 +3863,8 @@ fn export_table_history(
     conn: &Connection,
     schema: &SchemaDef,
     table_name: &str,
-    principal: &str,
-    trusted: bool,
+    user: &str,
+    bypass_policy: bool,
     branch_num: i64,
 ) -> Result<Vec<HistoryRecord>> {
     let branch_nums = branch::scope_nums(conn, branch_num)?;
@@ -3698,8 +3872,8 @@ fn export_table_history(
         conn,
         schema,
         table_name,
-        principal,
-        trusted,
+        user,
+        bypass_policy,
         &branch_nums,
         None,
     )?;
@@ -3715,8 +3889,8 @@ fn export_table_history(
         PolicyDependencyExport {
             table_name,
             policy: &schema.table_def(table_name)?.read_policy,
-            principal,
-            trusted,
+            user,
+            bypass_policy,
             branch_nums: &branch_nums,
             child_row_nums: None,
         },
@@ -3727,8 +3901,8 @@ fn export_table_history(
         PolicyDependencyExport {
             table_name,
             policy: &schema.table_def(table_name)?.write_policy,
-            principal,
-            trusted,
+            user,
+            bypass_policy,
             branch_nums: &branch_nums,
             child_row_nums: None,
         },
@@ -3736,7 +3910,12 @@ fn export_table_history(
     if branch_num != 1 {
         if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
             records.extend(export_main_base_snapshot_history(
-                conn, schema, table_name, base_epoch, principal, trusted,
+                conn,
+                schema,
+                table_name,
+                base_epoch,
+                user,
+                bypass_policy,
             )?);
         }
     }
@@ -3748,14 +3927,14 @@ fn export_main_base_snapshot_history(
     schema: &SchemaDef,
     table_name: &str,
     base_epoch: i64,
-    principal: &str,
-    trusted: bool,
+    user: &str,
+    bypass_policy: bool,
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
-    let policy_sql = if trusted {
+    let policy_sql = if bypass_policy {
         "1 = 1".to_owned()
     } else {
-        policy::snapshot_read_policy_sql_for_alias(schema, table, "h", principal, base_epoch)?
+        policy::snapshot_read_policy_sql_for_alias(schema, table, "h", user, base_epoch)?
     };
     let sql = format!(
         "SELECT h.row_num
@@ -3804,8 +3983,8 @@ fn export_main_base_snapshot_history(
         conn,
         schema,
         table_name,
-        principal,
-        trusted,
+        user,
+        bypass_policy,
         base_epoch,
         Some(&row_nums),
     )?);
@@ -3816,8 +3995,8 @@ fn export_snapshot_policy_dependency_history(
     conn: &Connection,
     schema: &SchemaDef,
     table_name: &str,
-    principal: &str,
-    trusted: bool,
+    user: &str,
+    bypass_policy: bool,
     base_epoch: i64,
     child_row_nums: Option<&[i64]>,
 ) -> Result<Vec<HistoryRecord>> {
@@ -3839,10 +4018,10 @@ fn export_snapshot_policy_dependency_history(
             field.name
         )));
     };
-    let policy_sql = if trusted {
+    let policy_sql = if bypass_policy {
         "1 = 1".to_owned()
     } else {
-        policy::snapshot_read_policy_sql_for_alias(schema, table, "h", principal, base_epoch)?
+        policy::snapshot_read_policy_sql_for_alias(schema, table, "h", user, base_epoch)?
     };
     let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let sql = format!(
@@ -3888,8 +4067,8 @@ fn export_snapshot_policy_dependency_history(
         conn,
         schema,
         parent_table,
-        principal,
-        trusted,
+        user,
+        bypass_policy,
         base_epoch,
         Some(&row_nums),
     )?);
@@ -3899,8 +4078,8 @@ fn export_snapshot_policy_dependency_history(
 struct PolicyDependencyExport<'a> {
     table_name: &'a str,
     policy: &'a PolicyDef,
-    principal: &'a str,
-    trusted: bool,
+    user: &'a str,
+    bypass_policy: bool,
     branch_nums: &'a [i64],
     child_row_nums: Option<&'a [i64]>,
 }
@@ -3928,7 +4107,7 @@ fn export_policy_dependency_history(
             field.name
         )));
     };
-    let policy_sql = export_read_policy_sql(schema, table, args.principal, args.trusted)?;
+    let policy_sql = export_read_policy_sql(schema, table, args.user, args.bypass_policy)?;
     let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let sql = format!(
         "SELECT DISTINCT current.{ref_column}
@@ -3952,8 +4131,8 @@ fn export_policy_dependency_history(
         conn,
         schema,
         parent_table,
-        args.principal,
-        args.trusted,
+        args.user,
+        args.bypass_policy,
         args.branch_nums,
         Some(&row_nums),
     )?;
@@ -3963,8 +4142,8 @@ fn export_policy_dependency_history(
         PolicyDependencyExport {
             table_name: parent_table,
             policy: &schema.table_def(parent_table)?.read_policy,
-            principal: args.principal,
-            trusted: args.trusted,
+            user: args.user,
+            bypass_policy: args.bypass_policy,
             branch_nums: args.branch_nums,
             child_row_nums: Some(&row_nums),
         },
@@ -4274,13 +4453,13 @@ fn export_visible_table_history(
     conn: &Connection,
     schema: &SchemaDef,
     table_name: &str,
-    principal: &str,
-    trusted: bool,
+    user: &str,
+    bypass_policy: bool,
     branch_nums: &[i64],
     row_nums: Option<&[i64]>,
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
-    let policy_sql = export_read_policy_sql(schema, table, principal, trusted)?;
+    let policy_sql = export_read_policy_sql(schema, table, user, bypass_policy)?;
     let field_columns = table
         .fields
         .iter()
@@ -4503,13 +4682,13 @@ fn branch_filter_sql(alias: &str, branch_nums: &[i64]) -> String {
 fn export_read_policy_sql(
     schema: &SchemaDef,
     table: &crate::schema::TableDef,
-    principal: &str,
-    trusted: bool,
+    user: &str,
+    bypass_policy: bool,
 ) -> Result<String> {
-    if trusted {
+    if bypass_policy {
         Ok("1 = 1".to_owned())
     } else {
-        policy::read_policy_sql(schema, table, principal)
+        policy::read_policy_sql(schema, table, user)
     }
 }
 

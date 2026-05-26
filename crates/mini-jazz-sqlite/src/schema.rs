@@ -134,7 +134,7 @@ pub(crate) struct IndexDef {
 pub(crate) enum PolicyDef {
     #[default]
     AllowAll,
-    CreatedByPrincipal,
+    CreatedByUser,
     RefReadable {
         field: String,
     },
@@ -144,7 +144,7 @@ impl PolicyDef {
     fn fingerprint_for_table(&self, table: &TableDef) -> String {
         match self {
             PolicyDef::AllowAll => "allow_all".to_owned(),
-            PolicyDef::CreatedByPrincipal => "created_by_principal".to_owned(),
+            PolicyDef::CreatedByUser => "created_by_user".to_owned(),
             PolicyDef::RefReadable { field } => {
                 let storage_field = table
                     .fields
@@ -278,12 +278,12 @@ impl TableBuilder {
         });
     }
 
-    pub fn read_if_created_by_principal(&mut self) {
-        self.table.read_policy = PolicyDef::CreatedByPrincipal;
+    pub fn read_if_created_by_user(&mut self) {
+        self.table.read_policy = PolicyDef::CreatedByUser;
     }
 
-    pub fn write_if_created_by_principal(&mut self) {
-        self.table.write_policy = PolicyDef::CreatedByPrincipal;
+    pub fn write_if_created_by_user(&mut self) {
+        self.table.write_policy = PolicyDef::CreatedByUser;
     }
 
     pub fn write_if_ref_readable(&mut self, field: &str) {

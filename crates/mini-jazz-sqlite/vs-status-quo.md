@@ -105,7 +105,7 @@ Status-quo concepts that will eventually need a migration story include:
 | `DurabilityTier`                | delivery target and authority/edge/global observation tier  |
 | `QuerySettled`                  | query settled signal                                        |
 | `Db`                            | product API facade over query/write/sync plans              |
-| `Session`                       | principal plus role plus policy context                     |
+| `Session`                       | user/auth context plus separate policy and attribution mode |
 | `VisibleRowEntry`               | current projection row                                      |
 | `branch_name` / composed prefix | branch/source/schema context                                |
 | `row_format`                    | physical row codec                                          |
