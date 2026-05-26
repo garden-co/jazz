@@ -899,3 +899,26 @@ Learning: query-scope export and branch-base export need parallel dependency
 walkers, but one walks current projection and the other walks historical
 snapshot rows. This is another point in favor of making "query context" an
 explicit lowering parameter in attempt 4 or the next spec pass.
+
+## 2026-05-25 18:26 PDT
+
+Starting row-level write set materialization. Goal: every row mutation in a
+transaction records whole-row write items (`tx_num`, table, row) so causality,
+validation, conflict detection, and future read/write-set sync have a concrete
+place to build from. Keeping this row-level matches the earlier decision not to
+use column masks for write-set semantics.
+
+## 2026-05-25 18:29 PDT
+
+Row-level write sets are green. Added `jazz_tx_write` and record whole-row write
+items for local generic writes, built-in project/todo writes, deletes, and
+applied remote history. Added `transaction_write_rows(tx_id)` as a probe API and
+verified both local multi-row transactions and synced generic rows retain write
+sets.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, still
+48 tests.
+
+Design note: this is intentionally row-level. Per-column data may still be
+useful for merge strategies, but write-set causality/conflict semantics should
+start with the whole row as the item.

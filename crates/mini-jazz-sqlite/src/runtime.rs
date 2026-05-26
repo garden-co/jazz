@@ -83,6 +83,7 @@ impl Runtime {
                 self.principal
             ],
         )?;
+        record_tx_write(&db, tx_num, "projects", row_num, 1)?;
         db.execute(
             "INSERT OR REPLACE INTO projects__schema_v1_current
              (row_num, j_branch_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
@@ -123,6 +124,7 @@ impl Runtime {
                 self.principal
             ],
         )?;
+        record_tx_write(&db, tx_num, "todos", row_num, 1)?;
         db.execute(
             "INSERT OR REPLACE INTO todos__schema_v1_current
              (row_num, j_branch_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
@@ -409,6 +411,7 @@ impl Runtime {
             &columns,
             &values,
         )?;
+        record_tx_write(db, tx_num, &record.table, row_num, record.op)?;
 
         if tx_outcome(db, tx_num)? != tx::OUTCOME_REJECTED && record.op != 3 {
             let mut current_columns = vec![
@@ -494,6 +497,22 @@ impl Runtime {
         tx::tx_num(&self.conn, tx_id)
     }
 
+    pub fn transaction_write_rows(&self, tx_id: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT writes.table_name, ids.row_id
+             FROM jazz_tx_write writes
+             JOIN jazz_tx tx ON tx.tx_num = writes.tx_num
+             JOIN jazz_row_id ids ON ids.row_num = writes.row_num
+             WHERE tx.tx_id = ?
+             ORDER BY writes.table_name, ids.row_id",
+        )?;
+        let rows = stmt.query_map(params![tx_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn create_branch(&mut self, branch_id: &str, base_global_epoch: Option<i64>) -> Result<()> {
         branch::ensure(&self.conn, branch_id, base_global_epoch, now_ms())?;
         Ok(())
@@ -537,6 +556,7 @@ impl Runtime {
 	             WHERE row_num = ? AND j_branch_num = ?",
             params![tx_num, now, self.principal, row_num, self.branch_num],
         )?;
+        record_tx_write(&db, tx_num, "todos", row_num, 3)?;
         db.execute(
             "DELETE FROM todos__schema_v1_current WHERE row_num = ? AND j_branch_num = ?",
             params![row_num, self.branch_num],
@@ -769,6 +789,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
         &columns,
         &sql_values,
     )?;
+    record_tx_write(args.db, args.tx_num, &table.name, row_num, 1)?;
 
     if allowed {
         let mut current_columns = vec![
@@ -792,6 +813,21 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
             &current_values,
         )?;
     }
+    Ok(())
+}
+
+fn record_tx_write(
+    conn: &Connection,
+    tx_num: i64,
+    table_name: &str,
+    row_num: i64,
+    op: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO jazz_tx_write (tx_num, table_name, row_num, op)
+         VALUES (?, ?, ?, ?)",
+        params![tx_num, table_name, row_num, op],
+    )?;
     Ok(())
 }
 
@@ -907,25 +943,29 @@ impl<'a> TransactionBuilder<'a> {
                     trusted: self.runtime.trusted,
                 })?,
                 Mutation::Project { id, title } => {
-                    insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?
+                    insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?;
+                    record_tx_write(&db, tx_num, "projects", row_num(&db, &id)?, 1)?;
                 }
                 Mutation::Todo {
                     id,
                     title,
                     done,
                     project_id,
-                } => insert_todo(
-                    &db,
-                    tx_num,
-                    NewTodo {
-                        id: &id,
-                        title: &title,
-                        done,
-                        project_id: &project_id,
-                        now,
-                        principal: &self.runtime.principal,
-                    },
-                )?,
+                } => {
+                    insert_todo(
+                        &db,
+                        tx_num,
+                        NewTodo {
+                            id: &id,
+                            title: &title,
+                            done,
+                            project_id: &project_id,
+                            now,
+                            principal: &self.runtime.principal,
+                        },
+                    )?;
+                    record_tx_write(&db, tx_num, "todos", row_num(&db, &id)?, 1)?;
+                }
             }
         }
         db.commit()?;

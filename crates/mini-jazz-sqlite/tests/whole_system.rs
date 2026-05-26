@@ -240,6 +240,13 @@ fn generic_transaction_seals_multiple_rows_atomically() {
     let rows = alice.read_rows("notes").unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row.tx_id == tx));
+    assert_eq!(
+        alice.transaction_write_rows(&tx).unwrap(),
+        vec![
+            ("notes".to_owned(), "note-1".to_owned()),
+            ("notes".to_owned(), "note-2".to_owned())
+        ]
+    );
 }
 
 #[test]
@@ -483,7 +490,7 @@ fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
     comment.insert("body".to_owned(), json!("Needs policy pass"));
     comment.insert("resolved".to_owned(), json!(false));
     comment.insert("doc".to_owned(), json!("doc-1"));
-    alice.insert_row("comments", "comment-1", comment).unwrap();
+    let comment_tx = alice.insert_row("comments", "comment-1", comment).unwrap();
 
     let bundle = alice.export_table_history("comments").unwrap();
     bob.apply_bundle(&bundle).unwrap();
@@ -497,6 +504,10 @@ fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
     assert_eq!(comments[0].values["body"], json!("Needs policy pass"));
     assert_eq!(comments[0].values["resolved"], json!(false));
     assert_eq!(comments[0].values["doc"], json!("doc-1"));
+    assert_eq!(
+        bob.transaction_write_rows(&comment_tx).unwrap(),
+        vec![("comments".to_owned(), "comment-1".to_owned())]
+    );
     assert_ne!(
         alice.physical_row_num_for("doc-1").unwrap(),
         bob.physical_row_num_for("doc-1").unwrap()
