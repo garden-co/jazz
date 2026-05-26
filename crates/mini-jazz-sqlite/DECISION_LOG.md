@@ -1045,3 +1045,16 @@ complete redaction story, but it gives clients a much more actionable durable
 error for the common "you did not send/sync the policy-influencing row" case.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 220 whole-system tests.
+
+## 2026-05-26 03:49 PDT
+
+Added fail-closed validation for recursive query descriptors. Applying a bundle
+whose `recursive_refs` query-read names an unknown parent field now rejects
+before partial apply, leaving history/current/query-read state empty.
+
+Discovery: treating recursive descriptors as normal query reads means they also
+need catalogue validation at apply time. The first implementation only checked
+the table; the test caught that malformed recursive descriptors could otherwise
+be persisted silently.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 221 whole-system tests.

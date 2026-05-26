@@ -858,7 +858,23 @@ impl Runtime {
             return Ok(());
         }
         if query_read.op == "recursive_refs" {
-            schema.table_def(&query_read.table)?;
+            let table = schema.table_def(&query_read.table)?;
+            let field = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == query_read.field)
+                .ok_or_else(|| {
+                    crate::Error::new(format!("unknown query field {}", query_read.field))
+                })?;
+            if !matches!(field.kind, FieldKind::Ref { .. }) {
+                return Err(crate::Error::new(format!(
+                    "recursive refs expects ref field {}",
+                    query_read.field
+                )));
+            }
+            if !query_read.value.is_string() {
+                return Err(crate::Error::new("recursive refs expects root id string"));
+            }
             return Ok(());
         }
         if query_read.op == "eq_top_created_at_desc" {

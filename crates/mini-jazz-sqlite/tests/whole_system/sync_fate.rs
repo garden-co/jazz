@@ -513,6 +513,38 @@ fn bundle_with_unknown_query_scope_fails_closed_without_partial_apply() {
 }
 
 #[test]
+fn recursive_query_with_unknown_parent_field_fails_closed_without_partial_apply() {
+    let schema = support::folders_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    let mut bundle = alice
+        .export_recursive_refs("folders", "root", "parent")
+        .unwrap();
+    bundle.query_reads[0].field = "missing_parent".to_owned();
+
+    let err = peer.apply_bundle(&bundle).unwrap_err();
+
+    assert!(err.to_string().contains("unknown query field"));
+    let stats = peer.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 0);
+    assert_eq!(stats.current_rows, 0);
+    assert!(peer.observed_query_reads().unwrap().is_empty());
+}
+
+#[test]
 fn durable_peer_remembers_query_scope_after_restart() {
     let dir = tempdir().unwrap();
     let peer_path = dir.path().join("peer.sqlite");
