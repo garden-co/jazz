@@ -1154,9 +1154,11 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
     }
     record_policy_read_set_for_write(
         args.db,
+        args.schema,
         table,
         &table.write_policy,
         args.values,
+        args.branch_num,
         args.tx_num,
     )?;
     let allowed = args.trusted
@@ -1321,9 +1323,11 @@ fn exclusive_write_conflict_exists(
 
 fn record_policy_read_set_for_write(
     conn: &Connection,
+    schema: &SchemaDef,
     table: &crate::schema::TableDef,
     policy: &PolicyDef,
     values: &BTreeMap<String, JsonValue>,
+    branch_num: i64,
     tx_num: i64,
 ) -> Result<()> {
     let PolicyDef::RefReadable { field } = policy else {
@@ -1334,14 +1338,116 @@ fn record_policy_read_set_for_write(
         .iter()
         .find(|candidate| candidate.name == *field)
         .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
-    let FieldKind::Ref { table } = &field.kind else {
+    let FieldKind::Ref {
+        table: ref_table_name,
+    } = &field.kind
+    else {
         return Ok(());
     };
     let Some(row_id) = values.get(&field.name).and_then(JsonValue::as_str) else {
         return Ok(());
     };
-    let row_num = ensure_row_id(conn, table, row_id)?;
-    record_tx_read(conn, tx_num, table, row_num, 1)
+    let row_num = ensure_row_id(conn, ref_table_name, row_id)?;
+    record_tx_read(conn, tx_num, ref_table_name, row_num, 1)?;
+    let ref_table = schema.table_def(ref_table_name)?;
+    record_policy_read_dependencies_for_row(
+        conn,
+        schema,
+        ref_table,
+        &ref_table.read_policy,
+        row_num,
+        branch_num,
+        tx_num,
+    )
+}
+
+fn record_policy_read_dependencies_for_row(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table: &crate::schema::TableDef,
+    policy: &PolicyDef,
+    row_num: i64,
+    branch_num: i64,
+    tx_num: i64,
+) -> Result<()> {
+    let PolicyDef::RefReadable { field } = policy else {
+        return Ok(());
+    };
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *field)
+        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+    let FieldKind::Ref {
+        table: ref_table_name,
+    } = &field.kind
+    else {
+        return Ok(());
+    };
+    let Some(parent_row_num) =
+        current_ref_field_row_num(conn, &table.name, field, row_num, branch_num)?
+    else {
+        return Ok(());
+    };
+    record_tx_read(conn, tx_num, ref_table_name, parent_row_num, 1)?;
+    let parent_table = schema.table_def(ref_table_name)?;
+    record_policy_read_dependencies_for_row(
+        conn,
+        schema,
+        parent_table,
+        &parent_table.read_policy,
+        parent_row_num,
+        branch_num,
+        tx_num,
+    )
+}
+
+fn current_ref_field_row_num(
+    conn: &Connection,
+    table_name: &str,
+    field: &FieldDef,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<Option<i64>> {
+    let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    conn.query_row(
+        &format!(
+            "SELECT current.{column}
+             FROM {} current
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             WHERE current.row_num = ?
+               AND {}
+               AND current.is_deleted = 0
+               AND tx.outcome != ?
+             ORDER BY CASE WHEN current.j_branch_num = ? THEN 0 ELSE 1 END
+             LIMIT 1",
+            crate::schema::current_table(table_name),
+            current_effective_branch_sql("current", table_name, branch_num)
+        ),
+        params![row_num, tx::OUTCOME_REJECTED, branch_num],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn current_effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> String {
+    if branch_num == 1 {
+        return format!("{alias}.j_branch_num = 1");
+    }
+    format!(
+        "({alias}.j_branch_num = {branch_num}
+          OR (
+            {alias}.j_branch_num = 1
+            AND NOT EXISTS (
+              SELECT 1
+              FROM {} branch_shadow
+              WHERE branch_shadow.row_num = {alias}.row_num
+                AND branch_shadow.j_branch_num = {branch_num}
+            )
+          ))",
+        crate::schema::current_table(table_name)
+    )
 }
 
 fn record_tx_read(

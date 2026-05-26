@@ -2087,3 +2087,18 @@ test now passes and gives us one real recursive-query lowering improvement.
 
 Full `cargo test -p mini-jazz-sqlite` passes with 112 whole-system tests after
 the reparent policy coverage and recursive tombstone CTE change.
+
+## 2026-05-25 20:33 PDT
+
+Starting recursive permission read-set coverage for writes. If `todos` can be
+written when their `project` is readable, and `projects` are readable only
+through a readable `org`, the todo write's policy read set should include both
+the project and the org. Otherwise replay/validation has a hidden dependency.
+
+Result: the test failed red with only `projects/project-1` in the policy read
+set. Added transitive policy-dependency recording for write policies: after
+recording the direct parent, the runtime walks the referenced row's read policy
+through current effective branch state and records its policy dependencies too.
+The targeted test now passes.
+
+Full `cargo test -p mini-jazz-sqlite` passes with 113 whole-system tests.
