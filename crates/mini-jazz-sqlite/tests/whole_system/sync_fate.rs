@@ -262,6 +262,50 @@ fn same_bundle_twice_is_idempotent() {
 }
 
 #[test]
+fn bundle_with_unknown_table_fails_closed_without_partial_apply() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Unknown table bundle", false, "project-1")
+        .unwrap();
+    let mut bundle = alice.export_table_history("todos").unwrap();
+    for record in &mut bundle.history {
+        if record.table == "todos" {
+            record.table = "missing_catalogue_table".to_owned();
+        }
+    }
+
+    let err = peer.apply_bundle(&bundle).unwrap_err();
+    assert!(err.to_string().contains("unknown table"));
+    let stats = peer.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 0);
+    assert_eq!(stats.current_rows, 0);
+    assert!(peer.open_todos().unwrap().is_empty());
+}
+
+#[test]
+fn bundle_with_unknown_query_scope_fails_closed_without_partial_apply() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Bad query metadata", false, "project-1")
+        .unwrap();
+    let mut bundle = alice.export_query_scope_open_todos().unwrap();
+    bundle.query_reads[0].table = "missing_catalogue_table".to_owned();
+
+    let err = peer.apply_bundle(&bundle).unwrap_err();
+    assert!(err.to_string().contains("unknown table"));
+    let stats = peer.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 0);
+    assert_eq!(stats.current_rows, 0);
+    assert!(peer.open_todos().unwrap().is_empty());
+}
+
+#[test]
 fn replicas_may_use_different_physical_ids_for_same_public_ids() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();

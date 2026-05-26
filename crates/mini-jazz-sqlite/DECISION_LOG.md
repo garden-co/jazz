@@ -269,3 +269,17 @@ Design lesson: this is the write-path equivalent of `effective.rs`. The
 eventual module should probably be organized around lowering a write into
 `effective_values`, `policy_reads`, `history_row`, `current_projection_effect`,
 and `fate`, rather than around table/transaction nouns.
+
+## 2026-05-26 00:32 PDT
+
+Added fail-closed catalogue/scope coverage; full mini crate suite is green with
+144 tests.
+
+- A bundle whose history references an unknown table errors and leaves no
+  history/current projection behind.
+- A bundle whose query-scope metadata references an unknown table also errors
+  before partially applying the history.
+
+Design lesson: applying a bundle inside one SQLite transaction is paying off.
+Catalogue/schema gaps can be treated as unsettled/fail-closed without leaving
+half-imported txs or rows that need a later scrub.
