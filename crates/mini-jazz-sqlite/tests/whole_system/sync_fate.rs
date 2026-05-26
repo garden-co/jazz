@@ -491,6 +491,59 @@ fn remote_pending_update_does_not_override_global_current_on_peer() {
 }
 
 #[test]
+fn accepted_remote_pending_update_repairs_peer_current_projection() {
+    let schema = support::notes_schema();
+    let mut authority =
+        Runtime::open_with_schema(Storage::Memory, "authority", "alice", schema.clone()).unwrap();
+    let mut writer =
+        Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema.clone()).unwrap();
+    let mut peer = Runtime::open_with_schema(Storage::Memory, "peer", "alice", schema).unwrap();
+
+    let base_tx = authority
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("global")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority.accept_transaction_at_global(&base_tx, 1).unwrap();
+    let base_bundle = authority.export_table_history("notes").unwrap();
+    writer.apply_bundle(&base_bundle).unwrap();
+    peer.apply_bundle(&base_bundle).unwrap();
+
+    let pending_tx = writer
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("accepted later")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    let pending_bundle = writer.export_table_history("notes").unwrap();
+    authority.apply_bundle(&pending_bundle).unwrap();
+    peer.apply_bundle(&pending_bundle).unwrap();
+    assert_eq!(
+        peer.read_rows("notes").unwrap()[0].values["body"],
+        json!("global")
+    );
+
+    authority
+        .accept_transaction_at_global(&pending_tx, 2)
+        .unwrap();
+    peer.apply_bundle(&authority.export_table_history("notes").unwrap())
+        .unwrap();
+    assert_eq!(
+        peer.read_rows("notes").unwrap()[0].values["body"],
+        json!("accepted later")
+    );
+}
+
+#[test]
 fn accepted_bundle_does_not_resurrect_rejected_fate() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut rejected_peer = Runtime::open(Storage::Memory, "rejected-peer", "alice").unwrap();

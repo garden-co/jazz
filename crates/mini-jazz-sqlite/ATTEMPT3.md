@@ -1905,3 +1905,21 @@ read-set entry.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 generic_transaction_delete_records_previous_row_read_set` passes, and full
 `cargo test -p mini-jazz-sqlite` passes with 102 whole-system tests.
+
+## 2026-05-25 20:15 PDT
+
+Starting accepted-after-remote-pending visibility coverage. A peer may keep a
+remote pending update history-only because a durable row already exists, but
+once a trusted tier accepts that same transaction, current projection must
+advance to it.
+
+## 2026-05-25 20:15 PDT
+
+Accepted-after-remote-pending visibility is green without further code changes.
+The previous remote-pending fix still allows the accepted fate update to replay
+the same history record and advance current projection once the transaction
+becomes globally accepted.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+accepted_remote_pending_update_repairs_peer_current_projection` passes, and full
+`cargo test -p mini-jazz-sqlite` passes with 103 whole-system tests.
