@@ -1011,3 +1011,24 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Open issue: deleted-row export currently exports all history for rows whose
 latest version is deleted. That is useful for replay but may be broader than
 minimal "remove this row" sync payloads.
+
+## 2026-05-25 18:40 PDT
+
+Starting recursive query over branch base + sparse overlay. Current recursive
+query walks only the current projection for `self.branch_num`, unlike normal
+branch reads which also overlay pinned main-base rows.
+
+## 2026-05-25 18:41 PDT
+
+Recursive query over branch base + sparse overlay is green. For branches with a
+pinned base, recursive traversal now composes over the already-materialized
+visible branch rows from `read_rows`, so it sees base rows plus branch-local
+overlay rows.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+53 tests.
+
+Design note: this implementation deliberately uses an in-memory traversal for
+the branch snapshot case. It proves semantics quickly, but a serious
+implementation should lower the same visible-row relation into a recursive CTE
+instead of materializing the whole visible table first.

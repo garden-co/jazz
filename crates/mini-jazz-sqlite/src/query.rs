@@ -93,6 +93,10 @@ impl QueryContext<'_> {
                 parent_field.name, table_name
             )));
         }
+        if self.branch_num != 1 && branch::base_global_epoch(self.conn, self.branch_num)?.is_some()
+        {
+            return self.read_recursive_refs_from_visible_rows(table_name, root_id, parent_field);
+        }
         let root_num = row_num(self.conn, root_id)?;
         let parent_column =
             crate::schema::quote_ident(&crate::schema::storage_column(parent_field));
@@ -163,6 +167,48 @@ impl QueryContext<'_> {
         )?;
         rows.map(|row| row_to_view(self.conn, table_name, table, row?))
             .collect()
+    }
+
+    fn read_recursive_refs_from_visible_rows(
+        &self,
+        table_name: &str,
+        root_id: &str,
+        parent_field: &FieldDef,
+    ) -> Result<Vec<RowView>> {
+        let mut rows_by_id = self
+            .read_rows(table_name)?
+            .into_iter()
+            .map(|row| (row.id.clone(), row))
+            .collect::<BTreeMap<_, _>>();
+        let Some(root) = rows_by_id.remove(root_id) else {
+            return Ok(Vec::new());
+        };
+        let mut ordered = vec![root];
+        let mut frontier = vec![root_id.to_owned()];
+        while !frontier.is_empty() {
+            let mut next_ids = Vec::new();
+            let ids = rows_by_id.keys().cloned().collect::<Vec<_>>();
+            for id in ids {
+                let Some(row) = rows_by_id.get(&id) else {
+                    continue;
+                };
+                let parent_id = row
+                    .values
+                    .get(&parent_field.name)
+                    .and_then(JsonValue::as_str);
+                if parent_id.is_some_and(|parent_id| frontier.iter().any(|seen| seen == parent_id))
+                {
+                    next_ids.push(id);
+                }
+            }
+            for id in &next_ids {
+                if let Some(row) = rows_by_id.remove(id) {
+                    ordered.push(row);
+                }
+            }
+            frontier = next_ids;
+        }
+        Ok(ordered)
     }
 
     fn read_policy_sql(&self, table: &crate::schema::TableDef) -> Result<String> {
