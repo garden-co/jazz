@@ -1058,3 +1058,15 @@ the table; the test caught that malformed recursive descriptors could otherwise
 be persisted silently.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 221 whole-system tests.
+
+## 2026-05-26 03:50 PDT
+
+Pinned explicit-null/default semantics. Inserts with an omitted defaulted field
+still receive the default, but explicitly supplied `null` on an optional field
+is preserved as row content and is not treated as omission.
+
+Discovery: the current effective-write-value implementation already has the
+right shape: defaults apply by missing key, not by falsy/null value. This is a
+small but important high-level API invariant for optional fields.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 222 whole-system tests.

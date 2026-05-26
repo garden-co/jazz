@@ -1000,6 +1000,33 @@ fn insert_applies_declared_defaults_for_omitted_fields() {
 }
 
 #[test]
+fn explicit_null_optional_field_is_not_overwritten_by_default() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.optional_text("tag");
+        table.text_default("status", "draft");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-null",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Explicit null")),
+                ("tag".to_owned(), json!(null)),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["tag"], json!(null));
+    assert_eq!(rows[0].values["status"], json!("draft"));
+}
+
+#[test]
 fn declared_defaults_sync_and_rebuild_as_history_values() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("defaults.sqlite");
