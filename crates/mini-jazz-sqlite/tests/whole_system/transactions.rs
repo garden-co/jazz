@@ -417,3 +417,65 @@ fn global_epoch_can_accept_multiple_transactions() {
         Some(7)
     );
 }
+
+#[test]
+fn generic_update_preserves_omitted_fields() {
+    let schema = support::notes_schema();
+    let mut db = Runtime::open_with_schema(Storage::Memory, "node", "alice", schema).unwrap();
+
+    db.insert_row(
+        "notes",
+        "note-1",
+        BTreeMap::from([
+            ("body".to_owned(), json!("Draft")),
+            ("pinned".to_owned(), json!(false)),
+        ]),
+    )
+    .unwrap();
+
+    db.update_row(
+        "notes",
+        "note-1",
+        BTreeMap::from([("pinned".to_owned(), json!(true))]),
+    )
+    .unwrap();
+
+    let rows = db.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("Draft"));
+    assert_eq!(rows[0].values["pinned"], json!(true));
+}
+
+#[test]
+fn rejecting_update_restores_previous_visible_version() {
+    let schema = support::notes_schema();
+    let mut db = Runtime::open_with_schema(Storage::Memory, "node", "alice", schema).unwrap();
+
+    db.insert_row(
+        "notes",
+        "note-1",
+        BTreeMap::from([
+            ("body".to_owned(), json!("Accepted base")),
+            ("pinned".to_owned(), json!(false)),
+        ]),
+    )
+    .unwrap();
+    let update_tx = db
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("Rejected update"))]),
+        )
+        .unwrap();
+    assert_eq!(
+        db.read_rows("notes").unwrap()[0].values["body"],
+        json!("Rejected update")
+    );
+
+    db.reject_transaction(&update_tx, "policy_denied").unwrap();
+
+    let rows = db.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("Accepted base"));
+    assert_eq!(rows[0].values["pinned"], json!(false));
+}

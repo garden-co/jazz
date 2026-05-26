@@ -261,6 +261,91 @@ fn equality_query_scope_resync_removes_deleted_matching_row() {
 }
 
 #[test]
+fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Still open")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-alice")),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer.read_rows_where_eq("tasks", "done", json!(false))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    alice
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("project".to_owned(), json!("project-bob"))]),
+        )
+        .unwrap();
+    assert!(alice
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert!(peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn branch_equality_query_scope_records_branch_predicate_read() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
@@ -324,12 +409,11 @@ fn branch_equality_query_scope_resync_repairs_row_that_left_predicate() {
     )
     .unwrap();
     peer.checkout_branch("draft").unwrap();
-    assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
-            .unwrap()
-            .len(),
-        1
-    );
+    let draft_rows = peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(draft_rows.len(), 1);
+    assert_eq!(draft_rows[0].id, "task-1");
 
     alice
         .update_row(
@@ -352,6 +436,93 @@ fn branch_equality_query_scope_resync_repairs_row_that_left_predicate() {
         .read_rows_where_eq("tasks", "done", json!(false))
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn branch_query_scope_repair_does_not_delete_same_predicate_row_on_main() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-main",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main open")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer.read_rows_where_eq("tasks", "done", json!(false))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-draft",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft open")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+    peer.checkout_branch("draft").unwrap();
+    let draft_rows = peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(draft_rows.len(), 2);
+    assert!(draft_rows.iter().any(|row| row.id == "task-main"));
+    assert!(draft_rows.iter().any(|row| row.id == "task-draft"));
+
+    alice
+        .update_row(
+            "tasks",
+            "task-draft",
+            BTreeMap::from([("done".to_owned(), json!(true))]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+
+    let draft_rows = peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(draft_rows.len(), 1);
+    assert_eq!(draft_rows[0].id, "task-main");
+    peer.checkout_branch("main").unwrap();
+    let main_rows = peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(main_rows.len(), 1);
+    assert_eq!(main_rows[0].id, "task-main");
 }
 
 #[test]
