@@ -805,3 +805,19 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Learning: the existing field model (`name` plus `storage_name`) was already the
 right abstraction for this. The missing piece was only exposing the same lens
 operation for refs, not just text columns.
+
+## 2026-05-25 18:18 PDT
+
+Starting rejection reason surfacing. We already store `jazz_tx_rejection.code`,
+but `transaction_info` does not expose it. This matters for the product contract:
+rejection should be replayable history and also visible enough to reject promises
+or call global error handlers with a useful reason.
+
+## 2026-05-25 18:19 PDT
+
+Rejection reason surfacing is green. `TransactionInfo` now includes
+`rejection_code: Option<String>`, read from `jazz_tx_rejection`. The existing
+rejection test now proves the stored policy denial reason is observable.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, still
+45 tests.

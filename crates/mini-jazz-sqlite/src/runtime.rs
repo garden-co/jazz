@@ -4,7 +4,7 @@ use crate::subscription::RowsSubscription;
 use crate::sync::{BranchRecord, Bundle, HistoryRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{branch, policy, projection, query, schema, storage, tx, Result, Storage};
-use rusqlite::{params, params_from_iter, Connection};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -471,10 +471,22 @@ impl Runtime {
         let receipt_tiers = stmt
             .query_map(params![tx_id], |row| tier_name(row.get::<_, i64>(0)?))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        let rejection_code = self
+            .conn
+            .query_row(
+                "SELECT rejection.code
+                 FROM jazz_tx_rejection rejection
+                 JOIN jazz_tx tx ON tx.tx_num = rejection.tx_num
+                 WHERE tx.tx_id = ?",
+                params![tx_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
         Ok(TransactionInfo {
             tx_id,
             global_epoch,
             receipt_tiers,
+            rejection_code,
         })
     }
 

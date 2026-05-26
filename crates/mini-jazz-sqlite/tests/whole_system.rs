@@ -66,6 +66,10 @@ fn rejected_transaction_remains_history_but_is_hidden_from_current() {
     let stats = alice.storage_stats().unwrap();
     assert_eq!(stats.history_rows, 2);
     assert_eq!(stats.rejected_transactions, 1);
+    assert_eq!(
+        alice.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
 }
 
 #[test]

@@ -42,6 +42,7 @@ pub struct TransactionInfo {
     pub tx_id: String,
     pub global_epoch: Option<i64>,
     pub receipt_tiers: Vec<String>,
+    pub rejection_code: Option<String>,
 }
 
 impl StorageStats {
