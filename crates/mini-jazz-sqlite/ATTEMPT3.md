@@ -2102,3 +2102,20 @@ through current effective branch state and records its policy dependencies too.
 The targeted test now passes.
 
 Full `cargo test -p mini-jazz-sqlite` passes with 113 whole-system tests.
+
+## 2026-05-25 20:35 PDT
+
+Checking the same recursive write-policy dependency through a pinned branch
+base. A draft branch created while a project points at Alice's org should keep
+authorizing writes through that base snapshot even if main later repoints the
+project at Bob's org. The policy read set should likewise record the base org.
+
+Result: the test failed twice in useful stages. First, branch write
+authorization denied the draft write because it checked latest main state
+instead of the pinned base snapshot. After fixing that, authorization passed
+but the policy read set still recorded Bob's latest-main org. Added snapshot
+lookup for transitive policy-read dependency recording when a pinned branch has
+no local overlay for the referenced row. The targeted test now passes and
+covers both authorization and read-set provenance.
+
+Full `cargo test -p mini-jazz-sqlite` passes with 114 whole-system tests.

@@ -1409,6 +1409,13 @@ fn current_ref_field_row_num(
     row_num: i64,
     branch_num: i64,
 ) -> Result<Option<i64>> {
+    if branch_num != 1 {
+        if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
+            if !current_row_exists_on_branch(conn, table_name, row_num, branch_num)? {
+                return snapshot_ref_field_row_num(conn, table_name, field, row_num, base_epoch);
+            }
+        }
+    }
     let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     conn.query_row(
         &format!(
@@ -1425,6 +1432,73 @@ fn current_ref_field_row_num(
             current_effective_branch_sql("current", table_name, branch_num)
         ),
         params![row_num, tx::OUTCOME_REJECTED, branch_num],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn current_row_exists_on_branch(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {}
+             WHERE row_num = ?
+               AND j_branch_num = ?",
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn snapshot_ref_field_row_num(
+    conn: &Connection,
+    table_name: &str,
+    field: &FieldDef,
+    row_num: i64,
+    base_epoch: i64,
+) -> Result<Option<i64>> {
+    let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    conn.query_row(
+        &format!(
+            "SELECT h.{column}
+             FROM {} h
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.row_num = ?
+               AND h.j_branch_num = 1
+               AND h.op != 3
+               AND tx.outcome != ?
+               AND tx.global_epoch IS NOT NULL
+               AND tx.global_epoch <= ?
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} newer
+                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 WHERE newer.row_num = h.row_num
+                   AND newer.j_branch_num = 1
+                   AND newer_tx.outcome != ?
+                   AND newer_tx.global_epoch IS NOT NULL
+                   AND newer_tx.global_epoch <= ?
+                   AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
+               )
+             LIMIT 1",
+            crate::schema::history_table(table_name),
+            history_table = crate::schema::history_table(table_name),
+        ),
+        params![
+            row_num,
+            tx::OUTCOME_REJECTED,
+            base_epoch,
+            tx::OUTCOME_REJECTED,
+            base_epoch
+        ],
         |row| row.get::<_, i64>(0),
     )
     .optional()

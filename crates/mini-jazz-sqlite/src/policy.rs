@@ -1,5 +1,5 @@
 use crate::schema::{FieldKind, PolicyDef, SchemaDef, TableDef};
-use crate::{tx, Result};
+use crate::{branch, tx, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -58,6 +58,25 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
                 .ok_or_else(|| crate::Error::new(format!("expected ref id for {field}")))?;
             let ref_row_num = crate::rows::row_num(check.db, ref_id)?;
             let ref_table = check.schema.table_def(ref_table_name)?;
+            if check.branch_num != 1 {
+                if let Some(base_epoch) = branch::base_global_epoch(check.db, check.branch_num)? {
+                    if !branch_current_row_exists(
+                        check.db,
+                        ref_table_name,
+                        ref_row_num,
+                        check.branch_num,
+                    )? {
+                        return snapshot_write_ref_allowed(
+                            check.db,
+                            check.schema,
+                            ref_table,
+                            ref_row_num,
+                            check.principal,
+                            base_epoch,
+                        );
+                    }
+                }
+            }
             let policy_sql = lower_policy(
                 check.schema,
                 ref_table,
@@ -87,6 +106,71 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
             Ok(count > 0)
         }
     }
+}
+
+fn branch_current_row_exists(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {}
+             WHERE row_num = ?
+               AND j_branch_num = ?",
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn snapshot_write_ref_allowed(
+    conn: &Connection,
+    schema: &SchemaDef,
+    ref_table: &TableDef,
+    ref_row_num: i64,
+    principal: &str,
+    base_epoch: i64,
+) -> Result<bool> {
+    let policy_sql =
+        snapshot_read_policy_sql_for_alias(schema, ref_table, "h", principal, base_epoch)?;
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {} h
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.row_num = ?
+               AND h.j_branch_num = 1
+               AND h.op != 3
+               AND tx.outcome != {}
+               AND tx.global_epoch IS NOT NULL
+               AND tx.global_epoch <= ?
+               AND {policy_sql}
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} newer
+                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 WHERE newer.row_num = h.row_num
+                   AND newer.j_branch_num = 1
+                   AND newer_tx.outcome != {}
+                   AND newer_tx.global_epoch IS NOT NULL
+                   AND newer_tx.global_epoch <= ?
+                   AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
+               )",
+            crate::schema::history_table(&ref_table.name),
+            tx::OUTCOME_REJECTED,
+            tx::OUTCOME_REJECTED,
+            history_table = crate::schema::history_table(&ref_table.name),
+            policy_sql = policy_sql,
+        ),
+        params![ref_row_num, base_epoch, base_epoch],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> String {
