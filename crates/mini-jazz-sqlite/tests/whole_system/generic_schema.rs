@@ -1002,6 +1002,71 @@ fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_delete
 }
 
 #[test]
+fn empty_equality_query_scope_later_delivers_inserted_match_without_table_replication() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-closed",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Closed")),
+                ("done".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    let initial = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert!(initial.history.is_empty());
+    assert_eq!(initial.query_reads.len(), 1);
+    peer.apply_bundle(&initial).unwrap();
+    assert!(peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+    assert_eq!(peer.observed_query_reads().unwrap(), initial.query_reads);
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-open",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Opened later")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        assert!(refresh
+            .history
+            .iter()
+            .any(|record| record.table == "tasks" && record.row_id == "task-open"));
+        assert!(!refresh
+            .history
+            .iter()
+            .any(|record| record.table == "tasks" && record.row_id == "task-closed"));
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let rows = peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "task-open");
+}
+
+#[test]
 fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

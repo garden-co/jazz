@@ -778,3 +778,9 @@ Design lesson: the product semantics are easy to state, but this slice is intent
 Added declared scalar defaults for inserts. Schemas can declare `text_default` and `bool_default`; omitted insert fields are filled before policy checks, history writes, current projection writes, sync export, and rebuild. Full mini crate suite is green with 203 tests.
 
 Design lesson: defaults belong in the effective write-value phase rather than at SQLite DDL level for now. That keeps defaults semantic and replayable across history, but default metadata should probably participate in schema/catalogue compatibility once the schema version story is less skeletal.
+
+## 2026-05-26 03:15 PDT
+
+Added whole-system coverage for initially empty query scopes. An equality query that matches no rows still syncs its durable query-read descriptor; a later refresh sends a newly inserted matching row without sending unrelated non-matching rows. Full mini crate suite is green with 204 tests.
+
+Design lesson: query descriptors already behave like desired-state subscriptions, not just repair hints for rows that were previously delivered. This is an important local-first invariant and should be made explicit in the spec's sync/subscription section.
