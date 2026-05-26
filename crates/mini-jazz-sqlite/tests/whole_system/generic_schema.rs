@@ -976,6 +976,76 @@ fn not_equal_query_scope_syncs_and_refreshes_present_optional_values() {
 }
 
 #[test]
+fn created_by_not_equal_query_scope_syncs_and_refreshes() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-alice",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Alice")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "notes",
+        "note-bob",
+        BTreeMap::from([
+            ("body".to_owned(), json!("Bob")),
+            ("pinned".to_owned(), json!(false)),
+        ]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("notes").unwrap())
+        .unwrap();
+
+    peer.apply_bundle(
+        &alice
+            .export_query_where_ne("notes", "$createdBy", json!("alice"))
+            .unwrap(),
+    )
+    .unwrap();
+    let rows = peer
+        .read_rows_where_ne("notes", "$createdBy", json!("alice"))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-bob");
+
+    alice
+        .update_row(
+            "notes",
+            "note-bob",
+            BTreeMap::from([("pinned".to_owned(), json!(true))]),
+        )
+        .unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let refreshed = peer
+        .read_rows_where_ne("notes", "$createdBy", json!("alice"))
+        .unwrap();
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0].id, "note-bob");
+    assert_eq!(refreshed[0].values["pinned"], json!(true));
+}
+
+#[test]
 fn insert_applies_declared_defaults_for_omitted_fields() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");

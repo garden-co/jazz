@@ -1070,3 +1070,16 @@ right shape: defaults apply by missing key, not by falsy/null value. This is a
 small but important high-level API invariant for optional fields.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 222 whole-system tests.
+
+## 2026-05-26 03:51 PDT
+
+Added distributed query-scope coverage for `ne` over the `$createdBy` magic
+field. A peer syncs "rows not created by alice", receives only Bob's row, then a
+later update to Bob's row refreshes through the same observed query descriptor.
+
+Discovery: the generic query-scope machinery already supports non-equality
+operators over magic fields well enough for `$createdBy`. This gives more
+confidence that query descriptors can stay operator-shaped across both user and
+system columns.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 223 whole-system tests.
