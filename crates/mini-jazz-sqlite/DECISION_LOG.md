@@ -403,3 +403,15 @@ crate suite is green with 156 tests.
 Design lesson: a generic SQLite lowering has to validate the semantic row shape
 before it touches physical columns. Otherwise "helpful" projection code becomes
 silent data loss.
+
+## 2026-05-26 00:49 PDT
+
+Locked in batch-wide rejection semantics for the unified transaction concept. A
+single transaction that writes a project and two todos disappears entirely from
+current reads when rejected, while all three history/write-set rows remain and
+projection rebuild preserves invisibility. Full mini crate suite is green with
+157 tests.
+
+Design lesson: the current fate/projection model already had the right shape
+for whole-transaction rejection. The new test is valuable because this is a core
+status-quo parity point from batches that must remain true after refactors.

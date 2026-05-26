@@ -22,6 +22,41 @@ fn explicit_transaction_seals_multiple_mutations_atomically() {
 }
 
 #[test]
+fn rejecting_multi_row_transaction_hides_all_written_rows_but_keeps_history() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    let tx = alice
+        .transaction()
+        .create_project("project-1", "Atomic project")
+        .create_todo("todo-1", "First todo", false, "project-1")
+        .create_todo("todo-2", "Second todo", false, "project-1")
+        .commit()
+        .unwrap();
+    assert_eq!(alice.open_todos().unwrap().len(), 2);
+
+    alice.reject_transaction(&tx, "policy_denied").unwrap();
+
+    assert!(alice.open_todos().unwrap().is_empty());
+    assert_eq!(
+        alice.transaction_write_rows(&tx).unwrap(),
+        vec![
+            ("projects".to_owned(), "project-1".to_owned()),
+            ("todos".to_owned(), "todo-1".to_owned()),
+            ("todos".to_owned(), "todo-2".to_owned())
+        ]
+    );
+    let stats = alice.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 3);
+    assert_eq!(stats.current_rows, 0);
+
+    alice.clear_current_projection_for_test().unwrap();
+    alice.rebuild_current_projection().unwrap();
+
+    assert!(alice.open_todos().unwrap().is_empty());
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 3);
+}
+
+#[test]
 fn generic_transaction_seals_multiple_rows_atomically() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");
