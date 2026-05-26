@@ -2,6 +2,7 @@ mod branch;
 mod error;
 mod policy;
 mod projection;
+mod query;
 mod rows;
 mod runtime;
 mod schema;

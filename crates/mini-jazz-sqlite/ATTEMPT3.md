@@ -486,3 +486,14 @@ Limitations:
   source snapshots.
 - Ordinary `read_rows` still returns normal overlay rows and does not include
   conflict metadata.
+
+## 2026-05-25 17:48 PDT
+
+Behavior-preserving query split is green. Generic row reads, pinned branch base
+reads, sparse overlay reads, and conflict candidate reads now live in `query.rs`
+instead of `runtime.rs`.
+
+Learning: this is the right module boundary: policy lowering, branch visibility,
+lens value decoding, and conflict candidates all converge at query execution.
+`runtime.rs` is still large, but the highest-complexity read behavior now has a
+place to evolve.
