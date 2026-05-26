@@ -1669,3 +1669,16 @@ between unresolved source candidates, but explicit resolution turns the branch
 back into normal single-row update semantics.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 263 whole-system tests.
+
+## 2026-05-26 05:43 PDT
+
+Updated `SPEC.md` to match the executable branch-source model from the
+overnight slice: branch source reachability is transitive and acyclic,
+source-depth controls precedence, same-depth candidates remain conflicts, and
+ordinary writes over unresolved same-depth candidates fail until explicit
+branch-local conflict resolution creates a base row.
+
+Discovery: the spec should now talk about product-grade branch merge APIs as
+the deferred layer, not multi-source reads themselves. The prototype already
+has enough multi-source semantics to test the core visibility and ambiguity
+rules.

@@ -917,11 +917,22 @@ Visible row selection:
 
 ```text
 for each logical row:
-  collect versions visible from branch sources
-  apply source precedence
-  apply merge strategy or expose conflict candidates
+  collect versions visible from the branch source graph
+  walk sources transitively; cycles are invalid catalogue state
+  apply source-depth precedence:
+    branch-local rows shadow direct sources
+    direct sources shadow deeper transitive sources
+    same-depth candidates remain conflicts
+  expose unresolved same-depth candidates until explicitly resolved
   filter deleted winners unless requested
 ```
+
+Writes use the same graph with stricter base selection. A branch-local write may
+use an inherited row as its base only when that row has exactly one effective
+candidate after source-depth precedence. If multiple same-depth candidates are
+visible, ordinary update/delete must fail as ambiguous; explicit conflict
+resolution creates a branch-local row, after which ordinary writes use that
+local row as their base.
 
 Baseline branch features:
 
@@ -929,15 +940,16 @@ Baseline branch features:
 - branch create from main at pinned global epoch
 - branch-local writes
 - branch reads over overlay plus pinned main base
+- branch reads over transitive acyclic source graphs
 - branch sync including branch-local rows and base-only rows
 - branch policy/write validation against branch overlay plus pinned base
 - branch query-scope repair scoped by branch id
 
 Deferred branch features:
 
-- multi-base branches
 - hot branch projections
 - metadata-only merge commits
+- product-grade branch merge APIs over multi-source graphs
 
 Branch merge should preferably become a metadata transaction changing branch
 sources rather than copying rows. Multi-base conflicts should remain visible
@@ -946,7 +958,7 @@ candidates until resolved.
 Open issues:
 
 - exact provenance encoding
-- multi-base conflict semantics
+- user-facing multi-base conflict metadata and resolution workflow
 - branch source table layout
 - whether branch-local query repair should use durable query-read state,
   predicate history indexes, or both
@@ -2160,6 +2172,11 @@ feature exists.
 - A branch-local transaction may be globally accepted while invisible to main.
 - Main visibility does not automatically include branch-local history.
 - Branch reads use source precedence, not incidental storage order.
+- Branch source reachability is transitive and acyclic.
+- Branch source depth is precedence: nearer sources shadow deeper sources,
+  while same-depth candidates remain conflicts.
+- Ordinary branch writes over unresolved same-depth candidates fail as
+  ambiguous; explicit conflict resolution creates a branch-local base row.
 - Branch-local writes use the same logical row ids as main by default.
 - Branch source/provenance changes are ordinary authorized metadata
   transactions.
