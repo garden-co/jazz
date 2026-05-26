@@ -518,13 +518,6 @@ bundle.
 Open issue: branch-scoped export still does not include pinned main-base
 snapshot rows for branches based on `base_global_epoch`.
 
-## 2026-05-25 17:54 PDT
-
-Stretch goal recorded: recursive queries and recursive permission policies need
-explicit derisking. They are likely to force recursive CTE lowering and careful
-policy dependency tracking. Current priorities remain branch-scoped sync
-correctness and module boundaries first.
-
 ## 2026-05-25 17:52 PDT
 
 Correction: I accidentally treated the previous checkpoint as a stopping point.
@@ -536,6 +529,13 @@ Next targets:
 - move sync import/export out of `runtime.rs`
 - lens + policy composition
 - better module boundaries around generic mutations
+
+## 2026-05-25 17:54 PDT
+
+Stretch goal recorded: recursive queries and recursive permission policies need
+explicit derisking. They are likely to force recursive CTE lowering and careful
+policy dependency tracking. Current priorities remain branch-scoped sync
+correctness and module boundaries first.
 
 ## 2026-05-25 17:57 PDT
 
