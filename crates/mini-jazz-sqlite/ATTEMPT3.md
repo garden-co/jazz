@@ -393,3 +393,13 @@ Attempt 3 still lacks a first-class trusted-peer/admin policy bypass context.
 Decision: direct policy dependency inclusion belongs in sync/export, not only in
 query results. This is the minimum way for a receiver to recreate a policy-gated
 query without already having the parent facts.
+
+## 2026-05-25 17:32 PDT
+
+Policy dependency subscription invalidation is green. A subscription to child
+rows removes the child when only the parent policy fact changes from
+Alice-readable to Bob-owned.
+
+Learning: rerun-and-diff subscriptions can correctly handle policy dependency
+changes because `read_rows` is already policy-aware. The missing future piece is
+efficient invalidation/read-set tracking, not the semantic model.
