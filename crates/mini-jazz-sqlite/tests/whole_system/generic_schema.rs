@@ -1196,6 +1196,92 @@ fn not_equal_query_scope_syncs_and_refreshes_present_optional_values() {
 }
 
 #[test]
+fn durable_not_equal_null_query_read_refreshes_present_optional_values_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("ne-null-query-worker.sqlite");
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.optional_text("tag");
+    });
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    upstream
+        .insert_row(
+            "notes",
+            "note-tagged",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Tagged")),
+                ("tag".to_owned(), json!("work")),
+            ]),
+        )
+        .unwrap();
+    upstream
+        .insert_row(
+            "notes",
+            "note-untagged",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Untagged")),
+                ("tag".to_owned(), json!(null)),
+            ]),
+        )
+        .unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_ne("notes", "tag", json!(null))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(worker.observed_query_reads().unwrap()[0].op, "ne");
+        assert_eq!(
+            worker
+                .read_rows_where_ne("notes", "tag", json!(null))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    upstream
+        .update_row(
+            "notes",
+            "note-untagged",
+            BTreeMap::from([("tag".to_owned(), json!("personal"))]),
+        )
+        .unwrap();
+
+    let mut reopened = Runtime::open_with_schema(
+        Storage::File(worker_path),
+        "worker-reopened",
+        "alice",
+        schema,
+    )
+    .unwrap();
+    for refresh in upstream
+        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    let refreshed = reopened
+        .read_rows_where_ne("notes", "tag", json!(null))
+        .unwrap();
+    assert_eq!(refreshed.len(), 2);
+    assert!(refreshed.iter().any(|row| row.id == "note-untagged"));
+}
+
+#[test]
 fn created_by_not_equal_query_scope_syncs_and_refreshes() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");

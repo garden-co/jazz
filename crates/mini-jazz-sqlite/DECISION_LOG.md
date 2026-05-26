@@ -1493,3 +1493,15 @@ the generic descriptor direction. Equality, ordered pages, `contains`, and
 separate reconnect mechanisms.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 250 whole-system tests.
+
+## 2026-05-26 05:21 PDT
+
+Added durable reconnect coverage for `ne null` over optional fields. A worker
+persists a "present optional value" query, restarts, and refreshes in a row that
+became non-null while it was away.
+
+Discovery: SQL-null predicate semantics also fit the generic persisted query
+descriptor path. Optional-field reconnect does not need a separate absence
+mechanism unless the query is specifically about a missing referenced row.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 251 whole-system tests.
