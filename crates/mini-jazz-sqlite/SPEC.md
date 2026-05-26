@@ -248,9 +248,22 @@ Outcome is not the same as durability. Edge acceptance of a mergeable
 transaction is a replayable durability/acceptance receipt; global acceptance is
 the final authority outcome for exclusive transactions.
 
-Open issue: the exact representation of edge-accepted mergeable transactions is
-still to be tested. This v2 spec prefers `outcome + durability/receipts` over a
-single overloaded fate enum.
+The v0 prototype represents edge-accepted mergeable transactions as
+`outcome = accepted` plus an edge receipt and no `global_epoch`. Later global
+acceptance enriches the same public transaction id with `global_epoch` and a
+global receipt.
+
+Transaction outcome updates are monotonic. They are not last-write-wins. The
+prototype order is:
+
+```text
+pending < accepted < rejected
+```
+
+`rejected` is terminal for ordinary visibility even if later bundles carry
+accepted/global metadata for the same transaction. Durable metadata may still
+attach for diagnostics, reconciliation, or audit, but it must not resurrect the
+rejected version.
 
 ### 5.9 Authority
 
@@ -587,15 +600,37 @@ Policies may depend on rows other than the result row. In the running example,
 a todo read may depend on the referenced project row and the project membership
 rows that authorize Alice.
 
+Policy evaluation always happens in an explicit read context. The same policy
+expression may produce different answers under:
+
+- main current
+- branch overlay plus latest main
+- branch overlay plus pinned base snapshot
+- historical global epoch snapshot
+
+Local validation, edge validation, sync export, subscription invalidation, and
+policy read-set recording must use the same read context for one operation. A
+write through a pinned branch must not accidentally validate against latest main
+when the referenced policy row has no branch overlay; it must validate against
+the branch's pinned base snapshot.
+
 Policy dependencies must be represented as observed facts separately from
 ordinary result dependencies. A row included only for policy enforcement should
 not necessarily appear as a query include.
 
+Write-policy validation records policy read facts. These facts are transitive:
+if a todo write is allowed because its project is readable, and the project is
+readable only because an org is readable, the transaction's policy read facts
+include both the project and the org. These facts are read-set material for
+replay, validation, causality reasoning, sync scope, and future diagnostics.
+
 Policy failures should not let ordinary clients distinguish hidden rows from
 nonexistent rows. Trusted peers and authorities may keep richer debug logs.
 
-Recursive policies are a major lowering risk and should be de-risked early with
-recursive CTE experiments.
+Recursive policies are in scope. v0 rejects policy cycles and supports bounded
+acyclic recursive policy chains that lower to SQL. Recursive policy lowering
+must work in all read contexts listed above, including pinned branch base
+snapshots.
 
 Open issues:
 
@@ -603,6 +638,7 @@ Open issues:
 - how to bound recursive policy evaluation
 - edge policy-readiness strategy
 - redaction rules for policy denial/rejection explanations
+- compact representation and indexing of transitive policy read facts
 
 ## 11. Transactions
 
@@ -664,6 +700,15 @@ public transaction id.
 Authority rejection keeps the transaction and history rows. Visibility and
 projection repair make rejected versions disappear from ordinary reads.
 
+Edge acceptance of mergeable transactions sets the transaction outcome to
+accepted and records an edge receipt without a global epoch. Global acceptance
+later records the global epoch and global receipt on the same transaction.
+
+Multiple transactions may share one global epoch. A global epoch is an authority
+batch/order point, not a unique transaction coordinate. Deterministic ordering
+within one global epoch uses a stable tie-breaker such as physical transaction
+number or public transaction id, depending on the storage context.
+
 Waiting semantics:
 
 - waiting on a mergeable transaction may target local, edge, or global
@@ -676,8 +721,7 @@ Waiting semantics:
 Open issues:
 
 - exact durability receipt layout
-- whether edge-accepted mergeable transactions set `outcome = accepted` or keep
-  a separate edge-accepted receipt until global observation
+- explicit fate partial order and merge rules for all incoming-sync cases
 - audit-grade append-only fate/receipt history
 
 ## 12. Row History And Current Projection
@@ -712,10 +756,16 @@ Projection rebuild:
 6. preserve concurrent candidates when merge strategy cannot reduce them
 7. apply delete semantics
 
-Accepted global transactions are ordered by global epoch. Local pending
+Accepted global transactions are ordered by `(global_epoch, tie_breaker)`,
+because several transactions may share a global epoch. Local pending
 transactions are ordered by `(node, local_epoch)` only within one node.
 Cross-node same-row pending writes are conflict candidates unless a merge rule
 resolves them.
+
+Remote pending history must not displace durable accepted/global current state.
+It may materialize only when no durable version exists for that row and branch.
+Local pending mergeable writes may sort after durable rows for optimistic UX.
+Pending exclusive writes are not visible until globally accepted.
 
 If a delete and update are concurrent visible candidates, the reducer must apply
 a specified merge/delete rule or preserve candidates. It must not silently pick
@@ -747,6 +797,15 @@ projection exists for a branch, read through history and branch visibility.
 Current reads may include local optimistic mergeable transactions from the
 originating runtime. Pending exclusive transactions are not visible until
 globally accepted.
+
+When a branch has a pinned base snapshot, its effective current read is:
+
+1. branch-local overlay rows and tombstones
+2. otherwise main history at or below the branch base epoch
+3. filtered through policy in that same effective context
+
+Latest main state after the branch base is not visible through that branch
+unless it is explicitly merged into the branch view.
 
 ### 13.2 Global Epoch Snapshot
 
@@ -871,6 +930,8 @@ Baseline branch features:
 - branch-local writes
 - branch reads over overlay plus pinned main base
 - branch sync including branch-local rows and base-only rows
+- branch policy/write validation against branch overlay plus pinned base
+- branch query-scope repair scoped by branch id
 
 Deferred branch features:
 
@@ -887,6 +948,8 @@ Open issues:
 - exact provenance encoding
 - multi-base conflict semantics
 - branch source table layout
+- whether branch-local query repair should use durable query-read state,
+  predicate history indexes, or both
 
 ## 15. Queries And Observed Facts
 
@@ -943,6 +1006,26 @@ Predicate/range/absence facts must compare by normalized expression, normalized
 bound values, table/schema identity, and branch/source context. The exact normal
 form is open; until then only planner-supported predicate forms are stable.
 
+Query-scoped sync must include enough repair information for a receiver that
+previously synced the same scope to remove stale rows. Exporting only the
+current result rows is insufficient. If a row previously matched `done = false`
+and now has `done = true`, the refresh must send the row's new visible version.
+If the row was deleted, the refresh must send the tombstone. This is ordinary
+history, not an authoritative result snapshot.
+
+The v0 prototype repair strategy for equality predicates is:
+
+1. collect current result rows
+2. also collect rows whose local history ever matched the equality predicate
+3. export current/history versions for those repair rows
+4. attach a predicate observed fact carrying table, field, value, and branch id
+5. dedupe concrete history records before encoding the bundle
+
+This strategy is correct enough for the prototype, but may over-export. A
+production implementation should persist subscription/query-read state or
+predicate indexes so repair candidates can be bounded by actual prior delivery,
+not only by local "ever matched" history.
+
 Example: querying open todos includes:
 
 - todo rows that matched `done = false`
@@ -957,6 +1040,9 @@ Open issues:
 - relation inference from schema metadata
 - compact predicate/range closure
 - page-boundary fact shape
+- durable query-read/subscription state for scope contraction
+- efficient repair candidate discovery for rows that leave predicate/range
+  scopes
 
 ## 16. Sync Bundles
 
@@ -975,12 +1061,49 @@ Bundles contain:
 - catalogue entries when needed
 - file/blob metadata and bytes when in scope and authorized
 
+The Attempt 3 bundle shape is:
+
+```text
+branches: branch id, base global epoch, source branch ids
+txs: tx id, node id, local epoch, global epoch, conflict mode, outcome,
+     rejection code, receipt tiers, creation time
+reads: transaction row-read facts, currently scoped to exported transaction ids
+query_reads: equality predicate facts with branch/table/field/value
+history: row versions with branch id, tx id, op, values, and system metadata
+```
+
+This is a prototype wire shape, not the final encoding. It captures the product
+boundary that matters: public ids and semantic facts cross the wire; physical
+ids do not.
+
 Bundles use public ids on the wire. Incoming sync hydrates public ids into local
 physical ids before touching hot tables.
 
 Bundles are not authoritative result snapshots. Receivers apply history,
 outcome, receipts, branch metadata, and catalogue data, then run queries
 locally.
+
+Scope contraction is part of query-scoped sync. When a refreshed query scope no
+longer contains a row that the receiver may currently show for that scope, the
+bundle must carry enough facts/history to make a local rerun remove it. This can
+happen because of updates, deletes, transaction outcome changes, branch source
+changes, policy dependency changes, or catalogue/lens changes.
+
+Bundle assembly must dedupe concrete history rows and transaction records even
+when the same row is included for multiple reasons: result, dependency, policy,
+repair, snapshot base, and branch provenance.
+
+Table-scope and query-scope exports have different obligations. Table-scope
+exports include table tombstones needed to converge table replicas. Query-scope
+exports include only rows/facts needed by the query, its policy dependencies,
+and its repair obligations; they should avoid unrelated tombstone leakage.
+
+Branch-scoped sync carries several provenance classes:
+
+- active branch metadata
+- source branch metadata and history needed for source candidates
+- pinned main-base snapshot history
+- branch-local overlay history and tombstones
 
 If a receiver lacks required catalogue state, it should wait or fail closed. The
 query-scoped bundle is not the primary discovery mechanism for an app's
@@ -991,6 +1114,10 @@ Open issues:
 - compact reconnect summaries
 - exact bundle encoding
 - whether future policy dependencies can use opaque proofs
+- how much negative/repair information should be represented explicitly versus
+  as ordinary history for repair rows
+- durable read-set sync for predicate/range/absence facts; current row read-set
+  sync is scoped to transactions whose history is exported
 
 ## 17. Subscriptions
 
@@ -1075,8 +1202,31 @@ non-changing for the current projection.
 
 Duplicate incoming sync application must be idempotent.
 
-Open issue: affected-row discovery should become narrower than broad projection
-repair, but broad repair is acceptable as a correctness baseline.
+Incoming transaction fate is merged monotonically. A stale pending or accepted
+bundle must not downgrade a rejected transaction; a stale pending bundle must
+not downgrade an accepted/global transaction; late global metadata enriches the
+same transaction rather than replacing it.
+
+The prototype authority path currently applies an untrusted bundle, validates
+pending transactions, rejects invalid ones, and repairs projection. Tests cover
+important pollution cases, but the desired production shape is staging
+validation before publishing proposal rows into application-visible current
+projection.
+
+Receivers are not allowed to trust the sender's query result as final. They
+apply transaction/history/fate/fact data, repair or rebuild projections, and
+rerun the query locally. Predicate observed facts may be used to repair stale
+scope-local projection rows, but correctness still comes from local query
+execution.
+
+Open issues:
+
+- affected-row discovery should become narrower than broad projection repair,
+  but broad repair is acceptable as a correctness baseline
+- exact receiver-side storage for query-read facts and scope contraction
+- whether incoming predicate facts should directly mutate current projection or
+  only schedule rerun/repair work
+- staged apply/validate/publish pipeline for untrusted authority intake
 
 ## 19. Authority Validation
 
@@ -1402,8 +1552,7 @@ CREATE TABLE jazz_tx (
   outcome INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   metadata_blob BLOB NOT NULL,
-  UNIQUE (node_num, local_epoch),
-  UNIQUE (global_epoch)
+  UNIQUE (node_num, local_epoch)
 );
 
 CREATE TABLE jazz_tx_receipt (
@@ -1424,6 +1573,10 @@ CREATE TABLE jazz_tx_rejection (
 
 This sketch encodes the v2 split between outcome, durability receipt, and
 rejection detail.
+
+`global_epoch` is intentionally not unique. Multiple transactions may share one
+authority epoch. Indexes should support lookup/order by `(global_epoch, tx_num)`
+or equivalent stable tie-breaker.
 
 ### 26.2 History And Current Tables
 
@@ -1682,10 +1835,13 @@ The following areas remain intentionally underspecified:
 - compact dotted vector encoding
 - local-to-global vector upgrade broadcast
 - predicate/range scope closure
+- query-scope repair candidate bounding
+- durable storage for query-read/subscription observed facts
 - authority validation over large read sets
 - multi-base branch conflict semantics
 - branch provenance encoding
 - policy language and recursive policy bounds
+- recursive policy lowering performance and diagnostics
 - full schema lens semantics
 - reconnect summaries
 - durable subscription resume
@@ -1693,10 +1849,12 @@ The following areas remain intentionally underspecified:
 - audit-grade append-only receipt history
 - garbage collection and compaction
 
-## Appendix A: Implementation Strategy For Attempt 3
+## Appendix A: Attempt 3 Implementation Status And Strategy
 
-Attempt 3 should start fresh and copy only deliberate helpers, tests, and
-learnings from prior attempts.
+Attempt 3 is no longer throwaway. It should remain the working prototype until
+we learn a reason to restart. Future work may still freely reshape internals,
+but the current code has proved enough whole-system composition to be worth
+evolving.
 
 All Attempt 3 stores should use SQLite, including memory-only stores. In-memory
 means in-memory SQLite, not a parallel fake implementation. This keeps storage
@@ -1750,6 +1908,31 @@ Suggested slices:
 11. narrow but real policies
 12. narrow but real lenses
 
+Implemented slices so far:
+
+- SQLite-backed in-memory and file-backed runtimes
+- schema-driven DDL for narrow structural schemas
+- local writes, generic transactions, updates, deletes, and current projection
+- deterministic projection rebuild from history and transaction fate
+- public ids with local physical surrogates
+- transaction fate, edge/global receipts, rejection repair, and idempotent sync
+- query-scoped sync bundles using public ids
+- branch metadata, branch-local writes, pinned main base snapshots, and sparse
+  overlays
+- branch provenance sync for simple branch sources
+- equality query lowering with predicate observed facts
+- query-scope repair for rows that leave equality predicates via update or
+  delete
+- one-shot subscriptions via rerun-and-diff semantic row diffs
+- narrow read/write policies, including ref-readable policies
+- transitive policy read-set recording for recursive write policies
+- trusted edge validation of untrusted bundles
+- recursive query reads over self refs
+- recursive query-scope export of deleted subtrees
+- cycle rejection and bounded acyclic recursive policy lowering
+- narrow schema lenses for renamed fields and refs
+- system-column prefix escaping
+
 Tests should be product-shaped integration tests using projects, todos, Alice,
 Bob, and a core authority.
 
@@ -1798,6 +1981,55 @@ Attempt 3 should include policies and lenses, even if the first slices are
 narrow. The goal is to prove that the whole system composes, not to defer the two
 features most likely to change scope, query planning, validation, and sync.
 
+Implementation lessons from Attempt 3:
+
+- The useful architecture is verb-shaped: write, validate, apply, export,
+  repair, read, subscribe. Thin data artifacts are useful, but manager-style
+  abstractions should not become the design center.
+- SQLite is a good semantic substrate for the prototype. Recursive CTEs,
+  transactions, projection tables, and ordinary indexes are already carrying
+  real Jazz semantics.
+- Correctness depends on making read contexts explicit. The same logical policy
+  must evaluate against main current, branch overlay, pinned base snapshot, or
+  historical snapshot depending on the operation.
+- Query-scoped sync needs repair semantics from the beginning. A bundle cannot
+  merely export current result rows and hope the receiver removes stale rows.
+- Read/write sets are becoming the bridge between policy, validation,
+  replayability, causality, and future conflict explanation.
+- Whole-system tests are more valuable than narrow helper tests for this design:
+  most important bugs appeared only when branch snapshots, policies, sync, and
+  query scopes were composed.
+
+Known implementation tensions:
+
+- Query-scope repair currently uses local history that ever matched a supported
+  equality predicate. This is correct for the prototype but can over-export.
+- Projection repair is intentionally broad in several incoming-sync paths.
+- Recursive policy/query lowering works for narrow acyclic cases, but helper
+  SQL is duplicated and needs consolidation.
+- Exclusive transaction conflict handling is still row-coarse and not a full
+  read/write-set validation model.
+- Branch source/provenance is still much simpler than the product design.
+- Current query-read facts are carried in bundles but not yet durable
+  subscription state.
+- Lenses are currently field-level storage-name mappings for text/ref renames.
+  There is no schema-versioned catalogue, inverse lens graph, compatibility
+  graph, or copy-forward storage yet; physical table names are still
+  `schema_v1`.
+- Conflict candidates are exposed through side APIs and tests, not as ordinary
+  current-row conflict blobs or query result metadata.
+- Predicate facts are equality-only in the generic path. There is no durable
+  range/absence predicate model yet.
+- Recursive query reads use two strategies: current projection can use recursive
+  CTEs, while pinned branch snapshot reads may fall back to in-memory traversal
+  over already visible rows. This is a correctness-first shortcut, not the final
+  planner shape.
+- Receipt representation is minimal. Receipt tiers and timestamps exist, but
+  authority identity, signatures, and detailed receipt payload semantics remain
+  open.
+- Trusted/admin policy bypass exists in the harness, but audit/provenance
+  semantics for bypassed writes are thin.
+
 ## Appendix B: Rationale
 
 Append-only history plus rebuildable projections handles rejection repair,
@@ -1830,6 +2062,10 @@ Future work may revisit:
 - custom SQLite VFS/page compression
 - opaque policy proofs
 - compact encrypted indexes
+- query-scope repair via durable observed-fact indexes rather than broad
+  "ever matched" scans
+- consolidating snapshot/effective-branch SQL builders into one read-context
+  lowering layer
 
 ## Appendix D: Invariants To Test
 
@@ -1864,6 +2100,12 @@ feature exists.
 - Waiting on an exclusive transaction at global tier resolves on acceptance and
   rejects on rejection.
 - Edge-accepted mergeable transactions produce replayable receipt state.
+- Edge-accepted mergeable transactions are accepted and visible without a
+  global epoch.
+- Later global acceptance enriches the same public transaction id.
+- Rejected outcome is terminal for ordinary visibility.
+- Stale incoming fate cannot downgrade accepted/global or rejected state.
+- Multiple transactions may share one global epoch.
 - Duplicate incoming transaction records are idempotent.
 
 ### D.3 History And Projection Invariants
@@ -1880,6 +2122,11 @@ feature exists.
 - Projection repair after late acceptance can make previously hidden state
   visible.
 - Local current projection may include local optimistic mergeable writes.
+- Remote pending history cannot displace a durable accepted/global current row.
+- Remote pending history may materialize only when no durable row version exists
+  for that row and branch.
+- Durable/global ordering uses `(global_epoch, tie_breaker)`, not global epoch
+  alone.
 - Cross-node concurrent same-row pending writes are conflicts unless merge
   strategy resolves them.
 - Incidental SQLite row order never decides visible conflict winners.
@@ -1915,7 +2162,23 @@ feature exists.
 - Branch source/provenance changes are ordinary authorized metadata
   transactions.
 - Branch sync includes branch metadata as well as visible row history.
+- Branch metadata includes base global epoch and source branch ids; row
+  `branch_id` alone is insufficient for branch reproduction.
 - Base-only rows needed for branch query results are included in branch sync.
+- Branch-local tombstones over pinned-base rows prevent base rows from
+  reappearing in the branch view.
+- Rejected branch overlays fall back to the pinned base when a base candidate
+  exists.
+- Pinned branch reads use branch overlay plus base snapshot, not latest main.
+- Pinned branch write-policy validation uses branch overlay plus base snapshot
+  for referenced policy rows.
+- Pinned branch policy read-set recording records base-snapshot dependencies
+  when no branch overlay exists.
+- Edge validation of untrusted branch writes reproduces the same pinned-base
+  policy decision from synced branch/base history.
+- Branch query-scope repair is scoped by branch id.
+- A branch delete of a pinned-base row exports a branch tombstone sufficient to
+  repair peer recursive reads.
 
 ### D.6 Query And Observed-Fact Invariants
 
@@ -1933,6 +2196,17 @@ feature exists.
 - Bundle locators dedupe concrete rows/transactions even when facts repeat.
 - Normalized predicates/ranges compare deterministically for supported planner
   forms.
+- Query-scope refresh repairs rows that leave a predicate through an update.
+- Query-scope refresh repairs rows that leave a predicate through a delete by
+  sending tombstone history.
+- Query-scope export includes predicate observed facts with table, field, value,
+  and branch context for supported predicates.
+- Query-scope repair rows may be included even when they are no longer semantic
+  result rows.
+- Query-scope export dedupes concrete history records included for several
+  reasons.
+- Recursive query-scope export includes deleted descendant subtrees, not only
+  direct deleted children.
 
 ### D.7 Sync Invariants
 
@@ -1949,6 +2223,11 @@ feature exists.
 - Reconnect replays desired subscriptions.
 - Reconnect uses replay-window recovery before full scope/frontier fallback.
 - Scope contraction removes or invalidates stale rows.
+- Scope contraction is represented with enough ordinary history/facts for the
+  receiver to rerun locally; bundles are not authoritative result snapshots.
+- Rows that leave scope because of update, delete, policy change, branch source
+  change, outcome change, or catalogue/lens change eventually disappear from
+  local query results after relevant repair data arrives.
 
 ### D.8 Subscription Invariants
 
@@ -1980,6 +2259,17 @@ feature exists.
   product tradeoff.
 - Exclusive transactions are validated by global authority against
   authority-visible history and policy facts.
+- Recursive policies over acyclic ref chains are SQL-lowerable.
+- Direct and indirect recursive policy cycles are rejected.
+- Write policies record transitive policy read facts, not only direct parent
+  rows.
+- Policy evaluation and policy read-set recording use the same read context.
+- Historical snapshot policy evaluates referenced parents at the same snapshot
+  epoch recursively, not through current projection.
+- Branch-local parent rows override base parents for branch policy checks.
+- `write_if_created_by_principal` allows self-authored inserts and preserves
+  original `created_by` on updates.
+- Updates and deletes record the previously visible row as a read dependency.
 
 ### D.10 Catalogue And Lens Invariants
 
