@@ -974,3 +974,16 @@ This strengthens the case that "query descriptors as desired state" can cover
 both flat and recursive local-first subscriptions.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 217 whole-system tests.
+
+## 2026-05-26 03:41 PDT
+
+Did a small runtime architecture cleanup: all export paths now construct bundles
+through one `make_bundle` helper, which centralizes protocol version, schema
+fingerprint, and scoped policy fingerprint calculation.
+
+Discovery: tonight's policy-fingerprint and recursive-descriptor work made it
+too easy to accidentally hand-build subtly different bundles. Centralizing this
+does not solve the larger runtime-module size problem, but it removes one source
+of drift before adding more query/export shapes.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 217 whole-system tests.

@@ -327,16 +327,14 @@ impl Runtime {
             &self.conn,
             self.branch_num,
         )?);
-        Ok(Bundle {
-            protocol_version: BUNDLE_PROTOCOL_VERSION,
-            schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &query_reads),
+        Ok(make_bundle(
+            &self.schema,
             branches,
             txs,
             reads,
             query_reads,
             history,
-        })
+        ))
     }
 
     pub fn newest_open_todos(&self, limit: usize) -> Result<Vec<TodoView>> {
@@ -388,16 +386,14 @@ impl Runtime {
             op: "top_created_at_desc".to_owned(),
             value: JsonValue::Number(serde_json::Number::from(limit)),
         }];
-        Ok(Bundle {
-            protocol_version: BUNDLE_PROTOCOL_VERSION,
-            schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &query_reads),
+        Ok(make_bundle(
+            &self.schema,
             branches,
             txs,
             reads,
             query_reads,
             history,
-        })
+        ))
     }
 
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
@@ -414,16 +410,14 @@ impl Runtime {
         let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
-        Ok(Bundle {
-            protocol_version: BUNDLE_PROTOCOL_VERSION,
-            schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &[]),
+        Ok(make_bundle(
+            &self.schema,
             branches,
             txs,
             reads,
-            query_reads: Vec::new(),
+            Vec::new(),
             history,
-        })
+        ))
     }
 
     pub fn export_recursive_refs(
@@ -508,16 +502,14 @@ impl Runtime {
             op: "recursive_refs".to_owned(),
             value: JsonValue::String(root_id.to_owned()),
         }];
-        Ok(Bundle {
-            protocol_version: BUNDLE_PROTOCOL_VERSION,
-            schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &query_reads),
+        Ok(make_bundle(
+            &self.schema,
             branches,
             txs,
             reads,
             query_reads,
             history,
-        })
+        ))
     }
 
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
@@ -772,16 +764,14 @@ impl Runtime {
             }
             "absent" => {
                 let query_reads = vec![read.clone()];
-                Ok(Bundle {
-                    protocol_version: BUNDLE_PROTOCOL_VERSION,
-                    schema_fingerprint: self.schema.compatibility_fingerprint(),
-                    policy_fingerprint: scoped_policy_fingerprint(&self.schema, &[], &query_reads),
-                    branches: Vec::new(),
-                    txs: export_txs(&self.conn)?,
-                    reads: Vec::new(),
+                Ok(make_bundle(
+                    &self.schema,
+                    Vec::new(),
+                    export_txs(&self.conn)?,
+                    Vec::new(),
                     query_reads,
-                    history: Vec::new(),
-                })
+                    Vec::new(),
+                ))
             }
             op => Err(crate::Error::new(format!(
                 "unsupported observed query refresh {op}"
@@ -1991,16 +1981,14 @@ impl Runtime {
             op: op.to_owned(),
             value,
         }];
-        Ok(Bundle {
-            protocol_version: BUNDLE_PROTOCOL_VERSION,
-            schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &query_reads),
+        Ok(make_bundle(
+            &self.schema,
             branches,
             txs,
             reads,
             query_reads,
             history,
-        })
+        ))
     }
 
     pub fn read_recursive_refs(
@@ -4551,6 +4539,26 @@ fn scoped_policy_fingerprint(
         tables.insert(query_read.table.clone());
     }
     schema.policy_fingerprint_for_tables(tables.iter())
+}
+
+fn make_bundle(
+    schema: &SchemaDef,
+    branches: Vec<BranchRecord>,
+    txs: Vec<TxRecord>,
+    reads: Vec<ReadRecord>,
+    query_reads: Vec<QueryReadRecord>,
+    history: Vec<HistoryRecord>,
+) -> Bundle {
+    Bundle {
+        protocol_version: BUNDLE_PROTOCOL_VERSION,
+        schema_fingerprint: schema.compatibility_fingerprint(),
+        policy_fingerprint: scoped_policy_fingerprint(schema, &history, &query_reads),
+        branches,
+        txs,
+        reads,
+        query_reads,
+        history,
+    }
 }
 
 fn tier_name(tier: i64) -> rusqlite::Result<String> {
