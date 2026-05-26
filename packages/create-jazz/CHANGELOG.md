@@ -1,5 +1,11 @@
 # create-jazz
 
+## 2.0.0-alpha.50
+
+### Patch Changes
+
+- f463ae9: Drop Node.js 20 support. Minimum is now Node.js 22.12 (Jod LTS). `engines.node` is set to `>=22.12` on `jazz-tools` and `create-jazz`; consumers on Node 20 will see an `EBADENGINE` warning (npm/pnpm) or a hard install failure (Yarn).
+
 ## 2.0.0-alpha.49
 
 ## 2.0.0-alpha.48
