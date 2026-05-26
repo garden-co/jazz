@@ -505,3 +505,14 @@ crate suite is green with 163 tests.
 Design lesson: mutable transaction fate can still be replayable if precedence is
 monotonic: accepted metadata may enrich a rejected tx, but rejected outcome and
 detail remain authoritative.
+
+## 2026-05-26 01:05 PDT
+
+Made ref-readable policy declarations fail closed at schema install time. A
+policy that points at a missing field or a scalar field now gets a Jazz-shaped
+schema error instead of silently degrading to allow-all behavior. Full mini
+crate suite is green with 164 tests.
+
+Design lesson: policy syntax validation is part of policy-first behavior. Bad
+policy declarations must fail loudly before any runtime can start accepting or
+serving data under the wrong assumptions.

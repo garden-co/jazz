@@ -336,11 +336,17 @@ fn validate_policy_cycle(
         .find(|candidate| candidate.name == *field)
     else {
         seen.remove(&table.name);
-        return Ok(());
+        return Err(crate::Error::new(format!(
+            "policy on {} references unknown field {}",
+            table.name, field
+        )));
     };
     let FieldKind::Ref { table: parent } = &field.kind else {
         seen.remove(&table.name);
-        return Ok(());
+        return Err(crate::Error::new(format!(
+            "policy on {} references non-ref field {}",
+            table.name, field.name
+        )));
     };
     let parent_table = schema.table_def(parent)?;
     let result = validate_policy_cycle(schema, parent_table, &parent_table.read_policy, seen);

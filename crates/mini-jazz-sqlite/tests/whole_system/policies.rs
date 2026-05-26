@@ -64,6 +64,33 @@ fn policy_filters_reads_through_required_parent_ref() {
 }
 
 #[test]
+fn schema_rejects_ref_policy_that_does_not_point_at_ref_field() {
+    let missing_ref = SchemaDef::new().table("todos", |table| {
+        table.text("title");
+        table.read_if_ref_readable("project");
+    });
+    let err = match Runtime::open_with_schema(Storage::Memory, "node", "alice", missing_ref) {
+        Ok(_) => panic!("policy with missing ref field opened successfully"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("policy on todos references unknown field project"));
+
+    let scalar_ref = SchemaDef::new().table("todos", |table| {
+        table.text("title");
+        table.read_if_ref_readable("title");
+    });
+    let err = match Runtime::open_with_schema(Storage::Memory, "node", "alice", scalar_ref) {
+        Ok(_) => panic!("policy with scalar ref field opened successfully"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("policy on todos references non-ref field title"));
+}
+
+#[test]
 fn policy_scoped_sync_includes_required_parent_rows_only() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
