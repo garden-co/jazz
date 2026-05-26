@@ -763,6 +763,83 @@ impl Runtime {
         self.query_context().read_rows(table_name)
     }
 
+    pub fn read_rows_where_eq(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+    ) -> Result<Vec<RowView>> {
+        self.schema.table_def(table_name)?;
+        Ok(self
+            .read_rows(table_name)?
+            .into_iter()
+            .filter(|row| row.values.get(field_name) == Some(&value))
+            .collect())
+    }
+
+    pub fn export_query_where_eq(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+    ) -> Result<Bundle> {
+        self.schema.table_def(table_name)?;
+        let rows = self.read_rows_where_eq(table_name, field_name, value)?;
+        let row_nums = rows
+            .iter()
+            .map(|row| row_num(&self.conn, &row.id))
+            .collect::<Result<Vec<_>>>()?;
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let txs = export_txs(&self.conn)?;
+        let mut history = export_visible_table_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            &self.principal,
+            self.trusted,
+            &branch_nums,
+            Some(&row_nums),
+        )?;
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            &self.principal,
+            self.trusted,
+            &branch_nums,
+            Some(&row_nums),
+        )?);
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
+                history.extend(export_history_versions_for_rows(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    Some(&row_nums),
+                    Some(base_epoch),
+                )?);
+                history.extend(export_snapshot_policy_dependency_history(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    &self.principal,
+                    self.trusted,
+                    base_epoch,
+                    Some(&row_nums),
+                )?);
+            }
+        }
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        Ok(Bundle {
+            branches,
+            txs,
+            reads,
+            history,
+        })
+    }
+
     pub fn read_recursive_refs(
         &self,
         table_name: &str,

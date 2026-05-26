@@ -1292,3 +1292,27 @@ on apply.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 durable_edge_rejects_after_restart_and_repairs_memory_client` passes.
+
+## 2026-05-25 19:10 PDT
+
+Starting generic point-predicate query/export slice. The hardcoded open-todos
+query was useful scaffolding, but the system needs a generic path that can read
+and export current rows for arbitrary schema fields while still including policy
+dependencies. Targeting simple equality predicates first.
+
+## 2026-05-25 19:11 PDT
+
+Generic point-predicate query/export is green. Added
+`read_rows_where_eq(table, field, value)` and `export_query_where_eq(...)`,
+then proved a generic `tasks.done = false` scope exports only matching task rows
+plus the parent project required to re-evaluate `read_if_ref_readable` on the
+receiver.
+
+Design note: this is deliberately semantic-first, not performance-first. It
+filters over `read_rows` in memory and reuses existing row-ID-scoped export.
+That validates the operation shape and policy composition, but a real version
+should lower predicates into SQL and record predicate/range read sets.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+generic_equality_query_scope_exports_matching_rows_and_policy_dependencies`
+passes.

@@ -75,3 +75,77 @@ fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
         bob.physical_row_num_for("doc-1").unwrap()
     );
 }
+
+#[test]
+fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Visible project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-open",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Open")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-closed",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Closed")),
+                ("done".to_owned(), json!(true)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "task-open");
+
+    let bundle = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    let synced = bundle
+        .history
+        .iter()
+        .map(|record| (record.table.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(synced.contains(&("tasks", "task-open")));
+    assert!(!synced.contains(&("tasks", "task-closed")));
+    assert!(synced.contains(&("projects", "project-1")));
+
+    peer.apply_bundle(&bundle).unwrap();
+    let peer_rows = peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(peer_rows.len(), 1);
+    assert_eq!(peer_rows[0].id, "task-open");
+}
