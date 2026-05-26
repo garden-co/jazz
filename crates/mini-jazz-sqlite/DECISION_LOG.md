@@ -987,3 +987,17 @@ does not solve the larger runtime-module size problem, but it removes one source
 of drift before adding more query/export shapes.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 217 whole-system tests.
+
+## 2026-05-26 03:43 PDT
+
+Added recursive observed-query deletion coverage. A peer subscribes from a
+persisted `recursive_refs` descriptor; upstream deletes a descendant; reconnect
+refresh carries the tombstone and the observed subscription emits a semantic
+`Removed(child)` diff.
+
+Discovery: recursive descriptor refresh handles both expansion and contraction
+through the same bundle path. The contraction behavior depends on exporting
+deleted descendant tombstones, not on generic `apply_query_scope_repair`
+understanding recursive tree SQL.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 218 whole-system tests.

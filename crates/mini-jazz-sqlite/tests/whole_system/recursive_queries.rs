@@ -529,6 +529,64 @@ fn durable_recursive_query_read_refreshes_after_restart() {
 }
 
 #[test]
+fn recursive_observed_query_refresh_removes_deleted_descendant_with_subscription_diff() {
+    let schema = support::folders_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Child")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_recursive_refs("folders", "root", "parent")
+            .unwrap(),
+    )
+    .unwrap();
+    let mut subscription = peer
+        .subscribe_observed_query(&peer.observed_query_reads().unwrap()[0])
+        .unwrap();
+    assert_eq!(subscription.initial_rows().len(), 2);
+
+    alice.delete_row("folders", "child").unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let diffs = peer.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "child"));
+    let ids = peer
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root"]);
+}
+
+#[test]
 fn recursive_query_scope_sync_exports_deleted_descendant_tombstone() {
     let schema = support::folders_schema();
     let mut alice =
