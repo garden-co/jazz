@@ -110,7 +110,7 @@ pub(crate) fn reject(conn: &Connection, tx_id: &str, code: &str) -> Result<i64> 
 pub(crate) fn accept_global(conn: &Connection, tx_id: &str, global_epoch: i64) -> Result<i64> {
     let tx_num = tx_num(conn, tx_id)?;
     conn.execute(
-        "UPDATE jazz_tx SET outcome = ?, global_epoch = ? WHERE tx_num = ?",
+        "UPDATE jazz_tx SET outcome = MAX(outcome, ?), global_epoch = ? WHERE tx_num = ?",
         params![OUTCOME_ACCEPTED, global_epoch, tx_num],
     )?;
     conn.execute(
@@ -125,7 +125,7 @@ pub(crate) fn accept_global(conn: &Connection, tx_id: &str, global_epoch: i64) -
 pub(crate) fn accept_edge(conn: &Connection, tx_id: &str, observed_at: i64) -> Result<i64> {
     let tx_num = tx_num(conn, tx_id)?;
     conn.execute(
-        "UPDATE jazz_tx SET outcome = ? WHERE tx_num = ?",
+        "UPDATE jazz_tx SET outcome = MAX(outcome, ?) WHERE tx_num = ?",
         params![OUTCOME_ACCEPTED, tx_num],
     )?;
     conn.execute(

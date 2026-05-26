@@ -329,3 +329,41 @@ fn accepted_bundle_does_not_resurrect_rejected_fate() {
         Some(7)
     );
 }
+
+#[test]
+fn direct_accept_after_reject_preserves_rejected_outcome_with_global_metadata() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Reject then accept metadata", false, "project-1")
+        .unwrap();
+
+    alice.reject_transaction(&tx, "policy_denied").unwrap();
+    alice.accept_transaction_at_global(&tx, 7).unwrap();
+
+    assert!(alice.open_todos().unwrap().is_empty());
+    assert_eq!(alice.storage_stats().unwrap().rejected_transactions, 1);
+    let info = alice.transaction_info(&tx).unwrap();
+    assert_eq!(info.global_epoch, Some(7));
+    assert_eq!(info.rejection_code, Some("policy_denied".to_owned()));
+}
+
+#[test]
+fn direct_reject_after_accept_removes_current_but_preserves_global_metadata() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Accept then reject", false, "project-1")
+        .unwrap();
+
+    alice.accept_transaction_at_global(&tx, 7).unwrap();
+    alice.reject_transaction(&tx, "policy_denied").unwrap();
+
+    assert!(alice.open_todos().unwrap().is_empty());
+    assert_eq!(alice.storage_stats().unwrap().rejected_transactions, 1);
+    let info = alice.transaction_info(&tx).unwrap();
+    assert_eq!(info.global_epoch, Some(7));
+    assert_eq!(info.rejection_code, Some("policy_denied".to_owned()));
+}

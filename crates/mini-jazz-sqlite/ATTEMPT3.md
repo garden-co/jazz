@@ -1482,3 +1482,21 @@ the peer can query semantically through the indexed schema shape.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 index_only_schema_changes_are_semantically_compatible` passes.
+
+## 2026-05-25 19:28 PDT
+
+Starting direct fate monotonicity coverage from sidecar review. Bundle apply has
+monotonic outcome merging, but direct local authority calls may still downgrade
+accepted/rejected state if `reject_transaction` and `accept_transaction_at_*`
+are called in different orders.
+
+## 2026-05-25 19:30 PDT
+
+Direct fate monotonicity is green and found a real downgrade bug. Accepting a
+rejected transaction directly changed `outcome` back to accepted while leaving
+the rejection reason around. Direct edge/global accept now uses monotonic
+`MAX(outcome, accepted)`, so rejected remains terminal while global metadata and
+receipts can still attach.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system direct_`
+passes for the direct accept/reject ordering cases.
