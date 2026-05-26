@@ -1083,3 +1083,18 @@ confidence that query descriptors can stay operator-shaped across both user and
 system columns.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 223 whole-system tests.
+
+## 2026-05-26 03:56 PDT
+
+Added distributed query-scope support for `id != ...`. The first red test
+showed id predicates only supported equality and `in` during query repair.
+`id != excluded` now exports broad matching row ids for repair and apply-side
+repair can remove rows that no longer have non-deleted matching history in the
+scope.
+
+Discovery: broad predicates over magic fields need their own repair shape; they
+cannot reuse equality's finite-row-id loop. This is a useful warning for future
+range predicates and pagination cursors: the descriptor has to encode enough to
+repair rows that leave a broad result set, not just rows named by the cursor.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 224 whole-system tests.

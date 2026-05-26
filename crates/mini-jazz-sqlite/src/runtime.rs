@@ -952,6 +952,45 @@ impl Runtime {
         }
         if query_read.field == "id" {
             let branch_num = branch::checkout(db, &query_read.branch_id)?;
+            if query_read.op == "ne" {
+                let excluded_id = query_read
+                    .value
+                    .as_str()
+                    .ok_or_else(|| crate::Error::new("id inequality expects a string value"))?;
+                db.execute(
+                    &format!(
+                        "DELETE FROM {current_table}
+                         WHERE j_branch_num = ?
+                           AND row_num IN (
+                             SELECT row_num FROM jazz_row_id
+                             WHERE table_name = ? AND row_id != ?
+                           )
+                           AND row_num NOT IN (
+                             SELECT h.row_num
+                             FROM {history_table} h
+                             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+                             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                             WHERE ids.table_name = ?
+                               AND ids.row_id != ?
+                               AND h.j_branch_num = ?
+                               AND h.op != 3
+                               AND tx.outcome != ?
+                           )",
+                        current_table = crate::schema::current_table(&query_read.table),
+                        history_table = crate::schema::history_table(&query_read.table),
+                    ),
+                    params![
+                        branch_num,
+                        query_read.table,
+                        excluded_id,
+                        query_read.table,
+                        excluded_id,
+                        branch_num,
+                        tx::OUTCOME_REJECTED
+                    ],
+                )?;
+                return Ok(());
+            }
             let row_ids = id_predicate_values(&query_read.op, &query_read.value)?;
             for row_id in row_ids {
                 let row_num = ensure_row_id(db, &query_read.table, &row_id)?;
@@ -4225,6 +4264,21 @@ fn query_scope_repair_row_nums(
         return query_scope_repair_row_nums(conn, table, field_name, "eq", value);
     }
     if field_name == "id" {
+        if op == "ne" {
+            let excluded_id = value
+                .as_str()
+                .ok_or_else(|| crate::Error::new("id inequality expects a string value"))?;
+            let mut stmt = conn.prepare(
+                "SELECT row_num
+                 FROM jazz_row_id
+                 WHERE table_name = ? AND row_id != ?
+                 ORDER BY row_num",
+            )?;
+            let rows = stmt.query_map(params![table.name, excluded_id], |row| row.get(0))?;
+            return rows
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into);
+        }
         return id_predicate_values(op, value)?
             .into_iter()
             .map(|row_id| ensure_row_id(conn, &table.name, &row_id))

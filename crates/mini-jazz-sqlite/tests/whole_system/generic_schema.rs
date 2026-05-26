@@ -1046,6 +1046,64 @@ fn created_by_not_equal_query_scope_syncs_and_refreshes() {
 }
 
 #[test]
+fn id_not_equal_query_scope_syncs_and_repairs_deleted_row() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-keep",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Keep")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-excluded",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Excluded")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    peer.apply_bundle(
+        &alice
+            .export_query_where_ne("notes", "id", json!("note-excluded"))
+            .unwrap(),
+    )
+    .unwrap();
+    let rows = peer
+        .read_rows_where_ne("notes", "id", json!("note-excluded"))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-keep");
+
+    alice.delete_row("notes", "note-keep").unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(peer
+        .read_rows_where_ne("notes", "id", json!("note-excluded"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn insert_applies_declared_defaults_for_omitted_fields() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");
