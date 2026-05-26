@@ -736,3 +736,9 @@ Design lesson: read-set/version semantics are now a distinct subsystem rather th
 Added transaction-scoped absent row reads for inserts. A create now records whether the target public row id was absent at write time, bundles preserve that read, and untrusted exclusive transactions are rejected with `stale_read_set` when the authority already has a visible version for that row. Full mini crate suite is green with 197 tests.
 
 Design lesson: absent reads fit better as transaction read-set facts than as durable query subscriptions. Reusing `jazz_tx_read` with a distinct reason kept the protocol simple, but it also made clear that reason codes should become named, documented integer enums before the next spec sync.
+
+## 2026-05-26 03:03 PDT
+
+Extended ordinary branch reads over source branches. A merge branch now reads current rows from its explicit source branches, while a branch-local resolution row shadows source candidates for the same logical row. Full mini crate suite is green with 198 tests.
+
+Design lesson: multi-source branch visibility is not just a conflict side API; it belongs in the normal query lowering. The precedence rule is now branch-local overlay first, then source branches, with pinned main-base handling still layered separately. This is close to the product branch-view model, but branch backing rows and branch-row permissions remain unimplemented.

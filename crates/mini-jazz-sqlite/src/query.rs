@@ -501,6 +501,8 @@ impl QueryContext<'_> {
                 .map(|column| format!("current.{column}")),
         );
         select_columns.push("current.j_created_by".to_owned());
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let scope_placeholders = placeholders(scope_nums.len());
         let sql = format!(
             "SELECT {}
              FROM {} current
@@ -508,7 +510,7 @@ impl QueryContext<'_> {
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
             WHERE current.is_deleted = 0
                AND (
-                 current.j_branch_num = ?
+                 current.j_branch_num IN ({scope_placeholders})
                  OR (
                    ? = 1
                    AND ? != 1
@@ -517,11 +519,20 @@ impl QueryContext<'_> {
                      SELECT 1
                      FROM {current_table} branch_current
                      WHERE branch_current.row_num = current.row_num
-                       AND branch_current.j_branch_num = ?
+                       AND branch_current.j_branch_num IN ({scope_placeholders})
                    )
                  )
                )
                AND tx.outcome != ?
+               AND NOT (
+                 current.j_branch_num != ?
+                 AND EXISTS (
+                   SELECT 1
+                   FROM {current_table} active_current
+                   WHERE active_current.row_num = current.row_num
+                     AND active_current.j_branch_num = ?
+                 )
+               )
                AND {policy_sql}
              ORDER BY current.j_created_at DESC, current.row_num",
             select_columns.join(", "),
@@ -529,22 +540,33 @@ impl QueryContext<'_> {
             current_table = crate::schema::current_table(table_name),
             policy_sql = self.read_policy_sql(table)?,
         );
+        let mut params = scope_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer)
+            .collect::<Vec<_>>();
+        params.extend([
+            rusqlite::types::Value::Integer(if overlay_main { 1 } else { 0 }),
+            rusqlite::types::Value::Integer(self.branch_num),
+        ]);
+        params.extend(
+            scope_nums
+                .iter()
+                .copied()
+                .map(rusqlite::types::Value::Integer),
+        );
+        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
+        params.extend([
+            rusqlite::types::Value::Integer(self.branch_num),
+            rusqlite::types::Value::Integer(self.branch_num),
+        ]);
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
-        let rows = stmt.query_map(
-            params![
-                self.branch_num,
-                if overlay_main { 1 } else { 0 },
-                self.branch_num,
-                self.branch_num,
-                tx::OUTCOME_REJECTED
-            ],
-            |row| {
-                (0..row_width)
-                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            },
-        )?;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
         rows.map(|row| row_to_view(self.conn, table_name, table, row?))
             .collect()
     }
@@ -577,6 +599,8 @@ impl QueryContext<'_> {
                 ))
             })
         })?;
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let scope_placeholders = placeholders(scope_nums.len());
         let sql = format!(
             "SELECT {}
              FROM {} current
@@ -584,7 +608,7 @@ impl QueryContext<'_> {
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
             WHERE current.is_deleted = 0
                AND (
-                 current.j_branch_num = ?
+                 current.j_branch_num IN ({scope_placeholders})
                  OR (
                    ? = 1
                    AND ? != 1
@@ -593,11 +617,20 @@ impl QueryContext<'_> {
                      SELECT 1
                      FROM {current_table} branch_current
                      WHERE branch_current.row_num = current.row_num
-                       AND branch_current.j_branch_num = ?
+                       AND branch_current.j_branch_num IN ({scope_placeholders})
                    )
                  )
                )
                AND tx.outcome != ?
+               AND NOT (
+                 current.j_branch_num != ?
+                 AND EXISTS (
+                   SELECT 1
+                   FROM {current_table} active_current
+                   WHERE active_current.row_num = current.row_num
+                     AND active_current.j_branch_num = ?
+                 )
+               )
                AND current.{predicate_column} = ?
                AND {policy_sql}
              ORDER BY current.j_created_at DESC, current.row_num",
@@ -606,14 +639,27 @@ impl QueryContext<'_> {
             current_table = crate::schema::current_table(table_name),
             policy_sql = self.read_policy_sql(table)?,
         );
-        let params = [
-            rusqlite::types::Value::Integer(self.branch_num),
+        let mut params = scope_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer)
+            .collect::<Vec<_>>();
+        params.extend([
             rusqlite::types::Value::Integer(if overlay_main { 1 } else { 0 }),
             rusqlite::types::Value::Integer(self.branch_num),
-            rusqlite::types::Value::Integer(self.branch_num),
+        ]);
+        params.extend(
+            scope_nums
+                .iter()
+                .copied()
+                .map(rusqlite::types::Value::Integer),
+        );
+        params.extend([
             rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
+            rusqlite::types::Value::Integer(self.branch_num),
+            rusqlite::types::Value::Integer(self.branch_num),
             predicate_value,
-        ];
+        ]);
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
@@ -646,6 +692,8 @@ impl QueryContext<'_> {
         );
         select_columns.push("current.j_created_by".to_owned());
         let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let scope_placeholders = placeholders(scope_nums.len());
         let sql = format!(
             "SELECT {}
              FROM {} current
@@ -653,7 +701,7 @@ impl QueryContext<'_> {
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
             WHERE current.is_deleted = 0
                AND (
-                 current.j_branch_num = ?
+                 current.j_branch_num IN ({scope_placeholders})
                  OR (
                    ? = 1
                    AND ? != 1
@@ -662,11 +710,20 @@ impl QueryContext<'_> {
                      SELECT 1
                      FROM {current_table} branch_current
                      WHERE branch_current.row_num = current.row_num
-                       AND branch_current.j_branch_num = ?
+                       AND branch_current.j_branch_num IN ({scope_placeholders})
                    )
                  )
                )
                AND tx.outcome != ?
+               AND NOT (
+                 current.j_branch_num != ?
+                 AND EXISTS (
+                   SELECT 1
+                   FROM {current_table} active_current
+                   WHERE active_current.row_num = current.row_num
+                     AND active_current.j_branch_num = ?
+                 )
+               )
                AND instr(current.{predicate_column}, ?) > 0
                AND {policy_sql}
              ORDER BY current.j_created_at DESC, current.row_num",
@@ -675,14 +732,27 @@ impl QueryContext<'_> {
             current_table = crate::schema::current_table(table_name),
             policy_sql = self.read_policy_sql(table)?,
         );
-        let params = [
-            rusqlite::types::Value::Integer(self.branch_num),
+        let mut params = scope_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer)
+            .collect::<Vec<_>>();
+        params.extend([
             rusqlite::types::Value::Integer(if overlay_main { 1 } else { 0 }),
             rusqlite::types::Value::Integer(self.branch_num),
-            rusqlite::types::Value::Integer(self.branch_num),
+        ]);
+        params.extend(
+            scope_nums
+                .iter()
+                .copied()
+                .map(rusqlite::types::Value::Integer),
+        );
+        params.extend([
             rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
+            rusqlite::types::Value::Integer(self.branch_num),
+            rusqlite::types::Value::Integer(self.branch_num),
             rusqlite::types::Value::Text(needle.to_owned()),
-        ];
+        ]);
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
@@ -792,6 +862,10 @@ fn row_to_view(
         created_by: text_value(&raw[2 + table.fields.len()], "j_created_by")?,
         conflict_count: 0,
     })
+}
+
+fn placeholders(count: usize) -> String {
+    (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
 }
 
 pub(crate) fn sql_value_to_json(

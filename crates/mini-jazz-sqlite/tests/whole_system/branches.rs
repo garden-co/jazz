@@ -1033,6 +1033,56 @@ fn branch_conflict_metadata_surfaces_through_filtered_query() {
 }
 
 #[test]
+fn branch_read_rows_includes_source_branch_candidates() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-left",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left task")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-right",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right task")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 2);
+    let titles = rows
+        .iter()
+        .map(|row| row.values["title"].clone())
+        .collect::<Vec<_>>();
+    assert!(titles.contains(&json!("Left task")));
+    assert!(titles.contains(&json!("Right task")));
+}
+
+#[test]
 fn branch_conflict_resolution_transaction_clears_conflict_meta_after_rebuild() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
