@@ -1542,3 +1542,19 @@ visibility is now the right shared concept for optimistic writes and authority
 validation.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 254 whole-system tests.
+
+## 2026-05-26 05:26 PDT
+
+Found and fixed a branch-view consistency bug: effective row lookup and
+exclusive read-set validation walked source branches recursively, but ordinary
+branch reads only scanned direct sources. `branch::scope_nums` now returns the
+transitive acyclic source closure, and a new test covers `merge -> middle ->
+left` reading a row from `left`.
+
+Discovery: once branches can use other branches as bases/sources, the source
+graph should behave like semantic provenance, not a one-hop include list.
+Queries, sync exports, mutation lowering, and validation should all share the
+same source closure. Cycle rejection from the previous slice makes that closure
+safe to compute.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 255 whole-system tests.

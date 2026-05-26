@@ -1298,6 +1298,37 @@ fn branch_read_rows_includes_source_branch_candidates() {
 }
 
 #[test]
+fn branch_reads_transitive_source_branch_rows() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-left",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .create_branch_from_branches("middle", &["left"])
+        .unwrap();
+    alice
+        .create_branch_from_branches("merge", &["middle"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "task-left");
+}
+
+#[test]
 fn branch_observed_query_refresh_includes_later_source_branch_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
