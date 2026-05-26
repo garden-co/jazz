@@ -69,6 +69,27 @@ fn rejected_transaction_remains_history_but_is_hidden_from_current() {
 }
 
 #[test]
+fn rejected_fate_update_repairs_peer_current_projection() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Optimistic then rejected", false, "project-1")
+        .unwrap();
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    assert_eq!(peer.open_todos().unwrap().len(), 1);
+
+    alice.reject_transaction(&tx, "policy_denied").unwrap();
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(peer.open_todos().unwrap().is_empty());
+    assert_eq!(peer.storage_stats().unwrap().rejected_transactions, 1);
+}
+
+#[test]
 fn rejecting_generic_transaction_repairs_schema_driven_projection() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");

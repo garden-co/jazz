@@ -275,9 +275,11 @@ impl Runtime {
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
             db.execute(
-                "INSERT OR IGNORE INTO jazz_tx
+                "INSERT INTO jazz_tx
                  (tx_id, node_num, local_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, '{}')",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, '{}')
+                 ON CONFLICT(tx_id) DO UPDATE SET
+                   outcome = excluded.outcome",
                 params![
                     tx_record.tx_id,
                     node_num,
@@ -287,6 +289,18 @@ impl Runtime {
                     tx_record.outcome,
                     tx_record.created_at
                 ],
+            )?;
+        }
+        for table in schema.tables() {
+            db.execute(
+                &format!(
+                    "DELETE FROM {}
+                     WHERE visible_tx_num IN (
+                       SELECT tx_num FROM jazz_tx WHERE outcome = ?
+                     )",
+                    crate::schema::current_table(&table.name)
+                ),
+                params![tx::OUTCOME_REJECTED],
             )?;
         }
         for record in &bundle.history {

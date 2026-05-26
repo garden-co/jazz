@@ -581,3 +581,23 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Design note: this is still not a complete read-set model. It handles policy
 dependency rows for simple ref chains. Predicate/range reads, recursive graph
 queries, and policy cycles remain future derisking targets.
+
+## 2026-05-25 18:01 PDT
+
+Switching to transaction fate propagation. Suspected bug: bundle apply uses
+`INSERT OR IGNORE` for `jazz_tx`, so a peer that already saw an optimistic
+transaction may ignore a later rejected/accepted fate update for the same tx.
+This would violate the mutable fate decision we made earlier.
+
+## 2026-05-25 18:02 PDT
+
+Mutable transaction fate propagation is green for rejection. A peer can first
+apply an optimistic visible transaction, later apply a bundle where the same
+`tx_id` is rejected, and repair current projection while keeping history.
+
+Implementation detail: `apply_bundle` now updates `jazz_tx.outcome` on tx-id
+conflict and removes current rows whose `visible_tx_num` now points at rejected
+transactions before replaying incoming history.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+36 tests.
