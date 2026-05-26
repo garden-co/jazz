@@ -658,3 +658,9 @@ Design lesson: preserving branch sources and writing the resolution on the merge
 Generalized required-ref result filtering beyond the todo helper. `read_rows_require_ref(table, ref_field)` now filters parent rows whose referenced target is missing or not visible under that target table's read policy, and rejects non-ref fields. Full mini crate suite is green with 185 tests.
 
 Design lesson: required includes can start as a generic query-materialization rule over visible target rows. This is still not the final typed query API, but it removes another todo-shaped assumption and gives the future lowering layer a simple semantic contract to target.
+
+## 2026-05-26 02:25 PDT
+
+Added restarted subscription recovery from persisted query reads. A durable worker can reconstruct a subscription from an observed query descriptor after restart, apply an upstream refresh bundle, and emit the semantic removal diff against the stale local snapshot. Full mini crate suite is green with 186 tests.
+
+Design lesson: durable query descriptors can power both reconnect repair and listener recovery. We still do not persist listener identity/callback state, but the core mechanism now bridges stored query desire, refresh application, and semantic diff emission.

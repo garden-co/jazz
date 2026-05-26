@@ -107,6 +107,66 @@ fn predicate_subscription_diffs_when_row_enters_and_leaves_query() {
 }
 
 #[test]
+fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "upstream", "alice", schema.clone()).unwrap();
+
+    upstream
+        .insert_row(
+            "tasks",
+            "task-open",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Open before restart")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_eq("tasks", "done", json!(false))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(worker.observed_query_reads().unwrap().len(), 1);
+    }
+
+    upstream
+        .update_row(
+            "tasks",
+            "task-open",
+            BTreeMap::from([("done".to_owned(), json!(true))]),
+        )
+        .unwrap();
+
+    let mut worker =
+        Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
+    let observed = worker.observed_query_reads().unwrap();
+    let mut subscription = worker.subscribe_observed_query(&observed[0]).unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+
+    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+        worker.apply_bundle(&refresh).unwrap();
+    }
+    let diffs = worker.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "task-open"));
+}
+
+#[test]
 fn contains_subscription_diffs_when_text_starts_and_stops_matching() {
     let schema = support::notes_schema();
     let mut alice =

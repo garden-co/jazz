@@ -1808,6 +1808,49 @@ impl Runtime {
         ))
     }
 
+    pub fn subscribe_observed_query(&self, read: &QueryReadRecord) -> Result<RowsSubscription> {
+        if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
+            return Err(crate::Error::new(
+                "observed query branch is not checked out",
+            ));
+        }
+        match read.op.as_str() {
+            "eq" => self.subscribe_rows_where_eq(&read.table, &read.field, read.value.clone()),
+            "contains" => {
+                let Some(needle) = read.value.as_str() else {
+                    return Err(crate::Error::new("contains expects a string value"));
+                };
+                self.subscribe_rows_where_contains(&read.table, &read.field, needle)
+            }
+            "in" => {
+                let Some(values) = read.value.as_array() else {
+                    return Err(crate::Error::new("in predicate expects an array value"));
+                };
+                self.subscribe_rows_where_in(&read.table, &read.field, values.clone())
+            }
+            "eq_top_created_at_desc" => {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
+                self.subscribe_rows_where_eq_top_created_at_desc(
+                    &read.table,
+                    &read.field,
+                    value.clone(),
+                    limit as usize,
+                )
+            }
+            op => Err(crate::Error::new(format!(
+                "unsupported observed subscription query {op}"
+            ))),
+        }
+    }
+
     pub fn read_row_candidates(&self, table_name: &str, id: &str) -> Result<Vec<RowView>> {
         self.query_context().read_row_candidates(table_name, id)
     }
