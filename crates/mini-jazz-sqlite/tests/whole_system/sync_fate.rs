@@ -513,6 +513,36 @@ fn bundle_with_unknown_query_scope_fails_closed_without_partial_apply() {
 }
 
 #[test]
+fn absent_query_with_unknown_field_fails_closed_without_partial_apply() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice
+        .create_todo(
+            "todo-1",
+            "Bad absent query metadata",
+            false,
+            "project-missing",
+        )
+        .unwrap();
+    let mut bundle = alice.export_query_scope_open_todos().unwrap();
+    let absent = bundle
+        .query_reads
+        .iter_mut()
+        .find(|read| read.op == "absent")
+        .unwrap();
+    absent.field = "missing_id".to_owned();
+
+    let err = peer.apply_bundle(&bundle).unwrap_err();
+    assert!(err.to_string().contains("unknown query field"));
+    let stats = peer.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 0);
+    assert_eq!(stats.current_rows, 0);
+    assert!(peer.observed_query_reads().unwrap().is_empty());
+    assert!(peer.open_todos().unwrap().is_empty());
+}
+
+#[test]
 fn recursive_query_with_unknown_parent_field_fails_closed_without_partial_apply() {
     let schema = support::folders_schema();
     let mut alice =

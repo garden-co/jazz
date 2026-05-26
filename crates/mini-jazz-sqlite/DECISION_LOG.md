@@ -1409,3 +1409,15 @@ reconnect can preserve stale source membership while all row-level refreshes
 look successful.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 243 whole-system tests.
+
+## 2026-05-26 05:09 PDT
+
+Made malformed absent query descriptors fail closed. A bundle whose absent
+observed fact names an unknown field now aborts atomically, leaving no history,
+current projection, or persisted query read behind.
+
+Discovery: absence descriptors need the same catalogue validation as ordinary
+predicate descriptors. Treating absence as "table only" was too loose now that
+absence participates in reconnect refresh, branch context, and validation.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 244 whole-system tests.

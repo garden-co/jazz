@@ -893,7 +893,18 @@ impl Runtime {
         query_read: &QueryReadRecord,
     ) -> Result<()> {
         if query_read.op == "absent" {
-            schema.table_def(&query_read.table)?;
+            let table = schema.table_def(&query_read.table)?;
+            if query_read.field != "id"
+                && !table
+                    .fields
+                    .iter()
+                    .any(|field| field.name == query_read.field)
+            {
+                return Err(crate::Error::new(format!(
+                    "unknown query field {}",
+                    query_read.field
+                )));
+            }
             return Ok(());
         }
         if query_read.op == "recursive_refs" {
