@@ -1259,6 +1259,79 @@ fn recursive_write_policy_records_transitive_policy_read_set() {
 }
 
 #[test]
+fn trusted_edge_accepts_untrusted_recursive_write_when_bundle_contains_transitive_policy_dependencies(
+) {
+    let schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("projects", |table| {
+            table.text("title");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice = Runtime::open_trusted_as_with_schema(
+        Storage::Memory,
+        "alice-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    alice
+        .insert_row(
+            "orgs",
+            "org-1",
+            BTreeMap::from([("name".to_owned(), json!("Alice org"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Alice project")),
+                ("org".to_owned(), json!("org-1")),
+            ]),
+        )
+        .unwrap();
+    let tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Allowed by transitive policy")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    let exported = bundle
+        .history
+        .iter()
+        .map(|record| (record.table.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(exported.contains(&("todos", "todo-1")));
+    assert!(exported.contains(&("projects", "project-1")));
+    assert!(exported.contains(&("orgs", "org-1")));
+
+    edge.apply_untrusted_bundle(&bundle).unwrap();
+
+    let rows = edge.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+    assert_eq!(edge.transaction_info(&tx).unwrap().rejection_code, None);
+}
+
+#[test]
 fn policy_read_set_survives_sync() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

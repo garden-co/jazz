@@ -124,3 +124,17 @@ paired tests now cover both sides:
 Design lesson: sync scopes need two dependency lanes: result/read visibility
 dependencies and authority-validation dependencies. They can share mechanics,
 but the caller's intent matters.
+
+## 2026-05-26 00:19 PDT
+
+Extended the write-policy dependency finding to recursive policy chains. A
+trusted edge can now receive one untrusted bundle containing a todo write, its
+project parent, and the org required by the project's read policy, then validate
+the write successfully. Full mini crate suite is green with 130 tests.
+
+Explorer follow-up suggested high-value remaining parity tests: query-scope
+refresh after rejection, fate-before-history message ordering, subscription
+diffs on rejection, optional include absence/null semantics, same-epoch
+same-row tie-break determinism, branch global acceptance visibility, and a
+small edge/core/edge topology. Next focus: message-order and query-scope repair
+tests because they are likely to expose sync-contract holes quickly.
