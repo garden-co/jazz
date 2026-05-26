@@ -228,3 +228,16 @@ Design lesson: small pieces of the high-level query DSL can lower cleanly
 without building a query graph. The next question is not whether this works for
 simple predicates, but how much observed-fact/scope machinery each predicate
 form needs for correct sync and subscriptions.
+
+## 2026-05-26 00:29 PDT
+
+Extended `contains` from local query lowering into query-scope sync. Query
+observed facts now carry a small predicate op (`eq` or `contains`), and refresh
+repair uses the op when deleting stale current rows. Added a test where a row
+previously matching a text `contains` query is updated to stop matching; the
+peer's refreshed query scope removes it. Full mini crate suite is green with
+141 tests.
+
+Design lesson: observed facts should be a tiny relational predicate IR, not
+just `(field, value)`. This does not need to become a query graph; it can remain
+the replay/repair contract for the lowered SQL query shape.

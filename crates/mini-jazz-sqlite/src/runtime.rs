@@ -288,6 +288,7 @@ impl Runtime {
                 branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
                 table: "todos".to_owned(),
                 field: "done".to_owned(),
+                op: "eq".to_owned(),
                 value: JsonValue::Bool(false),
             }],
             history,
@@ -538,16 +539,14 @@ impl Runtime {
             })?;
         let branch_num = branch::checkout(db, &query_read.branch_id)?;
         let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-        let predicate_value =
-            crate::schema::field_sql_value(field, &query_read.value, |ref_table, row_id| {
-                ensure_row_id(db, ref_table, row_id)
-            })?;
+        let predicate_sql = query_predicate_sql(field, &predicate_column, &query_read.op)?;
+        let predicate_value = query_predicate_value(field, &query_read.op, &query_read.value, db)?;
         db.execute(
             &format!(
                 "DELETE FROM {}
                  WHERE j_branch_num = ?
                    AND is_deleted = 0
-                   AND {predicate_column} = ?
+                   AND {predicate_sql}
                    AND row_num NOT IN (
                      SELECT ids.row_num
                      FROM jazz_row_id ids
@@ -557,14 +556,16 @@ impl Runtime {
                        AND h.j_branch_num = ?
                        AND h.op != 3
                        AND tx.outcome != ?
-                       AND h.{predicate_column} = ?
+                       AND {history_predicate_sql}
                    )",
                 crate::schema::current_table(&query_read.table),
                 history_table = crate::schema::history_table(&query_read.table),
+                history_predicate_sql =
+                    query_predicate_sql(field, &format!("h.{predicate_column}"), &query_read.op)?,
             ),
             params![
                 branch_num,
-                predicate_value,
+                predicate_value.clone(),
                 query_read.table,
                 branch_num,
                 tx::OUTCOME_REJECTED,
@@ -1066,14 +1067,45 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
     ) -> Result<Bundle> {
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "eq",
+            value.clone(),
+            self.read_rows_where_eq(table_name, field_name, value)?,
+        )
+    }
+
+    pub fn export_query_where_contains(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        needle: &str,
+    ) -> Result<Bundle> {
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "contains",
+            JsonValue::String(needle.to_owned()),
+            self.read_rows_where_contains(table_name, field_name, needle)?,
+        )
+    }
+
+    fn export_query_scope(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        op: &str,
+        value: JsonValue,
+        rows: Vec<RowView>,
+    ) -> Result<Bundle> {
         let table = self.schema.table_def(table_name)?;
-        let rows = self.read_rows_where_eq(table_name, field_name, value.clone())?;
         let mut row_nums = rows
             .iter()
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
         row_nums.extend(query_scope_repair_row_nums(
-            &self.conn, table, field_name, &value,
+            &self.conn, table, field_name, op, &value,
         )?);
         row_nums.sort();
         row_nums.dedup();
@@ -1139,6 +1171,7 @@ impl Runtime {
                 branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
                 table: table_name.to_owned(),
                 field: field_name.to_owned(),
+                op: op.to_owned(),
                 value,
             }],
             history,
@@ -2784,6 +2817,7 @@ fn query_scope_repair_row_nums(
     conn: &Connection,
     table: &crate::schema::TableDef,
     field_name: &str,
+    op: &str,
     value: &JsonValue,
 ) -> Result<Vec<i64>> {
     let field = table
@@ -2792,14 +2826,13 @@ fn query_scope_repair_row_nums(
         .find(|candidate| candidate.name == field_name)
         .ok_or_else(|| crate::Error::new(format!("unknown query field {field_name}")))?;
     let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    let predicate_value = crate::schema::field_sql_value(field, value, |ref_table, row_id| {
-        ensure_row_id(conn, ref_table, row_id)
-    })?;
+    let predicate_sql = query_predicate_sql(field, &format!("h.{predicate_column}"), op)?;
+    let predicate_value = query_predicate_value(field, op, value, conn)?;
     let sql = format!(
         "SELECT DISTINCT h.row_num
          FROM {} h
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-         WHERE h.{predicate_column} = ?
+         WHERE {predicate_sql}
            AND tx.outcome != ?",
         crate::schema::history_table(&table.name),
     );
@@ -2809,6 +2842,48 @@ fn query_scope_repair_row_nums(
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn query_predicate_sql(field: &FieldDef, column: &str, op: &str) -> Result<String> {
+    match op {
+        "eq" => Ok(format!("{column} = ?")),
+        "contains" if matches!(field.kind, FieldKind::Text) => {
+            Ok(format!("instr({column}, ?) > 0"))
+        }
+        "contains" => Err(crate::Error::new(format!(
+            "contains only supports text fields, got {}",
+            field.name
+        ))),
+        _ => Err(crate::Error::new(format!(
+            "unsupported query predicate {op}"
+        ))),
+    }
+}
+
+fn query_predicate_value(
+    field: &FieldDef,
+    op: &str,
+    value: &JsonValue,
+    conn: &Connection,
+) -> Result<rusqlite::types::Value> {
+    match op {
+        "eq" => crate::schema::field_sql_value(field, value, |ref_table, row_id| {
+            ensure_row_id(conn, ref_table, row_id)
+        }),
+        "contains" if matches!(field.kind, FieldKind::Text) => Ok(rusqlite::types::Value::Text(
+            value
+                .as_str()
+                .ok_or_else(|| crate::Error::new("contains expects a string value"))?
+                .to_owned(),
+        )),
+        "contains" => Err(crate::Error::new(format!(
+            "contains only supports text fields, got {}",
+            field.name
+        ))),
+        _ => Err(crate::Error::new(format!(
+            "unsupported query predicate {op}"
+        ))),
+    }
 }
 
 fn dedupe_history_records(records: &mut Vec<HistoryRecord>) {

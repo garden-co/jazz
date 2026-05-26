@@ -77,6 +77,56 @@ fn text_contains_query_matches_status_quo_substring_semantics() {
 }
 
 #[test]
+fn contains_query_scope_resync_removes_row_that_left_predicate() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("contains target")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_contains("notes", "body", "target")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer.read_rows_where_contains("notes", "body", "target")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("moved elsewhere"))]),
+        )
+        .unwrap();
+    let bundle = alice
+        .export_query_where_contains("notes", "body", "target")
+        .unwrap();
+    assert_eq!(bundle.query_reads[0].op, "contains");
+    peer.apply_bundle(&bundle).unwrap();
+
+    assert!(peer
+        .read_rows_where_contains("notes", "body", "target")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

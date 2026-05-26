@@ -46,7 +46,13 @@ pub struct QueryReadRecord {
     pub branch_id: String,
     pub table: String,
     pub field: String,
+    #[serde(default = "default_query_predicate_op")]
+    pub op: String,
     pub value: JsonValue,
+}
+
+fn default_query_predicate_op() -> String {
+    "eq".to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
