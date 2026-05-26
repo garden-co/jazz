@@ -1480,3 +1480,16 @@ from creating durable ghosts that later query refresh or transaction validation
 would have to reason around.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 248 whole-system tests.
+
+## 2026-05-26 05:20 PDT
+
+Added durable reconnect coverage for non-equality query descriptors. Persisted
+`contains` and `in` observed query reads survive worker restart and refresh
+rows that left the predicate/value set out of the durable peer's visible result.
+
+Discovery: this did not require new implementation, which is a good sign for
+the generic descriptor direction. Equality, ordered pages, `contains`, and
+`in` now all share the same desired-state refresh substrate rather than
+separate reconnect mechanisms.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 250 whole-system tests.

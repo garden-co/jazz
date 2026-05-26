@@ -343,6 +343,85 @@ fn schema_field_in_query_matches_and_syncs_selected_rows() {
 }
 
 #[test]
+fn durable_in_query_read_refresh_repairs_row_that_left_value_set_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("in-query-worker.sqlite");
+    let schema = support::notes_schema();
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    for (id, body) in [
+        ("note-a", "alpha"),
+        ("note-b", "beta"),
+        ("note-c", "outside"),
+    ] {
+        upstream
+            .insert_row(
+                "notes",
+                id,
+                BTreeMap::from([
+                    ("body".to_owned(), json!(body)),
+                    ("pinned".to_owned(), json!(false)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_in("notes", "body", vec![json!("alpha"), json!("beta")])
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(worker.observed_query_reads().unwrap()[0].op, "in");
+        assert_eq!(
+            worker
+                .read_rows_where_in("notes", "body", vec![json!("alpha"), json!("beta")])
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    upstream
+        .update_row(
+            "notes",
+            "note-a",
+            BTreeMap::from([("body".to_owned(), json!("outside now"))]),
+        )
+        .unwrap();
+
+    let mut reopened = Runtime::open_with_schema(
+        Storage::File(worker_path),
+        "worker-reopened",
+        "alice",
+        schema,
+    )
+    .unwrap();
+    for refresh in upstream
+        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    let rows = reopened
+        .read_rows_where_in("notes", "body", vec![json!("alpha"), json!("beta")])
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-b");
+}
+
+#[test]
 fn created_by_magic_field_query_matches_creator_principal() {
     let schema = support::notes_schema();
     let mut alice =
@@ -473,6 +552,78 @@ fn contains_query_scope_resync_removes_row_that_left_predicate() {
     peer.apply_bundle(&bundle).unwrap();
 
     assert!(peer
+        .read_rows_where_contains("notes", "body", "target")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn durable_contains_query_read_refresh_repairs_row_that_left_predicate_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("contains-query-worker.sqlite");
+    let schema = support::notes_schema();
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    upstream
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("contains target")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_contains("notes", "body", "target")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(worker.observed_query_reads().unwrap()[0].op, "contains");
+        assert_eq!(
+            worker
+                .read_rows_where_contains("notes", "body", "target")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    upstream
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("moved elsewhere"))]),
+        )
+        .unwrap();
+
+    let mut reopened = Runtime::open_with_schema(
+        Storage::File(worker_path),
+        "worker-reopened",
+        "alice",
+        schema,
+    )
+    .unwrap();
+    for refresh in upstream
+        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(reopened
         .read_rows_where_contains("notes", "body", "target")
         .unwrap()
         .is_empty());
