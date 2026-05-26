@@ -724,3 +724,9 @@ Design lesson: restore-as-new-history composes with the existing bundle protocol
 Covered restarted ordered-page subscriptions. A durable worker can persist an `eq + top createdAt desc` query, restart, reconstruct a subscription from the observed descriptor, apply a refresh where a newer row displaced the old boundary, and emit added/removed semantic diffs. Full mini crate suite is green with 196 tests.
 
 Design lesson: the same durable descriptor now supports current-row repair and listener recovery for paginated views. The descriptor still encodes only the current page shape, not all possible future page boundaries, which matches the current scope but should remain explicit in the spec.
+
+## 2026-05-26 02:56 PDT
+
+Split versioned read-set mechanics into a dedicated `read_set` module. Runtime still orchestrates transaction acceptance, but observed-read recording, stale exclusive validation, and bundle prevalidation now live behind named helpers. Full mini crate suite is green with 196 tests.
+
+Design lesson: read-set/version semantics are now a distinct subsystem rather than runtime glue. This should make the next slices around absent/range reads and branch source overlays easier to test without bloating `runtime.rs` further.

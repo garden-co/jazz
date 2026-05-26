@@ -5,6 +5,7 @@ mod policy;
 mod projection;
 mod query;
 mod query_predicate;
+mod read_set;
 mod rows;
 mod runtime;
 mod schema;
