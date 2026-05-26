@@ -1695,6 +1695,79 @@ fn trusted_edge_accepts_untrusted_recursive_write_when_bundle_contains_transitiv
 }
 
 #[test]
+fn trusted_edge_reports_missing_transitive_policy_dependency() {
+    let schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("projects", |table| {
+            table.text("title");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice = Runtime::open_trusted_as_with_schema(
+        Storage::Memory,
+        "alice-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    alice
+        .insert_row(
+            "orgs",
+            "org-1",
+            BTreeMap::from([("name".to_owned(), json!("Alice org"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Alice project")),
+                ("org".to_owned(), json!("org-1")),
+            ]),
+        )
+        .unwrap();
+    let tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Missing grandparent")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    let mut bundle = alice.export_table_history("todos").unwrap();
+    bundle
+        .history
+        .retain(|record| !(record.table == "orgs" && record.row_id == "org-1"));
+
+    edge.apply_untrusted_bundle(&bundle).unwrap();
+
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        edge.transaction_info(&tx).unwrap().rejection_detail,
+        Some(json!({
+            "reason": "policy_dependency_unavailable",
+            "table": "todos",
+            "row_id": "todo-1",
+            "dependency_table": "orgs",
+            "dependency_row_id": "org-1"
+        }))
+    );
+}
+
+#[test]
 fn policy_read_set_survives_sync() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

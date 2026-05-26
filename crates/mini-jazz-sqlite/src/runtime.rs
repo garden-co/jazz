@@ -2612,6 +2612,16 @@ fn policy_denial_detail_for_history_record(
     record: &HistoryRecord,
     tx_num: i64,
 ) -> Result<JsonValue> {
+    let branch_num = branch::checkout(conn, &record.branch_id)?;
+    if let Some(dependency) = unavailable_recorded_policy_dependency(conn, tx_num, branch_num)? {
+        return Ok(json!({
+            "reason": "policy_dependency_unavailable",
+            "table": record.table,
+            "row_id": record.row_id,
+            "dependency_table": dependency.0,
+            "dependency_row_id": dependency.1,
+        }));
+    }
     if let PolicyDef::RefReadable { field } = &table.write_policy {
         if let Some(dependency) = unavailable_policy_dependency(conn, table, record, tx_num, field)?
         {
@@ -2629,6 +2639,48 @@ fn policy_denial_detail_for_history_record(
         "table": record.table,
         "row_id": record.row_id,
     }))
+}
+
+fn unavailable_recorded_policy_dependency(
+    conn: &Connection,
+    tx_num: i64,
+    branch_num: i64,
+) -> Result<Option<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT reads.table_name, ids.row_id, reads.row_num, reads.observed_tx_num
+         FROM jazz_tx_read reads
+         JOIN jazz_row_id ids ON ids.row_num = reads.row_num
+         WHERE reads.tx_num = ?
+           AND reads.reason = ?
+         ORDER BY reads.table_name, ids.row_id",
+    )?;
+    let rows = stmt.query_map(params![tx_num, 1], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (table_name, row_id, row_num, observed_tx_num) = row?;
+        let visible_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*)
+                 FROM {}
+                 WHERE row_num = ?
+                   AND j_branch_num = ?
+                   AND is_deleted = 0",
+                crate::schema::current_table(&table_name)
+            ),
+            params![row_num, branch_num],
+            |row| row.get(0),
+        )?;
+        if visible_count == 0 || observed_tx_num.is_none() {
+            return Ok(Some((table_name, row_id)));
+        }
+    }
+    Ok(None)
 }
 
 fn unavailable_policy_dependency(

@@ -1195,6 +1195,20 @@ last-applied snapshots is not safe under out-of-order sync.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 231 whole-system tests.
 
+## 2026-05-26 04:30 PDT
+
+Added and fixed missing transitive policy-dependency detail. An untrusted write
+can include the direct project dependency while omitting the grandparent org
+needed by the project's read policy; the trusted edge now rejects permanently
+with `policy_dependency_unavailable` naming `orgs/org-1`.
+
+Discovery: rejection detail cannot be derived only from the direct write-policy
+ref. Recursive policy validation records a policy read set, and the durable
+error path should use that read set plus current visibility to identify the
+missing dependency that actually made validation impossible.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 232 whole-system tests.
+
 ## 2026-05-26 04:23 PDT
 
 Narrowed one todo-specific query descriptor wart. The legacy
