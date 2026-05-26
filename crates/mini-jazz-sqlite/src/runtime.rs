@@ -180,6 +180,20 @@ impl Runtime {
         self.write_row(table_name, id, values, 2)
     }
 
+    pub fn resolve_row_conflict(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        values: BTreeMap<String, JsonValue>,
+    ) -> Result<String> {
+        let op = if self.row_has_current_branch_value(table_name, id)? {
+            2
+        } else {
+            1
+        };
+        self.write_row(table_name, id, values, op)
+    }
+
     fn write_row(
         &mut self,
         table_name: &str,
@@ -1770,12 +1784,31 @@ impl Runtime {
             }
         }
         for row in &mut rows {
+            if self.row_has_current_branch_value(table_name, &row.id)? {
+                continue;
+            }
             let candidate_count = self.read_row_candidates(table_name, &row.id)?.len();
             if candidate_count > 1 {
                 row.conflict_count = candidate_count;
             }
         }
         Ok(rows)
+    }
+
+    fn row_has_current_branch_value(&self, table_name: &str, id: &str) -> Result<bool> {
+        self.schema.table_def(table_name)?;
+        let row_num = row_num(&self.conn, id)?;
+        let count: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*)
+                 FROM {}
+                 WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
+                crate::schema::current_table(table_name)
+            ),
+            params![row_num, self.branch_num],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     fn conflict_candidate_row_ids(&self, table_name: &str) -> Result<Vec<String>> {

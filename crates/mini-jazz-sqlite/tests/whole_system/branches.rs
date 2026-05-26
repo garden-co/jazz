@@ -985,6 +985,76 @@ fn branch_multi_base_conflicts_expose_multiple_candidates() {
 }
 
 #[test]
+fn branch_conflict_resolution_transaction_clears_conflict_meta_after_rebuild() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+    assert!(alice
+        .read_rows_with_conflict_meta("tasks")
+        .unwrap()
+        .iter()
+        .all(|row| row.conflict_count == 2));
+
+    alice
+        .resolve_row_conflict(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Resolved title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice.read_rows_with_conflict_meta("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Resolved title"));
+    assert_eq!(rows[0].conflict_count, 0);
+
+    alice.clear_current_projection_for_test().unwrap();
+    alice.rebuild_current_projection().unwrap();
+
+    let rows = alice.read_rows_with_conflict_meta("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Resolved title"));
+    assert_eq!(rows[0].conflict_count, 0);
+}
+
+#[test]
 fn branch_conflict_candidates_include_pinned_base_candidate() {
     let schema = support::tasks_schema();
     let mut alice =

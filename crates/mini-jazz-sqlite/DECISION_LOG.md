@@ -640,3 +640,9 @@ Design lesson: query-scoped sync can safely deliver parent rows before required 
 Added a first ordinary conflict-meta read surface. Multi-base branch conflicts can now be surfaced as ordinary `RowView`s with `conflict_count`, instead of only through the side-channel candidate API. Full mini crate suite is green with 182 tests.
 
 Design lesson: pure multi-base conflicts currently do not appear in plain `read_rows`; they only exist as branch-source candidates. A conflict-aware query surface can bridge that, but the current implementation is intentionally narrow. The real design likely needs conflict metadata in the normal semantic row shape, plus explicit resolution transactions.
+
+## 2026-05-26 02:19 PDT
+
+Added a first explicit conflict-resolution transaction. A merge branch can now write a chosen row value over conflicting branch-source candidates, expose the resolved row with `conflict_count = 0`, and preserve that result after rebuilding the current projection. Full mini crate suite is green with 183 tests.
+
+Design lesson: branch conflict resolution can be modeled as an ordinary row write on the merge branch. The source candidates remain as provenance/history, while the current-branch value suppresses conflict metadata in the semantic read surface. This keeps resolution replayable, but it leaves richer conflict metadata and explicit "resolved from candidates X/Y" provenance for a later slice.
