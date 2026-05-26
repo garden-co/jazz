@@ -592,3 +592,9 @@ Design lesson: per-column metadata is useful for mergeable conflict resolution, 
 Used persisted query reads to drive reconnect refresh. A durable worker can receive a query scope, restart, send its observed descriptors to an upstream, and apply returned refresh bundles that remove rows which left scope while offline. Full mini crate suite is green with 174 tests.
 
 Design lesson: durable query-read storage is not just introspection. It can be the seed of a real resubscribe protocol: receiver remembers desired/observed scopes, upstream reruns descriptors, receiver applies repairs. The current API is manual and single-hop, but the core loop is now executable.
+
+## 2026-05-26 02:00 PDT
+
+Extended reconnect refresh to durable ordered-page descriptors. A restarted durable worker can send its persisted `eq + top createdAt desc` descriptor upstream and repair a page where a newer row displaced the old boundary while offline. Full mini crate suite is green with 175 tests.
+
+Design lesson: the resubscribe loop is not limited to simple predicates. Ordered pagination can use the same persisted descriptor lane, provided the descriptor carries both predicate and ordering/window metadata. This strengthens the case for one query descriptor model across sync and listeners.

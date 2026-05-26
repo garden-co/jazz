@@ -74,6 +74,100 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
 }
 
 #[test]
+fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("ordered-worker.sqlite");
+    let schema = support::notes_schema();
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "upstream", "alice", schema.clone()).unwrap();
+
+    upstream
+        .insert_row(
+            "notes",
+            "note-old",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old boundary")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    upstream
+        .insert_row(
+            "notes",
+            "note-middle",
+            BTreeMap::from([
+                ("body".to_owned(), json!("middle")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            worker
+                .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+                .unwrap()
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["note-middle", "note-old"]
+        );
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    upstream
+        .insert_row(
+            "notes",
+            "note-new",
+            BTreeMap::from([
+                ("body".to_owned(), json!("newest")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let mut reopened = Runtime::open_with_schema(
+        Storage::File(worker_path),
+        "worker-reopened",
+        "alice",
+        schema,
+    )
+    .unwrap();
+    let desired_queries = reopened.observed_query_reads().unwrap();
+    for refresh in upstream
+        .export_query_read_refreshes(&desired_queries)
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    assert_eq!(
+        reopened
+            .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 3)
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-new", "note-middle"]
+    );
+}
+
+#[test]
 fn durable_worker_rehydrates_fresh_memory_tab_after_restart() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");
