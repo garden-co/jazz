@@ -1366,3 +1366,19 @@ ordinary id query too; later tombstone refresh can repair the included semantic
 child back out while preserving the parent row.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 240 whole-system tests.
+
+## 2026-05-26 05:04 PDT
+
+Fixed branch-context absence refresh for fixture open-todos exports. A pinned
+draft branch with an absent optional project no longer imports a later main
+branch project during observed absence refresh; when the project is created on
+the draft branch, the same refresh path delivers it.
+
+Discovery: two bugs hid under one invariant. First, the fixture open-todos
+export path stamped branch-local todo history as `main`; it now carries the
+actual branch id from history. Second, `absent id` refresh must check whether
+the row is visible in the current read context before exporting repair history,
+otherwise history for the same public row id on another branch can leak into the
+receiver's local recomputation.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 241 whole-system tests.

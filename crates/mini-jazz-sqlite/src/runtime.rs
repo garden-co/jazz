@@ -313,7 +313,7 @@ impl Runtime {
 
     pub fn export_query_scope_open_todos(&self) -> Result<Bundle> {
         let txs = export_txs(&self.conn)?;
-        let history = export_open_todo_scope_history(&self.conn)?;
+        let history = export_open_todo_scope_history(&self.conn, self.branch_num)?;
         let reads = export_reads_for_history(&self.conn, &history)?;
         let branches = export_branch_records_for_history(&self.conn, &history)?;
         let mut query_reads = vec![QueryReadRecord {
@@ -376,7 +376,8 @@ impl Runtime {
             .map(|todo| todo.id)
             .collect::<Vec<_>>();
         let txs = export_txs(&self.conn)?;
-        let history = export_open_todo_scope_history_for_ids(&self.conn, &todo_ids)?;
+        let history =
+            export_open_todo_scope_history_for_ids(&self.conn, self.branch_num, &todo_ids)?;
         let reads = export_reads_for_history(&self.conn, &history)?;
         let branches = export_branch_records_for_history(&self.conn, &history)?;
         let query_reads = vec![QueryReadRecord {
@@ -773,6 +774,24 @@ impl Runtime {
                     let Some(row_id) = read.value.as_str() else {
                         return Err(crate::Error::new("absent id expects string value"));
                     };
+                    if self
+                        .read_rows_where_eq(
+                            &read.table,
+                            &read.field,
+                            JsonValue::String(row_id.to_owned()),
+                        )?
+                        .is_empty()
+                    {
+                        let query_reads = vec![read.clone()];
+                        return Ok(make_bundle(
+                            &self.schema,
+                            Vec::new(),
+                            export_txs(&self.conn)?,
+                            Vec::new(),
+                            query_reads,
+                            Vec::new(),
+                        ));
+                    }
                     return self.export_query_where_eq(
                         &read.table,
                         &read.field,
@@ -3720,10 +3739,13 @@ fn current_created_at_by_row_id(
         .map_err(Into::into)
 }
 
-fn export_open_todo_scope_history(conn: &Connection) -> Result<Vec<HistoryRecord>> {
+fn export_open_todo_scope_history(
+    conn: &Connection,
+    branch_num: i64,
+) -> Result<Vec<HistoryRecord>> {
     let mut records = Vec::new();
-    records.extend(export_open_todo_projects(conn)?);
-    records.extend(export_open_todos(conn)?);
+    records.extend(export_open_todo_projects(conn, branch_num)?);
+    records.extend(export_open_todos(conn, branch_num)?);
     Ok(records)
 }
 
@@ -3763,6 +3785,7 @@ fn open_todo_missing_project_query_reads(
 
 fn export_open_todo_scope_history_for_ids(
     conn: &Connection,
+    branch_num: i64,
     todo_ids: &[String],
 ) -> Result<Vec<HistoryRecord>> {
     let mut records = Vec::new();
@@ -3770,17 +3793,20 @@ fn export_open_todo_scope_history_for_ids(
         .iter()
         .map(|id| row_num(conn, id))
         .collect::<Result<Vec<_>>>()?;
-    records.extend(export_open_todo_projects_for_row_nums(conn, &row_nums)?);
-    records.extend(export_open_todos_for_row_nums(conn, &row_nums)?);
+    records.extend(export_open_todo_projects_for_row_nums(
+        conn, branch_num, &row_nums,
+    )?);
+    records.extend(export_open_todos_for_row_nums(conn, branch_num, &row_nums)?);
     Ok(records)
 }
 
-fn export_open_todo_projects(conn: &Connection) -> Result<Vec<HistoryRecord>> {
-    export_open_todo_projects_for_row_nums(conn, &[])
+fn export_open_todo_projects(conn: &Connection, branch_num: i64) -> Result<Vec<HistoryRecord>> {
+    export_open_todo_projects_for_row_nums(conn, branch_num, &[])
 }
 
 fn export_open_todo_projects_for_row_nums(
     conn: &Connection,
+    branch_num: i64,
     row_nums: &[i64],
 ) -> Result<Vec<HistoryRecord>> {
     let row_filter = sql_row_num_filter("todo", row_nums);
@@ -3792,22 +3818,28 @@ fn export_open_todo_projects_for_row_nums(
                 h.j_created_at,
                 h.j_updated_at,
                 h.j_created_by,
-                h.j_updated_by
+                h.j_updated_by,
+                branch.branch_id
          FROM projects__schema_v1_history h
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
          WHERE h.row_num IN (
            SELECT DISTINCT project_row_num
            FROM todos__schema_v1_current todo
            JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
            WHERE todo.is_deleted = 0
              AND todo.done = 0
+             AND todo.j_branch_num = ?
              AND todo_tx.outcome != ?
              {row_filter}
          )
          ORDER BY h.row_num, h.tx_num",
     ))?;
-    let mut query_params = vec![rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED)];
+    let mut query_params = vec![
+        rusqlite::types::Value::Integer(branch_num),
+        rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
+    ];
     query_params.extend(
         row_nums
             .iter()
@@ -3820,7 +3852,7 @@ fn export_open_todo_projects_for_row_nums(
         Ok(HistoryRecord {
             table: "projects".to_owned(),
             row_id: row.get(0)?,
-            branch_id: "main".to_owned(),
+            branch_id: row.get(8)?,
             tx_id: row.get(1)?,
             op: row.get(2)?,
             values,
@@ -3835,12 +3867,13 @@ fn export_open_todo_projects_for_row_nums(
         .map_err(Into::into)
 }
 
-fn export_open_todos(conn: &Connection) -> Result<Vec<HistoryRecord>> {
-    export_open_todos_for_row_nums(conn, &[])
+fn export_open_todos(conn: &Connection, branch_num: i64) -> Result<Vec<HistoryRecord>> {
+    export_open_todos_for_row_nums(conn, branch_num, &[])
 }
 
 fn export_open_todos_for_row_nums(
     conn: &Connection,
+    branch_num: i64,
     row_nums: &[i64],
 ) -> Result<Vec<HistoryRecord>> {
     let row_filter = sql_row_num_filter("todo", row_nums);
@@ -3854,23 +3887,29 @@ fn export_open_todos_for_row_nums(
                 h.j_created_at,
                 h.j_updated_at,
                 h.j_created_by,
-                h.j_updated_by
+                h.j_updated_by,
+                branch.branch_id
          FROM todos__schema_v1_history h
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
          JOIN jazz_row_id project_ids ON project_ids.row_num = h.project_row_num
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
          WHERE h.row_num IN (
            SELECT todo.row_num
            FROM todos__schema_v1_current todo
            JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
            WHERE todo.is_deleted = 0
              AND todo.done = 0
+             AND todo.j_branch_num = ?
              AND todo_tx.outcome != ?
              {row_filter}
          )
          ORDER BY h.row_num, h.tx_num",
     ))?;
-    let mut query_params = vec![rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED)];
+    let mut query_params = vec![
+        rusqlite::types::Value::Integer(branch_num),
+        rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
+    ];
     query_params.extend(
         row_nums
             .iter()
@@ -3888,7 +3927,7 @@ fn export_open_todos_for_row_nums(
         Ok(HistoryRecord {
             table: "todos".to_owned(),
             row_id: row.get(0)?,
-            branch_id: "main".to_owned(),
+            branch_id: row.get(10)?,
             tx_id: row.get(1)?,
             op: row.get(2)?,
             values,

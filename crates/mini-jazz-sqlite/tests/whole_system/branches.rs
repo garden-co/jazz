@@ -9,7 +9,7 @@ fn branch_local_write_is_invisible_on_main() {
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
-    alice.create_branch("draft", None).unwrap();
+    alice.create_branch("draft", Some(0)).unwrap();
     alice.checkout_branch("draft").unwrap();
     let mut task = BTreeMap::new();
     task.insert("title".to_owned(), json!("Draft-only"));
@@ -23,6 +23,81 @@ fn branch_local_write_is_invisible_on_main() {
 
     alice.checkout_branch("draft").unwrap();
     assert_eq!(alice.read_rows("tasks").unwrap()[0].id, "task-draft");
+}
+
+#[test]
+fn branch_absence_refresh_uses_branch_context_not_latest_main() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_branch("draft", Some(0)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .create_todo(
+            "todo-draft",
+            "Draft project may arrive",
+            false,
+            "project-late",
+        )
+        .unwrap();
+    let initial_bundle = alice.export_query_scope_open_todos().unwrap();
+    assert_eq!(
+        initial_bundle
+            .branches
+            .iter()
+            .find(|branch| branch.branch_id == "draft")
+            .unwrap()
+            .base_global_epoch,
+        Some(0)
+    );
+    peer.apply_bundle(&initial_bundle).unwrap();
+    peer.checkout_branch("draft").unwrap();
+    assert_eq!(
+        peer.branches()
+            .unwrap()
+            .into_iter()
+            .find(|branch| branch.id == "draft")
+            .unwrap()
+            .base_global_epoch,
+        Some(0)
+    );
+    assert_eq!(peer.open_todos().unwrap()[0].project_title, None);
+    let observed = peer.observed_query_reads().unwrap();
+    assert!(observed.iter().any(|read| {
+        read.branch_id == "draft"
+            && read.table == "projects"
+            && read.field == "id"
+            && read.op == "absent"
+            && read.value == json!("project-late")
+    }));
+
+    alice.checkout_branch("main").unwrap();
+    let main_project_tx = alice
+        .create_project("project-late", "Main project should not leak")
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&main_project_tx, 1)
+        .unwrap();
+    alice.checkout_branch("draft").unwrap();
+    for refresh in alice.export_query_read_refreshes(&observed).unwrap() {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+    peer.checkout_branch("draft").unwrap();
+    assert_eq!(peer.open_todos().unwrap()[0].project_title, None);
+
+    alice
+        .create_project("project-late", "Draft project")
+        .unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+    assert_eq!(
+        peer.open_todos().unwrap()[0].project_title.as_deref(),
+        Some("Draft project")
+    );
 }
 
 #[test]
