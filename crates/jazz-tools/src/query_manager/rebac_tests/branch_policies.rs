@@ -187,6 +187,10 @@ fn todos_metadata() -> HashMap<String, String> {
     HashMap::from([(MetadataKey::Table.to_string(), "todos".to_string())])
 }
 
+fn projects_metadata() -> HashMap<String, String> {
+    HashMap::from([(MetadataKey::Table.to_string(), "projects".to_string())])
+}
+
 fn branches_metadata() -> HashMap<String, String> {
     HashMap::from([(MetadataKey::Table.to_string(), "branches".to_string())])
 }
@@ -2128,6 +2132,69 @@ fn branch_ref_read_lens_schemas() -> (Schema, Schema, Lens, SchemaHash, SchemaHa
     (legacy, auth, lens, legacy_hash, auth_hash)
 }
 
+fn branch_backing_inherits_lens_schemas() -> (Schema, Schema, Lens, SchemaHash, SchemaHash) {
+    let legacy = SchemaBuilder::new()
+        .table(TableSchema::builder("projects").column("name", ColumnType::Text))
+        .table(TableSchema::builder("branches").fk_column("projectId", "projects"))
+        .table(
+            TableSchema::builder("todos")
+                .fk_column("projectId", "projects")
+                .column("title", ColumnType::Text),
+        )
+        .build();
+
+    let auth = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .column("ownerId", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::Cmp {
+                    column: "ownerId".into(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(vec!["user_id".into()]),
+                })),
+        )
+        .table(
+            TableSchema::builder("branches")
+                .fk_column("projectId", "projects")
+                .policies(TablePolicies::new().with_select(PolicyExpr::Inherits {
+                    operation: Operation::Select,
+                    via_column: "projectId".into(),
+                    max_depth: None,
+                })),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .fk_column("projectId", "projects")
+                .column("title", ColumnType::Text)
+                .policies({
+                    let mut todo_policies = TablePolicies::default();
+                    todo_policies.for_branch = HashMap::from([(
+                        TableName::new("branches"),
+                        TablePolicies::new().with_select(PolicyExpr::True),
+                    )]);
+                    todo_policies
+                }),
+        )
+        .build();
+
+    let legacy_hash = SchemaHash::compute(&legacy);
+    let auth_hash = SchemaHash::compute(&auth);
+    let mut transform = LensTransform::new();
+    transform.push(
+        LensOp::AddColumn {
+            table: "projects".to_string(),
+            column: "ownerId".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Text("alice".to_string()),
+        },
+        false,
+    );
+    let lens = Lens::new(legacy_hash, auth_hash, transform);
+
+    (legacy, auth, lens, legacy_hash, auth_hash)
+}
+
 #[test]
 // BranchRef lens path for graph read filtering:
 //
@@ -2226,6 +2293,139 @@ fn branch_read_transforms_backing_row_before_branch_ref_policy() {
         rows.len(),
         1,
         "branch read should use transformed backing row for BranchRef"
+    );
+}
+
+#[test]
+// Inherited backing-row select through a lens:
+//
+//   legacy projects(name)
+//        --lens adds ownerId=alice-->
+//   auth branches.select inherits projects.select(ownerId == session.user_id)
+//
+//   Expected: graph policy filtering transforms the inherited project row before
+//   evaluating the backing branch row's select policy.
+fn branch_backing_select_transforms_related_rows_before_policy_eval() {
+    let (legacy, auth, lens, legacy_hash, auth_hash) = branch_backing_inherits_lens_schemas();
+    let mut qm = create_query_manager_with_policy_mode(
+        SyncManager::new(),
+        auth.clone(),
+        RowPolicyMode::PermissiveLocal,
+    );
+    qm.set_known_schemas(Arc::new(HashMap::from([
+        (legacy_hash, legacy.clone()),
+        (auth_hash, auth.clone()),
+    ])));
+    qm.add_live_schema(legacy.clone());
+    qm.register_lens(lens);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let legacy_main_branch = ComposedBranchName::new("dev", legacy_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    let project_id = ObjectId::new();
+    let legacy_project_descriptor = legacy
+        .get(&TableName::new("projects"))
+        .expect("legacy projects table should exist")
+        .columns
+        .clone();
+    let project_commit = stored_row_commit(
+        smallvec![],
+        encode_row(
+            &legacy_project_descriptor,
+            &[Value::Text("Legacy project".into())],
+        )
+        .unwrap(),
+        1_000,
+        "alice",
+        None,
+    );
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: row_batch_created_payload(
+            project_id,
+            &legacy_main_branch,
+            Some(RowMetadata {
+                id: project_id,
+                metadata: projects_metadata(),
+            }),
+            &project_commit,
+        ),
+    });
+
+    let branch_id = ObjectId::new();
+    let legacy_branch_descriptor = legacy
+        .get(&TableName::new("branches"))
+        .expect("legacy branches table should exist")
+        .columns
+        .clone();
+    let branch_commit = stored_row_commit(
+        smallvec![],
+        encode_row(&legacy_branch_descriptor, &[Value::Uuid(project_id)]).unwrap(),
+        1_001,
+        "alice",
+        None,
+    );
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: row_batch_created_payload(
+            branch_id,
+            &legacy_main_branch,
+            Some(RowMetadata {
+                id: branch_id,
+                metadata: branches_metadata(),
+            }),
+            &branch_commit,
+        ),
+    });
+
+    let branch_name = branch_name_for(&legacy, branch_id);
+    let todo_id = ObjectId::new();
+    let legacy_todo_descriptor = legacy
+        .get(&TableName::new("todos"))
+        .expect("legacy todos table should exist")
+        .columns
+        .clone();
+    let todo_commit = stored_row_commit(
+        smallvec![],
+        encode_row(
+            &legacy_todo_descriptor,
+            &[
+                Value::Uuid(project_id),
+                Value::Text("Read through inherited project policy".into()),
+            ],
+        )
+        .unwrap(),
+        1_002,
+        "alice",
+        None,
+    );
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: row_batch_created_payload(
+            todo_id,
+            &branch_name,
+            Some(RowMetadata {
+                id: todo_id,
+                metadata: todos_metadata(),
+            }),
+            &todo_commit,
+        ),
+    });
+    qm.process(&mut storage);
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("todos").branch(&branch_name).build(),
+        Some(Session::new("alice")),
+    );
+    assert_eq!(
+        rows.len(),
+        1,
+        "backing branch select should transform inherited project rows before policy eval"
     );
 }
 

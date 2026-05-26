@@ -555,12 +555,17 @@ impl PolicyFilterNode {
                             if row.is_hard_deleted() {
                                 return None;
                             }
+                            let row_branch = BranchName::new(row.branch.as_str());
+                            let row_data = self.transform_content_for_schema(
+                                table_hint.as_str(),
+                                &row.data,
+                                row.batch_id,
+                                row_branch,
+                            )?;
                             Some(LoadedRow::new(
-                                row.data.clone(),
+                                row_data,
                                 row.row_provenance(),
-                                [(id, BranchName::new(row.branch.as_str()))]
-                                    .into_iter()
-                                    .collect(),
+                                [(id, row_branch)].into_iter().collect(),
                                 row.batch_id,
                             ))
                         };

@@ -381,6 +381,11 @@ function defineBranchQueryPermissions(
 
     if (config.includeForBranchBlock !== false) {
       policy.forBranch(policy.branches, ({ branchPolicy }) => {
+        branchPolicy.projects.allowRead.always();
+        branchPolicy.projects.allowInsert.always();
+        branchPolicy.projects.allowUpdate.always();
+        branchPolicy.projects.allowDelete.always();
+
         if (config.includeBranchTodoRead !== false) {
           applyReadPolicyForOwnerColumn(
             branchPolicy.todos.allowRead,
@@ -1473,6 +1478,72 @@ describe("branch query permissions browser integration", () => {
     );
     expect(projectRows, "project row remains visible when include is empty").toHaveLength(1);
     expect(projectRows[0]!.todosViaProject).toEqual([]);
+  });
+
+  /*
+   * Branch DB include inheritance path:
+   *
+   *   db.branch(A).all(projects.include({ todosViaProject: true }))
+   *
+   *   Expected: parent project and plain included todos both read from branch A.
+   */
+  it("applies a branch db view to plain included relations", async () => {
+    const caseName = "branch-db-plain-include";
+    const { app, seedDb } = await createSyncedBranchQueryCaseDbs(
+      {
+        normalReadMode: "always",
+        branchReadMode: "always",
+        branchBackingReadMode: "always",
+      },
+      caseName,
+    );
+    const backingProject = await seedBranchQueryProject(
+      app,
+      seedDb,
+      `Backing project ${caseName}`,
+      "edge",
+    );
+    const branch = await seedBranchQueryBranch(
+      app,
+      seedDb,
+      backingProject.id,
+      "alice",
+      `Draft ${caseName}`,
+      "edge",
+    );
+    const branchProject = await expectMutationAllowed(
+      "seed branch-local project for plain include",
+      () =>
+        seedDb.branch(branch.id).insert(app.projects, {
+          name: `Branch project ${caseName}`,
+        }),
+      "edge",
+    );
+    const branchTodo = await seedBranchQueryBranchTodo(
+      app,
+      seedDb,
+      branch.id,
+      branchProject.id,
+      "alice",
+      `Branch include todo ${caseName}`,
+      "edge",
+    );
+
+    const projectRows = await withTimeout(
+      seedDb.branch(branch.id).all(
+        app.projects.where({ id: branchProject.id }).include({
+          todosViaProject: true,
+        }),
+        { tier: "edge" },
+      ),
+      15_000,
+      "branch db plain include query did not resolve",
+    );
+    expect(projectRows, "project row remains visible through branch db view").toHaveLength(1);
+    expect(
+      projectRows[0]!.todosViaProject.map((todo) => todo.id),
+      "plain include reads from the branch db view",
+    ).toEqual([branchTodo.id]);
   });
 
   /*

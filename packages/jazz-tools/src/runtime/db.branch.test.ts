@@ -159,6 +159,59 @@ describe("Db.branch", () => {
     expect(query.array_subqueries[0].branches).toEqual(["included-branch"]);
   });
 
+  it("applies the db branch view to plain included relations", async () => {
+    const { client } = makeClient();
+    vi.mocked(client.query).mockResolvedValueOnce([
+      {
+        id: "project-1",
+        values: [
+          { type: "Text", value: "Draft project" },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: {
+                  id: "todo-1",
+                  values: [
+                    { type: "Uuid", value: "project-1" },
+                    { type: "Text", value: "Draft todo" },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+    const db = new TestDb(client);
+
+    const rows = await db.branch("outer-branch").all(
+      app.projects.include({
+        todosViaProject: true,
+      }),
+    );
+
+    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
+
+    const [queryJson] = vi.mocked(client.query).mock.calls.at(-1)! as [string];
+    const query = JSON.parse(queryJson);
+    expect(query.branches).toEqual(["outer-branch"]);
+    expect(rows).toEqual([
+      {
+        id: "project-1",
+        name: "Draft project",
+        todosViaProject: [
+          {
+            id: "todo-1",
+            projectId: "project-1",
+            title: "Draft todo",
+          },
+        ],
+      },
+    ]);
+  });
+
   it("preserves explicit branches on each union relation seed", async () => {
     const { client } = makeClient();
     const db = new TestDb(client);
