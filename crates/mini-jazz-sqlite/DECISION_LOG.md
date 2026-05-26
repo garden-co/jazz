@@ -381,3 +381,14 @@ Design lesson: the code/detail split feels right. Product code can branch on a
 stable rejection code while trusted-debug surfaces can inspect structured detail.
 The open product question is still what detail is safe to expose to untrusted
 clients for more complex policies.
+
+## 2026-05-26 00:47 PDT
+
+Added a first storage format tag. New SQLite stores set `PRAGMA user_version` to
+`1`, runtimes expose the current storage format version for tests/debugging, and
+stores with a future version fail before schema installation. Full mini crate
+suite is green with 155 tests.
+
+Design lesson: SQLite gives us a nearly free coarse storage-version boundary.
+This does not replace catalogue/schema/lens versioning, but it is a good guard
+for physical format changes and migration entry points.

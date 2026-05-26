@@ -1338,6 +1338,10 @@ impl Runtime {
         stats::collect(&self.conn, &self.schema)
     }
 
+    pub fn storage_format_version(&self) -> Result<i64> {
+        storage::storage_version(&self.conn)
+    }
+
     fn query_context(&self) -> query::QueryContext<'_> {
         query::QueryContext {
             conn: &self.conn,

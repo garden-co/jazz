@@ -4,6 +4,8 @@ use super::*;
 fn memory_runtime_writes_through_sqlite_current_projection() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
+    assert_eq!(alice.storage_format_version().unwrap(), 1);
+
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
         .create_todo("todo-1", "Write Attempt 3 tests", false, "project-1")
@@ -23,6 +25,38 @@ fn memory_runtime_writes_through_sqlite_current_projection() {
     assert!(stats.page_size > 0);
     assert_eq!(stats.database_bytes, stats.page_count * stats.page_size);
     assert!(stats.physical_tx_num_for(&tx).is_some());
+}
+
+#[test]
+fn durable_storage_is_tagged_with_format_version() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("versioned.sqlite");
+
+    Runtime::open(Storage::File(path.clone()), "worker", "alice").unwrap();
+
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 1);
+}
+
+#[test]
+fn future_storage_format_versions_fail_before_opening_runtime() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("future.sqlite");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.pragma_update(None, "user_version", 2).unwrap();
+    drop(conn);
+
+    let err = match Runtime::open(Storage::File(path), "worker", "alice") {
+        Ok(_) => panic!("future storage format opened successfully"),
+        Err(err) => err,
+    };
+
+    assert!(err
+        .to_string()
+        .contains("unsupported storage format version 2"));
 }
 
 #[test]
