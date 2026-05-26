@@ -87,3 +87,100 @@ fn subscription_removes_child_when_parent_policy_dependency_changes() {
     let diffs = alice.poll_subscription(&mut subscription).unwrap();
     assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "todo-1"));
 }
+
+#[test]
+fn subscription_diffs_when_active_branch_changes() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-main",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let mut subscription = alice.subscribe_rows("tasks").unwrap();
+    assert_eq!(subscription.initial_rows()[0].id, "task-main");
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-draft",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert_eq!(alice.read_rows("tasks").unwrap().len(), 2);
+    assert!(matches!(&diffs[..], [RowDiff::Added(row)] if row.id == "task-draft"));
+
+    alice.checkout_branch("main").unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "task-draft"));
+}
+
+#[test]
+fn subscription_on_pinned_branch_ignores_later_main_updates_until_overlay_changes() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let mut subscription = alice.subscribe_rows("tasks").unwrap();
+    assert_eq!(
+        subscription.initial_rows()[0].values["title"],
+        json!("Base")
+    );
+
+    alice.checkout_branch("main").unwrap();
+    let update_tx = alice
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main after branch")),
+                ("done".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&update_tx, 2).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    assert!(alice
+        .poll_subscription(&mut subscription)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Base")
+    );
+}

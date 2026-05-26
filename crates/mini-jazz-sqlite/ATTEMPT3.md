@@ -1574,3 +1574,19 @@ not the stored/lensed name `project`. Policy write validation now falls back to
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 renamed_ref_lens_participates_in_untrusted_write_policy_validation` passes.
+
+## 2026-05-25 19:37 PDT
+
+Starting branch subscription diff coverage from sidecar review. Since
+subscriptions are implemented as rerun-and-diff, polling after checkout should
+produce the same semantic transition as one-shot reads in the new active branch.
+
+## 2026-05-25 19:38 PDT
+
+Branch subscription diff coverage is green. Added tests for polling after
+checkout to a branch with extra overlay rows, polling after checkout back to
+main, and a pinned branch subscription ignoring later main updates until the
+branch view itself changes.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+subscription_` passes.
