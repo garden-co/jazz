@@ -2147,3 +2147,16 @@ refresh can send "this row moved out" as ordinary row history. The targeted
 test now passes.
 
 Full `cargo test -p mini-jazz-sqlite` passes with 116 whole-system tests.
+
+## 2026-05-25 20:42 PDT
+
+Taking the explorer's second quick invariant: recursive branch scope sync
+should export a draft tombstone when a branch deletes a descendant that came
+from the pinned main base, so a peer subscribed to that recursive tree repairs
+from `root -> child -> grandchild` down to `root`.
+
+Result: added the whole-system branch recursive delete test; it passed without
+implementation changes. This pins down that generic branch deletes, branch
+base export, and recursive tree reads already compose for this case.
+
+Full `cargo test -p mini-jazz-sqlite` passes with 117 whole-system tests.

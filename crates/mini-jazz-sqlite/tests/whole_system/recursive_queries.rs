@@ -727,6 +727,90 @@ fn recursive_query_scope_sync_preserves_branch_base_and_overlay() {
 }
 
 #[test]
+fn recursive_branch_query_export_includes_tombstone_for_deleted_base_descendant() {
+    let schema = SchemaDef::new().table("folders", |table| {
+        table.text("name");
+        table.ref_("parent", "folders");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    let root_tx = alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&root_tx, 1).unwrap();
+    let child_tx = alice
+        .insert_row(
+            "folders",
+            "base-child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Base child")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&child_tx, 2).unwrap();
+    let grandchild_tx = alice
+        .insert_row(
+            "folders",
+            "grandchild",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Grandchild")),
+                ("parent".to_owned(), json!("base-child")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&grandchild_tx, 3)
+        .unwrap();
+
+    alice.create_branch("draft", Some(3)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_recursive_refs("folders", "root", "parent")
+            .unwrap(),
+    )
+    .unwrap();
+    peer.checkout_branch("draft").unwrap();
+    assert_eq!(
+        peer.read_recursive_refs("folders", "root", "parent")
+            .unwrap()
+            .len(),
+        3
+    );
+
+    alice.delete_row("folders", "base-child").unwrap();
+    let bundle = alice
+        .export_recursive_refs("folders", "root", "parent")
+        .unwrap();
+    assert!(bundle
+        .history
+        .iter()
+        .any(|record| record.branch_id == "draft"
+            && record.row_id == "base-child"
+            && record.op == 3));
+
+    peer.apply_bundle(&bundle).unwrap();
+    let ids = peer
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root"]);
+}
+
+#[test]
 fn recursive_branch_query_export_includes_snapshot_policy_ancestors() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {
