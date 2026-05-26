@@ -561,7 +561,12 @@ impl Runtime {
                 branch_record.base_global_epoch,
                 now_ms(),
             )?;
-            branch::set_sources(&db, branch_num, &branch_record.source_branch_ids)?;
+            branch::set_sources_from_sync(
+                &db,
+                branch_num,
+                &branch_record.source_branch_ids,
+                branch_record.source_version,
+            )?;
         }
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
@@ -3544,10 +3549,10 @@ fn export_branch_records_for_history(
 
     let mut records = Vec::new();
     for branch_id in branch_ids {
-        let (branch_num, base_global_epoch) = conn.query_row(
-            "SELECT branch_num, base_global_epoch FROM jazz_branch WHERE branch_id = ?",
+        let (branch_num, base_global_epoch, source_version) = conn.query_row(
+            "SELECT branch_num, base_global_epoch, source_version FROM jazz_branch WHERE branch_id = ?",
             params![branch_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, i64>(2)?)),
         )?;
         let mut stmt = conn.prepare(
             "SELECT source.branch_id
@@ -3563,6 +3568,7 @@ fn export_branch_records_for_history(
             branch_id,
             base_global_epoch,
             source_branch_ids,
+            source_version,
         });
     }
     Ok(records)
@@ -3573,10 +3579,16 @@ fn include_branch_record(
     records: &mut Vec<BranchRecord>,
     branch_num: i64,
 ) -> Result<()> {
-    let (branch_id, base_global_epoch) = conn.query_row(
-        "SELECT branch_id, base_global_epoch FROM jazz_branch WHERE branch_num = ?",
+    let (branch_id, base_global_epoch, source_version) = conn.query_row(
+        "SELECT branch_id, base_global_epoch, source_version FROM jazz_branch WHERE branch_num = ?",
         params![branch_num],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
     )?;
     if records.iter().any(|record| record.branch_id == branch_id) {
         return Ok(());
@@ -3595,6 +3607,7 @@ fn include_branch_record(
         branch_id,
         base_global_epoch,
         source_branch_ids,
+        source_version,
     });
     Ok(())
 }

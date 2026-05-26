@@ -379,7 +379,8 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           branch_num INTEGER PRIMARY KEY,
           branch_id TEXT NOT NULL UNIQUE,
           base_global_epoch INTEGER,
-          created_at INTEGER NOT NULL
+          created_at INTEGER NOT NULL,
+          source_version INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS jazz_branch_source (
@@ -396,8 +397,8 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
         ) WITHOUT ROWID;
 
         INSERT OR IGNORE INTO jazz_branch
-          (branch_num, branch_id, base_global_epoch, created_at)
-          VALUES (1, 'main', NULL, 0);
+          (branch_num, branch_id, base_global_epoch, created_at, source_version)
+          VALUES (1, 'main', NULL, 0, 0);
 
         INSERT OR IGNORE INTO jazz_branch_backing
           (branch_id, base_global_epoch, source_branch_ids_json, created_at)

@@ -56,6 +56,7 @@ pub(crate) fn add_source(conn: &Connection, branch_num: i64, source_branch_id: &
          VALUES (?, ?)",
         params![branch_num, source_branch_num],
     )?;
+    bump_source_version(conn, branch_num)?;
     sync_backing_row(conn, branch_num)?;
     Ok(())
 }
@@ -71,6 +72,7 @@ pub(crate) fn remove_source(
          WHERE branch_num = ? AND source_branch_num = ?",
         params![branch_num, source_branch_num],
     )?;
+    bump_source_version(conn, branch_num)?;
     sync_backing_row(conn, branch_num)?;
     Ok(())
 }
@@ -93,6 +95,40 @@ pub(crate) fn set_sources(
         )?;
     }
     sync_backing_row(conn, branch_num)?;
+    Ok(())
+}
+
+pub(crate) fn source_version(conn: &Connection, branch_num: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT source_version FROM jazz_branch WHERE branch_num = ?",
+        params![branch_num],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn set_sources_from_sync(
+    conn: &Connection,
+    branch_num: i64,
+    source_branch_ids: &[String],
+    source_version: i64,
+) -> Result<()> {
+    if source_version < self::source_version(conn, branch_num)? {
+        return Ok(());
+    }
+    set_sources(conn, branch_num, source_branch_ids)?;
+    conn.execute(
+        "UPDATE jazz_branch SET source_version = ? WHERE branch_num = ?",
+        params![source_version, branch_num],
+    )?;
+    sync_backing_row(conn, branch_num)?;
+    Ok(())
+}
+
+fn bump_source_version(conn: &Connection, branch_num: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE jazz_branch SET source_version = source_version + 1 WHERE branch_num = ?",
+        params![branch_num],
+    )?;
     Ok(())
 }
 

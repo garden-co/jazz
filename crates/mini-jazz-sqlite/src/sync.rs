@@ -38,6 +38,8 @@ pub struct BranchRecord {
     pub branch_id: String,
     pub base_global_epoch: Option<i64>,
     pub source_branch_ids: Vec<String>,
+    #[serde(default)]
+    pub source_version: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

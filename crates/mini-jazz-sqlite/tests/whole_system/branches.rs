@@ -1273,6 +1273,71 @@ fn branch_observed_query_refresh_removes_detached_source_branch_rows() {
 }
 
 #[test]
+fn stale_branch_source_bundle_does_not_readd_removed_source() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-left",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left source")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .create_branch_from_branches("merge", &["left"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let stale_with_source = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    peer.apply_bundle(&stale_with_source).unwrap();
+    peer.checkout_branch("merge").unwrap();
+    assert_eq!(
+        peer.branches()
+            .unwrap()
+            .into_iter()
+            .find(|branch| branch.id == "merge")
+            .unwrap()
+            .source_branch_ids,
+        vec!["left"]
+    );
+
+    alice.remove_branch_source("merge", "left").unwrap();
+    let removal = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    peer.apply_bundle(&removal).unwrap();
+    assert!(peer
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == "merge")
+        .unwrap()
+        .source_branch_ids
+        .is_empty());
+
+    peer.apply_bundle(&stale_with_source).unwrap();
+    assert!(peer
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == "merge")
+        .unwrap()
+        .source_branch_ids
+        .is_empty());
+}
+
+#[test]
 fn durable_branch_source_removal_survives_reopen() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");

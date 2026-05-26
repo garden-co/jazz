@@ -1177,6 +1177,24 @@ repair correctly lower through the lens to the old physical storage column.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 230 whole-system tests.
 
+## 2026-05-26 04:28 PDT
+
+Found and fixed a stale branch-source replay bug. A peer could apply a stale
+bundle that still listed `left` as a source for `merge` after a newer bundle had
+removed that source, causing the source to reappear and branch results to widen
+again.
+
+Change: branch metadata now carries a monotone `source_version`, exported in
+`BranchRecord` and checked on apply before replacing the source list. Local
+source-list mutations bump the version. This bumped the prototype SQLite
+storage format from 2 to 3 because `jazz_branch` gained a system column.
+
+Discovery: branch provenance/source metadata is mutable state and therefore
+needs replay ordering just like transaction fate. Treating branch records as
+last-applied snapshots is not safe under out-of-order sync.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 231 whole-system tests.
+
 ## 2026-05-26 04:23 PDT
 
 Narrowed one todo-specific query descriptor wart. The legacy

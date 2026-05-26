@@ -4,7 +4,7 @@ use super::*;
 fn memory_runtime_writes_through_sqlite_current_projection() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
-    assert_eq!(alice.storage_format_version().unwrap(), 2);
+    assert_eq!(alice.storage_format_version().unwrap(), 3);
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -38,7 +38,7 @@ fn durable_storage_is_tagged_with_format_version() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn future_storage_format_versions_fail_before_opening_runtime() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("future.sqlite");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 3).unwrap();
+    conn.pragma_update(None, "user_version", 4).unwrap();
     drop(conn);
 
     let err = match Runtime::open(Storage::File(path), "worker", "alice") {
@@ -56,7 +56,7 @@ fn future_storage_format_versions_fail_before_opening_runtime() {
 
     assert!(err
         .to_string()
-        .contains("unsupported storage format version 3"));
+        .contains("unsupported storage format version 4"));
 }
 
 #[test]
