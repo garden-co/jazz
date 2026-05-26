@@ -1273,6 +1273,80 @@ fn branch_observed_query_refresh_removes_detached_source_branch_rows() {
 }
 
 #[test]
+fn durable_branch_source_removal_survives_reopen() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-left",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left source")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .create_branch_from_branches("merge", &["left"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &alice
+                    .export_query_where_eq("tasks", "done", json!(false))
+                    .unwrap(),
+            )
+            .unwrap();
+        worker.checkout_branch("merge").unwrap();
+        assert_eq!(
+            worker
+                .read_rows_where_eq("tasks", "done", json!(false))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    alice.remove_branch_source("merge", "left").unwrap();
+    let mut reopened =
+        Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
+    reopened.checkout_branch("merge").unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(reopened
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+    let merge = reopened
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == "merge")
+        .unwrap();
+    assert!(merge.source_branch_ids.is_empty());
+}
+
+#[test]
 fn branch_conflict_resolution_transaction_clears_conflict_meta_after_rebuild() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

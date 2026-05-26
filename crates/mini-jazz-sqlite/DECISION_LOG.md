@@ -1016,3 +1016,17 @@ provenance, not deltas. The existing additive apply behavior was fine for early
 creation-only tests but would leak detached source rows.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 219 whole-system tests.
+
+## 2026-05-26 03:46 PDT
+
+Added durable restart coverage for branch source removal. A durable worker syncs
+a merge branch whose rows are visible through a source branch, shuts down, then
+reopens after upstream detaches the source and receives a query refresh that
+removes the source row and persists the empty source list.
+
+Discovery: source-list contraction now works across the browser-worker-shaped
+durable boundary too, not only in a single in-memory session. This matters
+because branch provenance is system metadata and must survive exactly the same
+disconnect/reconnect loop as row history.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 220 whole-system tests.
