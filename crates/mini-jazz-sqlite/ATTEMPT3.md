@@ -1722,3 +1722,20 @@ policy in the source branch that produced each candidate.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 branch_conflict_candidates_respect_effective_row_policy` passes.
+
+## 2026-05-25 19:54 PDT
+
+Starting rebuild-order coverage for global epochs. Apply-time current projection
+now uses global epoch ordering, but `projection::rebuild` still appears to scan
+history by local `tx_num`, which can diverge from durable global order.
+
+## 2026-05-25 19:55 PDT
+
+Rebuild global ordering is green. The failing test created two versions whose
+local tx order disagreed with global epoch order; apply-time current projection
+kept epoch 20, but rebuild replayed to epoch 10. Rebuild now orders by
+row/branch, durable global epoch, then tx_num, with local pending rows sorting
+after durable rows to preserve optimistic current state.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+rebuild_uses_global_epoch_order_not_local_tx_order` passes.

@@ -41,7 +41,11 @@ fn rebuild_table(conn: &Connection, table: &crate::schema::TableDef) -> Result<(
          FROM {} h
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
          WHERE tx.outcome != ?
-         ORDER BY h.row_num, h.tx_num",
+         ORDER BY h.row_num,
+                  h.j_branch_num,
+                  CASE WHEN tx.global_epoch IS NULL THEN 1 ELSE 0 END,
+                  tx.global_epoch,
+                  tx.tx_num",
         select_columns.join(", "),
         history_table(&table.name),
     );

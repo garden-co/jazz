@@ -347,6 +347,56 @@ fn out_of_order_global_epochs_do_not_regress_current_projection() {
 }
 
 #[test]
+fn rebuild_uses_global_epoch_order_not_local_tx_order() {
+    let schema = support::notes_schema();
+    let mut authority =
+        Runtime::open_with_schema(Storage::Memory, "authority", "alice", schema.clone()).unwrap();
+    let mut peer = Runtime::open_with_schema(Storage::Memory, "peer", "alice", schema).unwrap();
+
+    let first_tx = authority
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("epoch 20")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&first_tx, 20)
+        .unwrap();
+
+    let second_tx = authority
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("epoch 10")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&second_tx, 10)
+        .unwrap();
+
+    peer.apply_bundle(&authority.export_table_history("notes").unwrap())
+        .unwrap();
+    assert_eq!(
+        peer.read_rows("notes").unwrap()[0].values["body"],
+        json!("epoch 20")
+    );
+
+    peer.clear_current_projection_for_test().unwrap();
+    peer.rebuild_current_projection().unwrap();
+    assert_eq!(
+        peer.read_rows("notes").unwrap()[0].values["body"],
+        json!("epoch 20")
+    );
+}
+
+#[test]
 fn accepted_bundle_does_not_resurrect_rejected_fate() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut rejected_peer = Runtime::open(Storage::Memory, "rejected-peer", "alice").unwrap();
