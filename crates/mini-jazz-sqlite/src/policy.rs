@@ -13,13 +13,13 @@ pub(crate) struct WriteCheck<'a> {
     pub(crate) row_num: i64,
     pub(crate) branch_num: i64,
     pub(crate) values: &'a BTreeMap<String, JsonValue>,
-    pub(crate) principal: &'a str,
+    pub(crate) user: &'a str,
 }
 
 pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
     match &check.table.write_policy {
         PolicyDef::AllowAll => Ok(true),
-        PolicyDef::CreatedByPrincipal => {
+        PolicyDef::CreatedByUser => {
             let count: i64 = check.db.query_row(
                 &format!(
                     "SELECT COUNT(*)
@@ -29,7 +29,7 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
                        AND current.j_created_by = ?",
                     crate::schema::current_table(&check.table.name)
                 ),
-                params![check.row_num, check.branch_num, check.principal],
+                params![check.row_num, check.branch_num, check.user],
                 |row| row.get(0),
             )?;
             Ok(count > 0)
@@ -71,7 +71,7 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
                             check.schema,
                             ref_table,
                             ref_row_num,
-                            check.principal,
+                            check.user,
                             base_epoch,
                         );
                     }
@@ -82,7 +82,7 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
                 ref_table,
                 "current",
                 &ref_table.read_policy,
-                check.principal,
+                check.user,
                 Some(check.branch_num),
                 0,
             )?;
@@ -133,11 +133,10 @@ fn snapshot_write_ref_allowed(
     schema: &SchemaDef,
     ref_table: &TableDef,
     ref_row_num: i64,
-    principal: &str,
+    user: &str,
     base_epoch: i64,
 ) -> Result<bool> {
-    let policy_sql =
-        snapshot_read_policy_sql_for_alias(schema, ref_table, "h", principal, base_epoch)?;
+    let policy_sql = snapshot_read_policy_sql_for_alias(schema, ref_table, "h", user, base_epoch)?;
     let count: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*)
@@ -192,27 +191,15 @@ fn effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> Strin
     )
 }
 
-pub(crate) fn read_policy_sql(
-    schema: &SchemaDef,
-    table: &TableDef,
-    principal: &str,
-) -> Result<String> {
-    lower_policy(
-        schema,
-        table,
-        "current",
-        &table.read_policy,
-        principal,
-        None,
-        0,
-    )
+pub(crate) fn read_policy_sql(schema: &SchemaDef, table: &TableDef, user: &str) -> Result<String> {
+    lower_policy(schema, table, "current", &table.read_policy, user, None, 0)
 }
 
 pub(crate) fn branch_read_policy_sql_for_alias(
     schema: &SchemaDef,
     table: &TableDef,
     alias: &str,
-    principal: &str,
+    user: &str,
     branch_num: i64,
 ) -> Result<String> {
     lower_policy(
@@ -220,7 +207,7 @@ pub(crate) fn branch_read_policy_sql_for_alias(
         table,
         alias,
         &table.read_policy,
-        principal,
+        user,
         Some(branch_num),
         0,
     )
@@ -230,7 +217,7 @@ pub(crate) fn snapshot_read_policy_sql_for_alias(
     schema: &SchemaDef,
     table: &TableDef,
     alias: &str,
-    principal: &str,
+    user: &str,
     base_epoch: i64,
 ) -> Result<String> {
     lower_snapshot_policy(
@@ -238,7 +225,7 @@ pub(crate) fn snapshot_read_policy_sql_for_alias(
         table,
         alias,
         &table.read_policy,
-        principal,
+        user,
         base_epoch,
         0,
     )
@@ -249,7 +236,7 @@ fn lower_policy(
     table: &TableDef,
     alias: &str,
     policy: &PolicyDef,
-    principal: &str,
+    user: &str,
     branch_num: Option<i64>,
     depth: usize,
 ) -> Result<String> {
@@ -258,9 +245,9 @@ fn lower_policy(
     }
     match policy {
         PolicyDef::AllowAll => Ok("1 = 1".to_owned()),
-        PolicyDef::CreatedByPrincipal => Ok(format!(
+        PolicyDef::CreatedByUser => Ok(format!(
             "{alias}.j_created_by = '{}'",
-            principal.replace('\'', "''")
+            user.replace('\'', "''")
         )),
         PolicyDef::RefReadable { field } => {
             let field = table
@@ -285,7 +272,7 @@ fn lower_policy(
                 ref_table,
                 &parent_alias,
                 &ref_table.read_policy,
-                principal,
+                user,
                 branch_num,
                 depth + 1,
             )?;
@@ -322,7 +309,7 @@ fn lower_snapshot_policy(
     table: &TableDef,
     alias: &str,
     policy: &PolicyDef,
-    principal: &str,
+    user: &str,
     base_epoch: i64,
     depth: usize,
 ) -> Result<String> {
@@ -333,9 +320,9 @@ fn lower_snapshot_policy(
     }
     match policy {
         PolicyDef::AllowAll => Ok("1 = 1".to_owned()),
-        PolicyDef::CreatedByPrincipal => Ok(format!(
+        PolicyDef::CreatedByUser => Ok(format!(
             "{alias}.j_created_by = '{}'",
-            principal.replace('\'', "''")
+            user.replace('\'', "''")
         )),
         PolicyDef::RefReadable { field } => {
             let field = table
@@ -362,7 +349,7 @@ fn lower_snapshot_policy(
                 ref_table,
                 &parent_alias,
                 &ref_table.read_policy,
-                principal,
+                user,
                 base_epoch,
                 depth + 1,
             )?;

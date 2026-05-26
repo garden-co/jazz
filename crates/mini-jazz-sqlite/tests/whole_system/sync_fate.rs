@@ -685,7 +685,7 @@ fn permission_fingerprint_mismatch_fails_closed_without_partial_apply() {
     let receiver_schema = SchemaDef::new().table("notes", |table| {
         table.text("body");
         table.bool("pinned");
-        table.write_if_created_by_principal();
+        table.write_if_created_by_user();
     });
     let mut writer =
         Runtime::open_with_schema(Storage::Memory, "writer", "alice", writer_schema).unwrap();
@@ -789,7 +789,7 @@ fn replicas_may_use_different_physical_tx_nums_for_same_public_tx_id() {
 }
 
 #[test]
-fn same_principal_on_two_nodes_preserves_authorship_and_distinct_node_epochs() {
+fn same_user_on_two_nodes_preserves_authorship_and_distinct_node_epochs() {
     let schema = support::notes_schema();
     let mut alice_phone =
         Runtime::open_with_schema(Storage::Memory, "alice-phone", "alice", schema.clone()).unwrap();

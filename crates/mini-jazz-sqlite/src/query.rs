@@ -10,8 +10,8 @@ pub(crate) struct QueryContext<'a> {
     pub(crate) conn: &'a Connection,
     pub(crate) schema: &'a SchemaDef,
     pub(crate) branch_num: i64,
-    pub(crate) principal: &'a str,
-    pub(crate) trusted: bool,
+    pub(crate) user: &'a str,
+    pub(crate) bypass_policy: bool,
 }
 
 impl QueryContext<'_> {
@@ -316,7 +316,7 @@ impl QueryContext<'_> {
                 self.schema,
                 table,
                 "child",
-                self.principal,
+                self.user,
                 self.branch_num
             )?,
         );
@@ -384,14 +384,14 @@ impl QueryContext<'_> {
     }
 
     fn read_policy_sql(&self, table: &crate::schema::TableDef) -> Result<String> {
-        if self.trusted {
+        if self.bypass_policy {
             Ok("1 = 1".to_owned())
         } else {
             policy::branch_read_policy_sql_for_alias(
                 self.schema,
                 table,
                 "current",
-                self.principal,
+                self.user,
                 self.branch_num,
             )
         }
@@ -402,7 +402,7 @@ impl QueryContext<'_> {
         table_name: &str,
         rows: Vec<RowView>,
     ) -> Result<Vec<RowView>> {
-        if self.trusted {
+        if self.bypass_policy {
             return Ok(rows);
         }
         let table = self.schema.table_def(table_name)?;
@@ -442,13 +442,13 @@ impl QueryContext<'_> {
         row: &RowView,
         branch_num: i64,
     ) -> Result<bool> {
-        if self.trusted {
+        if self.bypass_policy {
             return Ok(true);
         }
         let table = self.schema.table_def(table_name)?;
         match &table.read_policy {
             PolicyDef::AllowAll => Ok(true),
-            PolicyDef::CreatedByPrincipal => Ok(row.created_by == self.principal),
+            PolicyDef::CreatedByUser => Ok(row.created_by == self.user),
             PolicyDef::RefReadable { field } => {
                 let field = table
                     .fields
@@ -884,14 +884,14 @@ impl QueryContext<'_> {
 
     fn read_main_snapshot_rows(&self, table_name: &str, base_epoch: i64) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(table_name)?;
-        let policy_sql = if self.trusted {
+        let policy_sql = if self.bypass_policy {
             "1 = 1".to_owned()
         } else {
             policy::snapshot_read_policy_sql_for_alias(
                 self.schema,
                 table,
                 "h",
-                self.principal,
+                self.user,
                 base_epoch,
             )?
         };
