@@ -4349,6 +4349,7 @@ fn sql_value_to_json(
     value: &rusqlite::types::Value,
 ) -> Result<JsonValue> {
     match (&field.kind, value) {
+        (_, rusqlite::types::Value::Null) if field.nullable => Ok(JsonValue::Null),
         (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
             Ok(JsonValue::String(value.clone()))
         }

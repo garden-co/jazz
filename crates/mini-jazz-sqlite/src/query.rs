@@ -592,13 +592,30 @@ impl QueryContext<'_> {
         );
         select_columns.push("current.j_created_by".to_owned());
         let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-        let predicate_value = crate::schema::field_sql_value(field, value, |ref_table, row_id| {
-            row_num(self.conn, row_id).map_err(|err| {
-                crate::Error::new(format!(
-                    "failed to resolve ref {ref_table}.{row_id} for equality predicate: {err}"
-                ))
-            })
-        })?;
+        let (predicate_sql, predicate_value) = if value.is_null() {
+            if !field.nullable {
+                return Err(crate::Error::new(format!(
+                    "expected non-null for {}",
+                    field.name
+                )));
+            }
+            ("IS NULL".to_owned(), None)
+        } else {
+            (
+                "= ?".to_owned(),
+                Some(crate::schema::field_sql_value(
+                    field,
+                    value,
+                    |ref_table, row_id| {
+                        row_num(self.conn, row_id).map_err(|err| {
+                            crate::Error::new(format!(
+                                "failed to resolve ref {ref_table}.{row_id} for equality predicate: {err}"
+                            ))
+                        })
+                    },
+                )?),
+            )
+        };
         let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
         let scope_placeholders = placeholders(scope_nums.len());
         let sql = format!(
@@ -631,7 +648,7 @@ impl QueryContext<'_> {
                      AND active_current.j_branch_num = ?
                  )
                )
-               AND current.{predicate_column} = ?
+               AND current.{predicate_column} {predicate_sql}
                AND {policy_sql}
              ORDER BY current.j_created_at DESC, current.row_num",
             select_columns.join(", "),
@@ -658,8 +675,10 @@ impl QueryContext<'_> {
             rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
             rusqlite::types::Value::Integer(self.branch_num),
             rusqlite::types::Value::Integer(self.branch_num),
-            predicate_value,
         ]);
+        if let Some(predicate_value) = predicate_value {
+            params.push(predicate_value);
+        }
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
@@ -874,6 +893,7 @@ pub(crate) fn sql_value_to_json(
     value: &rusqlite::types::Value,
 ) -> Result<JsonValue> {
     match (&field.kind, value) {
+        (_, rusqlite::types::Value::Null) if field.nullable => Ok(JsonValue::Null),
         (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
             Ok(JsonValue::String(value.clone()))
         }

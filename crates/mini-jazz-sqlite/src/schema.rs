@@ -97,6 +97,7 @@ pub(crate) struct FieldDef {
     pub(crate) name: String,
     pub(crate) storage_name: String,
     pub(crate) kind: FieldKind,
+    pub(crate) nullable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +173,16 @@ impl TableBuilder {
             name: name.to_owned(),
             storage_name: user_storage_name(name),
             kind: FieldKind::Text,
+            nullable: false,
+        });
+    }
+
+    pub fn optional_text(&mut self, name: &str) {
+        self.table.fields.push(FieldDef {
+            name: name.to_owned(),
+            storage_name: user_storage_name(name),
+            kind: FieldKind::Text,
+            nullable: true,
         });
     }
 
@@ -180,6 +191,7 @@ impl TableBuilder {
             name: name.to_owned(),
             storage_name: user_storage_name(stored_as),
             kind: FieldKind::Text,
+            nullable: false,
         });
     }
 
@@ -188,6 +200,7 @@ impl TableBuilder {
             name: name.to_owned(),
             storage_name: user_storage_name(name),
             kind: FieldKind::Bool,
+            nullable: false,
         });
     }
 
@@ -198,6 +211,7 @@ impl TableBuilder {
             kind: FieldKind::Ref {
                 table: table.to_owned(),
             },
+            nullable: false,
         });
     }
 
@@ -208,6 +222,7 @@ impl TableBuilder {
             kind: FieldKind::Ref {
                 table: table.to_owned(),
             },
+            nullable: false,
         });
     }
 
@@ -518,6 +533,15 @@ pub(crate) fn field_sql_value(
     value: &serde_json::Value,
     resolve_ref: impl FnOnce(&str, &str) -> crate::Result<i64>,
 ) -> crate::Result<rusqlite::types::Value> {
+    if value.is_null() {
+        if field.nullable {
+            return Ok(rusqlite::types::Value::Null);
+        }
+        return Err(crate::Error::new(format!(
+            "expected non-null for {}",
+            field.name
+        )));
+    }
     Ok(match &field.kind {
         FieldKind::Text => rusqlite::types::Value::Text(
             value

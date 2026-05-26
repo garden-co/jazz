@@ -783,6 +783,44 @@ fn equality_query_scope_resync_removes_deleted_matching_row() {
 }
 
 #[test]
+fn nullable_text_round_trips_and_filters_with_is_null_semantics() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.optional_text("tag");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Tagged")),
+                ("tag".to_owned(), json!("work")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Untagged")),
+                ("tag".to_owned(), json!(null)),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice
+        .read_rows_where_eq("notes", "tag", json!(null))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-2");
+    assert_eq!(rows[0].values["tag"], json!(null));
+}
+
+#[test]
 fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_deleted_match() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

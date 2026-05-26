@@ -754,3 +754,9 @@ Design lesson: branch-as-data can start as a mirror/read surface without replaci
 Made branch base epochs immutable. Recreating a branch with the same base remains idempotent, but attempting to recreate it with a different base now fails instead of silently keeping the old metadata. Full mini crate suite is green with 199 tests.
 
 Design lesson: branch provenance needs fail-loud invariants early. Silent `INSERT OR IGNORE` behavior is too dangerous for branch views because the row history can appear valid while the branch base/sources no longer describe the intended snapshot.
+
+## 2026-05-26 03:08 PDT
+
+Added a first nullable-field slice. Schemas can declare `optional_text`, explicit JSON null values round-trip through history/current/query materialization, and equality filters over null lower to `IS NULL` instead of SQL's `= NULL` trap. Full mini crate suite is green with 200 tests.
+
+Design lesson: nullability needs to be a schema property, not a loose value convention. This small slice preserves required-field failures while proving the storage/query codec can represent SQL nulls semantically. Optional refs, defaults, `ne null`, and query-scope sync for null predicates remain open.
