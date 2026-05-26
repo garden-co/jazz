@@ -313,3 +313,14 @@ scope refresh. Full mini crate suite is green with 147 tests.
 Design lesson: every product-visible predicate needs both local evaluation and
 observed-fact repair semantics. Even a simple `id` predicate needed special
 repair handling because it is not a user schema column.
+
+## 2026-05-26 00:36 PDT
+
+Closed the sync half of `$createdBy` magic-field queries as well. Query-scope
+export/repair now handles `$createdBy = principal` and repairs deletes on the
+peer. Full mini crate suite is green with 148 tests.
+
+Design lesson: `id` and `$createdBy` are enough to prove the shape, but the
+ad-hoc branches in query repair are accumulating. Next architecture pass should
+extract a query predicate planner/evaluator that can produce local SQL,
+repair SQL, and history-row expansion from one predicate description.

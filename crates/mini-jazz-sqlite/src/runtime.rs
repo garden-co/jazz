@@ -572,6 +572,40 @@ impl Runtime {
             )?;
             return Ok(());
         }
+        if query_read.field == "$createdBy" {
+            let Some(created_by) = query_read.value.as_str() else {
+                return Err(crate::Error::new(
+                    "$createdBy equality expects a string value",
+                ));
+            };
+            let branch_num = branch::checkout(db, &query_read.branch_id)?;
+            db.execute(
+                &format!(
+                    "DELETE FROM {}
+                     WHERE j_branch_num = ?
+                       AND j_created_by = ?
+                       AND row_num NOT IN (
+                         SELECT h.row_num
+                         FROM {history_table} h
+                         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                         WHERE h.j_branch_num = ?
+                           AND h.j_created_by = ?
+                           AND h.op != 3
+                           AND tx.outcome != ?
+                       )",
+                    crate::schema::current_table(&query_read.table),
+                    history_table = crate::schema::history_table(&query_read.table),
+                ),
+                params![
+                    branch_num,
+                    created_by,
+                    branch_num,
+                    created_by,
+                    tx::OUTCOME_REJECTED
+                ],
+            )?;
+            return Ok(());
+        }
         let table = schema.table_def(&query_read.table)?;
         let field = table
             .fields
@@ -2891,6 +2925,28 @@ fn query_scope_repair_row_nums(
             return Err(crate::Error::new("id equality expects a string value"));
         };
         return Ok(vec![ensure_row_id(conn, &table.name, row_id)?]);
+    }
+    if field_name == "$createdBy" {
+        let Some(created_by) = value.as_str() else {
+            return Err(crate::Error::new(
+                "$createdBy equality expects a string value",
+            ));
+        };
+        let sql = format!(
+            "SELECT DISTINCT h.row_num
+             FROM {} h
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_created_by = ?
+               AND tx.outcome != ?",
+            crate::schema::history_table(&table.name),
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![created_by, tx::OUTCOME_REJECTED], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        return rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into);
     }
     let field = table
         .fields

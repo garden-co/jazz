@@ -202,6 +202,50 @@ fn created_by_magic_field_query_matches_creator_principal() {
 }
 
 #[test]
+fn created_by_magic_field_query_scope_syncs_and_repairs_delete() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-alice",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Alice")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("notes", "$createdBy", json!("alice"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer.read_rows_where_eq("notes", "$createdBy", json!("alice"))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice.delete_row("notes", "note-alice").unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("notes", "$createdBy", json!("alice"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(peer
+        .read_rows_where_eq("notes", "$createdBy", json!("alice"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn contains_query_scope_resync_removes_row_that_left_predicate() {
     let schema = support::notes_schema();
     let mut alice =
