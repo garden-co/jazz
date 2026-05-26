@@ -560,3 +560,24 @@ Next obvious derisk: sync dependency export is still direct-parent only. A
 recursive policy read can filter through grandparent rows, but a policy-scoped
 bundle likely does not yet include all transitive rows needed to recreate the
 query elsewhere.
+
+## 2026-05-25 17:58 PDT
+
+Starting the paired recursive sync-dependency test. Hypothesis: exporting
+`todos` with a recursive `read_if_ref_readable` policy currently includes the
+visible todo and its direct project, but omits the org row required to prove the
+project is readable on the receiving node.
+
+## 2026-05-25 17:59 PDT
+
+Recursive policy-scoped sync is green for the same grandparent chain. The export
+path now recursively follows `read_if_ref_readable` dependencies and carries the
+concrete child row set downward, so exporting `todos` includes only the required
+`projects` and only the required `orgs`.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+35 tests.
+
+Design note: this is still not a complete read-set model. It handles policy
+dependency rows for simple ref chains. Predicate/range reads, recursive graph
+queries, and policy cycles remain future derisking targets.

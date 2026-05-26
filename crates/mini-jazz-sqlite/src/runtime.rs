@@ -1002,6 +1002,7 @@ fn export_table_history(
         principal,
         trusted,
         &branch_nums,
+        None,
     )?);
     Ok(records)
 }
@@ -1013,6 +1014,7 @@ fn export_policy_dependency_history(
     principal: &str,
     trusted: bool,
     branch_nums: &[i64],
+    child_row_nums: Option<&[i64]>,
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
     let PolicyDef::RefReadable { field } = &table.read_policy else {
@@ -1039,18 +1041,20 @@ fn export_policy_dependency_history(
          FROM {} current
          JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
          WHERE current.is_deleted = 0
+           AND {row_filter}
            AND {}
            AND current_tx.outcome != {}
            AND {policy_sql}",
         crate::schema::current_table(table_name),
         branch_filter_sql("current", branch_nums),
         tx::OUTCOME_REJECTED,
+        row_filter = current_row_filter_sql("current", child_row_nums),
     );
     let mut stmt = conn.prepare(&sql)?;
     let row_nums = stmt
         .query_map([], |row| row.get::<_, i64>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    export_visible_table_history(
+    let mut records = export_visible_table_history(
         conn,
         schema,
         parent_table,
@@ -1058,7 +1062,17 @@ fn export_policy_dependency_history(
         trusted,
         branch_nums,
         Some(&row_nums),
-    )
+    )?;
+    records.extend(export_policy_dependency_history(
+        conn,
+        schema,
+        parent_table,
+        principal,
+        trusted,
+        branch_nums,
+        Some(&row_nums),
+    )?);
+    Ok(records)
 }
 
 fn export_visible_table_history(
@@ -1158,6 +1172,21 @@ fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
             "h.row_num IN ({})",
             (0..row_nums.len())
                 .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => "1 = 1".to_owned(),
+    }
+}
+
+fn current_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
+    match row_nums {
+        Some([]) => "0 = 1".to_owned(),
+        Some(row_nums) => format!(
+            "{alias}.row_num IN ({})",
+            row_nums
+                .iter()
+                .map(i64::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),

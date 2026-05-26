@@ -524,6 +524,80 @@ fn recursive_policy_filters_reads_through_grandparent_ref() {
 }
 
 #[test]
+fn recursive_policy_scoped_sync_includes_transitive_parent_rows() {
+    let schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("projects", |table| {
+            table.text("title");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "orgs",
+            "org-visible",
+            BTreeMap::from([("name".to_owned(), json!("Visible org"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "orgs",
+            "org-unrelated",
+            BTreeMap::from([("name".to_owned(), json!("Unrelated org"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-visible",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible project")),
+                ("org".to_owned(), json!("org-visible")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-visible",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible todo")),
+                ("project".to_owned(), json!("project-visible")),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    let synced = bundle
+        .history
+        .iter()
+        .map(|record| (record.table.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(synced.contains(&("todos", "todo-visible")));
+    assert!(synced.contains(&("projects", "project-visible")));
+    assert!(synced.contains(&("orgs", "org-visible")));
+    assert!(!synced.contains(&("orgs", "org-unrelated")));
+
+    peer.apply_bundle(&bundle).unwrap();
+    let rows = peer.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-visible");
+}
+
+#[test]
 fn policy_scoped_sync_includes_required_parent_rows_only() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
