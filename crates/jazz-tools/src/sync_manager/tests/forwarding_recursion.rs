@@ -83,3 +83,67 @@ fn forwarding_a_deep_parent_chain_does_not_overflow_the_stack() {
         "every batch in the chain should be queued exactly once"
     );
 }
+
+/// A hot row (e.g. a "last seen" timestamp written every second) accumulates a
+/// long synced history. The per-object `sent_batch_ids` set grows with it, and
+/// forwarding cloned that whole set on every forward — so the cost of an
+/// ordinary single-field update grew with the row's history, independent of
+/// how much is actually being sent.
+///
+/// This is a scaling guard, not a wall-clock budget: it forwards two equal
+/// batches of updates and asserts the second (against a larger already-sent
+/// set) does not take materially longer than the first. With the clone, the
+/// second batch is ~3x slower; checking membership by borrow keeps it flat.
+#[test]
+fn forwarding_hot_row_updates_do_not_scale_with_synced_history() {
+    use std::time::{Duration, Instant};
+    const PER_PHASE: usize = 100_000;
+
+    let io = MemoryStorage::new();
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    sm.add_server_with_storage(server_id, false, &io);
+    let row_id = ObjectId::new();
+
+    // Build all the update tips up front so the timed phases measure only the
+    // forward itself, not row construction. Each is a parentless tip on the
+    // same row, so forwarding queues it directly while the per-object
+    // sent-batch set keeps growing.
+    let tips: Vec<_> = (0..2 * PER_PHASE)
+        .map(|k| {
+            visible_row(
+                row_id,
+                "main",
+                Vec::new(),
+                1_000 + k as u64,
+                format!("v{k}").as_bytes(),
+            )
+        })
+        .collect();
+
+    let forward_range = |sm: &mut SyncManager, range: std::ops::Range<usize>| -> Duration {
+        let start = Instant::now();
+        for tip in &tips[range] {
+            sm.forward_row_batch_to_servers_with_storage(
+                &io,
+                "users",
+                row_id,
+                forwarding_metadata(),
+                tip.clone(),
+            );
+        }
+        start.elapsed()
+    };
+
+    // First phase grows the sent-batch set 0 -> PER_PHASE; second PER_PHASE -> 2*PER_PHASE.
+    let first = forward_range(&mut sm, 0..PER_PHASE);
+    let second = forward_range(&mut sm, PER_PHASE..2 * PER_PHASE);
+
+    let ratio = second.as_secs_f64() / first.as_secs_f64();
+    assert!(
+        ratio < 2.0,
+        "hot-row forwards scaled with synced-history size: the second {PER_PHASE} forwards took \
+         {ratio:.2}x the first (first={first:?}, second={second:?}). The per-object sent-batch set \
+         is being cloned on every forward."
+    );
+}
