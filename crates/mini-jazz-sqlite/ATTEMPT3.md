@@ -1739,3 +1739,19 @@ after durable rows to preserve optimistic current state.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 rebuild_uses_global_epoch_order_not_local_tx_order` passes.
+
+## 2026-05-25 19:56 PDT
+
+Starting generic transaction branch-delete coverage. Standalone `delete_row`
+can create a branch tombstone for a row visible only through the pinned base
+snapshot, but `TransactionBuilder::delete_row` still only deletes rows already
+materialized in current projection.
+
+## 2026-05-25 19:57 PDT
+
+Generic transaction branch delete is green. The transactional path now stages
+visible delete snapshots before opening the SQLite transaction and can write a
+branch tombstone from a pinned-base row, matching standalone `delete_row`.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+generic_transaction_delete_shadows_pinned_base_row` passes.

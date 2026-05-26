@@ -260,6 +260,38 @@ fn authority_acceptance_enriches_existing_transaction() {
 }
 
 #[test]
+fn generic_transaction_delete_shadows_pinned_base_row() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base task")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&tx, 1).unwrap();
+
+    alice.create_branch("draft", Some(1)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .transaction()
+        .delete_row("tasks", "task-1")
+        .commit()
+        .unwrap();
+
+    assert!(alice.read_rows("tasks").unwrap().is_empty());
+
+    alice.checkout_branch("main").unwrap();
+    assert_eq!(alice.read_rows("tasks").unwrap().len(), 1);
+}
+
+#[test]
 fn global_epoch_can_accept_multiple_transactions() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

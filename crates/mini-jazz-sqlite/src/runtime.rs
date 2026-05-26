@@ -1335,6 +1335,20 @@ impl<'a> TransactionBuilder<'a> {
     }
 
     pub fn commit(self) -> Result<String> {
+        let mutations = self.mutations;
+        let mut delete_snapshots = BTreeMap::new();
+        for mutation in &mutations {
+            let Mutation::DeleteRow { table, id } = mutation else {
+                continue;
+            };
+            let visible_row = self
+                .runtime
+                .read_rows(table)?
+                .into_iter()
+                .find(|row| row.id == *id)
+                .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?;
+            delete_snapshots.insert((table.clone(), id.clone()), visible_row);
+        }
         let (conflict_mode, outcome, global_epoch) = match self.mode {
             TransactionMode::Mergeable => (tx::MODE_MERGEABLE, tx::OUTCOME_PENDING, None),
             TransactionMode::Exclusive {
@@ -1357,7 +1371,7 @@ impl<'a> TransactionBuilder<'a> {
             outcome,
             global_epoch,
         )?;
-        for mutation in self.mutations {
+        for mutation in mutations {
             match mutation {
                 Mutation::Row {
                     table,
@@ -1380,6 +1394,11 @@ impl<'a> TransactionBuilder<'a> {
                 Mutation::DeleteRow { table, id } => {
                     let table_def = self.runtime.schema.table_def(&table)?;
                     let row_num = row_num(&db, &id)?;
+                    let visible_row = delete_snapshots
+                        .get(&(table.clone(), id.clone()))
+                        .ok_or_else(|| {
+                            crate::Error::new(format!("missing delete snapshot {id}"))
+                        })?;
                     let field_columns = table_def
                         .fields
                         .iter()
@@ -1413,7 +1432,7 @@ impl<'a> TransactionBuilder<'a> {
                         "j_created_by".to_owned(),
                         "?".to_owned(),
                     ]);
-                    db.execute(
+                    let inserted = db.execute(
                         &format!(
                             "INSERT OR IGNORE INTO {} ({})
                              SELECT {}
@@ -1432,6 +1451,36 @@ impl<'a> TransactionBuilder<'a> {
                             self.runtime.branch_num
                         ],
                     )?;
+                    if inserted == 0 {
+                        let mut values = vec![
+                            rusqlite::types::Value::Integer(row_num),
+                            rusqlite::types::Value::Integer(tx_num),
+                            rusqlite::types::Value::Integer(self.runtime.branch_num),
+                            rusqlite::types::Value::Integer(3),
+                        ];
+                        for field in &table_def.fields {
+                            let value = visible_row.values.get(&field.name).ok_or_else(|| {
+                                crate::Error::new(format!("missing field {}", field.name))
+                            })?;
+                            values.push(crate::schema::field_sql_value(
+                                field,
+                                value,
+                                |ref_table, row_id| ensure_row_id(&db, ref_table, row_id),
+                            )?);
+                        }
+                        values.extend([
+                            rusqlite::types::Value::Integer(now),
+                            rusqlite::types::Value::Integer(now),
+                            rusqlite::types::Value::Text(self.runtime.principal.clone()),
+                            rusqlite::types::Value::Text(self.runtime.principal.clone()),
+                        ]);
+                        insert_dynamic(
+                            &db,
+                            &crate::schema::history_table(&table),
+                            &insert_columns,
+                            &values,
+                        )?;
+                    }
                     db.execute(
                         &format!(
                             "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
@@ -1439,6 +1488,49 @@ impl<'a> TransactionBuilder<'a> {
                         ),
                         params![row_num, self.runtime.branch_num],
                     )?;
+                    if self.runtime.branch_num != 1 {
+                        let mut current_columns = vec![
+                            "row_num".to_owned(),
+                            "j_branch_num".to_owned(),
+                            "visible_tx_num".to_owned(),
+                            "is_deleted".to_owned(),
+                        ];
+                        current_columns.extend(field_columns.iter().cloned());
+                        current_columns.extend([
+                            "j_created_at".to_owned(),
+                            "j_updated_at".to_owned(),
+                            "j_created_by".to_owned(),
+                            "j_updated_by".to_owned(),
+                        ]);
+                        let mut current_values = vec![
+                            rusqlite::types::Value::Integer(row_num),
+                            rusqlite::types::Value::Integer(self.runtime.branch_num),
+                            rusqlite::types::Value::Integer(tx_num),
+                            rusqlite::types::Value::Integer(1),
+                        ];
+                        for field in &table_def.fields {
+                            let value = visible_row.values.get(&field.name).ok_or_else(|| {
+                                crate::Error::new(format!("missing field {}", field.name))
+                            })?;
+                            current_values.push(crate::schema::field_sql_value(
+                                field,
+                                value,
+                                |ref_table, row_id| ensure_row_id(&db, ref_table, row_id),
+                            )?);
+                        }
+                        current_values.extend([
+                            rusqlite::types::Value::Integer(now),
+                            rusqlite::types::Value::Integer(now),
+                            rusqlite::types::Value::Text(self.runtime.principal.clone()),
+                            rusqlite::types::Value::Text(self.runtime.principal.clone()),
+                        ]);
+                        insert_dynamic(
+                            &db,
+                            &crate::schema::current_table(&table),
+                            &current_columns,
+                            &current_values,
+                        )?;
+                    }
                     record_tx_write(&db, tx_num, &table, row_num, 3)?;
                 }
                 Mutation::Project { id, title } => {
