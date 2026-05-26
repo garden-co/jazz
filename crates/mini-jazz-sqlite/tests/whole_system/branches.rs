@@ -1210,6 +1210,69 @@ fn branch_observed_query_refresh_includes_newly_added_source_branch() {
 }
 
 #[test]
+fn branch_observed_query_refresh_removes_detached_source_branch_rows() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-left",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left source")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .create_branch_from_branches("merge", &["left"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+    peer.checkout_branch("merge").unwrap();
+    assert_eq!(
+        peer.read_rows_where_eq("tasks", "done", json!(false))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice.remove_branch_source("merge", "left").unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+    let merge = peer
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == "merge")
+        .unwrap();
+    assert!(merge.source_branch_ids.is_empty());
+}
+
+#[test]
 fn branch_conflict_resolution_transaction_clears_conflict_meta_after_rebuild() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

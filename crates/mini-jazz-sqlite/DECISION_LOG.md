@@ -1001,3 +1001,18 @@ deleted descendant tombstones, not on generic `apply_query_scope_repair`
 understanding recursive tree SQL.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 218 whole-system tests.
+
+## 2026-05-26 03:44 PDT
+
+Added branch source removal and sync contraction. `remove_branch_source` updates
+the backing branch row and rebuilds projection; applying branch metadata from a
+bundle now treats `source_branch_ids` as authoritative rather than only adding
+new sources. Query refresh after detaching a source branch now removes rows that
+were only visible through that source and syncs the empty source list.
+
+Discovery: branch provenance cannot be merged as a grow-only set if branches can
+remove sources. This is a real semantic choice: branch records are snapshots of
+provenance, not deltas. The existing additive apply behavior was fine for early
+creation-only tests but would leak detached source rows.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 219 whole-system tests.

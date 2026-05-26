@@ -558,9 +558,7 @@ impl Runtime {
                 branch_record.base_global_epoch,
                 now_ms(),
             )?;
-            for source_branch_id in &branch_record.source_branch_ids {
-                branch::add_source(&db, branch_num, source_branch_id)?;
-            }
+            branch::set_sources(&db, branch_num, &branch_record.source_branch_ids)?;
         }
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
@@ -1428,6 +1426,12 @@ impl Runtime {
     pub fn add_branch_source(&mut self, branch_id: &str, source_branch_id: &str) -> Result<()> {
         let branch_num = branch::checkout(&self.conn, branch_id)?;
         branch::add_source(&self.conn, branch_num, source_branch_id)
+    }
+
+    pub fn remove_branch_source(&mut self, branch_id: &str, source_branch_id: &str) -> Result<()> {
+        let branch_num = branch::checkout(&self.conn, branch_id)?;
+        branch::remove_source(&self.conn, branch_num, source_branch_id)?;
+        projection::rebuild(&self.conn, &self.schema, self.node_num)
     }
 
     pub fn checkout_branch(&mut self, branch_id: &str) -> Result<()> {

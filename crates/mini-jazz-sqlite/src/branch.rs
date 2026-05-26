@@ -60,6 +60,42 @@ pub(crate) fn add_source(conn: &Connection, branch_num: i64, source_branch_id: &
     Ok(())
 }
 
+pub(crate) fn remove_source(
+    conn: &Connection,
+    branch_num: i64,
+    source_branch_id: &str,
+) -> Result<()> {
+    let source_branch_num = checkout(conn, source_branch_id)?;
+    conn.execute(
+        "DELETE FROM jazz_branch_source
+         WHERE branch_num = ? AND source_branch_num = ?",
+        params![branch_num, source_branch_num],
+    )?;
+    sync_backing_row(conn, branch_num)?;
+    Ok(())
+}
+
+pub(crate) fn set_sources(
+    conn: &Connection,
+    branch_num: i64,
+    source_branch_ids: &[String],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM jazz_branch_source WHERE branch_num = ?",
+        params![branch_num],
+    )?;
+    for source_branch_id in source_branch_ids {
+        let source_branch_num = ensure(conn, source_branch_id, None, 0)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO jazz_branch_source (branch_num, source_branch_num)
+             VALUES (?, ?)",
+            params![branch_num, source_branch_num],
+        )?;
+    }
+    sync_backing_row(conn, branch_num)?;
+    Ok(())
+}
+
 pub(crate) fn scope_nums(conn: &Connection, branch_num: i64) -> Result<Vec<i64>> {
     let mut nums = vec![branch_num];
     let mut stmt = conn.prepare(
