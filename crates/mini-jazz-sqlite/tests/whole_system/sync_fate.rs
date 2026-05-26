@@ -302,7 +302,32 @@ fn bundle_with_unknown_query_scope_fails_closed_without_partial_apply() {
     let stats = peer.storage_stats().unwrap();
     assert_eq!(stats.history_rows, 0);
     assert_eq!(stats.current_rows, 0);
+    assert!(peer.observed_query_reads().unwrap().is_empty());
     assert!(peer.open_todos().unwrap().is_empty());
+}
+
+#[test]
+fn durable_peer_remembers_query_scope_after_restart() {
+    let dir = tempdir().unwrap();
+    let peer_path = dir.path().join("peer.sqlite");
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Remembered query", false, "project-1")
+        .unwrap();
+    let bundle = alice.export_query_scope_open_todos().unwrap();
+
+    {
+        let mut peer =
+            Runtime::open(Storage::File(peer_path.clone()), "peer-node", "alice").unwrap();
+        peer.apply_bundle(&bundle).unwrap();
+        peer.apply_bundle(&bundle).unwrap();
+        assert_eq!(peer.observed_query_reads().unwrap(), bundle.query_reads);
+    }
+
+    let reopened = Runtime::open(Storage::File(peer_path), "peer-node", "alice").unwrap();
+    assert_eq!(reopened.observed_query_reads().unwrap(), bundle.query_reads);
 }
 
 #[test]

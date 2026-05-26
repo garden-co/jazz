@@ -550,3 +550,9 @@ Design lesson: branch query scopes must be evaluated over the effective branch s
 Generalized the ordered page-boundary query-scope experiment beyond fixture todos. Generic schemas can now read and export `eq + top createdAt desc` scopes, and refresh removes a displaced boundary row when a newer matching row enters the page. Full mini crate suite is green with 169 tests.
 
 Design lesson: ordered-page repair can be represented as a query descriptor over ordinary schema fields plus system ordering metadata. The implementation is still a narrow descriptor shape, but the invariant no longer depends on todo-specific code.
+
+## 2026-05-26 01:44 PDT
+
+Persisted observed query-read descriptors. Applying a query-scoped bundle now records its query read in SQLite, dedupes repeated application, survives durable reopen, and still rolls back the observation when malformed query metadata fails closed. Full mini crate suite is green with 170 tests.
+
+Design lesson: query-scoped sync needs a durable desired/observed-query lane, not just query metadata inside transient bundles. This first table only records observations; using it to drive reconnect/resubscribe work remains a larger next slice.

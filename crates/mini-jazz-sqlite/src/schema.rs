@@ -238,6 +238,16 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           PRIMARY KEY (tx_num, table_name, row_num, reason)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS jazz_query_read (
+          branch_id TEXT NOT NULL,
+          table_name TEXT NOT NULL,
+          field_name TEXT NOT NULL,
+          op TEXT NOT NULL,
+          value_json TEXT NOT NULL,
+          observed_at INTEGER NOT NULL,
+          PRIMARY KEY (branch_id, table_name, field_name, op, value_json)
+        ) WITHOUT ROWID;
+
         CREATE TABLE IF NOT EXISTS jazz_row_id (
           row_num INTEGER PRIMARY KEY,
           table_name TEXT NOT NULL,

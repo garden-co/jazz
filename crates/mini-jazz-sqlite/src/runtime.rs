@@ -571,6 +571,7 @@ impl Runtime {
             )?;
         }
         for query_read in &bundle.query_reads {
+            Self::record_query_read(&db, query_read)?;
             Self::apply_query_scope_repair(&schema, &db, query_read)?;
         }
         for record in &bundle.history {
@@ -580,6 +581,51 @@ impl Runtime {
             Self::apply_query_scope_repair(&schema, &db, query_read)?;
         }
         db.commit()?;
+        Ok(())
+    }
+
+    pub fn observed_query_reads(&self) -> Result<Vec<QueryReadRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT branch_id, table_name, field_name, op, value_json
+             FROM jazz_query_read
+             ORDER BY branch_id, table_name, field_name, op, value_json",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let value_json: String = row.get(4)?;
+            let value = serde_json::from_str(&value_json).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            Ok(QueryReadRecord {
+                branch_id: row.get(0)?,
+                table: row.get(1)?,
+                field: row.get(2)?,
+                op: row.get(3)?,
+                value,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn record_query_read(db: &Connection, query_read: &QueryReadRecord) -> Result<()> {
+        db.execute(
+            "INSERT OR REPLACE INTO jazz_query_read
+             (branch_id, table_name, field_name, op, value_json, observed_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                query_read.branch_id,
+                query_read.table,
+                query_read.field,
+                query_read.op,
+                serde_json::to_string(&query_read.value)
+                    .map_err(|err| crate::Error::new(err.to_string()))?,
+                now_ms()
+            ],
+        )?;
         Ok(())
     }
 
