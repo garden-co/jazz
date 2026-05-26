@@ -165,6 +165,45 @@ fn rejection_subscription_reports_later_detail_enrichment() {
     );
 }
 
+fn open_tasks_runtime(node_id: &str) -> Runtime {
+    Runtime::open_with_schema(Storage::Memory, node_id, "alice", support::tasks_schema()).unwrap()
+}
+
+fn insert_task(runtime: &mut Runtime, id: &str, title: &str) -> String {
+    runtime
+        .insert_row(
+            "tasks",
+            id,
+            BTreeMap::from([
+                ("title".to_owned(), json!(title)),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap()
+}
+
+fn update_task_title(runtime: &mut Runtime, id: &str, title: &str) -> String {
+    runtime
+        .update_row(
+            "tasks",
+            id,
+            BTreeMap::from([("title".to_owned(), json!(title))]),
+        )
+        .unwrap()
+}
+
+fn assert_no_diff_and_unsettled(runtime: &Runtime, subscription: &mut RowsSubscription) {
+    assert!(runtime.poll_subscription(subscription).unwrap().is_empty());
+    assert!(!subscription.is_settled());
+}
+
+fn assert_added_task(diffs: &[RowDiff], id: &str) {
+    assert!(
+        matches!(diffs, [RowDiff::Added(row)] if row.id == id),
+        "expected one added diff for {id}, got {diffs:?}"
+    );
+}
+
 #[test]
 fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
@@ -212,6 +251,155 @@ fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
     );
     let diffs = alice.poll_subscription(&mut subscription).unwrap();
     assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "task-2"));
+}
+
+#[test]
+fn tiered_subscription_waits_for_required_receipt() {
+    let mut edge = open_tasks_runtime("edge-node");
+    let edge_tx = insert_task(&mut edge, "task-edge", "Edge settled");
+
+    assert_eq!(edge.read_rows("tasks").unwrap().len(), 1);
+    assert!(edge
+        .read_rows_at_tier("tasks", SubscriptionTier::Edge)
+        .unwrap()
+        .is_empty());
+
+    let mut edge_subscription = edge
+        .subscribe_rows_at_tier("tasks", SubscriptionTier::Edge)
+        .unwrap();
+    assert_eq!(edge_subscription.tier(), SubscriptionTier::Edge);
+    assert!(edge_subscription.initial_rows().is_empty());
+    assert!(!edge_subscription.is_settled());
+    assert_no_diff_and_unsettled(&edge, &mut edge_subscription);
+
+    edge.accept_transaction_at_edge(&edge_tx).unwrap();
+    let diffs = edge.poll_subscription(&mut edge_subscription).unwrap();
+
+    assert_added_task(&diffs, "task-edge");
+    assert!(edge_subscription.is_settled());
+    let info = edge.transaction_info(&edge_tx).unwrap();
+    assert_eq!(info.receipt_tiers, vec!["edge".to_owned()]);
+
+    let mut global = open_tasks_runtime("global-node");
+    let global_tx = insert_task(&mut global, "task-global", "Global settled");
+    let global_snapshot = global
+        .read_rows_at_tier("tasks", SubscriptionTier::Global)
+        .unwrap();
+    let mut global_subscription = global
+        .subscribe_rows_at_tier("tasks", SubscriptionTier::Global)
+        .unwrap();
+
+    assert_eq!(global_subscription.initial_rows(), global_snapshot);
+    assert!(global_subscription.initial_rows().is_empty());
+    assert!(!global_subscription.is_settled());
+
+    global.accept_transaction_at_edge(&global_tx).unwrap();
+    assert_no_diff_and_unsettled(&global, &mut global_subscription);
+    assert!(global
+        .read_rows_at_tier("tasks", SubscriptionTier::Global)
+        .unwrap()
+        .is_empty());
+
+    global.accept_transaction_at_global(&global_tx, 1).unwrap();
+    let diffs = global.poll_subscription(&mut global_subscription).unwrap();
+
+    assert_added_task(&diffs, "task-global");
+    assert!(global_subscription.is_settled());
+    assert_eq!(
+        global_subscription.initial_rows(),
+        global
+            .read_rows_at_tier("tasks", SubscriptionTier::Global)
+            .unwrap()
+    );
+}
+
+#[test]
+fn global_tier_subscription_updates_are_gated_after_initial_delivery() {
+    let mut alice = open_tasks_runtime("alice-node");
+
+    let insert_tx = insert_task(&mut alice, "task-1", "Base");
+    alice.accept_transaction_at_global(&insert_tx, 1).unwrap();
+    let mut subscription = alice
+        .subscribe_rows_at_tier("tasks", SubscriptionTier::Global)
+        .unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+    assert_eq!(
+        subscription.initial_rows()[0].values["title"],
+        json!("Base")
+    );
+    assert!(subscription.is_settled());
+
+    let update_tx = update_task_title(&mut alice, "task-1", "Pending global");
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Pending global")
+    );
+    assert_eq!(
+        alice
+            .read_rows_at_tier("tasks", SubscriptionTier::Global)
+            .unwrap()[0]
+            .values["title"],
+        json!("Base")
+    );
+    assert_no_diff_and_unsettled(&alice, &mut subscription);
+    assert_eq!(
+        subscription.initial_rows()[0].values["title"],
+        json!("Base")
+    );
+
+    alice.accept_transaction_at_edge(&update_tx).unwrap();
+    assert_no_diff_and_unsettled(&alice, &mut subscription);
+
+    alice.accept_transaction_at_global(&update_tx, 2).unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+
+    assert!(matches!(
+        &diffs[..],
+        [RowDiff::Updated { before, after }]
+            if before.values["title"] == json!("Base")
+                && after.values["title"] == json!("Pending global")
+    ));
+    assert!(subscription.is_settled());
+}
+
+#[test]
+fn tiered_subscription_preserves_branch_inherited_rows() {
+    let mut alice = open_tasks_runtime("alice-node");
+
+    let main_tx = insert_task(&mut alice, "task-main", "Main");
+    alice.accept_transaction_at_global(&main_tx, 1).unwrap();
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let mut inherited_subscription = alice
+        .subscribe_rows_at_tier("tasks", SubscriptionTier::Global)
+        .unwrap();
+    assert_eq!(inherited_subscription.initial_rows().len(), 1);
+    assert_eq!(inherited_subscription.initial_rows()[0].id, "task-main");
+    assert!(inherited_subscription.is_settled());
+    assert!(alice
+        .poll_subscription(&mut inherited_subscription)
+        .unwrap()
+        .is_empty());
+
+    alice.checkout_branch("main").unwrap();
+    let base_tx = insert_task(&mut alice, "task-base", "Pinned base");
+    alice.accept_transaction_at_global(&base_tx, 2).unwrap();
+    alice.create_branch("pinned", Some(2)).unwrap();
+    alice.checkout_branch("pinned").unwrap();
+
+    let pinned_subscription = alice
+        .subscribe_rows_at_tier("tasks", SubscriptionTier::Global)
+        .unwrap();
+    assert_eq!(
+        pinned_subscription
+            .initial_rows()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["task-base", "task-main"]
+    );
+    assert!(pinned_subscription.is_settled());
 }
 
 #[test]

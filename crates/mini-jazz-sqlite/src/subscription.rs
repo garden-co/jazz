@@ -3,9 +3,18 @@ use crate::types::{RejectionInfo, RowDiff, RowView};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionTier {
+    Local,
+    Edge,
+    Global,
+}
+
 #[derive(Clone, Debug)]
 pub struct RowsSubscription {
     pub(crate) query: RowsSubscriptionQuery,
+    pub(crate) tier: SubscriptionTier,
+    pub(crate) settled: bool,
     pub(crate) last_rows: Vec<RowView>,
 }
 
@@ -22,21 +31,44 @@ pub(crate) enum RowsSubscriptionQuery {
 
 impl RowsSubscription {
     pub(crate) fn new(table: &str, rows: Vec<RowView>) -> Self {
+        Self::new_query(
+            RowsSubscriptionQuery::Table {
+                table: table.to_owned(),
+            },
+            rows,
+        )
+    }
+
+    pub(crate) fn new_at_tier(
+        table: &str,
+        tier: SubscriptionTier,
+        settled: bool,
+        rows: Vec<RowView>,
+    ) -> Self {
         Self {
             query: RowsSubscriptionQuery::Table {
                 table: table.to_owned(),
             },
+            tier,
+            settled,
+            last_rows: rows,
+        }
+    }
+
+    fn new_query(query: RowsSubscriptionQuery, rows: Vec<RowView>) -> Self {
+        Self {
+            query,
+            tier: SubscriptionTier::Local,
+            settled: true,
             last_rows: rows,
         }
     }
 
     pub(crate) fn where_eq(table: &str, field: &str, value: JsonValue, rows: Vec<RowView>) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table, field, "eq", value,
-            )),
-            last_rows: rows,
-        }
+        Self::new_query(
+            RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(table, field, "eq", value)),
+            rows,
+        )
     }
 
     pub(crate) fn where_contains(
@@ -45,15 +77,15 @@ impl RowsSubscription {
         needle: &str,
         rows: Vec<RowView>,
     ) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+        Self::new_query(
+            RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
                 table,
                 field,
                 "contains",
                 JsonValue::String(needle.to_owned()),
             )),
-            last_rows: rows,
-        }
+            rows,
+        )
     }
 
     pub(crate) fn where_in(
@@ -62,24 +94,22 @@ impl RowsSubscription {
         values: Vec<JsonValue>,
         rows: Vec<RowView>,
     ) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+        Self::new_query(
+            RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
                 table,
                 field,
                 "in",
                 JsonValue::Array(values),
             )),
-            last_rows: rows,
-        }
+            rows,
+        )
     }
 
     pub(crate) fn where_ne(table: &str, field: &str, value: JsonValue, rows: Vec<RowView>) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table, field, "ne", value,
-            )),
-            last_rows: rows,
-        }
+        Self::new_query(
+            RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(table, field, "ne", value)),
+            rows,
+        )
     }
 
     pub(crate) fn where_recursive_refs(
@@ -88,15 +118,15 @@ impl RowsSubscription {
         parent_field: &str,
         rows: Vec<RowView>,
     ) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+        Self::new_query(
+            RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
                 table,
                 parent_field,
                 "recursive_refs",
                 JsonValue::String(root_id.to_owned()),
             )),
-            last_rows: rows,
-        }
+            rows,
+        )
     }
 
     pub(crate) fn where_eq_top_created_at_desc(
@@ -106,8 +136,8 @@ impl RowsSubscription {
         limit: usize,
         rows: Vec<RowView>,
     ) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+        Self::new_query(
+            RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
                 table,
                 field,
                 "eq_top_created_at_desc",
@@ -116,12 +146,20 @@ impl RowsSubscription {
                     "limit": limit,
                 }),
             )),
-            last_rows: rows,
-        }
+            rows,
+        )
     }
 
     pub fn initial_rows(&self) -> &[RowView] {
         &self.last_rows
+    }
+
+    pub fn tier(&self) -> SubscriptionTier {
+        self.tier
+    }
+
+    pub fn is_settled(&self) -> bool {
+        self.settled
     }
 
     pub(crate) fn replace_with_diff(&mut self, next_rows: Vec<RowView>) -> Vec<RowDiff> {

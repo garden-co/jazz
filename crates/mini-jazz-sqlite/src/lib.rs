@@ -20,5 +20,5 @@ pub use error::{Error, Result};
 pub use runtime::Runtime;
 pub use schema::SchemaDef;
 pub use storage::Storage;
-pub use subscription::RowsSubscription;
+pub use subscription::{RowsSubscription, SubscriptionTier};
 pub use types::{RejectionInfo, RowDiff, RowView, StorageStats, TransactionInfo};

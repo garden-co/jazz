@@ -1,4 +1,6 @@
-use mini_jazz_sqlite::{RejectionInfo, RowDiff, Runtime, SchemaDef, Storage};
+use mini_jazz_sqlite::{
+    RejectionInfo, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage, SubscriptionTier,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::tempdir;

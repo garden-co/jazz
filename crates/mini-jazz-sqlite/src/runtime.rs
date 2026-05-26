@@ -1,6 +1,8 @@
 use crate::rows::{ensure_row_id, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
-use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
+use crate::subscription::{
+    RejectionSubscription, RowsSubscription, RowsSubscriptionQuery, SubscriptionTier,
+};
 use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
@@ -1677,6 +1679,17 @@ impl Runtime {
         self.query_context().read_rows(table_name)
     }
 
+    pub fn read_rows_at_tier(
+        &self,
+        table_name: &str,
+        tier: SubscriptionTier,
+    ) -> Result<Vec<RowView>> {
+        Ok(self
+            .query_context()
+            .read_rows_at_tier(table_name, tier)?
+            .rows)
+    }
+
     pub fn read_rows_require_ref(
         &self,
         table_name: &str,
@@ -2058,6 +2071,20 @@ impl Runtime {
         ))
     }
 
+    pub fn subscribe_rows_at_tier(
+        &self,
+        table_name: &str,
+        tier: SubscriptionTier,
+    ) -> Result<RowsSubscription> {
+        let tiered = self.query_context().read_rows_at_tier(table_name, tier)?;
+        Ok(RowsSubscription::new_at_tier(
+            table_name,
+            tier,
+            tiered.settled,
+            tiered.rows,
+        ))
+    }
+
     pub fn subscribe_rejections(&self) -> Result<RejectionSubscription> {
         Ok(RejectionSubscription::new(self.rejected_transactions()?))
     }
@@ -2283,8 +2310,15 @@ impl Runtime {
         &self,
         subscription: &mut RowsSubscription,
     ) -> Result<Vec<crate::types::RowDiff>> {
+        let mut settled = true;
         let next_rows = match &subscription.query {
-            RowsSubscriptionQuery::Table { table } => self.read_rows(table)?,
+            RowsSubscriptionQuery::Table { table } => {
+                let tiered = self
+                    .query_context()
+                    .read_rows_at_tier(table, subscription.tier)?;
+                settled = tiered.settled;
+                tiered.rows
+            }
             RowsSubscriptionQuery::Predicate(query) if query.op == "eq" => {
                 self.read_rows_where_eq(&query.table, &query.field, query.value.clone())?
             }
@@ -2333,6 +2367,7 @@ impl Runtime {
                 )));
             }
         };
+        subscription.settled = settled;
         Ok(subscription.replace_with_diff(next_rows))
     }
 

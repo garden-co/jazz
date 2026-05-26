@@ -2855,6 +2855,14 @@ feature exists.
 - Subscription updates are semantic row diffs.
 - Dependency-only changes can update parent semantic rows.
 - Every subscription update is tier-gated.
+- Edge-tier subscriptions publish only row versions with an edge-or-global
+  durability receipt.
+- Global-tier subscriptions publish only row versions with a global durability
+  receipt; an edge receipt alone does not settle global delivery.
+- Tier-gated subscriptions preserve branch overlay and pinned-base snapshot
+  semantics while filtering by the requested durability tier.
+- A higher-tier subscription keeps its last tier-visible result and reports
+  unsettled while newer local state lacks the requested tier receipt.
 - Rows may arrive before query settlement without being published.
 - Missing sync/catalogue state leaves a query unsettled until timeout or
   irrecoverable failure.
@@ -3120,26 +3128,26 @@ Coverage labels:
 
 ### E.1 Coverage Summary By Invariant Group
 
-| Group                      | Current status        | Notes                                                                                                                                                                                                                                              |
-| -------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D.1 Identity               | covered for prototype | Public row ids, physical id locality, replica-local physical ids, and one principal writing from multiple nodes are tested.                                                                                                                        |
-| D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                    |
-| D.3 History/projection     | partial               | Append-only ordinary deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Hard delete/truncate and full merge/conflict projection semantics remain partial.                               |
-| D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                      |
-| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                     |
-| D.6 Queries/observed facts | partial               | Equality, contains, IN, not-equal, null-present, selected system fields, ordered pages, absence facts, recursive query scopes, policy dependencies, query-scope repair, and predicate serialization are tested. Range and catalogue facts are not. |
-| D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, scope contraction, active query refresh, and reconnect-shaped repair are tested. Compact reconnect summaries are not.                                   |
-| D.8 Subscriptions          | partial               | Rerun-and-diff, policy dependency diffs, branch checkout diffs, pinned branch stability, pagination, and reconnect-shaped observed subscription recovery are tested. Tier gating and settled state are not.                                        |
-| D.9 Policies               | covered for prototype | Read/write policies, ref-readable policies, recursive acyclic policies, cycle rejection, branch/pinned-base contexts, trusted bypass, and transitive policy read sets are tested. Full policy language and diagnostics are not.                    |
-| D.10 Catalogue/lenses      | partial               | Narrow storage-name rename lenses, ref lenses, system prefix escaping, and index-only compatibility are tested. Catalogue revision graph, migrations directory semantics, inverse lenses, and copy-forward are not.                                |
-| D.11 Authority validation  | partial               | Untrusted bundle rejection, atomic rejection, delete/update validation, branch-context validation, stale row/absence/policy/source read-set checks, exclusive same-row conflict, and repair are tested. Predicate/range validation is not.         |
-| D.12 Conflicts             | partial               | Side APIs expose multi-base and pinned-base conflict candidates and policy-filtered candidates; conflict-aware row reads and resolution transactions are tested. Product metadata shape is not.                                                    |
-| D.13 Errors/diagnostics    | partial               | Rejection codes, transaction info, rejection lists, rejection subscriptions, and detail enrichment are tested. Public error object shape, redaction, and diagnostics are not.                                                                      |
-| D.14 Storage/lowering      | partial               | SQLite current/history tables, physical ids, system prefix escaping, integer-like enum behavior, and rebuild are exercised. `WITHOUT ROWID`, generated indexes, and query plans are not asserted.                                                  |
-| D.15 Files/blobs           | untested              | No file/blob implementation in the prototype.                                                                                                                                                                                                      |
-| D.16 Privacy/encryption    | untested              | No E2EE/encrypted-index implementation in the prototype.                                                                                                                                                                                           |
-| D.17 Harness               | partial               | In-memory SQLite, file-backed durable nodes, multi-runtime local/edge/global tests, duplicate/reordered bundles, and durable reopen are tested. Drop/delay/reconnect protocol and deterministic clock APIs are not.                                |
-| D.18 Tooling/admin         | untested              | Tooling, inspector, admin catalogue publication, and codegen workflows are not implemented in the prototype.                                                                                                                                       |
+| Group                      | Current status        | Notes                                                                                                                                                                                                                                                  |
+| -------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D.1 Identity               | covered for prototype | Public row ids, physical id locality, replica-local physical ids, and one principal writing from multiple nodes are tested.                                                                                                                            |
+| D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                        |
+| D.3 History/projection     | partial               | Append-only ordinary deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Hard delete/truncate and full merge/conflict projection semantics remain partial.                                   |
+| D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                          |
+| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                         |
+| D.6 Queries/observed facts | partial               | Equality, contains, IN, not-equal, null-present, selected system fields, ordered pages, absence facts, recursive query scopes, policy dependencies, query-scope repair, and predicate serialization are tested. Range and catalogue facts are not.     |
+| D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, scope contraction, active query refresh, and reconnect-shaped repair are tested. Compact reconnect summaries are not.                                       |
+| D.8 Subscriptions          | covered for prototype | Rerun-and-diff, predicate diffs, policy dependency diffs, rejection diffs, branch checkout diffs, pinned branch stability, pagination, reconnect-shaped observed subscription recovery, tier-gated edge/global delivery, and settled state are tested. |
+| D.9 Policies               | covered for prototype | Read/write policies, ref-readable policies, recursive acyclic policies, cycle rejection, branch/pinned-base contexts, trusted bypass, and transitive policy read sets are tested. Full policy language and diagnostics are not.                        |
+| D.10 Catalogue/lenses      | partial               | Narrow storage-name rename lenses, ref lenses, system prefix escaping, and index-only compatibility are tested. Catalogue revision graph, migrations directory semantics, inverse lenses, and copy-forward are not.                                    |
+| D.11 Authority validation  | partial               | Untrusted bundle rejection, atomic rejection, delete/update validation, branch-context validation, stale row/absence/policy/source read-set checks, exclusive same-row conflict, and repair are tested. Predicate/range validation is not.             |
+| D.12 Conflicts             | partial               | Side APIs expose multi-base and pinned-base conflict candidates and policy-filtered candidates; conflict-aware row reads and resolution transactions are tested. Product metadata shape is not.                                                        |
+| D.13 Errors/diagnostics    | partial               | Rejection codes, transaction info, rejection lists, rejection subscriptions, and detail enrichment are tested. Public error object shape, redaction, and diagnostics are not.                                                                          |
+| D.14 Storage/lowering      | partial               | SQLite current/history tables, physical ids, system prefix escaping, integer-like enum behavior, and rebuild are exercised. `WITHOUT ROWID`, generated indexes, and query plans are not asserted.                                                      |
+| D.15 Files/blobs           | untested              | No file/blob implementation in the prototype.                                                                                                                                                                                                          |
+| D.16 Privacy/encryption    | untested              | No E2EE/encrypted-index implementation in the prototype.                                                                                                                                                                                               |
+| D.17 Harness               | partial               | In-memory SQLite, file-backed durable nodes, multi-runtime local/edge/global tests, duplicate/reordered bundles, and durable reopen are tested. Drop/delay/reconnect protocol and deterministic clock APIs are not.                                    |
+| D.18 Tooling/admin         | untested              | Tooling, inspector, admin catalogue publication, and codegen workflows are not implemented in the prototype.                                                                                                                                           |
 
 ### E.2 Test Module Mapping
 
@@ -3314,9 +3322,32 @@ Coverage labels:
 
 #### `subscriptions.rs`
 
+- `rejection_subscription_reports_new_sync_rejections_with_detail_once`: D.8,
+  D.13
+- `restarted_rejection_subscription_baselines_old_rejections_and_reports_later_ones`:
+  D.8, D.13, D.17
+- `rejection_subscription_reports_later_detail_enrichment`: D.8, D.13
 - `subscription_initial_snapshot_matches_query_then_diffs_semantic_rows`: D.8
+- `tiered_subscription_waits_for_required_receipt`: D.8
+- `global_tier_subscription_updates_are_gated_after_initial_delivery`: D.8
+- `tiered_subscription_preserves_branch_inherited_rows`: D.5, D.8
+- `predicate_subscription_diffs_when_row_enters_and_leaves_query`: D.6, D.8
+- `not_equal_subscription_diffs_when_optional_value_appears_and_clears`: D.6,
+  D.8
+- `observed_created_by_not_equal_subscription_removes_deleted_remote_row`: D.6,
+  D.7, D.8
+- `observed_id_not_equal_subscription_removes_deleted_remote_row`: D.6, D.7,
+  D.8
+- `restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff`:
+  D.7, D.8, D.17
+- `restarted_ordered_page_subscription_emits_boundary_refresh_diff`: D.6, D.7,
+  D.8, D.17
+- `contains_subscription_diffs_when_text_starts_and_stops_matching`: D.6, D.8
+- `in_subscription_diffs_when_row_enters_and_leaves_value_set`: D.6, D.8
+- `ordered_page_subscription_replaces_displaced_boundary_row`: D.6, D.8
 - `subscription_removes_child_when_parent_policy_dependency_changes`: D.8,
   D.9
+- `subscription_removes_row_when_visible_transaction_is_rejected`: D.3, D.8
 - `subscription_diffs_when_active_branch_changes`: D.5, D.8
 - `subscription_on_pinned_branch_ignores_later_main_updates_until_overlay_changes`:
   D.5, D.8
