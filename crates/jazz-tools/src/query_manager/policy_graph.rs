@@ -53,11 +53,6 @@ impl<'a> PolicyGraphBuildOptions<'a> {
             row_policy_mode,
         }
     }
-
-    pub(crate) fn with_initial_depth(mut self, initial_depth: usize) -> Self {
-        self.initial_depth = initial_depth;
-        self
-    }
 }
 
 impl PolicyGraph {
@@ -67,6 +62,29 @@ impl PolicyGraph {
         match plan.result_element_index {
             None | Some(0) => Some(plan.table),
             Some(index) => plan.joins.get(index - 1).map(|join| join.table),
+        }
+    }
+
+    fn relation_references_table(rel: &RelExpr, table: &TableName) -> bool {
+        match rel {
+            RelExpr::TableScan { table: scan_table } => scan_table == table,
+            RelExpr::Union { inputs } => inputs
+                .iter()
+                .any(|input| Self::relation_references_table(input, table)),
+            RelExpr::Filter { input, .. }
+            | RelExpr::Project { input, .. }
+            | RelExpr::Distinct { input, .. }
+            | RelExpr::OrderBy { input, .. }
+            | RelExpr::Offset { input, .. }
+            | RelExpr::Limit { input, .. } => Self::relation_references_table(input, table),
+            RelExpr::Join { left, right, .. } => {
+                Self::relation_references_table(left, table)
+                    || Self::relation_references_table(right, table)
+            }
+            RelExpr::Gather { seed, step, .. } => {
+                Self::relation_references_table(seed, table)
+                    || Self::relation_references_table(step, table)
+            }
         }
     }
 
@@ -137,7 +155,8 @@ impl PolicyGraph {
             table.as_str(),
             PolicyFilterOptions::for_branch(options.branch)
                 .with_initial_depth(options.initial_depth)
-                .with_row_policy_mode(options.row_policy_mode),
+                .with_row_policy_mode(options.row_policy_mode)
+                .with_structural_exists_rel_scans(false),
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -154,30 +173,6 @@ impl PolicyGraph {
             exists_node: exists_id,
             table: *table,
         })
-    }
-
-    /// Create a graph for INHERITS: does parent row pass parent's policy?
-    ///
-    /// Graph structure: IndexScan(parent_table, _id = parent_id) → Materialize → PolicyFilter → ExistsOutput
-    ///
-    /// Returns None if the parent table is not in the schema.
-    pub(crate) fn for_inherits(
-        parent_table: &TableName,
-        parent_id: ObjectId,
-        parent_policy: &PolicyExpr,
-        session: &Session,
-        schema: &Schema,
-        options: PolicyGraphBuildOptions<'_>,
-    ) -> Option<Self> {
-        // INHERITS is essentially the same as a USING check on the parent table
-        Self::for_using_check_with_options(
-            parent_table,
-            parent_id,
-            parent_policy,
-            session,
-            schema,
-            options,
-        )
     }
 
     /// Create a graph for EXISTS: does any row in table match condition?
@@ -220,15 +215,16 @@ impl PolicyGraph {
         graph.add_edge(mat_id, scan_id);
 
         // PolicyFilter node: evaluate condition against each row
-        let policy_node = PolicyFilterNode::new_with_branch_policy_mode_and_operation(
+        let policy_node = PolicyFilterNode::new_with_options(
             descriptor.clone(),
             condition.clone(),
             session.clone(),
             schema.clone(),
             table.as_str(),
-            branch,
-            row_policy_mode,
-            policy_operation,
+            PolicyFilterOptions::for_branch(branch)
+                .with_row_policy_mode(row_policy_mode)
+                .with_policy_operation(policy_operation)
+                .with_structural_exists_rel_scans(false),
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -262,8 +258,10 @@ impl PolicyGraph {
     ) -> Option<Self> {
         let use_structural_rows = structural_scans
             || current_table
-                .and_then(|table| {
-                    Self::exists_rel_output_table(rel, branch).map(|output| output == *table)
+                .map(|table| {
+                    let output_is_current =
+                        Self::exists_rel_output_table(rel, branch) == Some(*table);
+                    output_is_current || Self::relation_references_table(rel, table)
                 })
                 .unwrap_or(false);
         let compile_schema: Schema = if use_structural_rows {

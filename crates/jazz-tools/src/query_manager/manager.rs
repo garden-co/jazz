@@ -363,7 +363,6 @@ pub(super) struct WriteTableCacheEntry {
     pub(super) update_using_policy: Option<Arc<PolicyExpr>>,
     pub(super) update_check_policy: Option<Arc<PolicyExpr>>,
     pub(super) delete_using_policy: Option<Arc<PolicyExpr>>,
-    pub(super) select_policy: Option<Arc<PolicyExpr>>,
 }
 
 /// Server-side query subscription state.

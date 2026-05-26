@@ -2082,7 +2082,7 @@ fn evaluate_simple_recursive(
             })
         }
         PolicyExpr::ExistsRel { rel } => {
-            let bound = match bind_relation_refs(rel, content, descriptor, session, None) {
+            let bound = match bind_relation_refs(rel, content, descriptor, session, row_id) {
                 Some(expr) => expr,
                 None => return SimpleEvalResult::fail(),
             };

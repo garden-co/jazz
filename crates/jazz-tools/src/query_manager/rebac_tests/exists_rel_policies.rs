@@ -151,6 +151,90 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
 }
 
 #[test]
+fn local_update_with_exists_rel_policy_can_bind_outer_row_id() {
+    let mut schema = Schema::new();
+    let access_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("resource_id", ColumnType::Uuid),
+        ColumnDescriptor::new("user_id", ColumnType::Text),
+    ]);
+    schema.insert(
+        TableName::new("resource_access"),
+        TableSchema {
+            columns: access_descriptor.clone(),
+            indexed_columns: Some(vec!["resource_id".into()]),
+            policies: TablePolicies::new().with_select(PolicyExpr::True),
+        },
+    );
+
+    let protected_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
+    let protected_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::ExistsRel {
+            rel: RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("resource_access"),
+                }),
+                predicate: PredicateExpr::And(vec![
+                    PredicateExpr::Cmp {
+                        left: ColumnRef::unscoped("resource_id"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::OuterColumn(ColumnRef::unscoped("id")),
+                    },
+                    PredicateExpr::Cmp {
+                        left: ColumnRef::unscoped("user_id"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::SessionRef(vec!["user_id".into()]),
+                    },
+                ]),
+            },
+        }),
+        PolicyExpr::True,
+    );
+    schema.insert(
+        TableName::new("protected"),
+        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let protected = qm
+        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
+        .expect("seed protected row");
+    qm.insert(
+        &mut storage,
+        "resource_access",
+        &[Value::Uuid(protected.row_id), Value::Text("alice".into())],
+    )
+    .expect("seed access edge");
+
+    let bob_err = qm
+        .update_with_session(
+            &mut storage,
+            protected.row_id,
+            &[Value::Text("bob update".into())],
+            Some(&Session::new("bob")),
+        )
+        .expect_err("non-matching access edge should deny update");
+    assert!(matches!(
+        bob_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Update
+        } if table == TableName::new("protected")
+    ));
+
+    qm.update_with_session(
+        &mut storage,
+        protected.row_id,
+        &[Value::Text("alice update".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("matching access edge should allow update");
+}
+
+#[test]
 fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
     let mut schema = Schema::new();
     schema.insert(
