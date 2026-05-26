@@ -199,14 +199,14 @@ impl SyncManager {
         }
 
         for server_id in server_ids {
-            let mut visiting = HashSet::new();
+            let mut visited = HashSet::new();
             self.queue_row_to_server_with_missing_parents(
                 storage,
                 table,
                 server_id,
                 metadata.clone(),
                 row.clone(),
-                &mut visiting,
+                &mut visited,
             );
         }
     }
@@ -218,10 +218,14 @@ impl SyncManager {
         server_id: ServerId,
         metadata: HashMap<String, String>,
         row: StoredRowBatch,
-        visiting: &mut HashSet<BatchId>,
+        visited: &mut HashSet<BatchId>,
     ) {
         let object_id = row.row_id;
         let branch_name = BranchName::new(&row.branch);
+
+        // Every batch in a row's parent closure shares the same row id and
+        // branch, so the set already confirmed sent to this server is the same
+        // for the whole walk — read it once.
         let already_sent = self
             .servers
             .get(&server_id)
@@ -233,49 +237,73 @@ impl SyncManager {
             })
             .unwrap_or_default();
 
-        for parent_batch_id in row.parents.iter().copied() {
-            if already_sent.contains(&parent_batch_id) {
-                continue;
-            }
-            if !visiting.insert(parent_batch_id) {
+        // Walk the parent closure iteratively (post-order) rather than
+        // recursively: a deep history chain or wide merged DAG would otherwise
+        // push one native frame per ancestor and overflow the stack — fatal on
+        // the WASM worker's small shadow stack. `visited` ensures each batch is
+        // loaded and queued at most once regardless of graph shape. Each frame
+        // tracks how far through its row's parents the walk has progressed; a
+        // row is queued only once all of its parents have been queued.
+        let mut stack: Vec<(StoredRowBatch, usize)> = vec![(row, 0)];
+        while !stack.is_empty() {
+            let descend = {
+                let (current, parent_index) = stack.last_mut().expect("stack is non-empty");
+                let mut next_parent = None;
+                while *parent_index < current.parents.len() {
+                    let parent_batch_id = current.parents[*parent_index];
+                    *parent_index += 1;
+                    if already_sent.contains(&parent_batch_id) {
+                        continue;
+                    }
+                    if !visited.insert(parent_batch_id) {
+                        continue;
+                    }
+
+                    match storage.load_history_row_batch(
+                        table,
+                        current.branch.as_str(),
+                        object_id,
+                        parent_batch_id,
+                    ) {
+                        Ok(Some(parent_row)) => {
+                            next_parent = Some(parent_row);
+                            break;
+                        }
+                        Ok(None) => tracing::warn!(
+                            %server_id,
+                            %object_id,
+                            %branch_name,
+                            ?parent_batch_id,
+                            "missing parent row batch in local storage while queueing row batch to server"
+                        ),
+                        Err(error) => tracing::warn!(
+                            %server_id,
+                            %object_id,
+                            %branch_name,
+                            ?parent_batch_id,
+                            %error,
+                            "failed to load parent row batch while queueing row batch to server"
+                        ),
+                    }
+                }
+                next_parent
+            };
+
+            if let Some(parent_row) = descend {
+                stack.push((parent_row, 0));
                 continue;
             }
 
-            match storage.load_history_row_batch(
+            let (current, _) = stack.pop().expect("stack is non-empty");
+            self.queue_row_to_server_with_storage(
+                storage,
                 table,
-                row.branch.as_str(),
+                server_id,
                 object_id,
-                parent_batch_id,
-            ) {
-                Ok(Some(parent_row)) => self.queue_row_to_server_with_missing_parents(
-                    storage,
-                    table,
-                    server_id,
-                    metadata.clone(),
-                    parent_row,
-                    visiting,
-                ),
-                Ok(None) => tracing::warn!(
-                    %server_id,
-                    %object_id,
-                    %branch_name,
-                    ?parent_batch_id,
-                    "missing parent row batch in local storage while queueing row batch to server"
-                ),
-                Err(error) => tracing::warn!(
-                    %server_id,
-                    %object_id,
-                    %branch_name,
-                    ?parent_batch_id,
-                    %error,
-                    "failed to load parent row batch while queueing row batch to server"
-                ),
-            }
-
-            visiting.remove(&parent_batch_id);
+                metadata.clone(),
+                current,
+            );
         }
-
-        self.queue_row_to_server_with_storage(storage, table, server_id, object_id, metadata, row);
     }
 
     pub(crate) fn forward_row_batch_to_servers<H: Storage>(
