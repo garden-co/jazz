@@ -868,3 +868,18 @@ tests, exclusive validation now covers the three most important read-set shapes
 for untrusted acceptance.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 211 whole-system tests.
+
+## 2026-05-26 03:32 PDT
+
+Added ordinary peer-sync coverage for a lens-compatible write policy. An old
+schema writes `todos.project` under `write_if_ref_readable("project")`; a new
+schema reads the same storage through `workspace` using `ref_lens` and
+`write_if_ref_readable("workspace")`; ordinary `apply_bundle` accepts the
+bundle and materializes only the new semantic field.
+
+Discovery: storage-name-based write-policy fingerprints are doing the right
+thing for rename lenses. This keeps catalogue compatibility strict enough to
+fail closed on real write-policy drift while still allowing semantic field
+renames that lower to the same physical policy dependency.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 212 whole-system tests.

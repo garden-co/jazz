@@ -364,6 +364,62 @@ fn renamed_ref_lens_participates_in_untrusted_write_policy_validation() {
 }
 
 #[test]
+fn lens_compatible_write_policy_allows_ordinary_peer_sync() {
+    let old_schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let new_schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_lens("workspace", "project", "projects");
+            table.write_if_ref_readable("workspace");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", old_schema).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer", "alice", new_schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Lens-compatible write policy")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("projects").unwrap())
+        .unwrap();
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let rows = peer.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["workspace"], json!("project-1"));
+    assert!(!rows[0].values.contains_key("project"));
+}
+
+#[test]
 fn user_columns_with_system_prefix_are_escaped_physically() {
     let schema = SchemaDef::new().table("records", |table| {
         table.text("j_title");
