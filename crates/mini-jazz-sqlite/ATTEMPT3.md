@@ -1032,3 +1032,24 @@ Design note: this implementation deliberately uses an in-memory traversal for
 the branch snapshot case. It proves semantics quickly, but a serious
 implementation should lower the same visible-row relation into a recursive CTE
 instead of materializing the whole visible table first.
+
+## 2026-05-25 18:42 PDT
+
+Starting trusted-edge authoritative rejection. Existing trusted-edge test only
+covers accepted writes. Need a negative path where an edge receives a tx that
+violates policy, marks it rejected with a reason, removes current projection,
+and syncs that fate back to the submitter.
+
+## 2026-05-25 18:43 PDT
+
+Trusted-edge authoritative rejection is green. A Bob client submits a write
+under Alice's policy-protected parent; the trusted edge receives the tx, rejects
+it with `policy_denied`, and Bob learns the rejection reason after syncing edge
+state back.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+54 tests.
+
+Design note: this is still manually driven: the trusted edge does not yet
+automatically validate and reject during `apply_bundle`. The test proves the
+storage/sync/fate mechanics, not the final authority automation.

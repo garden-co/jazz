@@ -1176,6 +1176,61 @@ fn trusted_edge_accepts_mergeable_tx_then_untrusted_peers_enforce_policy() {
 }
 
 #[test]
+fn trusted_edge_rejects_policy_violating_tx_and_syncs_reason() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let project_bundle = alice.export_table_history("projects").unwrap();
+    bob.apply_bundle(&project_bundle).unwrap();
+    edge.apply_bundle(&project_bundle).unwrap();
+
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Should be rejected")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    assert!(bob.read_rows("todos").unwrap().is_empty());
+
+    edge.apply_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+    edge.reject_transaction(&tx, "policy_denied").unwrap();
+    bob.apply_bundle(&edge.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert!(bob.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        bob.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn policy_denied_write_is_rejected_history_not_current_state() {
     let schema = SchemaDef::new()
         .table("docs", |table| {
