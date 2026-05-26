@@ -1050,6 +1050,16 @@ impl Runtime {
             .read_rows_where_eq(table_name, field_name, value)
     }
 
+    pub fn read_rows_where_contains(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        needle: &str,
+    ) -> Result<Vec<RowView>> {
+        self.query_context()
+            .read_rows_where_contains(table_name, field_name, needle)
+    }
+
     pub fn export_query_where_eq(
         &self,
         table_name: &str,

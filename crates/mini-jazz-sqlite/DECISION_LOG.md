@@ -216,3 +216,15 @@ Design lesson: the useful module boundaries are verb/process boundaries, not
 entity nouns. `stats::collect` is a tiny example; larger candidates remain
 bundle application/export and write lowering. The low-risk path is to keep
 Runtime as the facade and move process-shaped implementations behind it.
+
+## 2026-05-26 00:27 PDT
+
+Added first status-quo query-language parity slice: text `contains` lowers to
+SQLite `instr`, works for generic schemas, and preserves the current Jazz
+behavior that an empty substring matches all strings. Non-text `contains` fails
+explicitly for now. Full mini crate suite is green with 140 tests.
+
+Design lesson: small pieces of the high-level query DSL can lower cleanly
+without building a query graph. The next question is not whether this works for
+simple predicates, but how much observed-fact/scope machinery each predicate
+form needs for correct sync and subscriptions.

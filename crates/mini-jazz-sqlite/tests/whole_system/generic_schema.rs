@@ -30,6 +30,53 @@ fn runtime_can_install_and_write_a_non_todo_schema() {
 }
 
 #[test]
+fn text_contains_query_matches_status_quo_substring_semantics() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("SQLite core direction")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Unrelated")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice
+        .read_rows_where_contains("notes", "body", "core")
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-1");
+
+    assert_eq!(
+        alice
+            .read_rows_where_contains("notes", "body", "")
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(alice
+        .read_rows_where_contains("notes", "pinned", "true")
+        .unwrap_err()
+        .to_string()
+        .contains("contains only supports text fields"));
+}
+
+#[test]
 fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
     let schema = SchemaDef::new()
         .table("docs", |table| {
