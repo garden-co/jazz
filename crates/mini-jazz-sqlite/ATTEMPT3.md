@@ -1467,3 +1467,18 @@ code so updates and creates can share one sealed tx.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 generic_transaction_can_seal_updates_atomically` passes.
+
+## 2026-05-25 19:27 PDT
+
+Starting index-only schema compatibility coverage. The spec says schema changes
+that only affect indexes should be automatically lens-compatible, so peers with
+different index declarations but identical row shapes should sync semantically.
+
+## 2026-05-25 19:27 PDT
+
+Index-only schema compatibility coverage is green. An unindexed writer can sync
+to a peer whose schema adds an index over a user column and `$createdAt`, and
+the peer can query semantically through the indexed schema shape.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+index_only_schema_changes_are_semantically_compatible` passes.

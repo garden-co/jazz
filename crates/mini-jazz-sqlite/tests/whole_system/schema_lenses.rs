@@ -172,3 +172,40 @@ fn user_columns_with_system_prefix_are_escaped_physically() {
     assert_eq!(peer_rows.len(), 1);
     assert_eq!(peer_rows[0].values["j_title"], json!("Looks like system"));
 }
+
+#[test]
+fn index_only_schema_changes_are_semantically_compatible() {
+    let unindexed = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let indexed = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+        table.index("done_created", ["done", "$createdAt"]);
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", unindexed).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", indexed).unwrap();
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Compatible")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("tasks").unwrap())
+        .unwrap();
+
+    let rows = peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Compatible"));
+}
