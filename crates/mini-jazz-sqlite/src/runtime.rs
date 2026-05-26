@@ -535,6 +535,11 @@ impl Runtime {
         record_tx_write(db, tx_num, &record.table, row_num, record.op)?;
 
         let outcome = tx_outcome(db, tx_num)?;
+        if outcome != tx::OUTCOME_REJECTED
+            && !is_newest_version_for_current(db, &record.table, row_num, branch_num, tx_num)?
+        {
+            return Ok(());
+        }
         if outcome != tx::OUTCOME_REJECTED && record.op == 3 {
             db.execute(
                 &format!(
@@ -1473,6 +1478,38 @@ fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {
         params![tx_num],
         |row| row.get(0),
     )?)
+}
+
+fn is_newest_version_for_current(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+    tx_num: i64,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {} h
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx current_tx ON current_tx.tx_num = ?
+             WHERE h.row_num = ?
+               AND h.j_branch_num = ?
+               AND tx.outcome != ?
+               AND (
+                 (tx.global_epoch IS NOT NULL AND current_tx.global_epoch IS NOT NULL
+                  AND (tx.global_epoch > current_tx.global_epoch
+                       OR (tx.global_epoch = current_tx.global_epoch AND tx.tx_num > current_tx.tx_num)))
+                 OR ((tx.global_epoch IS NOT NULL) = (current_tx.global_epoch IS NOT NULL)
+                     AND tx.global_epoch IS NULL
+                     AND tx.tx_num > current_tx.tx_num)
+               )",
+            crate::schema::history_table(table_name)
+        ),
+        params![tx_num, row_num, branch_num, tx::OUTCOME_REJECTED],
+        |row| row.get(0),
+    )?;
+    Ok(count == 0)
 }
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {

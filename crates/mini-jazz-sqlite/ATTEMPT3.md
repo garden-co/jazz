@@ -1670,3 +1670,20 @@ bug. `read_rows_where_eq` now applies the same effective-branch policy filter as
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 branch_equality_query_uses_effective_branch_policy` passes.
+
+## 2026-05-25 19:45 PDT
+
+Starting out-of-order global epoch current-projection coverage from sidecar
+review. If a peer receives an older global epoch after a newer version of the
+same row, current projection should not regress to the older value.
+
+## 2026-05-25 19:47 PDT
+
+Out-of-order global epoch current projection is green and found a real apply
+order bug. Applying epoch 10 after epoch 20 regressed current state to epoch 10.
+`apply_history_record` now checks whether the incoming record is the newest
+known version for that row/branch using global epoch first and tx_num as a
+tie-breaker before publishing to current.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+out_of_order_global_epochs_do_not_regress_current_projection` passes.
