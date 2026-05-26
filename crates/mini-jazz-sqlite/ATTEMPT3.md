@@ -1217,3 +1217,21 @@ row set.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 recursive_query_scope_sync_includes_recursive_policy_ancestors` passes.
+
+## 2026-05-25 19:03 PDT
+
+Starting branch pinned-base recursive query policy coverage. The previous fix
+added snapshot policy dependencies to recursive exports, but there is not yet a
+focused test proving that a receiver can reproduce a branch recursive query
+whose base rows are visible only because historical policy ancestors were
+included.
+
+## 2026-05-25 19:04 PDT
+
+Branch pinned-base recursive query policy coverage is green. The new test
+creates accepted main history, pins a branch to that global epoch, exports a
+recursive branch query, and verifies the bundle includes the historical org row
+needed to satisfy the branch snapshot read policy on a peer.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+recursive_branch_query_export_includes_snapshot_policy_ancestors` passes.

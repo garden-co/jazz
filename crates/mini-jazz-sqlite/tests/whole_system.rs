@@ -1186,6 +1186,83 @@ fn recursive_query_scope_sync_preserves_branch_base_and_overlay() {
 }
 
 #[test]
+fn recursive_branch_query_export_includes_snapshot_policy_ancestors() {
+    let schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("folders", |table| {
+            table.text("name");
+            table.ref_("parent", "folders");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    let org_tx = alice
+        .insert_row(
+            "orgs",
+            "org-alice",
+            BTreeMap::from([("name".to_owned(), json!("Alice org"))]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&org_tx, 1).unwrap();
+    let root_tx = alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+                ("org".to_owned(), json!("org-alice")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&root_tx, 2).unwrap();
+    let child_tx = alice
+        .insert_row(
+            "folders",
+            "base-child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Base child")),
+                ("parent".to_owned(), json!("root")),
+                ("org".to_owned(), json!("org-alice")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&child_tx, 3).unwrap();
+
+    alice.create_branch("draft", Some(3)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let bundle = alice
+        .export_recursive_refs("folders", "root", "parent")
+        .unwrap();
+    let synced = bundle
+        .history
+        .iter()
+        .map(|record| (record.table.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(synced.contains(&("folders", "root")));
+    assert!(synced.contains(&("folders", "base-child")));
+    assert!(synced.contains(&("orgs", "org-alice")));
+
+    peer.apply_bundle(&bundle).unwrap();
+    peer.checkout_branch("draft").unwrap();
+    let ids = peer
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root", "base-child"]);
+}
+
+#[test]
 fn policy_scoped_sync_includes_required_parent_rows_only() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
