@@ -839,3 +839,17 @@ is holding up under sync and durable rebuild. Defaults are semantic row content
 once the transaction is sealed, not SQLite DDL-side generated values.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 209 whole-system tests.
+
+## 2026-05-26 03:29 PDT
+
+Added branch overlay coverage for the new `ne` query path. A branch-local row
+that initially satisfies `tag != null` is delivered by query-scoped sync, then a
+branch-local update to `tag = null` causes the same query scope to repair the
+peer's branch projection back to empty.
+
+Discovery: the generic query-scope machinery now handles `ne` across branch
+overlays without special casing beyond the predicate lowering. This is a useful
+confirmation that the branch/query integration is becoming operator-shaped
+rather than equality-shaped.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 210 whole-system tests.

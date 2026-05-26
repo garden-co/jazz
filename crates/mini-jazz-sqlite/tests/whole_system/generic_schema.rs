@@ -1451,6 +1451,63 @@ fn branch_equality_query_scope_resync_repairs_row_that_left_predicate() {
 }
 
 #[test]
+fn branch_not_equal_query_scope_resync_repairs_row_that_left_predicate() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.optional_text("tag");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Tagged draft")),
+                ("tag".to_owned(), json!("work")),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_ne("tasks", "tag", json!(null))
+            .unwrap(),
+    )
+    .unwrap();
+    peer.checkout_branch("draft").unwrap();
+    assert_eq!(
+        peer.read_rows_where_ne("tasks", "tag", json!(null))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("tag".to_owned(), json!(null))]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_ne("tasks", "tag", json!(null))
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert!(peer
+        .read_rows_where_ne("tasks", "tag", json!(null))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn branch_query_scope_repair_does_not_delete_same_predicate_row_on_main() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
