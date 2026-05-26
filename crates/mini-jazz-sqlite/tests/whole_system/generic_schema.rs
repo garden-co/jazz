@@ -1317,6 +1317,71 @@ fn generic_equality_query_lowers_public_ref_ids_to_physical_row_ids() {
 }
 
 #[test]
+fn generic_required_ref_read_filters_parent_until_target_is_visible() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Readable"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-readable",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible include")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "projects",
+        "project-2",
+        BTreeMap::from([("title".to_owned(), json!("Bob private"))]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-hidden",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Hidden include")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-2")),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice.read_rows_require_ref("todos", "project").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-readable");
+    assert!(alice
+        .read_rows_require_ref("todos", "title")
+        .unwrap_err()
+        .to_string()
+        .contains("field title on table todos is not a ref"));
+}
+
+#[test]
 fn generic_update_records_update_op_and_syncs_current_value() {
     let schema = support::notes_schema();
     let mut alice =

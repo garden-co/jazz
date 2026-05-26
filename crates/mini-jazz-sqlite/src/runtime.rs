@@ -1507,6 +1507,48 @@ impl Runtime {
         self.query_context().read_rows(table_name)
     }
 
+    pub fn read_rows_require_ref(
+        &self,
+        table_name: &str,
+        ref_field_name: &str,
+    ) -> Result<Vec<RowView>> {
+        let table = self.schema.table_def(table_name)?;
+        let ref_field = table
+            .fields
+            .iter()
+            .find(|field| field.name == ref_field_name)
+            .ok_or_else(|| {
+                crate::Error::new(format!(
+                    "unknown field {ref_field_name} on table {table_name}"
+                ))
+            })?;
+        let FieldKind::Ref {
+            table: target_table,
+        } = &ref_field.kind
+        else {
+            return Err(crate::Error::new(format!(
+                "field {ref_field_name} on table {table_name} is not a ref"
+            )));
+        };
+        let visible_targets = self
+            .query_context()
+            .read_rows(target_table)?
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<BTreeSet<_>>();
+        Ok(self
+            .query_context()
+            .read_rows(table_name)?
+            .into_iter()
+            .filter(|row| {
+                row.values
+                    .get(ref_field_name)
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|id| visible_targets.contains(id))
+            })
+            .collect())
+    }
+
     pub fn read_rows_where_eq(
         &self,
         table_name: &str,
