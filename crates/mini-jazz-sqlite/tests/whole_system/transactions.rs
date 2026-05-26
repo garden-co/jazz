@@ -181,6 +181,14 @@ fn generic_update_records_previous_row_read_set() {
         alice.transaction_previous_read_rows(&tx).unwrap(),
         vec![("notes".to_owned(), "note-1".to_owned())]
     );
+    assert_eq!(
+        alice.transaction_observed_read_rows(&tx).unwrap(),
+        vec![(
+            "notes".to_owned(),
+            "note-1".to_owned(),
+            Some("tx-alice-node-1".to_owned())
+        )]
+    );
 }
 
 #[test]

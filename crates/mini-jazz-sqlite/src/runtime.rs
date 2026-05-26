@@ -1298,6 +1298,30 @@ impl Runtime {
         self.transaction_read_rows_for_reason(tx_id, 2)
     }
 
+    pub fn transaction_observed_read_rows(
+        &self,
+        tx_id: &str,
+    ) -> Result<Vec<(String, String, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT reads.table_name, ids.row_id, observed.tx_id
+             FROM jazz_tx_read reads
+             JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             JOIN jazz_row_id ids ON ids.row_num = reads.row_num
+             LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
+             WHERE tx.tx_id = ?
+             ORDER BY reads.table_name, ids.row_id",
+        )?;
+        let rows = stmt.query_map(params![tx_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     fn transaction_read_rows_for_reason(
         &self,
         tx_id: &str,

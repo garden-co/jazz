@@ -694,3 +694,9 @@ Design lesson: conflict metadata needs to be part of semantic row materializatio
 Implemented the first versioned read-set slice. `jazz_tx_read` now records the observed visible transaction for row reads, bundles carry `observed_tx_id`, and untrusted exclusive transactions are rejected with `stale_read_set` when a policy dependency changed since the sender observed it. Full mini crate suite is green with 190 tests.
 
 Design lesson: row identity read sets were enough for sync scoping, but exclusive validation really does need version identity. The first implementation validates pending exclusive bundles before acceptance using the authority's current view, then imports and rejects the stale transaction so replay/fate remains durable. It is intentionally narrow: absence reads, branch-specific base snapshots, and compact read-set encoding still need sharper treatment.
+
+## 2026-05-26 02:43 PDT
+
+Added a small observed-read introspection API. `transaction_observed_read_rows(tx)` exposes the row read set together with the observed transaction id, and the previous-row read-set test now pins that an update observed the earlier version. Full mini crate suite is green with 190 tests.
+
+Design lesson: versioned read sets should be inspectable as semantic data, not only buried in bundles or SQLite columns. The tuple API is deliberately rough, but it gives tests and future spec work a stable way to assert causality/version observations.
