@@ -883,10 +883,18 @@ impl Runtime {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
             .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
+        let page_count: i64 = self
+            .conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: i64 = self
+            .conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
         Ok(StorageStats::new(
             history_rows,
             current_rows,
             rejected_transactions,
+            page_count,
+            page_size,
             tx_nums,
         ))
     }

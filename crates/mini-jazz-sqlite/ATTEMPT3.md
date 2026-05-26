@@ -1338,3 +1338,19 @@ snapshot reads too.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 generic_equality_query` passes.
+
+## 2026-05-25 19:14 PDT
+
+Starting SQLite page footprint introspection. We have external layout/perf
+experiments, but the runtime itself should expose enough storage stats to write
+small overhead probes without separate benchmark harnesses.
+
+## 2026-05-25 19:15 PDT
+
+SQLite page footprint introspection is green. `StorageStats` now includes
+`page_count`, `page_size`, and computed `database_bytes` using SQLite PRAGMAs.
+This gives future invariant/perf tests a cheap way to estimate storage overhead
+from the same runtime harness.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+memory_runtime_writes_through_sqlite_current_projection` passes.

@@ -34,6 +34,9 @@ pub struct StorageStats {
     pub history_rows: i64,
     pub current_rows: i64,
     pub rejected_transactions: i64,
+    pub page_count: i64,
+    pub page_size: i64,
+    pub database_bytes: i64,
     tx_nums_by_id: BTreeMap<String, i64>,
 }
 
@@ -51,12 +54,17 @@ impl StorageStats {
         history_rows: i64,
         current_rows: i64,
         rejected_transactions: i64,
+        page_count: i64,
+        page_size: i64,
         tx_nums_by_id: BTreeMap<String, i64>,
     ) -> Self {
         Self {
             history_rows,
             current_rows,
             rejected_transactions,
+            page_count,
+            page_size,
+            database_bytes: page_count * page_size,
             tx_nums_by_id,
         }
     }

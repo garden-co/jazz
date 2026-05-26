@@ -19,6 +19,9 @@ fn memory_runtime_writes_through_sqlite_current_projection() {
     let stats = alice.storage_stats().unwrap();
     assert_eq!(stats.history_rows, 2);
     assert_eq!(stats.current_rows, 2);
+    assert!(stats.page_count > 0);
+    assert!(stats.page_size > 0);
+    assert_eq!(stats.database_bytes, stats.page_count * stats.page_size);
     assert!(stats.physical_tx_num_for(&tx).is_some());
 }
 
