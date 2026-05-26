@@ -192,3 +192,16 @@ with 138 tests.
 Design lesson: the current fact model already supports a credible browser edge
 plus cloud-core topology. The missing pieces are transport/protocol shape and
 catalogue negotiation, not a different storage/runtime semantic path.
+
+## 2026-05-26 00:24 PDT
+
+Added query-scope tombstone precision coverage; full mini crate suite is green
+with 139 tests. The test syncs an equality query, deletes both a matching row
+and an unrelated nonmatching row, then refreshes the query. The bundle includes
+the matching tombstone needed to repair the peer but excludes the unrelated
+tombstone.
+
+Design lesson: query-scope repair can stay narrower than table replication even
+when handling deletions. We still need richer observed facts for optional
+absence/range/page scopes, but simple equality/deletion repair has a workable
+shape.

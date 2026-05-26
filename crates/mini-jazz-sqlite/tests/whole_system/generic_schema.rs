@@ -261,6 +261,70 @@ fn equality_query_scope_resync_removes_deleted_matching_row() {
 }
 
 #[test]
+fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_deleted_match() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-matching",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Matching")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-unrelated",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Unrelated")),
+                ("done".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer.read_rows_where_eq("tasks", "done", json!(false))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice.delete_row("tasks", "task-matching").unwrap();
+    alice.delete_row("tasks", "task-unrelated").unwrap();
+    let bundle = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    let synced = bundle
+        .history
+        .iter()
+        .map(|record| (record.row_id.as_str(), record.op))
+        .collect::<Vec<_>>();
+    assert!(synced.contains(&("task-matching", 3)));
+    assert!(!synced.iter().any(|(row_id, _)| *row_id == "task-unrelated"));
+
+    peer.apply_bundle(&bundle).unwrap();
+    assert!(peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
