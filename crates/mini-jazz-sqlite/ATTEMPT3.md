@@ -1518,3 +1518,19 @@ snapshot policy dependency lowering/export.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 branch_base_snapshot_chooses_latest_row_version_within_same_global_epoch`
 passes.
+
+## 2026-05-25 19:31 PDT
+
+Starting rejected branch overlay fallback coverage from sidecar review. If a
+branch-local update/delete shadows a pinned base row and then that tx is
+rejected, branch reads should fall back to the pinned base version.
+
+## 2026-05-25 19:32 PDT
+
+Rejected branch overlay fallback coverage is green. Existing projection repair
+already deletes rejected branch current rows, and the pinned-base read path then
+reveals the base version again. Added explicit update and delete tests,
+including projection rebuild for the update case.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+rejected_branch_` passes.

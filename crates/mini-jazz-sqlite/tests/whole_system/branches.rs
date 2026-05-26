@@ -234,6 +234,90 @@ fn branch_delete_shadows_pinned_base_row() {
 }
 
 #[test]
+fn rejected_branch_update_reveals_pinned_base_row_again() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let draft_tx = alice
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft")),
+                ("done".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Draft")
+    );
+
+    alice.reject_transaction(&draft_tx, "conflict").unwrap();
+
+    let rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Base"));
+
+    alice.clear_current_projection_for_test().unwrap();
+    alice.rebuild_current_projection().unwrap();
+    let rebuilt = alice.read_rows("tasks").unwrap();
+    assert_eq!(rebuilt.len(), 1);
+    assert_eq!(rebuilt[0].values["title"], json!("Base"));
+}
+
+#[test]
+fn rejected_branch_delete_reveals_pinned_base_row_again() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let delete_tx = alice.delete_row("tasks", "task-1").unwrap();
+    assert!(alice.read_rows("tasks").unwrap().is_empty());
+
+    alice.reject_transaction(&delete_tx, "conflict").unwrap();
+
+    let rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Base"));
+}
+
+#[test]
 fn branch_export_includes_pinned_main_base_rows_for_receiver_view() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
