@@ -784,3 +784,9 @@ Design lesson: defaults belong in the effective write-value phase rather than at
 Added whole-system coverage for initially empty query scopes. An equality query that matches no rows still syncs its durable query-read descriptor; a later refresh sends a newly inserted matching row without sending unrelated non-matching rows. Full mini crate suite is green with 204 tests.
 
 Design lesson: query descriptors already behave like desired-state subscriptions, not just repair hints for rows that were previously delivered. This is an important local-first invariant and should be made explicit in the spec's sync/subscription section.
+
+## 2026-05-26 03:16 PDT
+
+Added same-principal multi-node coverage. Two runtimes with the same principal but different node ids each start their own local epoch sequence, produce distinct public transaction ids, sync into one peer, and preserve `j_created_by = alice` for both rows. Full mini crate suite is green with 205 tests.
+
+Design lesson: node identity and authorization principal are separate axes in the prototype already. This matters for browser/device topologies: causality and local epochs belong to nodes, while authorship and policy identity belong to principals.

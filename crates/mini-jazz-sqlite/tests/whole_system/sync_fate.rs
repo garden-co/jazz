@@ -711,6 +711,53 @@ fn replicas_may_use_different_physical_tx_nums_for_same_public_tx_id() {
 }
 
 #[test]
+fn same_principal_on_two_nodes_preserves_authorship_and_distinct_node_epochs() {
+    let schema = support::notes_schema();
+    let mut alice_phone =
+        Runtime::open_with_schema(Storage::Memory, "alice-phone", "alice", schema.clone()).unwrap();
+    let mut alice_laptop =
+        Runtime::open_with_schema(Storage::Memory, "alice-laptop", "alice", schema.clone())
+            .unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    let phone_tx = alice_phone
+        .insert_row(
+            "notes",
+            "note-phone",
+            BTreeMap::from([
+                ("body".to_owned(), json!("From phone")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let laptop_tx = alice_laptop
+        .insert_row(
+            "notes",
+            "note-laptop",
+            BTreeMap::from([
+                ("body".to_owned(), json!("From laptop")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    assert_eq!(phone_tx, "tx-alice-phone-1");
+    assert_eq!(laptop_tx, "tx-alice-laptop-1");
+
+    peer.apply_bundle(&alice_phone.export_table_history("notes").unwrap())
+        .unwrap();
+    peer.apply_bundle(&alice_laptop.export_table_history("notes").unwrap())
+        .unwrap();
+
+    let rows = peer.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.created_by == "alice"));
+    assert!(rows.iter().any(|row| row.tx_id == phone_tx));
+    assert!(rows.iter().any(|row| row.tx_id == laptop_tx));
+}
+
+#[test]
 fn query_scope_is_not_table_replication() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
