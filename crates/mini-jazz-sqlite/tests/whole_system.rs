@@ -3,6 +3,8 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
+mod support;
+
 #[test]
 fn memory_runtime_writes_through_sqlite_current_projection() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
@@ -242,10 +244,7 @@ fn generic_transaction_seals_multiple_rows_atomically() {
 
 #[test]
 fn exclusive_transaction_requires_global_epoch_and_commits_accepted() {
-    let schema = SchemaDef::new().table("notes", |table| {
-        table.text("body");
-        table.bool("pinned");
-    });
+    let schema = support::notes_schema();
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
@@ -733,11 +732,7 @@ fn recursive_policy_scoped_sync_includes_transitive_parent_rows() {
 
 #[test]
 fn recursive_query_reads_policy_filtered_tree() {
-    let schema = SchemaDef::new().table("folders", |table| {
-        table.text("name");
-        table.ref_("parent", "folders");
-        table.read_if_created_by_principal();
-    });
+    let schema = support::folders_schema();
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
     let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
@@ -784,11 +779,7 @@ fn recursive_query_reads_policy_filtered_tree() {
 
 #[test]
 fn recursive_query_scope_sync_recreates_policy_filtered_tree() {
-    let schema = SchemaDef::new().table("folders", |table| {
-        table.text("name");
-        table.ref_("parent", "folders");
-        table.read_if_created_by_principal();
-    });
+    let schema = support::folders_schema();
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
     let mut peer =
@@ -1511,10 +1502,7 @@ fn branch_source_metadata_survives_sync() {
 fn branch_conflict_candidates_survive_durable_sync_and_rejected_fate() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");
-    let schema = SchemaDef::new().table("tasks", |table| {
-        table.text("title");
-        table.bool("done");
-    });
+    let schema = support::tasks_schema();
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
 

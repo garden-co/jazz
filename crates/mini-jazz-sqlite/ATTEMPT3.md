@@ -821,3 +821,14 @@ rejection test now proves the stored policy denial reason is observable.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, still
 45 tests.
+
+## 2026-05-25 18:20 PDT
+
+Small test-shape cleanup: added `tests/support/mod.rs` with shared schema
+fixtures for notes/tasks/folders and switched the newest/repetitive tests to
+use it. This is not a full integration-test split, but it gives the next slices
+a place to put shared fixtures instead of continuing to bloat
+`whole_system.rs`.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, still
+45 tests.
