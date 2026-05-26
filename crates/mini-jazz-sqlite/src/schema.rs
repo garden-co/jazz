@@ -184,6 +184,7 @@ impl TableBuilder {
 }
 
 pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
+    validate_policy_cycles(schema)?;
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS jazz_node (
@@ -255,6 +256,58 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
 
     for table in schema.tables() {
         install_table(conn, table)?;
+    }
+    Ok(())
+}
+
+fn validate_policy_cycles(schema: &SchemaDef) -> Result<()> {
+    for table in schema.tables() {
+        validate_policy_cycle(schema, table, &table.read_policy)?;
+        validate_policy_cycle(schema, table, &table.write_policy)?;
+    }
+    Ok(())
+}
+
+fn validate_policy_cycle(schema: &SchemaDef, table: &TableDef, policy: &PolicyDef) -> Result<()> {
+    let PolicyDef::RefReadable { field } = policy else {
+        return Ok(());
+    };
+    let Some(field) = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *field)
+    else {
+        return Ok(());
+    };
+    let FieldKind::Ref { table: parent } = &field.kind else {
+        return Ok(());
+    };
+    if parent == &table.name {
+        return Err(crate::Error::new(format!(
+            "policy cycle detected on {}.{}",
+            table.name, field.name
+        )));
+    }
+    let parent_table = schema.table_def(parent)?;
+    if let PolicyDef::RefReadable {
+        field: parent_field,
+    } = &parent_table.read_policy
+    {
+        let Some(parent_field) = parent_table
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == *parent_field)
+        else {
+            return Ok(());
+        };
+        if let FieldKind::Ref { table: grandparent } = &parent_field.kind {
+            if grandparent == &table.name {
+                return Err(crate::Error::new(format!(
+                    "policy cycle detected between {} and {}",
+                    table.name, parent_table.name
+                )));
+            }
+        }
     }
     Ok(())
 }

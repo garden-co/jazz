@@ -1053,3 +1053,22 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Design note: this is still manually driven: the trusted edge does not yet
 automatically validate and reject during `apply_bundle`. The test proves the
 storage/sync/fate mechanics, not the final authority automation.
+
+## 2026-05-25 18:44 PDT
+
+Starting policy-cycle behavior. Current recursive policy lowering only has a
+depth guard. I want a clearer schema-time rejection for direct policy cycles so
+query execution does not fail unpredictably later.
+
+## 2026-05-25 18:45 PDT
+
+Schema-time policy-cycle rejection is green for direct self-ref cycles. Installing
+a table whose policy says `read_if_ref_readable("parent")` where `parent`
+references the same table now returns a clear policy-cycle error.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+55 tests.
+
+Open issue: this only catches direct and immediate two-table cycles. A real
+schema validator should walk the policy graph completely and report useful
+diagnostics for longer cycles.

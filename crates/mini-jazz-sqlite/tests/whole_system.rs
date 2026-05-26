@@ -768,6 +768,20 @@ fn recursive_policy_filters_reads_through_grandparent_ref() {
 }
 
 #[test]
+fn schema_rejects_direct_recursive_policy_cycle() {
+    let schema = SchemaDef::new().table("folders", |table| {
+        table.text("name");
+        table.ref_("parent", "folders");
+        table.read_if_ref_readable("parent");
+    });
+
+    let err = Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema)
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("policy cycle"));
+}
+
+#[test]
 fn recursive_policy_scoped_sync_includes_transitive_parent_rows() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {
