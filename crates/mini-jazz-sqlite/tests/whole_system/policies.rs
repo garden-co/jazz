@@ -421,6 +421,44 @@ fn trusted_edge_authoritatively_rejects_untrusted_policy_violation_on_apply() {
 }
 
 #[test]
+fn untrusted_validation_error_does_not_leave_invalid_current_row_visible() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut bob =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "bob-node", "bob", schema.clone())
+            .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Missing parent")),
+                ("project".to_owned(), json!("project-missing")),
+            ]),
+        )
+        .unwrap();
+
+    edge.apply_untrusted_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        edge.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn durable_edge_rejects_after_restart_and_repairs_memory_client() {
     let dir = tempdir().unwrap();
     let edge_path = dir.path().join("edge.sqlite");

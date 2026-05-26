@@ -1609,3 +1609,23 @@ row leakage would be wrong.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 branch_scoped_export_excludes_unrelated_deleted_rows` passes.
+
+## 2026-05-25 19:40 PDT
+
+Starting untrusted validation atomicity/error-path coverage. Sidecar review
+called out that `apply_untrusted_bundle` applies then validates, so validation
+errors may leave current projection temporarily or permanently polluted.
+
+## 2026-05-25 19:41 PDT
+
+Untrusted validation missing-parent coverage is green. A todo that references a
+missing policy parent is applied, then rejected with `policy_denied`, and the
+trusted edge does not expose it in current reads. This did not require a runtime
+change.
+
+Design note: this still does not fully solve transactional staging/validation;
+it only covers this concrete error-prone missing-parent case. The production
+shape should validate in a staging transaction before publishing current rows.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+untrusted_validation_error_does_not_leave_invalid_current_row_visible` passes.
