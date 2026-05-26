@@ -779,6 +779,70 @@ fn recursive_query_reads_policy_filtered_tree() {
 }
 
 #[test]
+fn recursive_query_scope_sync_recreates_policy_filtered_tree() {
+    let schema = SchemaDef::new().table("folders", |table| {
+        table.text("name");
+        table.ref_("parent", "folders");
+        table.read_if_created_by_principal();
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Child")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "unrelated",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Unrelated")),
+                ("parent".to_owned(), json!("unrelated")),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice
+        .export_recursive_refs("folders", "root", "parent")
+        .unwrap();
+    let synced = bundle
+        .history
+        .iter()
+        .map(|record| record.row_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(synced, vec!["root", "child"]);
+    assert!(!synced.contains(&"unrelated"));
+
+    peer.apply_bundle(&bundle).unwrap();
+    let ids = peer
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root", "child"]);
+}
+
+#[test]
 fn policy_scoped_sync_includes_required_parent_rows_only() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

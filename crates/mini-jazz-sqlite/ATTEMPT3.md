@@ -742,3 +742,25 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Open issues: current recursive query support is deliberately narrow. It does not
 yet cover branch base overlays, policy-scoped recursive query export, arbitrary
 recursive predicates, or visited-row/read-set capture.
+
+## 2026-05-25 18:13 PDT
+
+Starting recursive query-scope export. Goal: reuse the recursive query result as
+the row set to export, so a peer can apply the bundle and recreate the same
+policy-filtered tree without receiving unrelated sibling/subtree rows.
+
+## 2026-05-25 18:14 PDT
+
+Recursive query-scope sync is green. `export_recursive_refs(...)` runs the
+recursive query, maps returned public row IDs back to local row nums, exports
+visible history for exactly those rows, and includes active branch metadata. A
+peer can apply the bundle and recreate the same policy-filtered tree without
+receiving unrelated rows.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+43 tests.
+
+Design note: this is result-set export, not a full predicate/range read set.
+For a live subscription or correctness-preserving sync scope, we would still
+need to encode "all current/future children where parent is in this recursive
+frontier" rather than only the rows returned right now.

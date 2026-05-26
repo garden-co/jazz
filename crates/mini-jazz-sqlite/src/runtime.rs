@@ -259,6 +259,38 @@ impl Runtime {
         })
     }
 
+    pub fn export_recursive_refs(
+        &self,
+        table_name: &str,
+        root_id: &str,
+        parent_field: &str,
+    ) -> Result<Bundle> {
+        self.schema.table_def(table_name)?;
+        let rows = self.read_recursive_refs(table_name, root_id, parent_field)?;
+        let row_nums = rows
+            .iter()
+            .map(|row| row_num(&self.conn, &row.id))
+            .collect::<Result<Vec<_>>>()?;
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let txs = export_txs(&self.conn)?;
+        let history = export_visible_table_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            &self.principal,
+            self.trusted,
+            &branch_nums,
+            Some(&row_nums),
+        )?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        Ok(Bundle {
+            branches,
+            txs,
+            history,
+        })
+    }
+
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
         let schema = self.schema.clone();
         let db = self.conn.transaction()?;
