@@ -248,6 +248,7 @@ impl Runtime {
             table_name,
             &self.principal,
             self.trusted,
+            self.branch_num,
         )?;
         let branches = export_branch_records_for_history(&self.conn, &history)?;
         Ok(Bundle {
@@ -982,11 +983,25 @@ fn export_table_history(
     table_name: &str,
     principal: &str,
     trusted: bool,
+    branch_num: i64,
 ) -> Result<Vec<HistoryRecord>> {
-    let mut records =
-        export_visible_table_history(conn, schema, table_name, principal, trusted, None)?;
+    let branch_nums = branch::scope_nums(conn, branch_num)?;
+    let mut records = export_visible_table_history(
+        conn,
+        schema,
+        table_name,
+        principal,
+        trusted,
+        &branch_nums,
+        None,
+    )?;
     records.extend(export_policy_dependency_history(
-        conn, schema, table_name, principal, trusted,
+        conn,
+        schema,
+        table_name,
+        principal,
+        trusted,
+        &branch_nums,
     )?);
     Ok(records)
 }
@@ -997,6 +1012,7 @@ fn export_policy_dependency_history(
     table_name: &str,
     principal: &str,
     trusted: bool,
+    branch_nums: &[i64],
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
     let PolicyDef::RefReadable { field } = &table.read_policy else {
@@ -1023,9 +1039,11 @@ fn export_policy_dependency_history(
          FROM {} current
          JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
          WHERE current.is_deleted = 0
+           AND {}
            AND current_tx.outcome != {}
            AND {policy_sql}",
         crate::schema::current_table(table_name),
+        branch_filter_sql("current", branch_nums),
         tx::OUTCOME_REJECTED,
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -1038,6 +1056,7 @@ fn export_policy_dependency_history(
         parent_table,
         principal,
         trusted,
+        branch_nums,
         Some(&row_nums),
     )
 }
@@ -1048,6 +1067,7 @@ fn export_visible_table_history(
     table_name: &str,
     principal: &str,
     trusted: bool,
+    branch_nums: &[i64],
     row_nums: Option<&[i64]>,
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
@@ -1084,6 +1104,7 @@ fn export_visible_table_history(
            WHERE current.row_num = h.row_num
              AND current.j_branch_num = h.j_branch_num
              AND current.is_deleted = 0
+             AND {}
              AND current_tx.outcome != {}
              AND {policy_sql}
          )
@@ -1091,6 +1112,7 @@ fn export_visible_table_history(
         select_columns.join(", "),
         crate::schema::history_table(table_name),
         crate::schema::current_table(table_name),
+        branch_filter_sql("current", branch_nums),
         tx::OUTCOME_REJECTED,
         row_filter = row_filter_sql(row_nums),
     );
@@ -1141,6 +1163,20 @@ fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
         ),
         None => "1 = 1".to_owned(),
     }
+}
+
+fn branch_filter_sql(alias: &str, branch_nums: &[i64]) -> String {
+    if branch_nums.is_empty() {
+        return "0 = 1".to_owned();
+    }
+    format!(
+        "{alias}.j_branch_num IN ({})",
+        branch_nums
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn export_read_policy_sql(

@@ -510,6 +510,29 @@ Decision: branch provenance belongs in sync metadata alongside row-version
 payloads. Row `branch_id` alone is not enough once branches can have source
 branches.
 
-Limitation: source branch histories are still sent as separate bundles in the
-test. A real branch scoped bundle should probably include the source branch
-facts needed to recreate candidates in one scope.
+Follow-up green: branch table export is now active-branch scoped. It excludes
+unrelated branch rows, but includes declared source branch rows for a merge
+branch, so a receiver can recover conflict candidates from one branch-scoped
+bundle.
+
+Open issue: branch-scoped export still does not include pinned main-base
+snapshot rows for branches based on `base_global_epoch`.
+
+## 2026-05-25 17:54 PDT
+
+Stretch goal recorded: recursive queries and recursive permission policies need
+explicit derisking. They are likely to force recursive CTE lowering and careful
+policy dependency tracking. Current priorities remain branch-scoped sync
+correctness and module boundaries first.
+
+## 2026-05-25 17:52 PDT
+
+Correction: I accidentally treated the previous checkpoint as a stopping point.
+Continuing the autonomous stretch.
+
+Next targets:
+
+- branch-scoped bundles that include source branch candidate facts in one scope
+- move sync import/export out of `runtime.rs`
+- lens + policy composition
+- better module boundaries around generic mutations

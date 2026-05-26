@@ -44,3 +44,20 @@ pub(crate) fn add_source(conn: &Connection, branch_num: i64, source_branch_id: &
     )?;
     Ok(())
 }
+
+pub(crate) fn scope_nums(conn: &Connection, branch_num: i64) -> Result<Vec<i64>> {
+    let mut nums = vec![branch_num];
+    let mut stmt = conn.prepare(
+        "SELECT source_branch_num
+         FROM jazz_branch_source
+         WHERE branch_num = ?
+         ORDER BY source_branch_num",
+    )?;
+    let sources = stmt
+        .query_map(params![branch_num], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    nums.extend(sources);
+    nums.sort();
+    nums.dedup();
+    Ok(nums)
+}

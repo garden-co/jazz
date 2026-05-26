@@ -708,6 +708,53 @@ fn branch_local_write_is_invisible_on_main() {
 }
 
 #[test]
+fn branch_scoped_export_excludes_unrelated_branch_rows() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-draft",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("other", None).unwrap();
+    alice.checkout_branch("other").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-other",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Other")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let rows = alice
+        .export_table_history("tasks")
+        .unwrap()
+        .history
+        .into_iter()
+        .map(|record| record.row_id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows, vec!["task-draft"]);
+}
+
+#[test]
 fn branch_reads_main_base_with_sparse_overlay() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
@@ -888,7 +935,7 @@ fn branch_source_metadata_survives_sync() {
             ]),
         )
         .unwrap();
-    let left_bundle = alice.export_table_history("tasks").unwrap();
+    alice.export_table_history("tasks").unwrap();
 
     alice.create_branch("right", None).unwrap();
     alice.checkout_branch("right").unwrap();
@@ -902,7 +949,7 @@ fn branch_source_metadata_survives_sync() {
             ]),
         )
         .unwrap();
-    let right_bundle = alice.export_table_history("tasks").unwrap();
+    alice.export_table_history("tasks").unwrap();
 
     alice
         .create_branch_from_branches("merge", &["left", "right"])
@@ -925,9 +972,15 @@ fn branch_source_metadata_survives_sync() {
         .find(|branch| branch.branch_id == "merge")
         .unwrap();
     assert_eq!(merge_record.source_branch_ids, vec!["left", "right"]);
+    let bundled_rows = merge_bundle
+        .history
+        .iter()
+        .map(|record| (record.branch_id.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(bundled_rows.contains(&("left", "task-1")));
+    assert!(bundled_rows.contains(&("right", "task-1")));
+    assert!(bundled_rows.contains(&("merge", "merge-marker")));
 
-    bob.apply_bundle(&left_bundle).unwrap();
-    bob.apply_bundle(&right_bundle).unwrap();
     bob.apply_bundle(&merge_bundle).unwrap();
     bob.checkout_branch("merge").unwrap();
 
