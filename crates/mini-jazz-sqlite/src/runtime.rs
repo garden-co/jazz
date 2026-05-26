@@ -836,15 +836,9 @@ impl Runtime {
             let allowed =
                 write_allowed_for_history_record(&self.conn, &self.schema, table, row_num, record)?;
             if !allowed {
-                self.reject_transaction_with_detail(
-                    &record.tx_id,
-                    "policy_denied",
-                    json!({
-                        "reason": "write_policy_denied",
-                        "table": record.table,
-                        "row_id": record.row_id,
-                    }),
-                )?;
+                let detail =
+                    policy_denial_detail_for_history_record(&self.conn, table, record, tx_num)?;
+                self.reject_transaction_with_detail(&record.tx_id, "policy_denied", detail)?;
                 rejected.insert(record.tx_id.clone());
             }
         }
@@ -2533,6 +2527,88 @@ fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
         values: check.values,
         principal: check.principal,
     })
+}
+
+fn policy_denial_detail_for_history_record(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    record: &HistoryRecord,
+    tx_num: i64,
+) -> Result<JsonValue> {
+    if let PolicyDef::RefReadable { field } = &table.write_policy {
+        if let Some(dependency) = unavailable_policy_dependency(conn, table, record, tx_num, field)?
+        {
+            return Ok(json!({
+                "reason": "policy_dependency_unavailable",
+                "table": record.table,
+                "row_id": record.row_id,
+                "dependency_table": dependency.0,
+                "dependency_row_id": dependency.1,
+            }));
+        }
+    }
+    Ok(json!({
+        "reason": "write_policy_denied",
+        "table": record.table,
+        "row_id": record.row_id,
+    }))
+}
+
+fn unavailable_policy_dependency(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    record: &HistoryRecord,
+    tx_num: i64,
+    field_name: &str,
+) -> Result<Option<(String, String)>> {
+    let Some(field) = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field_name)
+    else {
+        return Ok(None);
+    };
+    let FieldKind::Ref {
+        table: ref_table_name,
+    } = &field.kind
+    else {
+        return Ok(None);
+    };
+    let Some(row_id) = record.values.get(&field.name).and_then(JsonValue::as_str) else {
+        return Ok(None);
+    };
+    let dependency_row_num = ensure_row_id(conn, ref_table_name, row_id)?;
+    let branch_num = branch::checkout(conn, &record.branch_id)?;
+    let visible_count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {}
+             WHERE row_num = ?
+               AND j_branch_num = ?
+               AND is_deleted = 0",
+            crate::schema::current_table(ref_table_name)
+        ),
+        params![dependency_row_num, branch_num],
+        |row| row.get(0),
+    )?;
+    if visible_count == 0 {
+        return Ok(Some((ref_table_name.clone(), row_id.to_owned())));
+    }
+    let missing_observed_read_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM jazz_tx_read
+         WHERE tx_num = ?
+           AND table_name = ?
+           AND row_num = ?
+           AND observed_tx_num IS NULL",
+        params![tx_num, ref_table_name, dependency_row_num],
+        |row| row.get(0),
+    )?;
+    if missing_observed_read_count > 0 {
+        Ok(Some((ref_table_name.clone(), row_id.to_owned())))
+    } else {
+        Ok(None)
+    }
 }
 
 fn current_creation_metadata(

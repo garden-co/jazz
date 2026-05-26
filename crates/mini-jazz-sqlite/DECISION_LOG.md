@@ -1030,3 +1030,18 @@ because branch provenance is system metadata and must survive exactly the same
 disconnect/reconnect loop as row history.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 220 whole-system tests.
+
+## 2026-05-26 03:48 PDT
+
+Improved rejection detail for untrusted writes whose policy dependency is not
+available at the authority. Instead of only reporting `write_policy_denied`, the
+authority now reports `policy_dependency_unavailable` with the child row and the
+missing dependency table/row id when a ref-readable write policy points at a row
+that is absent from the authority's visible state.
+
+Discovery: policy-denial UX can be layered on existing read-set/policy
+information without changing transaction fate. This is still intentionally not a
+complete redaction story, but it gives clients a much more actionable durable
+error for the common "you did not send/sync the policy-influencing row" case.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 220 whole-system tests.
