@@ -623,3 +623,28 @@ Design note: receipts are still represented minimally. We are not transporting
 authority identity, signatures, or detailed receipt JSON yet. The important
 shape for this attempt is that tx fate is mutable and replayable, with enough
 global epoch metadata for snapshot semantics.
+
+## 2026-05-25 18:04 PDT
+
+Starting pinned branch-base export. Current branch export is active-branch
+scoped plus source branches; it likely omits main-history rows at
+`base_global_epoch`. That means a receiver can learn the branch metadata but
+still render an empty branch if the branch relies on a main-base snapshot.
+
+## 2026-05-25 18:06 PDT
+
+Pinned branch-base export is green. Exporting a branch with
+`base_global_epoch = 1` now includes:
+
+- the active branch record, even when the branch has no overlay rows
+- main-branch row versions at or before the pinned epoch that are needed to
+  recreate the branch snapshot
+- not later main updates after the branch base
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+38 tests.
+
+Learning: branch-scoped sync has three kinds of provenance to carry:
+active-branch metadata, source-branch metadata/history for merge candidates, and
+pinned main-base snapshot history. Treating sync scope as "branches mentioned by
+history rows" was insufficient.

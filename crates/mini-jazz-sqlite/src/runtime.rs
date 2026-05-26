@@ -250,7 +250,8 @@ impl Runtime {
             self.trusted,
             self.branch_num,
         )?;
-        let branches = export_branch_records_for_history(&self.conn, &history)?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {
             branches,
             txs,
@@ -908,6 +909,37 @@ fn export_branch_records_for_history(
     Ok(records)
 }
 
+fn include_branch_record(
+    conn: &Connection,
+    records: &mut Vec<BranchRecord>,
+    branch_num: i64,
+) -> Result<()> {
+    let (branch_id, base_global_epoch) = conn.query_row(
+        "SELECT branch_id, base_global_epoch FROM jazz_branch WHERE branch_num = ?",
+        params![branch_num],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+    )?;
+    if records.iter().any(|record| record.branch_id == branch_id) {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT source.branch_id
+         FROM jazz_branch_source branch_source
+         JOIN jazz_branch source ON source.branch_num = branch_source.source_branch_num
+         WHERE branch_source.branch_num = ?
+         ORDER BY source.branch_id",
+    )?;
+    let source_branch_ids = stmt
+        .query_map(params![branch_num], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    records.push(BranchRecord {
+        branch_id,
+        base_global_epoch,
+        source_branch_ids,
+    });
+    Ok(())
+}
+
 fn export_open_todo_scope_history(conn: &Connection) -> Result<Vec<HistoryRecord>> {
     let mut records = Vec::new();
     records.extend(export_open_todo_projects(conn)?);
@@ -1030,7 +1062,63 @@ fn export_table_history(
         &branch_nums,
         None,
     )?);
+    if branch_num != 1 {
+        if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
+            records.extend(export_main_base_snapshot_history(
+                conn, schema, table_name, base_epoch, principal, trusted,
+            )?);
+        }
+    }
     Ok(records)
+}
+
+fn export_main_base_snapshot_history(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    base_epoch: i64,
+    principal: &str,
+    trusted: bool,
+) -> Result<Vec<HistoryRecord>> {
+    let table = schema.table_def(table_name)?;
+    let policy_sql = export_read_policy_sql(schema, table, principal, trusted)?;
+    let sql = format!(
+        "SELECT h.row_num
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.j_branch_num = 1
+           AND tx.outcome != ?
+           AND tx.global_epoch IS NOT NULL
+           AND tx.global_epoch <= ?
+           AND h.op != 3
+           AND {policy_sql}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM {history_table} newer
+             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+             WHERE newer.row_num = h.row_num
+               AND newer.j_branch_num = 1
+               AND newer_tx.outcome != ?
+               AND newer_tx.global_epoch IS NOT NULL
+               AND newer_tx.global_epoch <= ?
+               AND newer_tx.global_epoch > tx.global_epoch
+           )",
+        crate::schema::history_table(table_name),
+        history_table = crate::schema::history_table(table_name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_nums = stmt
+        .query_map(
+            params![
+                tx::OUTCOME_REJECTED,
+                base_epoch,
+                tx::OUTCOME_REJECTED,
+                base_epoch
+            ],
+            |row| row.get::<_, i64>(0),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), Some(base_epoch))
 }
 
 fn export_policy_dependency_history(
@@ -1189,6 +1277,88 @@ fn export_visible_table_history(
         });
     }
     Ok(records)
+}
+
+fn export_history_versions_for_rows(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    row_nums: Option<&[i64]>,
+    max_global_epoch: Option<i64>,
+) -> Result<Vec<HistoryRecord>> {
+    let table = schema.table_def(table_name)?;
+    let field_columns = table
+        .fields
+        .iter()
+        .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+        .collect::<Vec<_>>();
+    let mut select_columns = vec![
+        "ids.row_id".to_owned(),
+        "branch.branch_id".to_owned(),
+        "tx.tx_id".to_owned(),
+        "h.op".to_owned(),
+    ];
+    select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+    select_columns.extend([
+        "h.j_created_at".to_owned(),
+        "h.j_updated_at".to_owned(),
+        "h.j_created_by".to_owned(),
+        "h.j_updated_by".to_owned(),
+    ]);
+    let sql = format!(
+        "SELECT {}
+         FROM {} h
+         JOIN jazz_row_id ids ON ids.row_num = h.row_num
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
+         WHERE {row_filter}
+           AND {epoch_filter}
+         ORDER BY h.row_num, h.tx_num",
+        select_columns.join(", "),
+        crate::schema::history_table(table_name),
+        row_filter = row_filter_sql(row_nums),
+        epoch_filter = history_epoch_filter_sql(max_global_epoch),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_width = 4 + table.fields.len() + 4;
+    let mut rows = match row_nums {
+        Some(row_nums) => stmt.query(params_from_iter(row_nums.iter()))?,
+        None => stmt.query([])?,
+    };
+    let mut records = Vec::new();
+    while let Some(row) = rows.next()? {
+        let row = (0..row_width)
+            .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut values = BTreeMap::new();
+        for (idx, field) in table.fields.iter().enumerate() {
+            values.insert(
+                field.name.clone(),
+                sql_value_to_json(conn, field, &row[idx + 4])?,
+            );
+        }
+        let sys = 4 + table.fields.len();
+        records.push(HistoryRecord {
+            table: table_name.to_owned(),
+            row_id: text_value(&row[0], "row_id")?,
+            branch_id: text_value(&row[1], "branch_id")?,
+            tx_id: text_value(&row[2], "tx_id")?,
+            op: integer_value(&row[3], "op")?,
+            values,
+            created_at: integer_value(&row[sys], "j_created_at")?,
+            updated_at: integer_value(&row[sys + 1], "j_updated_at")?,
+            created_by: text_value(&row[sys + 2], "j_created_by")?,
+            updated_by: text_value(&row[sys + 3], "j_updated_by")?,
+        });
+    }
+    Ok(records)
+}
+
+fn history_epoch_filter_sql(max_global_epoch: Option<i64>) -> String {
+    match max_global_epoch {
+        Some(epoch) => format!("tx.global_epoch IS NOT NULL AND tx.global_epoch <= {epoch}"),
+        None => "1 = 1".to_owned(),
+    }
 }
 
 fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
