@@ -22,6 +22,42 @@ fn branch_sources_reject_direct_and_indirect_cycles() {
 }
 
 #[test]
+fn synced_branch_source_cycle_fails_without_partial_catalogue_apply() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let branches_before = peer.branches().unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .create_todo("todo-left", "Left source", false, "project-missing")
+        .unwrap();
+    alice
+        .create_branch_from_branches("merge", &["left"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let mut bundle = alice.export_table_history("todos").unwrap();
+    bundle
+        .branches
+        .iter_mut()
+        .find(|branch| branch.branch_id == "left")
+        .unwrap()
+        .source_branch_ids = vec!["merge".to_owned()];
+    bundle
+        .branches
+        .iter_mut()
+        .find(|branch| branch.branch_id == "left")
+        .unwrap()
+        .source_version = 10;
+
+    let err = peer.apply_bundle(&bundle).unwrap_err();
+    assert!(err.to_string().contains("branch source cycle"));
+    assert_eq!(peer.branches().unwrap(), branches_before);
+    assert!(peer.read_rows("todos").unwrap().is_empty());
+}
+
+#[test]
 fn branch_local_write_is_invisible_on_main() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

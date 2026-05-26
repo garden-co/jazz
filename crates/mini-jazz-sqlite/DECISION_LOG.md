@@ -1467,3 +1467,16 @@ the catalogue boundary instead of relying on every query/read-set traversal to
 defend itself against cycles.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 247 whole-system tests.
+
+## 2026-05-26 05:18 PDT
+
+Extended branch source cycle rejection to synced bundles. A malformed bundle
+that would make `left -> merge -> left` now aborts with no branch catalogue or
+row-history side effects on the receiving peer.
+
+Discovery: branch provenance validation needs to be part of the same atomic
+sync-apply transaction as history/fate. This keeps malformed catalogue edits
+from creating durable ghosts that later query refresh or transaction validation
+would have to reason around.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 248 whole-system tests.
