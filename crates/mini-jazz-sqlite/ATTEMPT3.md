@@ -2020,3 +2020,9 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system long_acyclic_re
 ## 2026-05-25 20:24 PDT
 
 Starting pinned-base conflict candidate coverage. `read_row_candidates` currently reads explicit branch sources; I want to test whether a merge branch can surface a base snapshot candidate plus source branch candidates for the same row. If it cannot, our conflict view is losing provenance from the flattened effective base.
+
+## 2026-05-25 20:25 PDT
+
+Pinned-base conflict candidates are green. Merge branches can now preserve an effective-base candidate alongside explicit source-branch candidates. I added a branch constructor variant that records both `base_global_epoch` and source provenance, and candidate reads now prepend the visible main snapshot row before source candidates.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system branch_conflict_candidates_include_pinned_base_candidate` passes, and full `cargo test -p mini-jazz-sqlite` passes with 108 whole-system tests.

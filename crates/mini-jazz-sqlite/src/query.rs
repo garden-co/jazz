@@ -97,6 +97,13 @@ impl QueryContext<'_> {
             },
         )?;
         let mut candidates = Vec::new();
+        if let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? {
+            candidates.extend(
+                self.read_main_snapshot_rows(table_name, base_epoch)?
+                    .into_iter()
+                    .filter(|row| row.id == id),
+            );
+        }
         for row in rows {
             let mut row = row?;
             let source_branch_num = match row.remove(0) {
