@@ -1629,6 +1629,22 @@ impl Runtime {
         ))
     }
 
+    pub fn subscribe_rows_where_eq_top_created_at_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+    ) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::where_eq_top_created_at_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            limit,
+            self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
+        ))
+    }
+
     pub fn read_row_candidates(&self, table_name: &str, id: &str) -> Result<Vec<RowView>> {
         self.query_context().read_row_candidates(table_name, id)
     }
@@ -1654,6 +1670,14 @@ impl Runtime {
                 field,
                 values,
             } => self.read_rows_where_in(table, field, values.clone())?,
+            RowsSubscriptionQuery::WhereEqTopCreatedAtDesc {
+                table,
+                field,
+                value,
+                limit,
+            } => {
+                self.read_rows_where_eq_top_created_at_desc(table, field, value.clone(), *limit)?
+            }
         };
         Ok(subscription.replace_with_diff(next_rows))
     }

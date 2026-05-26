@@ -562,3 +562,9 @@ Design lesson: query-scoped sync needs a durable desired/observed-query lane, no
 Represented optional include absence as a query-read fact. The open-todos export now emits an `absent` id read for a missing project include, receivers persist it, and later project arrival still updates the semantic row. Full mini crate suite is green with 170 tests.
 
 Design lesson: `null` includes are not just missing data; they are observations. Even a fixture-shaped absence descriptor clarifies the future generic model: optional relationships need explicit absence facts so reconnect and invalidation can distinguish "not requested" from "requested and absent/unauthorized."
+
+## 2026-05-26 01:47 PDT
+
+Added ordered-page local subscription coverage. A `where eq + top createdAt desc` subscription now reports the newer row entering and the old page-boundary row leaving. Full mini crate suite is green with 171 tests.
+
+Design lesson: local listeners and sync query scopes are converging on the same query descriptor problem. Keeping separate subscription enums and bundle query-read records is now clearly duplication; a shared semantic query descriptor should be an architecture cleanup soon.

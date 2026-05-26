@@ -28,6 +28,12 @@ pub(crate) enum RowsSubscriptionQuery {
         field: String,
         values: Vec<JsonValue>,
     },
+    WhereEqTopCreatedAtDesc {
+        table: String,
+        field: String,
+        value: JsonValue,
+        limit: usize,
+    },
 }
 
 impl RowsSubscription {
@@ -78,6 +84,24 @@ impl RowsSubscription {
                 table: table.to_owned(),
                 field: field.to_owned(),
                 values,
+            },
+            last_rows: rows,
+        }
+    }
+
+    pub(crate) fn where_eq_top_created_at_desc(
+        table: &str,
+        field: &str,
+        value: JsonValue,
+        limit: usize,
+        rows: Vec<RowView>,
+    ) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::WhereEqTopCreatedAtDesc {
+                table: table.to_owned(),
+                field: field.to_owned(),
+                value,
+                limit,
             },
             last_rows: rows,
         }

@@ -215,6 +215,75 @@ fn in_subscription_diffs_when_row_enters_and_leaves_value_set() {
 }
 
 #[test]
+fn ordered_page_subscription_replaces_displaced_boundary_row() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-old",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old boundary")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-middle",
+            BTreeMap::from([
+                ("body".to_owned(), json!("middle")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let mut subscription = alice
+        .subscribe_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+        .unwrap();
+    assert_eq!(
+        subscription
+            .initial_rows()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-middle", "note-old"]
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-new",
+            BTreeMap::from([
+                ("body".to_owned(), json!("newest")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+
+    assert!(diffs
+        .iter()
+        .any(|diff| matches!(diff, RowDiff::Added(row) if row.id == "note-new")));
+    assert!(diffs
+        .iter()
+        .any(|diff| matches!(diff, RowDiff::Removed(row) if row.id == "note-old")));
+    assert_eq!(
+        subscription
+            .initial_rows()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-new", "note-middle"]
+    );
+}
+
+#[test]
 fn subscription_removes_child_when_parent_policy_dependency_changes() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
