@@ -403,3 +403,13 @@ Alice-readable to Bob-owned.
 Learning: rerun-and-diff subscriptions can correctly handle policy dependency
 changes because `read_rows` is already policy-aware. The missing future piece is
 efficient invalidation/read-set tracking, not the semantic model.
+
+## 2026-05-25 17:32 PDT
+
+Branch snapshot edge cases are green. A branch based at global epoch 2 does not
+show a row whose latest accepted version at epoch 2 is a delete, and it also
+does not show a pending main row with no global epoch.
+
+Learning: the query-only branch base implementation already has the essential
+shape for these cases: latest accepted history at-or-before base, `h.op != 3`,
+and `global_epoch IS NOT NULL`.

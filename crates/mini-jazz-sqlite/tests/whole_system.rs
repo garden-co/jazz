@@ -650,6 +650,38 @@ fn branch_base_is_pinned_to_global_epoch() {
 }
 
 #[test]
+fn branch_base_snapshot_respects_deletes_and_excludes_pending_main() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let mut deleted_task = BTreeMap::new();
+    deleted_task.insert("title".to_owned(), json!("Will be deleted"));
+    deleted_task.insert("done".to_owned(), json!(false));
+    let create_tx = alice
+        .insert_row("tasks", "task-deleted", deleted_task)
+        .unwrap();
+    alice.accept_transaction_at_global(&create_tx, 1).unwrap();
+    let delete_tx = alice.delete_row("tasks", "task-deleted").unwrap();
+    alice.accept_transaction_at_global(&delete_tx, 2).unwrap();
+
+    let mut pending_task = BTreeMap::new();
+    pending_task.insert("title".to_owned(), json!("Still pending"));
+    pending_task.insert("done".to_owned(), json!(false));
+    alice
+        .insert_row("tasks", "task-pending", pending_task)
+        .unwrap();
+
+    alice.create_branch("after-delete", Some(2)).unwrap();
+    alice.checkout_branch("after-delete").unwrap();
+
+    assert!(alice.read_rows("tasks").unwrap().is_empty());
+}
+
+#[test]
 fn rename_lens_reads_old_storage_column_as_new_field_name() {
     let old_schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
