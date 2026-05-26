@@ -58,6 +58,13 @@ pub struct TransactionInfo {
     pub rejection_detail: Option<JsonValue>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RejectionInfo {
+    pub tx_id: String,
+    pub code: String,
+    pub detail: Option<JsonValue>,
+}
+
 impl StorageStats {
     pub(crate) fn new(
         history_rows: i64,

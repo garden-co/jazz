@@ -604,6 +604,18 @@ fn trusted_edge_authoritatively_rejects_untrusted_policy_violation_on_apply() {
             "row_id": "todo-1"
         }))
     );
+    assert_eq!(
+        edge.rejected_transactions().unwrap(),
+        vec![RejectionInfo {
+            tx_id: tx.clone(),
+            code: "policy_denied".to_owned(),
+            detail: Some(json!({
+                "reason": "write_policy_denied",
+                "table": "todos",
+                "row_id": "todo-1"
+            })),
+        }]
+    );
 
     bob.apply_bundle(&edge.export_table_history("todos").unwrap())
         .unwrap();
@@ -614,6 +626,18 @@ fn trusted_edge_authoritatively_rejects_untrusted_policy_violation_on_apply() {
             "table": "todos",
             "row_id": "todo-1"
         }))
+    );
+    assert_eq!(
+        bob.rejected_transactions().unwrap(),
+        vec![RejectionInfo {
+            tx_id: tx,
+            code: "policy_denied".to_owned(),
+            detail: Some(json!({
+                "reason": "write_policy_denied",
+                "table": "todos",
+                "row_id": "todo-1"
+            })),
+        }]
     );
 }
 

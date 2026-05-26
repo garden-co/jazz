@@ -899,3 +899,17 @@ branch as a first-class operation; the current public API mostly creates branch
 provenance at branch creation time.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 213 whole-system tests.
+
+## 2026-05-26 03:34 PDT
+
+Added a first public rejection-list API. `rejected_transactions()` returns
+durable transaction id, code, and detail records from `jazz_tx_rejection`; the
+existing policy rejection sync test now verifies that both the authority and a
+downstream peer can enumerate the same rejection detail.
+
+Discovery: transaction rejection data was already durable and synced as part of
+transaction export, so a user-visible queue is mostly API shape rather than new
+storage. The future callback/promise surface can be layered over this list,
+with redaction semantics still deliberately unsettled.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 213 whole-system tests.

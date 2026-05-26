@@ -5,7 +5,7 @@ use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
 };
-use crate::types::{BranchInfo, RowView, StorageStats, TodoView, TransactionInfo};
+use crate::types::{BranchInfo, RejectionInfo, RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
     storage, tx, Result, Storage,
@@ -1298,6 +1298,25 @@ impl Runtime {
             rejection_code,
             rejection_detail,
         })
+    }
+
+    pub fn rejected_transactions(&self) -> Result<Vec<RejectionInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tx.tx_id, rejection.code, rejection.detail_json
+             FROM jazz_tx_rejection rejection
+             JOIN jazz_tx tx ON tx.tx_num = rejection.tx_num
+             ORDER BY tx.tx_num",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let detail_json = row.get::<_, String>(2)?;
+            Ok(RejectionInfo {
+                tx_id: row.get(0)?,
+                code: row.get(1)?,
+                detail: parse_rejection_detail_for_sqlite(&detail_json, 2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn transaction_physical_num_for(&self, tx_id: &str) -> Result<i64> {
