@@ -538,3 +538,9 @@ field update. Full mini crate suite is green with 167 tests.
 Design lesson: lens support is now covered across reads, writes, policies,
 subscriptions indirectly through reads, and query-scoped sync. The storage-name
 mapping is holding up better than expected.
+
+## 2026-05-26 01:39 PDT
+
+Added branch query-scope repair coverage for sparse overlays. A peer that first receives a pinned main-base row for a branch query now removes it when a branch-local overlay shadows the same row out of the predicate result. Full mini crate suite is green with 168 tests.
+
+Design lesson: branch query scopes must be evaluated over the effective branch snapshot, not as independent main-base rows plus branch deltas. Overlay shadowing is part of query-scope contraction.
