@@ -118,6 +118,86 @@ fn branch_query_scope_refresh_removes_base_row_shadowed_by_branch_overlay() {
 }
 
 #[test]
+fn durable_branch_query_read_refreshes_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("branch-worker.sqlite");
+    let schema = support::tasks_schema();
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "upstream", "alice", schema.clone()).unwrap();
+
+    let base_tx = upstream
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base open")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    upstream.accept_transaction_at_global(&base_tx, 1).unwrap();
+    upstream.create_branch("draft", Some(1)).unwrap();
+    upstream.checkout_branch("draft").unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_eq("tasks", "done", json!(false))
+                    .unwrap(),
+            )
+            .unwrap();
+        worker.checkout_branch("draft").unwrap();
+        assert_eq!(
+            worker
+                .read_rows_where_eq("tasks", "done", json!(false))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    upstream
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft closed")),
+                ("done".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let mut reopened = Runtime::open_with_schema(
+        Storage::File(worker_path),
+        "worker-reopened",
+        "alice",
+        schema,
+    )
+    .unwrap();
+    reopened.checkout_branch("draft").unwrap();
+    let desired_queries = reopened.observed_query_reads().unwrap();
+    for refresh in upstream
+        .export_query_read_refreshes(&desired_queries)
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(reopened
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn branch_scoped_export_excludes_unrelated_branch_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

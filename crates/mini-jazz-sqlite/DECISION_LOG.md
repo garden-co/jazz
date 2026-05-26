@@ -598,3 +598,9 @@ Design lesson: durable query-read storage is not just introspection. It can be t
 Extended reconnect refresh to durable ordered-page descriptors. A restarted durable worker can send its persisted `eq + top createdAt desc` descriptor upstream and repair a page where a newer row displaced the old boundary while offline. Full mini crate suite is green with 175 tests.
 
 Design lesson: the resubscribe loop is not limited to simple predicates. Ordered pagination can use the same persisted descriptor lane, provided the descriptor carries both predicate and ordering/window metadata. This strengthens the case for one query descriptor model across sync and listeners.
+
+## 2026-05-26 02:01 PDT
+
+Covered branch-scoped reconnect refresh from persisted query reads. A durable worker can persist a branch query, restart on that branch, send the descriptor upstream, and repair the branch view after an overlay shadows the base row out of scope. Full mini crate suite is green with 176 tests.
+
+Design lesson: persisted query descriptors need branch context, but they do not need a separate branch-specific protocol. The same reconnect refresh loop works as long as branch provenance and checkout context are explicit.
