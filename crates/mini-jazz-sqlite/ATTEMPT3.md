@@ -855,3 +855,26 @@ Learning: the trusted/untrusted split is holding up as a useful axis separate
 from local/edge/global durability. Trusted peers can bypass policy while
 importing/exporting facts; untrusted peers still enforce their own visible
 result locally.
+
+## 2026-05-25 18:22 PDT
+
+Starting historical recursive policy derisk. Current known edge: a pinned branch
+base snapshot filters child history rows, but `read_if_ref_readable` may check
+the referenced parent in current projection instead of at the same base epoch.
+That would make a historical branch change visibility when a parent row changes
+after the branch was created.
+
+## 2026-05-25 18:23 PDT
+
+Historical ref-readable policy is green for branch base snapshots. Added
+snapshot-aware policy lowering that evaluates referenced parent rows through
+history at the same `base_global_epoch`, recursively, instead of using current
+projection. The same lowering is used for branch-base export filtering.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+47 tests.
+
+Learning: policy lowering needs a context, not just a policy expression:
+current-projection policy, historical-snapshot policy, and eventually
+branch-overlay historical policy have different SQL shapes even for the same
+high-level permission.

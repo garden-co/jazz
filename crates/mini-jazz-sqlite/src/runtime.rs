@@ -1172,7 +1172,11 @@ fn export_main_base_snapshot_history(
     trusted: bool,
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
-    let policy_sql = export_read_policy_sql_for_alias(schema, table, principal, trusted, "h")?;
+    let policy_sql = if trusted {
+        "1 = 1".to_owned()
+    } else {
+        policy::snapshot_read_policy_sql_for_alias(schema, table, "h", principal, base_epoch)?
+    };
     let sql = format!(
         "SELECT h.row_num
          FROM {} h
@@ -1505,20 +1509,6 @@ fn export_read_policy_sql(
         Ok("1 = 1".to_owned())
     } else {
         policy::read_policy_sql(schema, table, principal)
-    }
-}
-
-fn export_read_policy_sql_for_alias(
-    schema: &SchemaDef,
-    table: &crate::schema::TableDef,
-    principal: &str,
-    trusted: bool,
-    alias: &str,
-) -> Result<String> {
-    if trusted {
-        Ok("1 = 1".to_owned())
-    } else {
-        policy::read_policy_sql_for_alias(schema, table, alias, principal)
     }
 }
 

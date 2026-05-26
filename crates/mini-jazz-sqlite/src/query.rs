@@ -240,7 +240,13 @@ impl QueryContext<'_> {
         let policy_sql = if self.trusted {
             "1 = 1".to_owned()
         } else {
-            policy::read_policy_sql_for_alias(self.schema, table, "h", self.principal)?
+            policy::snapshot_read_policy_sql_for_alias(
+                self.schema,
+                table,
+                "h",
+                self.principal,
+                base_epoch,
+            )?
         };
         let field_columns = table
             .fields

@@ -1420,6 +1420,62 @@ fn branch_base_snapshot_applies_row_policy() {
 }
 
 #[test]
+fn branch_base_snapshot_ref_policy_uses_parent_at_base_epoch() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let project_tx = alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&project_tx, 1).unwrap();
+    let todo_tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible at branch base")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&todo_tx, 2).unwrap();
+    alice.create_branch("draft", Some(2)).unwrap();
+
+    let bob_project_tx = bob
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Bob takes over later"))]),
+        )
+        .unwrap();
+    bob.accept_transaction_at_global(&bob_project_tx, 3)
+        .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let rows = alice.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+}
+
+#[test]
 fn branch_multi_base_conflicts_expose_multiple_candidates() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
