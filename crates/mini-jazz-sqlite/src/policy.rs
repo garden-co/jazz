@@ -4,6 +4,8 @@ use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
+const MAX_POLICY_RECURSION_DEPTH: usize = 64;
+
 pub(crate) struct WriteCheck<'a> {
     pub(crate) db: &'a Connection,
     pub(crate) schema: &'a SchemaDef,
@@ -167,7 +169,7 @@ fn lower_policy(
     branch_num: Option<i64>,
     depth: usize,
 ) -> Result<String> {
-    if depth > 16 {
+    if depth > MAX_POLICY_RECURSION_DEPTH {
         return Err(crate::Error::new("policy recursion depth exceeded"));
     }
     match policy {
@@ -240,7 +242,7 @@ fn lower_snapshot_policy(
     base_epoch: i64,
     depth: usize,
 ) -> Result<String> {
-    if depth > 16 {
+    if depth > MAX_POLICY_RECURSION_DEPTH {
         return Err(crate::Error::new(
             "snapshot policy recursion depth exceeded",
         ));

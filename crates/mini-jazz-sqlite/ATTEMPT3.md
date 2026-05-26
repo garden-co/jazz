@@ -1985,6 +1985,22 @@ whole-system tests.
 
 ## 2026-05-25 20:22 PDT
 
+Starting recursive policy depth-bound coverage. We reject recursive policy
+cycles structurally, but long acyclic policy chains should also have explicit
+behavior instead of accidentally becoming an unbounded SQL generator.
+
+## 2026-05-25 20:22 PDT
+
 Predicate read-set wire shape is green. Equality query exports now include a bundle-level `query_reads` record with branch, table, field, and value. This is not yet durable invalidation machinery, but it makes the query predicate explicit on the sync artifact and gives the next attempt a concrete place to hang absence/range invalidation semantics.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system generic_equality_query_scope_exports_matching_rows_and_policy_dependencies` passes, and full `cargo test -p mini-jazz-sqlite` passes with 105 whole-system tests.
+
+## 2026-05-25 20:22 PDT
+
+Starting long recursive policy-chain coverage. Schema validation rejects cycles, but runtime policy lowering has depth limits. I want to know whether a legitimate acyclic parent chain still reads correctly beyond the shallow examples, or whether the prototype has a hidden product cap.
+
+## 2026-05-25 20:23 PDT
+
+Long recursive policy-chain coverage is green. A 17-hop acyclic ref-readable chain initially hit the prototype guard, so I lifted the explicit SQL-lowering recursion limit to 64 for both current and snapshot policies. This is still a guardrail, not a final semantics claim, but it proves the current lowering can handle substantially deeper legal chains.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system long_acyclic_ref_policy_chain_reads_visible_leaf` passes, and full `cargo test -p mini-jazz-sqlite` passes with 106 whole-system tests.

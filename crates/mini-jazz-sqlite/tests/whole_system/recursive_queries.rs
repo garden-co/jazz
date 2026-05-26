@@ -91,6 +91,43 @@ fn recursive_policy_filters_reads_through_grandparent_ref() {
 }
 
 #[test]
+fn long_acyclic_ref_policy_chain_reads_visible_leaf() {
+    let table_names = (0..18)
+        .map(|idx| format!("levels_{idx}"))
+        .collect::<Vec<_>>();
+    let mut schema = SchemaDef::new();
+    for idx in 0..table_names.len() {
+        let table_name = table_names[idx].clone();
+        let parent_name = idx.checked_sub(1).map(|parent| table_names[parent].clone());
+        schema = schema.table(&table_name, move |table| {
+            table.text("name");
+            if let Some(parent_name) = parent_name {
+                table.ref_("parent", &parent_name);
+                table.read_if_ref_readable("parent");
+            } else {
+                table.read_if_created_by_principal();
+            }
+        });
+    }
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    for (idx, table_name) in table_names.iter().enumerate() {
+        let mut values = BTreeMap::from([("name".to_owned(), json!(format!("Level {idx}")))]);
+        if idx > 0 {
+            values.insert("parent".to_owned(), json!(format!("row-{}", idx - 1)));
+        }
+        alice
+            .insert_row(table_name, &format!("row-{idx}"), values)
+            .unwrap();
+    }
+
+    let leaf_rows = alice.read_rows(table_names.last().unwrap()).unwrap();
+    assert_eq!(leaf_rows.len(), 1);
+    assert_eq!(leaf_rows[0].id, "row-17");
+}
+
+#[test]
 fn schema_rejects_direct_recursive_policy_cycle() {
     let schema = SchemaDef::new().table("folders", |table| {
         table.text("name");
@@ -127,6 +164,61 @@ fn schema_rejects_indirect_recursive_policy_cycle() {
         .err()
         .unwrap();
     assert!(err.to_string().contains("policy cycle"));
+}
+
+#[test]
+fn long_acyclic_recursive_policy_chain_reports_depth_bound() {
+    let mut schema = SchemaDef::new();
+    for idx in (0..18).rev() {
+        let table_name = format!("chain_{idx}");
+        let parent_name = format!("chain_{}", idx + 1);
+        schema = schema.table(&table_name, |table| {
+            table.text("name");
+            if idx == 17 {
+                table.read_if_created_by_principal();
+            } else {
+                table.ref_("parent", &parent_name);
+                table.read_if_ref_readable("parent");
+            }
+        });
+    }
+    let mut writer =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "writer", "alice", schema.clone())
+            .unwrap();
+    let mut reader =
+        Runtime::open_with_schema(Storage::Memory, "reader", "alice", schema.clone()).unwrap();
+
+    writer
+        .insert_row(
+            "chain_17",
+            "row-17",
+            BTreeMap::from([("name".to_owned(), json!("row 17"))]),
+        )
+        .unwrap();
+    for idx in (0..17).rev() {
+        writer
+            .insert_row(
+                &format!("chain_{idx}"),
+                &format!("row-{idx}"),
+                BTreeMap::from([
+                    ("name".to_owned(), json!(format!("row {idx}"))),
+                    ("parent".to_owned(), json!(format!("row-{}", idx + 1))),
+                ]),
+            )
+            .unwrap();
+    }
+    for idx in 0..18 {
+        reader
+            .apply_bundle(
+                &writer
+                    .export_table_history(&format!("chain_{idx}"))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let err = reader.read_rows("chain_0").unwrap_err();
+    assert!(err.to_string().contains("policy recursion depth exceeded"));
 }
 
 #[test]
