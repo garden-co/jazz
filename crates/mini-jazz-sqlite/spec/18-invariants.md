@@ -24,6 +24,11 @@ feature exists.
 - One simple write creates one sealed transaction.
 - One explicit transaction may contain multiple row mutations and still seals as
   one transaction.
+- Transactions read from the semantic database snapshot captured when the
+  transaction started.
+- Transaction reads include the transaction's own staged writes.
+- Transaction reads exclude other transactions' staged writes and later
+  committed writes.
 - An explicit transaction with no staged mutations is a no-op and creates no
   transaction record.
 - Multiple staged mutations to the same row in one explicit transaction

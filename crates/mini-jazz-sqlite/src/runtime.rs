@@ -1781,11 +1781,21 @@ impl Runtime {
     }
 
     pub fn transaction(&mut self) -> TransactionBuilder<'_> {
+        let start = self.transaction_start().map_err(|err| err.to_string());
         TransactionBuilder {
             runtime: self,
             mutations: Vec::new(),
             mode: TransactionMode::Mergeable,
+            start,
         }
+    }
+
+    fn transaction_start(&self) -> Result<TransactionStart> {
+        Ok(TransactionStart {
+            vector: transaction_dotted_vector(&self.conn)?,
+            branch_num: self.branch_num,
+            scope_depths: branch::scope_depths(&self.conn, self.branch_num)?,
+        })
     }
 
     pub fn delete_row(&mut self, table_name: &str, id: &str) -> Result<String> {
@@ -2917,6 +2927,32 @@ fn validate_write_fields(
     Ok(())
 }
 
+fn transaction_effective_values(
+    table: &crate::schema::TableDef,
+    base: Option<&RowView>,
+    patch_values: &BTreeMap<String, JsonValue>,
+    op: i64,
+    id: &str,
+) -> Result<BTreeMap<String, JsonValue>> {
+    if op == 1 {
+        let mut values = patch_values.clone();
+        for field in &table.fields {
+            if !values.contains_key(&field.name) {
+                if let Some(default_value) = &field.default_value {
+                    values.insert(field.name.clone(), default_value.clone());
+                }
+            }
+        }
+        return Ok(values);
+    }
+    let mut values = base
+        .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?
+        .values
+        .clone();
+    values.extend(patch_values.clone());
+    Ok(values)
+}
+
 struct LocalWriteCheck<'a> {
     db: &'a Connection,
     schema: &'a SchemaDef,
@@ -3512,10 +3548,29 @@ fn record_tx_write(
     Ok(())
 }
 
+fn transaction_dotted_vector(conn: &Connection) -> Result<BTreeMap<i64, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT node_num, MAX(local_epoch)
+         FROM jazz_tx
+         GROUP BY node_num
+         ORDER BY node_num",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
+        .map_err(Into::into)
+}
+
 pub struct TransactionBuilder<'a> {
     runtime: &'a mut Runtime,
     mutations: Vec<Mutation>,
     mode: TransactionMode,
+    start: std::result::Result<TransactionStart, String>,
+}
+
+struct TransactionStart {
+    vector: BTreeMap<i64, i64>,
+    branch_num: i64,
+    scope_depths: BTreeMap<i64, i64>,
 }
 
 enum TransactionMode {
@@ -3585,6 +3640,325 @@ impl<'a> TransactionBuilder<'a> {
             id: id.to_owned(),
         });
         self
+    }
+
+    pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
+        let table = self.runtime.schema.table_def(table_name)?;
+        let mut rows_by_id = self
+            .read_rows_at_start(table_name)?
+            .into_iter()
+            .map(|row| (row.id.clone(), row))
+            .collect::<BTreeMap<_, _>>();
+
+        for mutation in &self.mutations {
+            match mutation {
+                Mutation::Row {
+                    table: mutation_table,
+                    id,
+                    values,
+                    op,
+                } if mutation_table == table_name => {
+                    validate_write_fields(table, values)?;
+                    let effective_values =
+                        transaction_effective_values(table, rows_by_id.get(id), values, *op, id)?;
+                    let created_by = if *op == 1 {
+                        self.runtime.attribution_user().to_owned()
+                    } else {
+                        rows_by_id
+                            .get(id)
+                            .map(|row| row.created_by.clone())
+                            .unwrap_or_else(|| self.runtime.attribution_user().to_owned())
+                    };
+                    rows_by_id.insert(
+                        id.clone(),
+                        RowView {
+                            table: table_name.to_owned(),
+                            id: id.clone(),
+                            values: effective_values,
+                            created_by,
+                            tx_id: "staged".to_owned(),
+                            conflict_count: 0,
+                        },
+                    );
+                }
+                Mutation::DeleteRow {
+                    table: mutation_table,
+                    id,
+                } if mutation_table == table_name => {
+                    rows_by_id.remove(id);
+                }
+                _ => {}
+            }
+        }
+
+        let mut rows = self.filter_transaction_rows_by_policy(
+            table_name,
+            rows_by_id.into_values().collect::<Vec<_>>(),
+        )?;
+        rows.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(rows)
+    }
+
+    fn start(&self) -> Result<&TransactionStart> {
+        self.start
+            .as_ref()
+            .map_err(|err| crate::Error::new(err.clone()))
+    }
+
+    fn read_rows_at_start(&self, table_name: &str) -> Result<Vec<RowView>> {
+        let mut rows = self.read_history_rows_at_start(table_name)?;
+        let start = self.start()?;
+        if start.branch_num != 1 {
+            if let Some(base_epoch) =
+                branch::base_global_epoch(&self.runtime.conn, start.branch_num)?
+            {
+                rows.extend(self.read_main_base_rows_at_start(table_name, base_epoch)?);
+            }
+        }
+        self.collapse_transaction_rows(rows)
+    }
+
+    fn read_history_rows_at_start(&self, table_name: &str) -> Result<Vec<(i64, RowView)>> {
+        let start = self.start()?;
+        let table = self.runtime.schema.table_def(table_name)?;
+        let scope_nums = start.scope_depths.keys().copied().collect::<Vec<_>>();
+        if scope_nums.is_empty() || start.vector.is_empty() {
+            return Ok(Vec::new());
+        }
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec![
+            "h.j_branch_num".to_owned(),
+            "ids.row_id".to_owned(),
+            "tx.tx_id".to_owned(),
+        ];
+        select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+        select_columns.push("h.j_created_by".to_owned());
+        let scope_placeholders = local_placeholders(scope_nums.len());
+        let (tx_visible_sql, tx_visible_params) = dotted_vector_sql("tx", &start.vector);
+        let (newer_visible_sql, newer_visible_params) =
+            dotted_vector_sql("newer_tx", &start.vector);
+        let sql = format!(
+            "SELECT {}
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_branch_num IN ({scope_placeholders})
+               AND {tx_visible_sql}
+               AND tx.outcome != ?
+               AND h.op != 3
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} newer
+                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 WHERE newer.row_num = h.row_num
+                   AND newer.j_branch_num = h.j_branch_num
+                   AND {newer_visible_sql}
+                   AND newer_tx.outcome != ?
+                   AND newer_tx.tx_num > tx.tx_num
+               )
+             ORDER BY h.j_created_at DESC, h.row_num",
+            select_columns.join(", "),
+            crate::schema::history_table(table_name),
+            history_table = crate::schema::history_table(table_name),
+        );
+        let mut params = scope_nums
+            .into_iter()
+            .map(rusqlite::types::Value::Integer)
+            .collect::<Vec<_>>();
+        params.extend(tx_visible_params);
+        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
+        params.extend(newer_visible_params);
+        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
+        self.query_transaction_rows(table_name, table, &sql, params)
+    }
+
+    fn read_main_base_rows_at_start(
+        &self,
+        table_name: &str,
+        base_epoch: i64,
+    ) -> Result<Vec<(i64, RowView)>> {
+        let start = self.start()?;
+        if start.vector.is_empty() {
+            return Ok(Vec::new());
+        }
+        let table = self.runtime.schema.table_def(table_name)?;
+        let scope_nums = start.scope_depths.keys().copied().collect::<Vec<_>>();
+        let scope_placeholders = local_placeholders(scope_nums.len());
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec![
+            "1".to_owned(),
+            "ids.row_id".to_owned(),
+            "tx.tx_id".to_owned(),
+        ];
+        select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+        select_columns.push("h.j_created_by".to_owned());
+        let (tx_visible_sql, tx_visible_params) = dotted_vector_sql("tx", &start.vector);
+        let (newer_visible_sql, newer_visible_params) =
+            dotted_vector_sql("newer_tx", &start.vector);
+        let (shadow_visible_sql, shadow_visible_params) =
+            dotted_vector_sql("shadow_tx", &start.vector);
+        let sql = format!(
+            "SELECT {}
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_branch_num = 1
+               AND {tx_visible_sql}
+               AND tx.outcome != ?
+               AND tx.global_epoch IS NOT NULL
+               AND tx.global_epoch <= ?
+               AND h.op != 3
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} newer
+                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 WHERE newer.row_num = h.row_num
+                   AND newer.j_branch_num = 1
+                   AND {newer_visible_sql}
+                   AND newer_tx.outcome != ?
+                   AND newer_tx.global_epoch IS NOT NULL
+                   AND newer_tx.global_epoch <= ?
+                   AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
+               )
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} branch_shadow
+                 JOIN jazz_tx shadow_tx ON shadow_tx.tx_num = branch_shadow.tx_num
+                 WHERE branch_shadow.row_num = h.row_num
+                   AND branch_shadow.j_branch_num IN ({scope_placeholders})
+                   AND {shadow_visible_sql}
+                   AND shadow_tx.outcome != ?
+               )
+             ORDER BY h.j_created_at DESC, h.row_num",
+            select_columns.join(", "),
+            crate::schema::history_table(table_name),
+            history_table = crate::schema::history_table(table_name),
+        );
+        let mut params = tx_visible_params;
+        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
+        params.push(rusqlite::types::Value::Integer(base_epoch));
+        params.extend(newer_visible_params);
+        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
+        params.push(rusqlite::types::Value::Integer(base_epoch));
+        params.extend(scope_nums.into_iter().map(rusqlite::types::Value::Integer));
+        params.extend(shadow_visible_params);
+        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
+        self.query_transaction_rows(table_name, table, &sql, params)
+    }
+
+    fn query_transaction_rows(
+        &self,
+        table_name: &str,
+        table: &crate::schema::TableDef,
+        sql: &str,
+        params: Vec<rusqlite::types::Value>,
+    ) -> Result<Vec<(i64, RowView)>> {
+        let mut stmt = self.runtime.conn.prepare(sql)?;
+        let row_width = 3 + table.fields.len() + 1;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        rows.map(|row| {
+            let mut row = row?;
+            let branch_num = integer_value(&row.remove(0), "j_branch_num")?;
+            Ok((
+                branch_num,
+                runtime_row_to_view(&self.runtime.conn, table_name, table, row)?,
+            ))
+        })
+        .collect()
+    }
+
+    fn collapse_transaction_rows(&self, rows: Vec<(i64, RowView)>) -> Result<Vec<RowView>> {
+        let start = self.start()?;
+        let mut min_depth_by_row: BTreeMap<String, i64> = BTreeMap::new();
+        for (branch_num, row) in &rows {
+            let depth =
+                start
+                    .scope_depths
+                    .get(branch_num)
+                    .copied()
+                    .unwrap_or(if *branch_num == 1 {
+                        i64::MAX / 4
+                    } else {
+                        i64::MAX / 2
+                    });
+            min_depth_by_row
+                .entry(row.id.clone())
+                .and_modify(|min_depth| *min_depth = (*min_depth).min(depth))
+                .or_insert(depth);
+        }
+        Ok(rows
+            .into_iter()
+            .filter_map(|(branch_num, row)| {
+                let depth =
+                    start
+                        .scope_depths
+                        .get(&branch_num)
+                        .copied()
+                        .unwrap_or(if branch_num == 1 {
+                            i64::MAX / 4
+                        } else {
+                            i64::MAX / 2
+                        });
+                (min_depth_by_row.get(&row.id) == Some(&depth)).then_some(row)
+            })
+            .collect())
+    }
+
+    fn filter_transaction_rows_by_policy(
+        &self,
+        table_name: &str,
+        rows: Vec<RowView>,
+    ) -> Result<Vec<RowView>> {
+        if self.runtime.bypasses_policy() {
+            return Ok(rows);
+        }
+        let table = self.runtime.schema.table_def(table_name)?;
+        match &table.read_policy {
+            PolicyDef::AllowAll => Ok(rows),
+            PolicyDef::CreatedByUser => Ok(rows
+                .into_iter()
+                .filter(|row| row.created_by == self.runtime.policy_user())
+                .collect()),
+            PolicyDef::RefReadable { field } => {
+                let field = table
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == *field)
+                    .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+                let FieldKind::Ref {
+                    table: parent_table,
+                } = &field.kind
+                else {
+                    return Ok(Vec::new());
+                };
+                let visible_parent_ids = self
+                    .read_rows(parent_table)?
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect::<BTreeSet<_>>();
+                Ok(rows
+                    .into_iter()
+                    .filter(|row| {
+                        row.values
+                            .get(&field.name)
+                            .and_then(JsonValue::as_str)
+                            .is_some_and(|parent_id| visible_parent_ids.contains(parent_id))
+                    })
+                    .collect())
+            }
+        }
     }
 
     pub fn commit(self) -> Result<String> {
@@ -5072,11 +5446,54 @@ fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<String> {
     }
 }
 
+fn runtime_row_to_view(
+    conn: &Connection,
+    table_name: &str,
+    table: &crate::schema::TableDef,
+    raw: Vec<rusqlite::types::Value>,
+) -> Result<RowView> {
+    let mut values = BTreeMap::new();
+    for (idx, field) in table.fields.iter().enumerate() {
+        values.insert(
+            field.name.clone(),
+            sql_value_to_json(conn, field, &raw[idx + 2])?,
+        );
+    }
+    Ok(RowView {
+        table: table_name.to_owned(),
+        id: text_value(&raw[0], "row_id")?,
+        tx_id: text_value(&raw[1], "tx_id")?,
+        values,
+        created_by: text_value(&raw[2 + table.fields.len()], "j_created_by")?,
+        conflict_count: 0,
+    })
+}
+
 fn integer_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
     match value {
         rusqlite::types::Value::Integer(value) => Ok(*value),
         _ => Err(crate::Error::new(format!("expected integer {name}"))),
     }
+}
+
+fn local_placeholders(count: usize) -> String {
+    (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
+}
+
+fn dotted_vector_sql(
+    alias: &str,
+    vector: &BTreeMap<i64, i64>,
+) -> (String, Vec<rusqlite::types::Value>) {
+    let mut params = Vec::new();
+    let clauses = vector
+        .iter()
+        .map(|(node_num, local_epoch)| {
+            params.push(rusqlite::types::Value::Integer(*node_num));
+            params.push(rusqlite::types::Value::Integer(*local_epoch));
+            format!("({alias}.node_num = ? AND {alias}.local_epoch <= ?)")
+        })
+        .collect::<Vec<_>>();
+    (format!("({})", clauses.join(" OR ")), params)
 }
 
 fn now_ms() -> i64 {
