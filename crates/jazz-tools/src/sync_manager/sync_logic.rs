@@ -56,7 +56,7 @@ impl SyncManager {
                 storage,
                 table.as_str(),
                 server_id,
-                metadata,
+                &metadata,
                 row,
                 &mut visiting,
             );
@@ -197,7 +197,7 @@ impl SyncManager {
         &mut self,
         server_id: ServerId,
         object_id: ObjectId,
-        metadata: HashMap<String, String>,
+        metadata: &HashMap<String, String>,
         row: StoredRowBatch,
         include_metadata: bool,
     ) {
@@ -240,9 +240,9 @@ impl SyncManager {
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
             payload: SyncPayload::RowBatchCreated {
-                metadata: include_metadata.then_some(RowMetadata {
+                metadata: include_metadata.then(|| RowMetadata {
                     id: object_id,
-                    metadata,
+                    metadata: metadata.clone(),
                 }),
                 row,
             },
