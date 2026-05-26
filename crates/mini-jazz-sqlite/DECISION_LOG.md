@@ -676,3 +676,9 @@ Design lesson: precise exclusive validation needs versioned read-set entries or 
 Pinned the missing-lens fail-closed behavior. A bundle produced by a schema that semantically renamed `title` to `name` is rejected by a peer whose schema has an unrelated physical `name` column and no lens, leaving no rows or transaction metadata partially applied. Full mini crate suite is green with 187 tests.
 
 Design lesson: the structural compatibility fingerprint is already doing useful catalogue-boundary work: two schemas with the same public field names are not compatible if their storage/lens shapes differ. This is a good default, though a future explicit catalogue-sync lane may want better diagnostics than "incompatible schema fingerprint".
+
+## 2026-05-26 02:28 PDT
+
+Added a first branch metadata read surface. Runtimes can list branch ids, base global epochs, and source branch ids; the metadata survives table-history sync for a merge branch. Full mini crate suite is green with 188 tests.
+
+Design lesson: branch provenance is already durable and syncable as system metadata, but it is not yet a user-visible backing row with ordinary permissions. The new read surface makes that gap explicit: product branch permissions should probably wrap or replace this system-only table with a policy-controlled branch catalogue.

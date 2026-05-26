@@ -5,7 +5,7 @@ use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
 };
-use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
+use crate::types::{BranchInfo, RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{
     branch, effective, policy, projection, query, query_predicate, schema, stats, storage, tx,
     Result, Storage,
@@ -1312,6 +1312,41 @@ impl Runtime {
     pub fn checkout_branch(&mut self, branch_id: &str) -> Result<()> {
         self.branch_num = branch::checkout(&self.conn, branch_id)?;
         Ok(())
+    }
+
+    pub fn branches(&self) -> Result<Vec<BranchInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT branch_num, branch_id, base_global_epoch
+             FROM jazz_branch
+             ORDER BY branch_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        let mut branches = Vec::new();
+        for row in rows {
+            let (branch_num, id, base_global_epoch) = row?;
+            let mut source_stmt = self.conn.prepare(
+                "SELECT source.branch_id
+                 FROM jazz_branch_source branch_source
+                 JOIN jazz_branch source ON source.branch_num = branch_source.source_branch_num
+                 WHERE branch_source.branch_num = ?
+                 ORDER BY source.branch_id",
+            )?;
+            let source_branch_ids = source_stmt
+                .query_map(params![branch_num], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            branches.push(BranchInfo {
+                id,
+                base_global_epoch,
+                source_branch_ids,
+            });
+        }
+        Ok(branches)
     }
 
     pub fn principal_for_test(&mut self, principal: &str) {

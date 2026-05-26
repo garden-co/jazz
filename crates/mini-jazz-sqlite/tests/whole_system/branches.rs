@@ -1197,6 +1197,62 @@ fn branch_source_metadata_survives_sync() {
 }
 
 #[test]
+fn branch_metadata_lists_and_syncs_base_and_sources() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-main",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 5).unwrap();
+    alice.create_branch("left", Some(5)).unwrap();
+    alice.create_branch("right", Some(5)).unwrap();
+    alice
+        .create_branch_from_branches_at_base("merge", Some(5), &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-merge",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Merge marker")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let local_merge = alice
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == "merge")
+        .unwrap();
+    assert_eq!(local_merge.base_global_epoch, Some(5));
+    assert_eq!(local_merge.source_branch_ids, vec!["left", "right"]);
+
+    bob.apply_bundle(&alice.export_table_history("tasks").unwrap())
+        .unwrap();
+    let remote_merge = bob
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == "merge")
+        .unwrap();
+    assert_eq!(remote_merge.base_global_epoch, Some(5));
+    assert_eq!(remote_merge.source_branch_ids, vec!["left", "right"]);
+}
+
+#[test]
 fn branch_conflict_resolution_survives_sync() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

@@ -31,6 +31,13 @@ pub struct TodoView {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchInfo {
+    pub id: String,
+    pub base_global_epoch: Option<i64>,
+    pub source_branch_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageStats {
     pub history_rows: i64,
     pub current_rows: i64,
