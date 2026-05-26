@@ -57,12 +57,11 @@ describe("startLocalJazzServer via DevServer", () => {
     await expect(fetch(`${url}/health`).then((r) => r.ok)).rejects.toThrow();
   }, 30_000);
 
-  it("passes edge upstream and peer secret options through DevServer", async () => {
+  it("passes edge upstream options through DevServer with admin secret only", async () => {
     const port = await getAvailablePort();
     handle = await startLocalJazzServer({
       port,
       upstreamUrl: "ws://127.0.0.1:9",
-      peerSecret: "cluster-peer-secret",
       adminSecret: "admin-secret",
       inMemory: true,
     });

@@ -27,7 +27,6 @@ export interface StartLocalJazzServerOptions {
   backendSecret?: string;
   adminSecret?: string;
   upstreamUrl?: string;
-  peerSecret?: string;
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
   enableLogs?: boolean;
@@ -109,7 +108,6 @@ export async function startLocalJazzServer(
       backendSecret: options.backendSecret,
       adminSecret: options.adminSecret,
       upstreamUrl: options.upstreamUrl,
-      peerSecret: options.peerSecret,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
     });

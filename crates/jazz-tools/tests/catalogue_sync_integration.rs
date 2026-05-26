@@ -129,14 +129,9 @@ async fn seed_schema_catalogue(server: &TestingServer, schema: &jazz_tools::Sche
 #[tokio::test]
 async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
     let app_id = TestingServer::default_app_id();
-    let core = TestingServer::builder()
-        .with_app_id(app_id)
-        .with_peer_secret("cluster-peer-secret")
-        .start()
-        .await;
+    let core = TestingServer::builder().with_app_id(app_id).start().await;
     let edge = TestingServer::builder()
         .with_app_id(app_id)
-        .with_peer_secret("cluster-peer-secret")
         .with_upstream_url(core.base_url())
         .start()
         .await;
@@ -264,14 +259,9 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
 #[tokio::test]
 async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_edge() {
     let app_id = TestingServer::default_app_id();
-    let core = TestingServer::builder()
-        .with_app_id(app_id)
-        .with_peer_secret("cluster-peer-secret")
-        .start()
-        .await;
+    let core = TestingServer::builder().with_app_id(app_id).start().await;
     let edge = TestingServer::builder()
         .with_app_id(app_id)
-        .with_peer_secret("cluster-peer-secret")
         .with_upstream_url(core.base_url())
         .start()
         .await;

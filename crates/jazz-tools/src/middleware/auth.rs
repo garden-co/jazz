@@ -143,7 +143,7 @@ pub struct AuthConfig {
     pub backend_secret: Option<String>,
     /// Secret for admin operations (schema/policy sync).
     pub admin_secret: Option<String>,
-    /// Shared secret for trusted server-to-server peer sync.
+    /// Legacy shared secret for explicit peer WebSocket auth. Edge upstream sync uses admin_secret.
     pub peer_secret: Option<String>,
     /// Time source for auth expiry checks. Defaults to the system clock.
     pub clock: AuthClock,
@@ -1118,7 +1118,7 @@ pub fn validate_admin_secret(
     }
 }
 
-/// Check if peer sync secret is valid.
+/// Check if a legacy peer WebSocket auth secret is valid.
 pub fn validate_peer_secret(
     provided: Option<&str>,
     config: &AuthConfig,

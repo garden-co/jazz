@@ -123,7 +123,7 @@ export interface AuthConfig {
   backend_secret?: string;
   /** Admin secret for privileged sync and `/admin/*` catalogue operations. */
   admin_secret?: string;
-  /** Shared server-to-server secret for peer sync. */
+  /** Legacy shared secret for explicit peer WebSocket auth. Edge upstream sync uses admin_secret. */
   peer_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;

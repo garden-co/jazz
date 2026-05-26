@@ -50,7 +50,7 @@ pub(super) enum WsClientSetup {
 /// Authenticate a WebSocket `AuthHandshake`.
 ///
 /// Priority is:
-/// 1. `peer_secret` valid → `WsClientSetup::Peer`
+/// 1. legacy `peer_secret` valid → `WsClientSetup::Peer`
 /// 2. `admin_secret` valid → `WsClientSetup::Backend`
 /// 3. `backend_secret` present + no session header → `WsClientSetup::Backend`
 /// 4. Otherwise → `extract_session` → `WsClientSetup::Session`
