@@ -1,8 +1,10 @@
 use mini_jazz_sqlite::sync::{Bundle, QueryReadRecord};
-use mini_jazz_sqlite::{Result, RowView, Runtime, SchemaDef};
+use mini_jazz_sqlite::{Result, RowView, Runtime, SchemaDef, Storage};
 use serde_json::json;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use tempfile::TempDir;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TodoView {
@@ -30,6 +32,65 @@ pub trait FixtureRuntimeExt {
     fn newest_open_todos(&self, limit: usize) -> Result<Vec<TodoView>>;
     fn export_query_scope_open_todos(&self) -> Result<Bundle>;
     fn export_query_scope_newest_open_todos(&self, limit: usize) -> Result<Bundle>;
+}
+
+pub struct Harness {
+    dir: TempDir,
+}
+
+impl Harness {
+    pub fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().expect("create test harness directory"),
+        }
+    }
+
+    pub fn path(&self, file_name: &str) -> PathBuf {
+        self.dir.path().join(file_name)
+    }
+
+    pub fn memory(&self, node_id: &str, principal: &str) -> Result<Runtime> {
+        Runtime::open(Storage::Memory, node_id, principal)
+    }
+
+    pub fn durable(&self, file_name: &str, node_id: &str, principal: &str) -> Result<Runtime> {
+        Runtime::open(Storage::File(self.path(file_name)), node_id, principal)
+    }
+
+    pub fn memory_with_schema(
+        &self,
+        node_id: &str,
+        principal: &str,
+        schema: SchemaDef,
+    ) -> Result<Runtime> {
+        Runtime::open_with_schema(Storage::Memory, node_id, principal, schema)
+    }
+
+    pub fn durable_with_schema(
+        &self,
+        file_name: &str,
+        node_id: &str,
+        principal: &str,
+        schema: SchemaDef,
+    ) -> Result<Runtime> {
+        Runtime::open_with_schema(
+            Storage::File(self.path(file_name)),
+            node_id,
+            principal,
+            schema,
+        )
+    }
+}
+
+pub fn apply(source_bundle: Bundle, target: &mut Runtime) -> Result<()> {
+    target.apply_bundle(&source_bundle)
+}
+
+pub fn refresh_observed_queries(source: &Runtime, target: &mut Runtime) -> Result<()> {
+    for refresh in source.export_query_read_refreshes(&target.observed_query_reads()?)? {
+        target.apply_bundle(&refresh)?;
+    }
+    Ok(())
 }
 
 impl FixtureRuntimeExt for Runtime {

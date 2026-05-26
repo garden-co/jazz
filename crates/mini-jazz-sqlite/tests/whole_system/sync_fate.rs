@@ -2,45 +2,44 @@ use super::*;
 
 #[test]
 fn query_scoped_sync_converges_memory_and_durable_nodes() {
-    let dir = tempdir().unwrap();
-    let worker_path = dir.path().join("worker.sqlite");
-
-    let mut alice = Runtime::open(Storage::Memory, "alice-tab", "alice").unwrap();
-    let mut worker =
-        Runtime::open(Storage::File(worker_path.clone()), "alice-worker", "alice").unwrap();
+    let harness = support::Harness::new();
+    let mut alice = harness.memory("alice-tab", "alice").unwrap();
+    let mut worker = harness
+        .durable("worker.sqlite", "alice-worker", "alice")
+        .unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
         .create_todo("todo-1", "Sync through bundle", false, "project-1")
         .unwrap();
 
-    let bundle = alice.export_query_scope_open_todos().unwrap();
-    worker.apply_bundle(&bundle).unwrap();
+    support::apply(alice.export_query_scope_open_todos().unwrap(), &mut worker).unwrap();
 
     assert_eq!(worker.open_todos().unwrap(), alice.open_todos().unwrap());
 
     drop(worker);
-    let reopened = Runtime::open(Storage::File(worker_path), "alice-worker", "alice").unwrap();
+    let reopened = harness
+        .durable("worker.sqlite", "alice-worker", "alice")
+        .unwrap();
     assert_eq!(reopened.open_todos().unwrap(), alice.open_todos().unwrap());
 }
 
 #[test]
 fn durable_query_reads_drive_reconnect_refresh_after_restart() {
-    let dir = tempdir().unwrap();
-    let worker_path = dir.path().join("worker.sqlite");
-
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
+    let harness = support::Harness::new();
+    let mut upstream = harness.memory("upstream", "alice").unwrap();
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
         .create_todo("todo-1", "Initially open", false, "project-1")
         .unwrap();
 
     {
-        let mut worker =
-            Runtime::open(Storage::File(worker_path.clone()), "worker", "alice").unwrap();
-        worker
-            .apply_bundle(&upstream.export_query_scope_open_todos().unwrap())
-            .unwrap();
+        let mut worker = harness.durable("worker.sqlite", "worker", "alice").unwrap();
+        support::apply(
+            upstream.export_query_scope_open_todos().unwrap(),
+            &mut worker,
+        )
+        .unwrap();
         assert_eq!(worker.open_todos().unwrap().len(), 1);
         assert_eq!(worker.observed_query_reads().unwrap().len(), 1);
     }
@@ -57,17 +56,12 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
         )
         .unwrap();
 
-    let mut reopened =
-        Runtime::open(Storage::File(worker_path), "worker-reopened", "alice").unwrap();
+    let mut reopened = harness
+        .durable("worker.sqlite", "worker-reopened", "alice")
+        .unwrap();
     assert_eq!(reopened.open_todos().unwrap().len(), 1);
 
-    let desired_queries = reopened.observed_query_reads().unwrap();
-    for refresh in upstream
-        .export_query_read_refreshes(&desired_queries)
-        .unwrap()
-    {
-        reopened.apply_bundle(&refresh).unwrap();
-    }
+    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
 
     assert!(reopened.open_todos().unwrap().is_empty());
     assert_eq!(reopened.observed_query_reads().unwrap().len(), 1);
@@ -75,11 +69,11 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
 
 #[test]
 fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
-    let dir = tempdir().unwrap();
-    let worker_path = dir.path().join("ordered-worker.sqlite");
+    let harness = support::Harness::new();
     let schema = support::notes_schema();
-    let mut upstream =
-        Runtime::open_with_schema(Storage::Memory, "upstream", "alice", schema.clone()).unwrap();
+    let mut upstream = harness
+        .memory_with_schema("upstream", "alice", schema.clone())
+        .unwrap();
 
     upstream
         .insert_row(
@@ -104,20 +98,16 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
         .unwrap();
 
     {
-        let mut worker = Runtime::open_with_schema(
-            Storage::File(worker_path.clone()),
-            "worker",
-            "alice",
-            schema.clone(),
+        let mut worker = harness
+            .durable_with_schema("ordered-worker.sqlite", "worker", "alice", schema.clone())
+            .unwrap();
+        support::apply(
+            upstream
+                .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+                .unwrap(),
+            &mut worker,
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
-                    .unwrap(),
-            )
-            .unwrap();
         assert_eq!(
             worker
                 .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
@@ -141,20 +131,10 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
         )
         .unwrap();
 
-    let mut reopened = Runtime::open_with_schema(
-        Storage::File(worker_path),
-        "worker-reopened",
-        "alice",
-        schema,
-    )
-    .unwrap();
-    let desired_queries = reopened.observed_query_reads().unwrap();
-    for refresh in upstream
-        .export_query_read_refreshes(&desired_queries)
-        .unwrap()
-    {
-        reopened.apply_bundle(&refresh).unwrap();
-    }
+    let mut reopened = harness
+        .durable_with_schema("ordered-worker.sqlite", "worker-reopened", "alice", schema)
+        .unwrap();
+    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
 
     assert_eq!(
         reopened
@@ -169,30 +149,31 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
 
 #[test]
 fn durable_worker_rehydrates_fresh_memory_tab_after_restart() {
-    let dir = tempdir().unwrap();
-    let worker_path = dir.path().join("worker.sqlite");
-
-    let mut tab = Runtime::open(Storage::Memory, "alice-tab", "alice").unwrap();
+    let harness = support::Harness::new();
+    let mut tab = harness.memory("alice-tab", "alice").unwrap();
     tab.create_project("project-1", "Spec work").unwrap();
     tab.create_todo("todo-1", "Survives tab restart", false, "project-1")
         .unwrap();
 
     {
-        let mut worker =
-            Runtime::open(Storage::File(worker_path.clone()), "alice-worker", "alice").unwrap();
-        worker
-            .apply_bundle(&tab.export_query_scope_open_todos().unwrap())
+        let mut worker = harness
+            .durable("worker.sqlite", "alice-worker", "alice")
             .unwrap();
+        support::apply(tab.export_query_scope_open_todos().unwrap(), &mut worker).unwrap();
         assert_eq!(worker.open_todos().unwrap(), tab.open_todos().unwrap());
     }
 
-    let worker = Runtime::open(Storage::File(worker_path), "alice-worker", "alice").unwrap();
-    let mut fresh_tab = Runtime::open(Storage::Memory, "alice-tab-restarted", "alice").unwrap();
+    let worker = harness
+        .durable("worker.sqlite", "alice-worker", "alice")
+        .unwrap();
+    let mut fresh_tab = harness.memory("alice-tab-restarted", "alice").unwrap();
     assert!(fresh_tab.open_todos().unwrap().is_empty());
 
-    fresh_tab
-        .apply_bundle(&worker.export_query_scope_open_todos().unwrap())
-        .unwrap();
+    support::apply(
+        worker.export_query_scope_open_todos().unwrap(),
+        &mut fresh_tab,
+    )
+    .unwrap();
 
     assert_eq!(
         fresh_tab.open_todos().unwrap(),
