@@ -359,8 +359,67 @@ fn policy_filters_reads_through_required_parent_ref() {
     assert_eq!(visible[0].values["project"], json!("project-alice"));
 
     let scoped_bundle = alice.export_table_history("todos").unwrap();
-    assert_eq!(scoped_bundle.history.len(), 1);
-    assert_eq!(scoped_bundle.history[0].row_id, "todo-visible");
+    assert!(scoped_bundle
+        .history
+        .iter()
+        .any(|record| record.table == "todos" && record.row_id == "todo-visible"));
+    assert!(scoped_bundle
+        .history
+        .iter()
+        .any(|record| record.table == "projects" && record.row_id == "project-alice"));
+}
+
+#[test]
+fn policy_scoped_sync_includes_required_parent_rows_only() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema.clone())
+            .unwrap();
+
+    let mut visible_project = BTreeMap::new();
+    visible_project.insert("title".to_owned(), json!("Visible project"));
+    alice
+        .insert_row("projects", "project-visible", visible_project)
+        .unwrap();
+
+    let mut unrelated_project = BTreeMap::new();
+    unrelated_project.insert("title".to_owned(), json!("Unrelated project"));
+    alice
+        .insert_row("projects", "project-unrelated", unrelated_project)
+        .unwrap();
+
+    let mut visible_todo = BTreeMap::new();
+    visible_todo.insert("title".to_owned(), json!("Visible todo"));
+    visible_todo.insert("project".to_owned(), json!("project-visible"));
+    alice
+        .insert_row("todos", "todo-visible", visible_todo)
+        .unwrap();
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    let synced = bundle
+        .history
+        .iter()
+        .map(|record| (record.table.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(synced.contains(&("todos", "todo-visible")));
+    assert!(synced.contains(&("projects", "project-visible")));
+    assert!(!synced.contains(&("projects", "project-unrelated")));
+
+    bob.apply_bundle(&bundle).unwrap();
+    let rows = bob.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["project"], json!("project-visible"));
 }
 
 #[test]

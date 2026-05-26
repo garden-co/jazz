@@ -377,3 +377,19 @@ and show it after checkout with only one history row.
 Decision: the distributed-system harness should keep mixing in-memory SQLite
 nodes with durable SQLite nodes. Even these tiny tests catch whether sync facts
 are semantic/idempotent rather than process-local.
+
+## 2026-05-25 17:31 PDT
+
+Policy dependency sync is green. When a table's read policy depends on a parent
+ref, exporting the child table now includes the visible child row history plus
+the required parent row history, but not unrelated parent rows.
+
+Learning: the first version of the test applied Alice's scoped bundle into a
+runtime with Bob's ordinary principal and then expected Alice's result. That was
+wrong for the model as currently written: policy-shaped result reproduction
+requires either the same principal/session or an explicit trusted-peer context.
+Attempt 3 still lacks a first-class trusted-peer/admin policy bypass context.
+
+Decision: direct policy dependency inclusion belongs in sync/export, not only in
+query results. This is the minimum way for a receiver to recreate a policy-gated
+query without already having the parent facts.

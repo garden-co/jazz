@@ -1,5 +1,5 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
-use crate::schema::{FieldDef, FieldKind, SchemaDef};
+use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::RowsSubscription;
 use crate::sync::{Bundle, HistoryRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
@@ -989,6 +989,63 @@ fn export_table_history(
     table_name: &str,
     principal: &str,
 ) -> Result<Vec<HistoryRecord>> {
+    let mut records = export_visible_table_history(conn, schema, table_name, principal, None)?;
+    records.extend(export_policy_dependency_history(
+        conn, schema, table_name, principal,
+    )?);
+    Ok(records)
+}
+
+fn export_policy_dependency_history(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    principal: &str,
+) -> Result<Vec<HistoryRecord>> {
+    let table = schema.table_def(table_name)?;
+    let PolicyDef::RefReadable { field } = &table.read_policy else {
+        return Ok(Vec::new());
+    };
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *field)
+        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+    let FieldKind::Ref {
+        table: parent_table,
+    } = &field.kind
+    else {
+        return Err(crate::Error::new(format!(
+            "policy field {} is not a ref",
+            field.name
+        )));
+    };
+    let policy_sql = policy::read_policy_sql(schema, table, principal)?;
+    let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let sql = format!(
+        "SELECT DISTINCT current.{ref_column}
+         FROM {} current
+         JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+         WHERE current.is_deleted = 0
+           AND current_tx.outcome != {}
+           AND {policy_sql}",
+        crate::schema::current_table(table_name),
+        tx::OUTCOME_REJECTED,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_nums = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    export_visible_table_history(conn, schema, parent_table, principal, Some(&row_nums))
+}
+
+fn export_visible_table_history(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    principal: &str,
+    row_nums: Option<&[i64]>,
+) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
     let policy_sql = policy::read_policy_sql(schema, table, principal)?;
     let field_columns = table
@@ -1015,7 +1072,8 @@ fn export_table_history(
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
          JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
-         WHERE EXISTS (
+         WHERE {row_filter}
+           AND EXISTS (
            SELECT 1
            FROM {} current
            JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
@@ -1030,18 +1088,19 @@ fn export_table_history(
         crate::schema::history_table(table_name),
         crate::schema::current_table(table_name),
         tx::OUTCOME_REJECTED,
+        row_filter = row_filter_sql(row_nums),
     );
     let mut stmt = conn.prepare(&sql)?;
     let row_width = 4 + table.fields.len() + 4;
-    let rows = stmt.query_map([], |row| {
-        (0..row_width)
-            .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
-            .collect::<rusqlite::Result<Vec<_>>>()
-    })?;
-
     let mut records = Vec::new();
-    for row in rows {
-        let row = row?;
+    let mut rows = match row_nums {
+        Some(row_nums) => stmt.query(params_from_iter(row_nums.iter()))?,
+        None => stmt.query([])?,
+    };
+    while let Some(row) = rows.next()? {
+        let row = (0..row_width)
+            .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut values = BTreeMap::new();
         for (idx, field) in table.fields.iter().enumerate() {
             values.insert(
@@ -1064,6 +1123,20 @@ fn export_table_history(
         });
     }
     Ok(records)
+}
+
+fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
+    match row_nums {
+        Some([]) => "0 = 1".to_owned(),
+        Some(row_nums) => format!(
+            "h.row_num IN ({})",
+            (0..row_nums.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => "1 = 1".to_owned(),
+    }
 }
 
 fn sql_value_to_json(
