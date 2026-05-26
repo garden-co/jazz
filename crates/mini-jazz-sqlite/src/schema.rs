@@ -61,13 +61,18 @@ impl SchemaDef {
     }
 
     pub(crate) fn policy_fingerprint(&self) -> String {
+        self.policy_fingerprint_for_tables(self.tables.keys())
+    }
+
+    pub(crate) fn policy_fingerprint_for_tables<'a>(
+        &self,
+        table_names: impl IntoIterator<Item = &'a String>,
+    ) -> String {
         let mut parts = Vec::new();
-        for table in self.tables.values() {
-            parts.push(format!(
-                "{}:read:{}",
-                table.name,
-                table.read_policy.fingerprint_for_table(table)
-            ));
+        for table_name in table_names {
+            let Some(table) = self.tables.get(table_name) else {
+                continue;
+            };
             parts.push(format!(
                 "{}:write:{}",
                 table.name,

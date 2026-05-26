@@ -163,7 +163,7 @@ fn untrusted_acceptance_uses_authority_policy_not_sender_policy_fingerprint() {
     let bundle = writer.export_table_history("notes").unwrap();
     assert_ne!(bundle.policy_fingerprint, edge.local_policy_fingerprint());
 
-    edge.apply_bundle(&bundle).unwrap();
+    edge.apply_untrusted_bundle(&bundle).unwrap();
     assert_eq!(edge.read_rows("notes").unwrap().len(), 1);
 
     let mut rejecting_edge = Runtime::open_trusted_with_schema(

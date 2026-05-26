@@ -330,7 +330,7 @@ impl Runtime {
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: self.schema.policy_fingerprint(),
+            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &query_reads),
             branches,
             txs,
             reads,
@@ -381,20 +381,21 @@ impl Runtime {
         let history = export_open_todo_scope_history_for_ids(&self.conn, &todo_ids)?;
         let reads = export_reads_for_history(&self.conn, &history)?;
         let branches = export_branch_records_for_history(&self.conn, &history)?;
+        let query_reads = vec![QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: "todos".to_owned(),
+            field: "done".to_owned(),
+            op: "top_created_at_desc".to_owned(),
+            value: JsonValue::Number(serde_json::Number::from(limit)),
+        }];
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: self.schema.policy_fingerprint(),
+            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &query_reads),
             branches,
             txs,
             reads,
-            query_reads: vec![QueryReadRecord {
-                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
-                table: "todos".to_owned(),
-                field: "done".to_owned(),
-                op: "top_created_at_desc".to_owned(),
-                value: JsonValue::Number(serde_json::Number::from(limit)),
-            }],
+            query_reads,
             history,
         })
     }
@@ -416,7 +417,7 @@ impl Runtime {
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: self.schema.policy_fingerprint(),
+            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &[]),
             branches,
             txs,
             reads,
@@ -503,7 +504,7 @@ impl Runtime {
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: self.schema.policy_fingerprint(),
+            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &[]),
             branches,
             txs,
             reads,
@@ -513,6 +514,14 @@ impl Runtime {
     }
 
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
+        self.apply_bundle_inner(bundle, true)
+    }
+
+    fn apply_bundle_inner(
+        &mut self,
+        bundle: &Bundle,
+        check_policy_fingerprint: bool,
+    ) -> Result<()> {
         if bundle.protocol_version != BUNDLE_PROTOCOL_VERSION {
             return Err(crate::Error::new(format!(
                 "unsupported bundle protocol version {}",
@@ -524,6 +533,22 @@ impl Runtime {
             && bundle.schema_fingerprint != local_schema_fingerprint
         {
             return Err(crate::Error::new("incompatible schema fingerprint"));
+        }
+        if check_policy_fingerprint {
+            let policy_tables = bundle_policy_tables(bundle);
+            for table_name in &policy_tables {
+                self.schema.table_def(table_name)?;
+            }
+            if !policy_tables.is_empty() {
+                let local_policy_fingerprint = self
+                    .schema
+                    .policy_fingerprint_for_tables(policy_tables.iter());
+                if bundle.policy_fingerprint != "legacy"
+                    && bundle.policy_fingerprint != local_policy_fingerprint
+                {
+                    return Err(crate::Error::new("incompatible policy fingerprint"));
+                }
+            }
         }
         let schema = self.schema.clone();
         let db = self.conn.transaction()?;
@@ -731,16 +756,19 @@ impl Runtime {
                     limit as usize,
                 )
             }
-            "absent" => Ok(Bundle {
-                protocol_version: BUNDLE_PROTOCOL_VERSION,
-                schema_fingerprint: self.schema.compatibility_fingerprint(),
-                policy_fingerprint: self.schema.policy_fingerprint(),
-                branches: Vec::new(),
-                txs: export_txs(&self.conn)?,
-                reads: Vec::new(),
-                query_reads: vec![read.clone()],
-                history: Vec::new(),
-            }),
+            "absent" => {
+                let query_reads = vec![read.clone()];
+                Ok(Bundle {
+                    protocol_version: BUNDLE_PROTOCOL_VERSION,
+                    schema_fingerprint: self.schema.compatibility_fingerprint(),
+                    policy_fingerprint: scoped_policy_fingerprint(&self.schema, &[], &query_reads),
+                    branches: Vec::new(),
+                    txs: export_txs(&self.conn)?,
+                    reads: Vec::new(),
+                    query_reads,
+                    history: Vec::new(),
+                })
+            }
             op => Err(crate::Error::new(format!(
                 "unsupported observed query refresh {op}"
             ))),
@@ -768,7 +796,7 @@ impl Runtime {
     pub fn apply_untrusted_bundle(&mut self, bundle: &Bundle) -> Result<()> {
         let stale_exclusive_tx_ids =
             read_set::stale_exclusive_tx_ids_in_bundle(&self.conn, bundle)?;
-        self.apply_bundle(bundle)?;
+        self.apply_bundle_inner(bundle, false)?;
         let mut rejected = BTreeSet::new();
         for tx_id in stale_exclusive_tx_ids {
             self.reject_transaction_with_detail(
@@ -1899,20 +1927,21 @@ impl Runtime {
         let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        let query_reads = vec![QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: table_name.to_owned(),
+            field: field_name.to_owned(),
+            op: op.to_owned(),
+            value,
+        }];
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: self.schema.policy_fingerprint(),
+            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &query_reads),
             branches,
             txs,
             reads,
-            query_reads: vec![QueryReadRecord {
-                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
-                table: table_name.to_owned(),
-                field: field_name.to_owned(),
-                op: op.to_owned(),
-                value,
-            }],
+            query_reads,
             history,
         })
     }
@@ -4404,6 +4433,32 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {
+    let mut tables = BTreeSet::new();
+    for record in &bundle.history {
+        tables.insert(record.table.clone());
+    }
+    for query_read in &bundle.query_reads {
+        tables.insert(query_read.table.clone());
+    }
+    tables
+}
+
+fn scoped_policy_fingerprint(
+    schema: &SchemaDef,
+    history: &[HistoryRecord],
+    query_reads: &[QueryReadRecord],
+) -> String {
+    let mut tables = BTreeSet::new();
+    for record in history {
+        tables.insert(record.table.clone());
+    }
+    for query_read in query_reads {
+        tables.insert(query_read.table.clone());
+    }
+    schema.policy_fingerprint_for_tables(tables.iter())
 }
 
 fn tier_name(tier: i64) -> rusqlite::Result<String> {

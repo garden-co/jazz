@@ -634,6 +634,41 @@ fn incompatible_schema_fingerprint_fails_closed_without_partial_apply() {
 }
 
 #[test]
+fn permission_fingerprint_mismatch_fails_closed_without_partial_apply() {
+    let writer_schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let receiver_schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+        table.write_if_created_by_principal();
+    });
+    let mut writer =
+        Runtime::open_with_schema(Storage::Memory, "writer", "alice", writer_schema).unwrap();
+    let mut receiver =
+        Runtime::open_with_schema(Storage::Memory, "receiver", "bob", receiver_schema).unwrap();
+
+    writer
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("policy mismatch")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    let bundle = writer.export_table_history("notes").unwrap();
+
+    let err = receiver.apply_bundle(&bundle).unwrap_err();
+
+    assert!(err.to_string().contains("incompatible policy"));
+    assert_eq!(receiver.storage_stats().unwrap().history_rows, 0);
+    assert!(receiver.read_rows("notes").unwrap().is_empty());
+}
+
+#[test]
 fn future_bundle_protocol_versions_fail_closed_without_partial_apply() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();

@@ -790,3 +790,23 @@ Design lesson: query descriptors already behave like desired-state subscriptions
 Added same-principal multi-node coverage. Two runtimes with the same principal but different node ids each start their own local epoch sequence, produce distinct public transaction ids, sync into one peer, and preserve `j_created_by = alice` for both rows. Full mini crate suite is green with 205 tests.
 
 Design lesson: node identity and authorization principal are separate axes in the prototype already. This matters for browser/device topologies: causality and local epochs belong to nodes, while authorship and policy identity belong to principals.
+
+## 2026-05-26 03:23 PDT
+
+Added fail-closed write-policy compatibility checks for ordinary peer bundle
+apply while preserving authority-side untrusted validation. Bundles now carry a
+policy fingerprint scoped to the tables represented by their history/query-read
+payload, and `apply_bundle` rejects mismatched non-legacy write-policy
+fingerprints before any partial apply. `apply_untrusted_bundle` deliberately
+skips this transport compatibility check and validates using the authority's
+local policy instead.
+
+Discovery: read policies are local visibility semantics, not an import
+compatibility boundary. A node with a stricter read policy can safely accept
+history and filter its current view locally, including across schema lenses.
+Write policies are the dangerous peer-sync boundary because they describe which
+writers were allowed to create the history. The fingerprint must also be scoped:
+a `projects` bundle should not fail because `todos` has a newer write policy,
+and fate-only bundles have no policy surface at all.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 206 whole-system tests.
