@@ -1435,6 +1435,11 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn add_branch_source(&mut self, branch_id: &str, source_branch_id: &str) -> Result<()> {
+        let branch_num = branch::checkout(&self.conn, branch_id)?;
+        branch::add_source(&self.conn, branch_num, source_branch_id)
+    }
+
     pub fn checkout_branch(&mut self, branch_id: &str) -> Result<()> {
         self.branch_num = branch::checkout(&self.conn, branch_id)?;
         Ok(())

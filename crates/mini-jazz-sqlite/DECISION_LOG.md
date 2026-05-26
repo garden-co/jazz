@@ -930,3 +930,18 @@ repair is currently handled by exporting the right tombstone/history rows rather
 than by special deletion SQL in `apply_query_scope_repair`.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 214 whole-system tests.
+
+## 2026-05-26 03:38 PDT
+
+Added an explicit `add_branch_source` operation and covered query refresh after
+source-set expansion. A peer observes an empty query on `merge`; upstream later
+adds `left` as a source branch; reconnect refresh sends rows visible through
+the new source and syncs the updated branch provenance.
+
+Discovery: source-set mutation works naturally through the existing
+`jazz_branch_source` plus backing-row mirror once there is an explicit API.
+This is still not the final branch permissions model, but it gives us a concrete
+verb for testing provenance changes instead of only branch creation-time
+sources.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 215 whole-system tests.
