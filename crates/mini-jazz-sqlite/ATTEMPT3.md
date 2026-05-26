@@ -1989,6 +1989,18 @@ Starting recursive policy depth-bound coverage. We reject recursive policy
 cycles structurally, but long acyclic policy chains should also have explicit
 behavior instead of accidentally becoming an unbounded SQL generator.
 
+## 2026-05-25 20:24 PDT
+
+Recursive policy depth experiment is green, but not in the direction I first
+expected: a 20-table acyclic ref-readable policy chain is SQL-lowerable and
+reads correctly. Also keeping the sidecar's green branch-candidate coverage:
+multi-source merge branches with a pinned base can expose the base candidate
+alongside source branch candidates.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+long_acyclic_recursive_policy_chain_is_sql_lowerable` passes, and full
+`cargo test -p mini-jazz-sqlite` passes with 107 whole-system tests.
+
 ## 2026-05-25 20:22 PDT
 
 Predicate read-set wire shape is green. Equality query exports now include a bundle-level `query_reads` record with branch, table, field, and value. This is not yet durable invalidation machinery, but it makes the query predicate explicit on the sync artifact and gives the next attempt a concrete place to hang absence/range invalidation semantics.
@@ -2004,3 +2016,7 @@ Starting long recursive policy-chain coverage. Schema validation rejects cycles,
 Long recursive policy-chain coverage is green. A 17-hop acyclic ref-readable chain initially hit the prototype guard, so I lifted the explicit SQL-lowering recursion limit to 64 for both current and snapshot policies. This is still a guardrail, not a final semantics claim, but it proves the current lowering can handle substantially deeper legal chains.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system long_acyclic_ref_policy_chain_reads_visible_leaf` passes, and full `cargo test -p mini-jazz-sqlite` passes with 106 whole-system tests.
+
+## 2026-05-25 20:24 PDT
+
+Starting pinned-base conflict candidate coverage. `read_row_candidates` currently reads explicit branch sources; I want to test whether a merge branch can surface a base snapshot candidate plus source branch candidates for the same row. If it cannot, our conflict view is losing provenance from the flattened effective base.

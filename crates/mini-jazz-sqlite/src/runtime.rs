@@ -757,7 +757,16 @@ impl Runtime {
         branch_id: &str,
         source_branch_ids: &[&str],
     ) -> Result<()> {
-        let branch_num = branch::ensure(&self.conn, branch_id, None, now_ms())?;
+        self.create_branch_from_branches_at_base(branch_id, None, source_branch_ids)
+    }
+
+    pub fn create_branch_from_branches_at_base(
+        &mut self,
+        branch_id: &str,
+        base_global_epoch: Option<i64>,
+        source_branch_ids: &[&str],
+    ) -> Result<()> {
+        let branch_num = branch::ensure(&self.conn, branch_id, base_global_epoch, now_ms())?;
         for source_branch_id in source_branch_ids {
             branch::add_source(&self.conn, branch_num, source_branch_id)?;
         }

@@ -167,14 +167,14 @@ fn schema_rejects_indirect_recursive_policy_cycle() {
 }
 
 #[test]
-fn long_acyclic_recursive_policy_chain_reports_depth_bound() {
+fn long_acyclic_recursive_policy_chain_is_sql_lowerable() {
     let mut schema = SchemaDef::new();
-    for idx in (0..18).rev() {
+    for idx in (0..20).rev() {
         let table_name = format!("chain_{idx}");
         let parent_name = format!("chain_{}", idx + 1);
         schema = schema.table(&table_name, |table| {
             table.text("name");
-            if idx == 17 {
+            if idx == 19 {
                 table.read_if_created_by_principal();
             } else {
                 table.ref_("parent", &parent_name);
@@ -190,12 +190,12 @@ fn long_acyclic_recursive_policy_chain_reports_depth_bound() {
 
     writer
         .insert_row(
-            "chain_17",
-            "row-17",
-            BTreeMap::from([("name".to_owned(), json!("row 17"))]),
+            "chain_19",
+            "row-19",
+            BTreeMap::from([("name".to_owned(), json!("row 19"))]),
         )
         .unwrap();
-    for idx in (0..17).rev() {
+    for idx in (0..19).rev() {
         writer
             .insert_row(
                 &format!("chain_{idx}"),
@@ -207,7 +207,7 @@ fn long_acyclic_recursive_policy_chain_reports_depth_bound() {
             )
             .unwrap();
     }
-    for idx in 0..18 {
+    for idx in 0..20 {
         reader
             .apply_bundle(
                 &writer
@@ -217,8 +217,9 @@ fn long_acyclic_recursive_policy_chain_reports_depth_bound() {
             .unwrap();
     }
 
-    let err = reader.read_rows("chain_0").unwrap_err();
-    assert!(err.to_string().contains("policy recursion depth exceeded"));
+    let rows = reader.read_rows("chain_0").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "row-0");
 }
 
 #[test]

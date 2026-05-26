@@ -809,6 +809,71 @@ fn branch_multi_base_conflicts_expose_multiple_candidates() {
 }
 
 #[test]
+fn branch_conflict_candidates_include_pinned_base_candidate() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+
+    alice.create_branch("left", Some(1)).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", Some(1)).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches_at_base("merge", Some(1), &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let titles = alice
+        .read_row_candidates("tasks", "task-1")
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.values["title"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        vec![
+            json!("Base title"),
+            json!("Left title"),
+            json!("Right title")
+        ]
+    );
+}
+
+#[test]
 fn branch_source_metadata_survives_sync() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
