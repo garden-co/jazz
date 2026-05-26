@@ -276,20 +276,31 @@ impl Runtime {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
             db.execute(
                 "INSERT INTO jazz_tx
-                 (tx_id, node_num, local_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, '{}')
+                 (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
                  ON CONFLICT(tx_id) DO UPDATE SET
-                   outcome = excluded.outcome",
+                   outcome = excluded.outcome,
+                   global_epoch = excluded.global_epoch",
                 params![
                     tx_record.tx_id,
                     node_num,
                     tx_record.local_epoch,
+                    tx_record.global_epoch,
                     tx::KIND_DATA,
                     tx::MODE_MERGEABLE,
                     tx_record.outcome,
                     tx_record.created_at
                 ],
             )?;
+            if let Some(global_epoch) = tx_record.global_epoch {
+                let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
+                db.execute(
+                    "INSERT OR REPLACE INTO jazz_tx_receipt
+                     (tx_num, tier, observed_at, receipt_json)
+                     VALUES (?, ?, ?, '{}')",
+                    params![tx_num, tx::TIER_GLOBAL, global_epoch],
+                )?;
+            }
         }
         for table in schema.tables() {
             db.execute(
@@ -840,7 +851,7 @@ fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.outcome, tx.created_at
+        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.outcome, tx.created_at
          FROM jazz_tx tx
          JOIN jazz_node node ON node.node_num = tx.node_num
          ORDER BY tx.tx_num",
@@ -850,8 +861,9 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             tx_id: row.get(0)?,
             node_id: row.get(1)?,
             local_epoch: row.get(2)?,
-            outcome: row.get(3)?,
-            created_at: row.get(4)?,
+            global_epoch: row.get(3)?,
+            outcome: row.get(4)?,
+            created_at: row.get(5)?,
         })
     })?;
     records

@@ -601,3 +601,25 @@ transactions before replaying incoming history.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 36 tests.
+
+## 2026-05-25 18:02 PDT
+
+Next symmetric fate target: accepted/global metadata propagation. The existing
+bundle `TxRecord` carries `outcome` but not `global_epoch` or receipts, so a
+peer can likely learn that a tx is accepted without learning the epoch needed
+for branch base snapshots and global durability reasoning.
+
+## 2026-05-25 18:03 PDT
+
+Accepted/global fate propagation is green. `TxRecord` now carries
+`global_epoch`, apply upserts it with the mutable outcome, and apply recreates a
+global receipt row when a global epoch is present. A peer can now learn that an
+already-applied optimistic transaction became globally accepted at epoch 7.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+37 tests.
+
+Design note: receipts are still represented minimally. We are not transporting
+authority identity, signatures, or detailed receipt JSON yet. The important
+shape for this attempt is that tx fate is mutable and replayable, with enough
+global epoch metadata for snapshot semantics.
