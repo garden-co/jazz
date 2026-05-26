@@ -276,6 +276,77 @@ fn id_in_query_matches_and_syncs_selected_rows() {
 }
 
 #[test]
+fn durable_id_in_query_refreshes_deleted_selected_row_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("id-in-query-worker.sqlite");
+    let schema = support::notes_schema();
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    for (id, body) in [
+        ("note-1", "First selected"),
+        ("note-2", "Not selected"),
+        ("note-3", "Third selected"),
+    ] {
+        upstream
+            .insert_row(
+                "notes",
+                id,
+                BTreeMap::from([
+                    ("body".to_owned(), json!(body)),
+                    ("pinned".to_owned(), json!(false)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_in("notes", "id", vec![json!("note-1"), json!("note-3")])
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(worker.observed_query_reads().unwrap()[0].field, "id");
+        assert_eq!(worker.read_rows("notes").unwrap().len(), 2);
+    }
+
+    upstream.delete_row("notes", "note-1").unwrap();
+
+    let mut reopened = Runtime::open_with_schema(
+        Storage::File(worker_path),
+        "worker-reopened",
+        "alice",
+        schema,
+    )
+    .unwrap();
+    for refresh in upstream
+        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    assert_eq!(
+        reopened
+            .read_rows("notes")
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-3"]
+    );
+}
+
+#[test]
 fn schema_field_in_query_matches_and_syncs_selected_rows() {
     let schema = support::notes_schema();
     let mut alice =

@@ -1517,3 +1517,15 @@ ordinary columns. That keeps the API-preservation story cleaner: selected
 magic fields can remain high-level query syntax without a separate sync path.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 252 whole-system tests.
+
+## 2026-05-26 05:23 PDT
+
+Added durable reconnect coverage for `id in [...]`. A durable worker persists a
+selected-row query, restarts after one selected row is deleted upstream, and
+refreshes to the remaining selected row.
+
+Discovery: public row-id predicates are also just query descriptors at the sync
+boundary. This supports using row-id cursors and explicit id filters at the API
+level without inventing a separate reconnect path for identity-shaped queries.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 253 whole-system tests.
