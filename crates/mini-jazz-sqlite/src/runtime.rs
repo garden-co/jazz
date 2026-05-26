@@ -1334,9 +1334,17 @@ fn export_open_todos(conn: &Connection) -> Result<Vec<HistoryRecord>> {
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
          JOIN jazz_row_id project_ids ON project_ids.row_num = h.project_row_num
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.row_num IN (
+           SELECT todo.row_num
+           FROM todos__schema_v1_current todo
+           JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
+           WHERE todo.is_deleted = 0
+             AND todo.done = 0
+             AND todo_tx.outcome != ?
+         )
          ORDER BY h.row_num, h.tx_num",
     )?;
-    let records = stmt.query_map([], |row| {
+    let records = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
         let mut values = BTreeMap::new();
         values.insert("title".to_owned(), JsonValue::String(row.get(3)?));
         values.insert(

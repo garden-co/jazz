@@ -445,6 +445,37 @@ fn query_scope_is_not_table_replication() {
 }
 
 #[test]
+fn query_scope_excludes_rows_outside_current_result_set() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+
+    alice
+        .create_project("project-1", "Visible project")
+        .unwrap();
+    alice
+        .create_todo("todo-open", "In query scope", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-closed", "Outside query scope", true, "project-1")
+        .unwrap();
+
+    let bundle = alice.export_query_scope_open_todos().unwrap();
+    let synced_todos = bundle
+        .history
+        .iter()
+        .filter(|record| record.table == "todos")
+        .map(|record| record.row_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(synced_todos.contains(&"todo-open"));
+    assert!(!synced_todos.contains(&"todo-closed"));
+
+    bob.apply_bundle(&bundle).unwrap();
+    assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
+    assert!(bob.physical_row_num_for("todo-open").is_ok());
+    assert!(bob.physical_row_num_for("todo-closed").is_err());
+}
+
+#[test]
 fn authority_acceptance_enriches_existing_transaction() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

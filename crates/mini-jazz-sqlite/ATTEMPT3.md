@@ -1235,3 +1235,21 @@ needed to satisfy the branch snapshot read policy on a peer.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 recursive_branch_query_export_includes_snapshot_policy_ancestors` passes.
+
+## 2026-05-25 19:05 PDT
+
+Starting query-scope precision cleanup. The hardcoded open-todos export proves
+that unrelated parent rows are excluded, but it still looks suspiciously broad
+for child rows: it may export todo history for rows that are not currently in
+the open-todos result set.
+
+## 2026-05-25 19:06 PDT
+
+Query-scope precision cleanup is green. The red test showed
+`export_query_scope_open_todos` exported history for a closed todo that was not
+in the current open-todos result. Fixed the hardcoded helper to filter child
+history by the current query result row IDs, matching the already-filtered
+parent-project export.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+query_scope_excludes_rows_outside_current_result_set` passes.
