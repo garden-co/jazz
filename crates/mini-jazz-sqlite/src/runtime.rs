@@ -2400,31 +2400,50 @@ fn export_deleted_recursive_descendant_history(
         .ok_or_else(|| crate::Error::new(format!("unknown ref field {parent_field}")))?;
     let parent_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let sql = format!(
-        "SELECT h.row_num
-         FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-         WHERE h.op = 3
-           AND {}
-           AND h.{parent_column} IN ({parent_placeholders})
-           AND tx.outcome != {}
-           AND NOT EXISTS (
-             SELECT 1
-             FROM {history_table} newer
-             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
-             WHERE newer.row_num = h.row_num
-               AND newer.j_branch_num = h.j_branch_num
-               AND newer_tx.outcome != {}
-               AND newer.tx_num > h.tx_num
-           )",
-        crate::schema::history_table(table_name),
-        branch_filter_sql("h", branch_nums),
-        tx::OUTCOME_REJECTED,
-        tx::OUTCOME_REJECTED,
+        "WITH RECURSIVE deleted_tree(row_num) AS (
+           SELECT h.row_num
+           FROM {history_table} h
+           JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+           WHERE h.op = 3
+             AND {branch_filter}
+             AND h.{parent_column} IN ({parent_placeholders})
+             AND tx.outcome != {rejected}
+             AND NOT EXISTS (
+               SELECT 1
+               FROM {history_table} newer
+               JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+               WHERE newer.row_num = h.row_num
+                 AND newer.j_branch_num = h.j_branch_num
+                 AND newer_tx.outcome != {rejected}
+                 AND newer.tx_num > h.tx_num
+             )
+           UNION
+           SELECT child.row_num
+           FROM {history_table} child
+           JOIN jazz_tx child_tx ON child_tx.tx_num = child.tx_num
+           JOIN deleted_tree parent ON child.{parent_column} = parent.row_num
+           WHERE child.op = 3
+             AND {child_branch_filter}
+             AND child_tx.outcome != {rejected}
+             AND NOT EXISTS (
+               SELECT 1
+               FROM {history_table} newer
+               JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+               WHERE newer.row_num = child.row_num
+                 AND newer.j_branch_num = child.j_branch_num
+                 AND newer_tx.outcome != {rejected}
+                 AND newer.tx_num > child.tx_num
+             )
+         )
+         SELECT row_num FROM deleted_tree",
+        history_table = crate::schema::history_table(table_name),
+        branch_filter = branch_filter_sql("h", branch_nums),
+        child_branch_filter = branch_filter_sql("child", branch_nums),
+        rejected = tx::OUTCOME_REJECTED,
         parent_placeholders = (0..parent_row_nums.len())
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(", "),
-        history_table = crate::schema::history_table(table_name),
     );
     let mut stmt = conn.prepare(&sql)?;
     let row_nums = stmt

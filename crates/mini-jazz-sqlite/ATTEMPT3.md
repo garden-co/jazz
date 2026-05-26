@@ -2057,3 +2057,33 @@ prototype API and verified `QueryReadRecord` survives bundle JSON round-trip.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 query_predicate_reads_survive_bundle_serialization` passes, and full
 `cargo test -p mini-jazz-sqlite` passes with 110 whole-system tests.
+
+## 2026-05-25 20:28 PDT
+
+Starting ref-readable update reparent coverage. An update that changes a ref
+governed by `write_if_ref_readable` must be validated against the new parent,
+not just against the previous row's old parent.
+
+Result: added a whole-system edge test where a trusted local peer for Bob
+manufactures an update moving a todo from Bob's readable project to Alice's
+unreadable project. The trusted edge rejects the update as `policy_denied` and
+keeps the previous visible todo state. This passed without implementation
+changes, which confirms the current validation path already checks incoming
+row values for ref-readable writes.
+
+## 2026-05-25 20:30 PDT
+
+Taking the recursive query stretch goal in a small concrete direction:
+recursive scope sync should include tombstones for an entire previously synced
+subtree, not just the first deleted descendant under the still-visible root.
+This matters for query-scope repair after deletes while peers are disconnected.
+
+Result: the new test failed red because only the direct child tombstone was
+exported. Replaced that lookup with a recursive CTE over deleted history,
+restricted to the branch scope and latest non-rejected row fate. The targeted
+test now passes and gives us one real recursive-query lowering improvement.
+
+## 2026-05-25 20:32 PDT
+
+Full `cargo test -p mini-jazz-sqlite` passes with 112 whole-system tests after
+the reparent policy coverage and recursive tombstone CTE change.
