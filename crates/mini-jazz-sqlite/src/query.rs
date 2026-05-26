@@ -61,7 +61,11 @@ impl QueryContext<'_> {
             .iter()
             .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
             .collect::<Vec<_>>();
-        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        let mut select_columns = vec![
+            "source.source_branch_num".to_owned(),
+            "ids.row_id".to_owned(),
+            "tx.tx_id".to_owned(),
+        ];
         select_columns.extend(
             field_columns
                 .iter()
@@ -83,7 +87,7 @@ impl QueryContext<'_> {
             crate::schema::current_table(table_name),
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = 3 + table.fields.len() + 1;
         let rows = stmt.query_map(
             params![self.branch_num, row_num, tx::OUTCOME_REJECTED],
             |row| {
@@ -92,8 +96,19 @@ impl QueryContext<'_> {
                     .collect::<rusqlite::Result<Vec<_>>>()
             },
         )?;
-        rows.map(|row| row_to_view(self.conn, table_name, table, row?))
-            .collect()
+        let mut candidates = Vec::new();
+        for row in rows {
+            let mut row = row?;
+            let source_branch_num = match row.remove(0) {
+                rusqlite::types::Value::Integer(value) => value,
+                _ => return Err(crate::Error::new("expected source branch num")),
+            };
+            let view = row_to_view(self.conn, table_name, table, row)?;
+            if self.row_view_visible_in_branch(table_name, &view, source_branch_num)? {
+                candidates.push(view);
+            }
+        }
+        Ok(candidates)
     }
 
     pub(crate) fn read_recursive_refs(
@@ -294,6 +309,93 @@ impl QueryContext<'_> {
                     .is_some_and(|parent_id| visible_parent_ids.contains(parent_id))
             })
             .collect())
+    }
+
+    fn row_view_visible_in_branch(
+        &self,
+        table_name: &str,
+        row: &RowView,
+        branch_num: i64,
+    ) -> Result<bool> {
+        if self.trusted {
+            return Ok(true);
+        }
+        let table = self.schema.table_def(table_name)?;
+        match &table.read_policy {
+            PolicyDef::AllowAll => Ok(true),
+            PolicyDef::CreatedByPrincipal => Ok(row.created_by == self.principal),
+            PolicyDef::RefReadable { field } => {
+                let field = table
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == *field)
+                    .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+                let FieldKind::Ref {
+                    table: parent_table,
+                } = &field.kind
+                else {
+                    return Ok(false);
+                };
+                let Some(parent_id) = row.values.get(&field.name).and_then(JsonValue::as_str)
+                else {
+                    return Ok(false);
+                };
+                let parent =
+                    self.read_current_row_in_branch(parent_table, parent_id, branch_num)?;
+                match parent {
+                    Some(parent) => {
+                        self.row_view_visible_in_branch(parent_table, &parent, branch_num)
+                    }
+                    None => Ok(false),
+                }
+            }
+        }
+    }
+
+    fn read_current_row_in_branch(
+        &self,
+        table_name: &str,
+        id: &str,
+        branch_num: i64,
+    ) -> Result<Option<RowView>> {
+        let table = self.schema.table_def(table_name)?;
+        let row_num = row_num(self.conn, id)?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        select_columns.extend(
+            field_columns
+                .iter()
+                .map(|column| format!("current.{column}")),
+        );
+        select_columns.push("current.j_created_by".to_owned());
+        let sql = format!(
+            "SELECT {}
+             FROM {} current
+             JOIN jazz_row_id ids ON ids.row_num = current.row_num
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             WHERE current.row_num = ?
+               AND current.j_branch_num = ?
+               AND current.is_deleted = 0
+               AND tx.outcome != ?",
+            select_columns.join(", "),
+            crate::schema::current_table(table_name),
+        );
+        let row_width = 2 + table.fields.len() + 1;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows =
+            stmt.query_map(params![row_num, branch_num, tx::OUTCOME_REJECTED], |row| {
+                (0..row_width)
+                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })?;
+        rows.next()
+            .transpose()?
+            .map(|row| row_to_view(self.conn, table_name, table, row))
+            .transpose()
     }
 
     fn read_rows_from_current(&self, table_name: &str, overlay_main: bool) -> Result<Vec<RowView>> {

@@ -1706,3 +1706,19 @@ restore the prior visible version.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 trusted_edge_rejects_untrusted_delete_policy_violation` passes.
+
+## 2026-05-25 19:53 PDT
+
+Starting conflict-candidate policy coverage. `read_row_candidates` currently
+reads directly from source branch current projections; I want to verify that
+candidate inspection still respects the caller's effective row policy.
+
+## 2026-05-25 19:54 PDT
+
+Conflict-candidate policy filtering is green. The failing test showed merge
+candidate inspection could reveal a candidate whose required parent row was not
+visible to the caller. Candidates are now post-filtered by evaluating the row
+policy in the source branch that produced each candidate.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+branch_conflict_candidates_respect_effective_row_policy` passes.

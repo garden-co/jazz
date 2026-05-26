@@ -857,6 +857,76 @@ fn branch_source_metadata_survives_sync() {
 }
 
 #[test]
+fn branch_conflict_candidates_respect_effective_row_policy() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-left",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible candidate")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-left")),
+            ]),
+        )
+        .unwrap();
+
+    alice.principal_for_test("bob");
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-right",
+            BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Hidden candidate")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-right")),
+            ]),
+        )
+        .unwrap();
+
+    alice.principal_for_test("alice");
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let candidates = alice.read_row_candidates("tasks", "task-1").unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].values["title"], json!("Visible candidate"));
+}
+
+#[test]
 fn branch_conflict_candidates_survive_durable_sync_and_rejected_fate() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");
