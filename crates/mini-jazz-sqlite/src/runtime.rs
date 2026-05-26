@@ -782,10 +782,12 @@ impl Runtime {
                         )?
                         .is_empty()
                     {
+                        let mut branches = Vec::new();
+                        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
                         let query_reads = vec![read.clone()];
                         return Ok(make_bundle(
                             &self.schema,
-                            Vec::new(),
+                            branches,
                             export_txs(&self.conn)?,
                             Vec::new(),
                             query_reads,

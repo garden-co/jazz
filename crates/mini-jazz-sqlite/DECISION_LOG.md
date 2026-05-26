@@ -1395,3 +1395,17 @@ tx ids. The transaction fate identity is stable, but the user-facing error
 payload can become more informative as authority/edge processing catches up.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 242 whole-system tests.
+
+## 2026-05-26 05:07 PDT
+
+Made absent-and-still-absent refresh carry branch metadata. A durable worker can
+persist only an absent observed query on a merge branch, restart after upstream
+removes a source branch, refresh that absent query, and still learn the updated
+empty source list.
+
+Discovery: even empty query-refresh bundles are not semantically empty. They
+must carry branch provenance for the checked-out observed branch, otherwise
+reconnect can preserve stale source membership while all row-level refreshes
+look successful.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 243 whole-system tests.

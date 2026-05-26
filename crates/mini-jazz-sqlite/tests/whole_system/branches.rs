@@ -101,6 +101,89 @@ fn branch_absence_refresh_uses_branch_context_not_latest_main() {
 }
 
 #[test]
+fn durable_absent_observed_refresh_carries_branch_source_changes_after_reconnect() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+    let schema = support::tasks_schema();
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "upstream", "alice", schema.clone()).unwrap();
+
+    upstream.create_branch("left", None).unwrap();
+    upstream
+        .create_branch_from_branches("merge", &["left"])
+        .unwrap();
+    upstream.checkout_branch("merge").unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_eq("tasks", "done", json!(false))
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut absent_bundle = upstream
+            .export_query_where_eq("tasks", "id", json!("task-missing"))
+            .unwrap();
+        absent_bundle.history.clear();
+        absent_bundle.query_reads[0].op = "absent".to_owned();
+        worker.apply_bundle(&absent_bundle).unwrap();
+        let non_absent_reads = worker
+            .observed_query_reads()
+            .unwrap()
+            .into_iter()
+            .filter(|read| read.op != "absent")
+            .collect::<Vec<_>>();
+        for read in non_absent_reads {
+            worker.forget_observed_query_read(&read).unwrap();
+        }
+        worker.checkout_branch("merge").unwrap();
+        assert_eq!(
+            worker
+                .branches()
+                .unwrap()
+                .into_iter()
+                .find(|branch| branch.id == "merge")
+                .unwrap()
+                .source_branch_ids,
+            vec!["left"]
+        );
+    }
+
+    upstream.remove_branch_source("merge", "left").unwrap();
+    let mut reopened =
+        Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
+    let observed = reopened.observed_query_reads().unwrap();
+    assert!(observed.iter().any(|read| {
+        read.branch_id == "merge"
+            && read.table == "tasks"
+            && read.field == "id"
+            && read.op == "absent"
+            && read.value == json!("task-missing")
+    }));
+    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+    reopened.checkout_branch("merge").unwrap();
+
+    assert!(reopened
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == "merge")
+        .unwrap()
+        .source_branch_ids
+        .is_empty());
+}
+
+#[test]
 fn branch_global_acceptance_does_not_make_branch_row_visible_on_main_after_sync() {
     let schema = support::tasks_schema();
     let mut alice =
