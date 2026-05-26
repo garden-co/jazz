@@ -945,3 +945,18 @@ verb for testing provenance changes instead of only branch creation-time
 sources.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 215 whole-system tests.
+
+## 2026-05-26 03:39 PDT
+
+Added coverage that rejected branch conflict resolutions restore conflict
+metadata. A merge branch first shows two source candidates, then a branch-local
+resolution hides the conflict, then rejecting the resolution transaction makes
+the two candidates and their `conflict_count = 2` surface again.
+
+Discovery: this invariant already falls out of mutable transaction fate plus
+projection rebuild. That is an encouraging sign for the "mutable fate on
+`jazz_tx` is replayable enough" thesis: rejecting the resolver does not need a
+special undo log; it just changes which history rows are eligible for current
+projection.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 216 whole-system tests.

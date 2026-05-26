@@ -1280,6 +1280,70 @@ fn branch_conflict_resolution_transaction_clears_conflict_meta_after_rebuild() {
 }
 
 #[test]
+fn rejected_branch_conflict_resolution_restores_conflict_meta() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+    let resolution_tx = alice
+        .resolve_row_conflict(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Resolved title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    assert_eq!(
+        alice.read_rows_with_conflict_meta("tasks").unwrap()[0].conflict_count,
+        0
+    );
+
+    alice
+        .reject_transaction(&resolution_tx, "policy_denied")
+        .unwrap();
+
+    let rows = alice.read_rows_with_conflict_meta("tasks").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.id == "task-1"));
+    assert!(rows.iter().all(|row| row.conflict_count == 2));
+}
+
+#[test]
 fn branch_conflict_candidates_include_pinned_base_candidate() {
     let schema = support::tasks_schema();
     let mut alice =
