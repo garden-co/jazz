@@ -321,6 +321,7 @@ impl Runtime {
             let value = record
                 .values
                 .get(&field.name)
+                .or_else(|| record.values.get(&field.storage_name))
                 .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
             columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
                 field,

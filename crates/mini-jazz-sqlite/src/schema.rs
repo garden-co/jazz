@@ -63,6 +63,7 @@ pub(crate) struct TableDef {
 #[derive(Clone, Debug)]
 pub(crate) struct FieldDef {
     pub(crate) name: String,
+    pub(crate) storage_name: String,
     pub(crate) kind: FieldKind,
 }
 
@@ -109,6 +110,15 @@ impl TableBuilder {
     pub fn text(&mut self, name: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
+            storage_name: name.to_owned(),
+            kind: FieldKind::Text,
+        });
+    }
+
+    pub fn text_lens(&mut self, name: &str, stored_as: &str) {
+        self.table.fields.push(FieldDef {
+            name: name.to_owned(),
+            storage_name: stored_as.to_owned(),
             kind: FieldKind::Text,
         });
     }
@@ -116,6 +126,7 @@ impl TableBuilder {
     pub fn bool(&mut self, name: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
+            storage_name: name.to_owned(),
             kind: FieldKind::Bool,
         });
     }
@@ -123,6 +134,7 @@ impl TableBuilder {
     pub fn ref_(&mut self, name: &str, table: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
+            storage_name: name.to_owned(),
             kind: FieldKind::Ref {
                 table: table.to_owned(),
             },
@@ -296,8 +308,8 @@ pub(crate) fn current_table(table: &str) -> String {
 
 pub(crate) fn storage_column(field: &FieldDef) -> String {
     match field.kind {
-        FieldKind::Ref { .. } => format!("{}_row_num", field.name),
-        _ => field.name.clone(),
+        FieldKind::Ref { .. } => format!("{}_row_num", field.storage_name),
+        _ => field.storage_name.clone(),
     }
 }
 

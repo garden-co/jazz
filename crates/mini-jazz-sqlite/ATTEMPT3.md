@@ -334,3 +334,22 @@ Limitations:
 - Policy for historical base rows is not fully re-evaluated recursively; this
   path should be revisited once recursive policy lowering exists.
 - Sync payloads do not carry branch provenance yet.
+
+## 2026-05-25 17:25 PDT
+
+First lens slice is green. A new schema can declare `text_lens("name",
+"title")`; old sync/history values containing `title` apply into the new schema
+and read back as semantic `name`.
+
+Decision: model this first lens as field-level semantic-name-to-storage-name
+mapping. This is the smallest useful compatibility mechanism and immediately
+exposed that incoming sync must accept both the new semantic field name and the
+old stored field name.
+
+Limitations:
+
+- This is not full schema-versioned storage. The table names are still
+  `schema_v1`, and writes through the new schema store into the old column.
+- No lens catalogue, compatibility check, generated inverse lens, or
+  copy-on-write-forward mechanism exists yet.
+- Policy/lens composition is untested.
