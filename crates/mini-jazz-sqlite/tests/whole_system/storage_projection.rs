@@ -136,3 +136,32 @@ fn delete_is_history_not_removal() {
     assert_eq!(stats.history_rows, 3);
     assert_eq!(stats.current_rows, 1);
 }
+
+#[test]
+fn deleted_generic_row_can_be_restored_as_new_history_version() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Before delete")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.delete_row("notes", "note-1").unwrap();
+    assert!(alice.read_rows("notes").unwrap().is_empty());
+
+    alice.restore_deleted_row("notes", "note-1").unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("Before delete"));
+    alice.clear_current_projection_for_test().unwrap();
+    alice.rebuild_current_projection().unwrap();
+    assert_eq!(alice.read_rows("notes").unwrap().len(), 1);
+}

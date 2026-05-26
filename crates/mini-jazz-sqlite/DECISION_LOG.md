@@ -706,3 +706,9 @@ Design lesson: versioned read sets should be inspectable as semantic data, not o
 Tightened the versioned read-set slice after review. Storage format is now version 2 so old v1 files fail fast instead of missing the new `observed_tx_num` column at runtime. Branch transactions that read inherited pinned-base rows now record the observed base transaction. Stale-exclusive prevalidation also preserves branch base metadata when the incoming bundle introduces the branch. Full mini crate suite is green with 193 tests.
 
 Design lesson: adding read-version causality touches three boundaries at once: storage compatibility, effective branch visibility, and sync prevalidation order. The fixes make the first implementation less misleading, but branch source overlays and absent/range reads still need their own version semantics.
+
+## 2026-05-26 02:49 PDT
+
+Added a first restore/undelete operation for generic rows. `restore_deleted_row(table, id)` reads the latest delete tombstone values and writes a new visible history version, surviving current-projection rebuild. Full mini crate suite is green with 194 tests.
+
+Design lesson: undoing a delete can stay append-only: restore is not removal of the tombstone, it is a new transaction derived from the tombstone's stored values. The current API is minimal and needs policy semantics, sync coverage, and branch-base behavior before being considered product-shaped.

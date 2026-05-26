@@ -1586,6 +1586,57 @@ impl Runtime {
         Ok(tx_id)
     }
 
+    pub fn restore_deleted_row(&mut self, table_name: &str, id: &str) -> Result<String> {
+        let table = self.schema.table_def(table_name)?;
+        let row_num = row_num(&self.conn, id)?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| {
+                format!(
+                    "h.{}",
+                    crate::schema::quote_ident(&crate::schema::storage_column(field))
+                )
+            })
+            .collect::<Vec<_>>();
+        let sql = format!(
+            "SELECT {}
+             FROM {} h
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.row_num = ?
+               AND h.j_branch_num = ?
+               AND h.op = 3
+               AND tx.outcome != ?
+             ORDER BY tx.global_epoch DESC NULLS LAST, h.tx_num DESC
+             LIMIT 1",
+            field_columns.join(", "),
+            crate::schema::history_table(table_name)
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map(
+            params![row_num, self.branch_num, tx::OUTCOME_REJECTED],
+            |row| {
+                (0..table.fields.len())
+                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            },
+        )?;
+        let row = rows
+            .next()
+            .transpose()?
+            .ok_or_else(|| crate::Error::new(format!("row {id} has no deleted version")))?;
+        let mut values = BTreeMap::new();
+        for (idx, field) in table.fields.iter().enumerate() {
+            values.insert(
+                field.name.clone(),
+                query::sql_value_to_json(&self.conn, field, &row[idx])?,
+            );
+        }
+        drop(rows);
+        drop(stmt);
+        self.write_row(table_name, id, values, 1)
+    }
+
     pub fn clear_current_projection_for_test(&mut self) -> Result<()> {
         projection::clear(&self.conn, &self.schema)
     }
