@@ -1790,3 +1790,20 @@ the current row for non-insert operations.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 created_by_write_policy_allows_self_create_but_rejects_other_writer` passes.
+
+## 2026-05-25 20:01 PDT
+
+Starting atomic untrusted transaction rejection. Sidecar review flagged that
+`apply_untrusted_bundle` validates records after applying the bundle; if one
+record in a multi-write transaction fails, all sibling current effects from the
+same sealed transaction must disappear too.
+
+## 2026-05-25 20:02 PDT
+
+Atomic untrusted transaction rejection was already green after the earlier
+projection rebuild-on-rejection fix. Added explicit coverage: a Bob-authored
+two-write transaction with one allowed sibling and one denied sibling is rejected
+as a whole, leaving no todo rows visible at the trusted edge.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+trusted_edge_rejects_untrusted_transaction_atomically` passes.
