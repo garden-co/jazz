@@ -54,6 +54,72 @@ fn rejection_subscription_reports_new_sync_rejections_with_detail_once() {
 }
 
 #[test]
+fn restarted_rejection_subscription_baselines_old_rejections_and_reports_later_ones() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+    let schema = support::tasks_schema();
+    let mut authority =
+        Runtime::open_with_schema(Storage::Memory, "authority", "alice", schema.clone()).unwrap();
+
+    let first = authority
+        .insert_row(
+            "tasks",
+            "task-first",
+            BTreeMap::from([
+                ("title".to_owned(), json!("First rejection")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority
+        .reject_transaction_with_detail(&first, "policy_denied", json!({"n": 1}))
+        .unwrap();
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(&authority.export_table_history("tasks").unwrap())
+            .unwrap();
+    }
+
+    let mut worker =
+        Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
+    let mut subscription = worker.subscribe_rejections().unwrap();
+    assert_eq!(subscription.initial_rejections().len(), 1);
+    assert!(worker
+        .poll_rejections(&mut subscription)
+        .unwrap()
+        .is_empty());
+
+    let second = authority
+        .insert_row(
+            "tasks",
+            "task-second",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Second rejection")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority
+        .reject_transaction_with_detail(&second, "policy_denied", json!({"n": 2}))
+        .unwrap();
+    worker
+        .apply_bundle(&authority.export_table_history("tasks").unwrap())
+        .unwrap();
+
+    let events = worker.poll_rejections(&mut subscription).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tx_id, second);
+    assert_eq!(events[0].detail, Some(json!({"n": 2})));
+}
+
+#[test]
 fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

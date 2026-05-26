@@ -1337,3 +1337,18 @@ explicit: observed facts may repeat conceptually, but sync payloads should not
 multiply the same row version.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 238 whole-system tests.
+
+## 2026-05-26 04:57 PDT
+
+Added durable rejection subscription baseline coverage. After a worker persists
+an existing rejection and restarts, subscribing to rejections treats that
+existing rejection as initial state rather than a new callback event; a later
+sync-delivered rejection still emits once with its structured detail.
+
+Discovery: the minimal rejection stream behaves like a subscription over durable
+transaction fate, not an append-only event log replay. That seems right for a
+global error callback: app startup can inspect initial rejected transactions
+separately, while callbacks fire for new transitions relative to the
+subscription baseline.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 239 whole-system tests.
