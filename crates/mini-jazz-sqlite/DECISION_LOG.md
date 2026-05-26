@@ -483,3 +483,14 @@ Design lesson: local listener semantics and sync query-scope semantics can share
 the same simple rerun/diff posture for now. The abstraction should probably
 become a common query descriptor instead of separate ad-hoc subscription and
 bundle predicate shapes.
+
+## 2026-05-26 01:02 PDT
+
+Added semantic schema validation before SQLite DDL. Schemas now reject duplicate
+semantic fields, duplicate physical storage fields introduced by lenses, and
+indexes that reference unknown fields. Full mini crate suite is green with 163
+tests.
+
+Design lesson: treating SQLite errors as the schema validator leaks the lowering
+layer too early. The core should reject incoherent Jazz schemas with Jazz-shaped
+messages before physical DDL is even attempted.

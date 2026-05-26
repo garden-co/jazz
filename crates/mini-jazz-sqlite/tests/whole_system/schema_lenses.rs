@@ -291,6 +291,45 @@ fn user_columns_with_system_prefix_are_escaped_physically() {
 }
 
 #[test]
+fn schema_validation_rejects_ambiguous_fields_and_indexes() {
+    let duplicate_semantic = SchemaDef::new().table("records", |table| {
+        table.text("title");
+        table.bool("title");
+    });
+    let err = match Runtime::open_with_schema(Storage::Memory, "node", "alice", duplicate_semantic)
+    {
+        Ok(_) => panic!("duplicate semantic field opened successfully"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("duplicate field records.title"));
+
+    let duplicate_storage = SchemaDef::new().table("records", |table| {
+        table.text("title");
+        table.text_lens("name", "title");
+    });
+    let err = match Runtime::open_with_schema(Storage::Memory, "node", "alice", duplicate_storage) {
+        Ok(_) => panic!("duplicate storage field opened successfully"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("duplicate storage field records.title"));
+
+    let unknown_index_field = SchemaDef::new().table("records", |table| {
+        table.text("title");
+        table.index("bad", ["missing"]);
+    });
+    let err = match Runtime::open_with_schema(Storage::Memory, "node", "alice", unknown_index_field)
+    {
+        Ok(_) => panic!("unknown index field opened successfully"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("index records.bad references unknown field missing"));
+}
+
+#[test]
 fn index_only_schema_changes_are_semantically_compatible() {
     let unindexed = SchemaDef::new().table("tasks", |table| {
         table.text("title");

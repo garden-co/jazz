@@ -184,6 +184,7 @@ impl TableBuilder {
 }
 
 pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
+    validate_schema_shape(schema)?;
     validate_policy_cycles(schema)?;
     conn.execute_batch(
         r#"
@@ -264,6 +265,44 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
 
     for table in schema.tables() {
         install_table(conn, table)?;
+    }
+    Ok(())
+}
+
+fn validate_schema_shape(schema: &SchemaDef) -> Result<()> {
+    for table in schema.tables() {
+        let mut fields = BTreeSet::new();
+        let mut storage_fields = BTreeSet::new();
+        for field in &table.fields {
+            if !fields.insert(field.name.clone()) {
+                return Err(crate::Error::new(format!(
+                    "duplicate field {}.{}",
+                    table.name, field.name
+                )));
+            }
+            if !storage_fields.insert(storage_column(field)) {
+                return Err(crate::Error::new(format!(
+                    "duplicate storage field {}.{}",
+                    table.name, field.storage_name
+                )));
+            }
+            if let FieldKind::Ref { table: ref_table } = &field.kind {
+                schema.table_def(ref_table)?;
+            }
+        }
+        for index in &table.indexes {
+            for column in &index.columns {
+                if column == "$createdAt" || column == "$updatedAt" {
+                    continue;
+                }
+                if !table.fields.iter().any(|field| field.name == *column) {
+                    return Err(crate::Error::new(format!(
+                        "index {}.{} references unknown field {}",
+                        table.name, index.name, column
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
