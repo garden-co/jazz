@@ -1111,3 +1111,23 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Design question: this is a strong semantic stance. If authorities can reverse
 rejections later, that should be modeled as a new fate transition with explicit
 provenance rather than ordinary accepted/rejected bundle reordering.
+
+## 2026-05-25 18:50 PDT
+
+Starting first read-set materialization. Narrow target: when a write policy
+checks a referenced parent row (`write_if_ref_readable`), record that parent row
+as a policy read item for the transaction. This is not full predicate/range
+read-set capture, but it gives transaction validation a concrete table to build
+on.
+
+## 2026-05-25 18:52 PDT
+
+First policy read-set materialization is green. Added `jazz_tx_read` and record
+reason `1` rows when `write_if_ref_readable` checks a parent ref. Added
+`transaction_policy_read_rows(tx_id)` as a probe.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+58 tests.
+
+Open issue: read-set export/sync and predicate/range read sets are still absent.
+This only records direct row dependencies for write-policy checks.

@@ -229,6 +229,14 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           PRIMARY KEY (tx_num, table_name, row_num)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS jazz_tx_read (
+          tx_num INTEGER NOT NULL,
+          table_name TEXT NOT NULL,
+          row_num INTEGER NOT NULL,
+          reason INTEGER NOT NULL,
+          PRIMARY KEY (tx_num, table_name, row_num, reason)
+        ) WITHOUT ROWID;
+
         CREATE TABLE IF NOT EXISTS jazz_row_id (
           row_num INTEGER PRIMARY KEY,
           table_name TEXT NOT NULL,

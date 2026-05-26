@@ -541,6 +541,23 @@ impl Runtime {
             .map_err(Into::into)
     }
 
+    pub fn transaction_policy_read_rows(&self, tx_id: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT reads.table_name, ids.row_id
+             FROM jazz_tx_read reads
+             JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             JOIN jazz_row_id ids ON ids.row_num = reads.row_num
+             WHERE tx.tx_id = ?
+               AND reads.reason = 1
+             ORDER BY reads.table_name, ids.row_id",
+        )?;
+        let rows = stmt.query_map(params![tx_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn create_branch(&mut self, branch_id: &str, base_global_epoch: Option<i64>) -> Result<()> {
         branch::ensure(&self.conn, branch_id, base_global_epoch, now_ms())?;
         Ok(())
@@ -762,6 +779,13 @@ struct InsertRowInTx<'a> {
 fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
     let table = args.schema.table_def(args.table_name)?;
     let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
+    record_policy_read_set_for_write(
+        args.db,
+        table,
+        &table.write_policy,
+        args.values,
+        args.tx_num,
+    )?;
     let allowed = args.trusted
         || policy::write_allowed(
             args.db,
@@ -842,6 +866,46 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
             &current_values,
         )?;
     }
+    Ok(())
+}
+
+fn record_policy_read_set_for_write(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    policy: &PolicyDef,
+    values: &BTreeMap<String, JsonValue>,
+    tx_num: i64,
+) -> Result<()> {
+    let PolicyDef::RefReadable { field } = policy else {
+        return Ok(());
+    };
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *field)
+        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+    let FieldKind::Ref { table } = &field.kind else {
+        return Ok(());
+    };
+    let Some(row_id) = values.get(&field.name).and_then(JsonValue::as_str) else {
+        return Ok(());
+    };
+    let row_num = ensure_row_id(conn, table, row_id)?;
+    record_tx_read(conn, tx_num, table, row_num, 1)
+}
+
+fn record_tx_read(
+    conn: &Connection,
+    tx_num: i64,
+    table_name: &str,
+    row_num: i64,
+    reason: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO jazz_tx_read (tx_num, table_name, row_num, reason)
+         VALUES (?, ?, ?, ?)",
+        params![tx_num, table_name, row_num, reason],
+    )?;
     Ok(())
 }
 
