@@ -116,6 +116,48 @@ fn id_magic_field_query_matches_public_row_id() {
 }
 
 #[test]
+fn created_by_magic_field_query_matches_creator_principal() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-alice",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Alice")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "notes",
+        "note-bob",
+        BTreeMap::from([
+            ("body".to_owned(), json!("Bob")),
+            ("pinned".to_owned(), json!(true)),
+        ]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("notes").unwrap())
+        .unwrap();
+
+    let rows = alice
+        .read_rows_where_eq("notes", "$createdBy", json!("bob"))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-bob");
+    assert!(alice
+        .read_rows_where_eq("notes", "$createdBy", json!(true))
+        .unwrap_err()
+        .to_string()
+        .contains("$createdBy equality expects a string"));
+}
+
+#[test]
 fn contains_query_scope_resync_removes_row_that_left_predicate() {
     let schema = support::notes_schema();
     let mut alice =

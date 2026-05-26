@@ -42,6 +42,18 @@ impl QueryContext<'_> {
                 .filter(|row| row.id == id)
                 .collect());
         }
+        if field_name == "$createdBy" {
+            let Some(created_by) = value.as_str() else {
+                return Err(crate::Error::new(
+                    "$createdBy equality expects a string value",
+                ));
+            };
+            return Ok(self
+                .read_rows(table_name)?
+                .into_iter()
+                .filter(|row| row.created_by == created_by)
+                .collect());
+        }
         let table = self.schema.table_def(table_name)?;
         let field = table
             .fields

@@ -293,3 +293,13 @@ Full mini crate suite is green with 145 tests.
 Design lesson: product magic fields can start as semantic query lowering, even
 if the first implementation is an in-memory filter over visible rows. The spec
 should distinguish product contract from eventual SQL/index lowering.
+
+## 2026-05-26 00:34 PDT
+
+Added `$createdBy` as a second semantic magic-field equality query. Full mini
+crate suite is green with 146 tests.
+
+Design lesson: magic fields need a small registry/planner rather than being
+special-cased forever. `id` and `$createdBy` can filter over decoded visible
+rows for now, but `$createdAt` and pagination/order will need SQL lowering and
+observed range/page facts.
