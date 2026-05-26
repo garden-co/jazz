@@ -694,3 +694,24 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Open issue: this is still a prototype API. A real authority path should probably
 construct exclusive/global transactions through a distinct trusted submission
 route rather than a local builder method named `exclusive_at_global`.
+
+## 2026-05-25 18:09 PDT
+
+Starting durable-worker topology reconciliation. Scenario: memory tab writes an
+optimistic mergeable transaction, durable worker stores it, worker restarts, then
+the tab receives/exports a rejected fate update and the reopened worker must
+repair its current projection without losing history.
+
+## 2026-05-25 18:10 PDT
+
+Durable worker rejection reconciliation is green. A file-backed worker can apply
+an optimistic table-scope bundle, restart, then apply the same tx with rejected
+fate and repair current projection while preserving the replayable history row.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+41 tests.
+
+Learning: table-scope export is intentionally narrower than query-scope export.
+In this test the todo row's project ref is represented as an ID/row mapping, but
+the project history row is not included because the export is not a todo query
+scope. This distinction is worth keeping explicit in the next spec.

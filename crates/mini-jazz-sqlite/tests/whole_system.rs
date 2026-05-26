@@ -90,6 +90,41 @@ fn rejected_fate_update_repairs_peer_current_projection() {
 }
 
 #[test]
+fn durable_worker_reconciles_rejected_fate_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+
+    let mut tab = Runtime::open(Storage::Memory, "alice-tab", "alice").unwrap();
+    tab.create_project("project-1", "Spec work").unwrap();
+    let tx = tab
+        .create_todo("todo-1", "Optimistic before restart", false, "project-1")
+        .unwrap();
+
+    {
+        let mut worker =
+            Runtime::open(Storage::File(worker_path.clone()), "alice-worker", "alice").unwrap();
+        worker
+            .apply_bundle(&tab.export_table_history("todos").unwrap())
+            .unwrap();
+        assert_eq!(worker.open_todos().unwrap().len(), 1);
+    }
+
+    tab.reject_transaction(&tx, "policy_denied").unwrap();
+
+    let mut reopened =
+        Runtime::open(Storage::File(worker_path.clone()), "alice-worker", "alice").unwrap();
+    assert_eq!(reopened.open_todos().unwrap().len(), 1);
+    reopened
+        .apply_bundle(&tab.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(reopened.open_todos().unwrap().is_empty());
+    let stats = reopened.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 1);
+    assert_eq!(stats.rejected_transactions, 1);
+}
+
+#[test]
 fn rejecting_generic_transaction_repairs_schema_driven_projection() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");
