@@ -77,6 +77,45 @@ fn text_contains_query_matches_status_quo_substring_semantics() {
 }
 
 #[test]
+fn id_magic_field_query_matches_public_row_id() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-public-id",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Find by id")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-other",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Other")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice
+        .read_rows_where_eq("notes", "id", json!("note-public-id"))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-public-id");
+    assert!(alice
+        .read_rows_where_eq("notes", "id", json!(7))
+        .unwrap_err()
+        .to_string()
+        .contains("id equality expects a string"));
+}
+
+#[test]
 fn contains_query_scope_resync_removes_row_that_left_predicate() {
     let schema = support::notes_schema();
     let mut alice =

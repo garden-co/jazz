@@ -283,3 +283,13 @@ Added fail-closed catalogue/scope coverage; full mini crate suite is green with
 Design lesson: applying a bundle inside one SQLite transaction is paying off.
 Catalogue/schema gaps can be treated as unsettled/fail-closed without leaving
 half-imported txs or rows that need a later scrub.
+
+## 2026-05-26 00:33 PDT
+
+Added `id` as the first generic magic-field query. `read_rows_where_eq(table,
+"id", "...")` now filters by public row id and rejects non-string id values.
+Full mini crate suite is green with 145 tests.
+
+Design lesson: product magic fields can start as semantic query lowering, even
+if the first implementation is an in-memory filter over visible rows. The spec
+should distinguish product contract from eventual SQL/index lowering.

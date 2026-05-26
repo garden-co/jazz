@@ -32,6 +32,16 @@ impl QueryContext<'_> {
         field_name: &str,
         value: JsonValue,
     ) -> Result<Vec<RowView>> {
+        if field_name == "id" {
+            let Some(id) = value.as_str() else {
+                return Err(crate::Error::new("id equality expects a string value"));
+            };
+            return Ok(self
+                .read_rows(table_name)?
+                .into_iter()
+                .filter(|row| row.id == id)
+                .collect());
+        }
         let table = self.schema.table_def(table_name)?;
         let field = table
             .fields
