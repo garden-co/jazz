@@ -346,6 +346,14 @@ impl Runtime {
             &branch_nums,
             &row_nums,
         )?);
+        history.extend(export_recursive_scope_repair_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            parent_field,
+            &branch_nums,
+            &row_nums,
+        )?);
         history.extend(export_policy_dependency_history(
             &self.conn,
             &self.schema,
@@ -2814,6 +2822,59 @@ fn export_deleted_recursive_descendant_history(
              )
          )
          SELECT row_num FROM deleted_tree",
+        history_table = crate::schema::history_table(table_name),
+        branch_filter = branch_filter_sql("h", branch_nums),
+        child_branch_filter = branch_filter_sql("child", branch_nums),
+        rejected = tx::OUTCOME_REJECTED,
+        parent_placeholders = (0..parent_row_nums.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_nums = stmt
+        .query_map(params_from_iter(parent_row_nums.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), None)
+}
+
+fn export_recursive_scope_repair_history(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    parent_field: &str,
+    branch_nums: &[i64],
+    parent_row_nums: &[i64],
+) -> Result<Vec<HistoryRecord>> {
+    if parent_row_nums.is_empty() {
+        return Ok(Vec::new());
+    }
+    let table = schema.table_def(table_name)?;
+    let field = table
+        .fields
+        .iter()
+        .find(|field| field.name == parent_field)
+        .ok_or_else(|| crate::Error::new(format!("unknown ref field {parent_field}")))?;
+    let parent_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let sql = format!(
+        "WITH RECURSIVE historical_tree(row_num) AS (
+           SELECT h.row_num
+           FROM {history_table} h
+           JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+           WHERE {branch_filter}
+             AND h.{parent_column} IN ({parent_placeholders})
+             AND tx.outcome != {rejected}
+           UNION
+           SELECT child.row_num
+           FROM {history_table} child
+           JOIN jazz_tx child_tx ON child_tx.tx_num = child.tx_num
+           JOIN historical_tree parent ON child.{parent_column} = parent.row_num
+           WHERE {child_branch_filter}
+             AND child_tx.outcome != {rejected}
+         )
+         SELECT DISTINCT row_num FROM historical_tree",
         history_table = crate::schema::history_table(table_name),
         branch_filter = branch_filter_sql("h", branch_nums),
         child_branch_filter = branch_filter_sql("child", branch_nums),

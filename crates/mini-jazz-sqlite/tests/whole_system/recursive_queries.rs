@@ -541,6 +541,92 @@ fn recursive_query_scope_sync_exports_deleted_descendant_subtree_tombstones() {
 }
 
 #[test]
+fn recursive_query_scope_sync_repairs_reparented_descendant_subtree() {
+    let schema = support::folders_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "other-root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Other root")),
+                ("parent".to_owned(), json!("other-root")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Child")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "grandchild",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Grandchild")),
+                ("parent".to_owned(), json!("child")),
+            ]),
+        )
+        .unwrap();
+
+    peer.apply_bundle(
+        &alice
+            .export_recursive_refs("folders", "root", "parent")
+            .unwrap(),
+    )
+    .unwrap();
+    let ids = peer
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root", "child", "grandchild"]);
+
+    alice
+        .update_row(
+            "folders",
+            "child",
+            BTreeMap::from([("parent".to_owned(), json!("other-root"))]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_recursive_refs("folders", "root", "parent")
+            .unwrap(),
+    )
+    .unwrap();
+
+    let ids = peer
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root"]);
+}
+
+#[test]
 fn recursive_query_scope_sync_includes_recursive_policy_ancestors() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {

@@ -53,3 +53,16 @@ That base is not always the row in the checked-out branch current projection:
 it may be the sparse-overlay inherited main row, or a pinned historical snapshot.
 This is a good candidate for an architecture cleanup boundary rather than more
 ad hoc helpers inside `runtime.rs`.
+
+## 2026-05-26 00:07 PDT
+
+Second slice green: added recursive query-scope repair for reparenting. Prior
+coverage handled descendant deletion tombstones, but not rows that left the
+recursive scope because an edge changed. The red test showed peers retained
+`child` and `grandchild` after `child.parent` moved to another root.
+
+Implementation is intentionally conservative: export history for rows that
+historically participated in the recursive scope so the receiver can learn the
+edge moved. This is likely over-broad for large trees, but it gives a correct
+baseline and identifies a future optimization target: durable recursive
+predicate/read-set state rather than ad hoc historical-tree export.
