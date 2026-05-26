@@ -141,6 +141,16 @@ impl TableBuilder {
         });
     }
 
+    pub fn ref_lens(&mut self, name: &str, stored_as: &str, table: &str) {
+        self.table.fields.push(FieldDef {
+            name: name.to_owned(),
+            storage_name: stored_as.to_owned(),
+            kind: FieldKind::Ref {
+                table: table.to_owned(),
+            },
+        });
+    }
+
     pub fn index<const N: usize>(&mut self, name: &str, columns: [&str; N]) {
         self.table.indexes.push(IndexDef {
             name: name.to_owned(),

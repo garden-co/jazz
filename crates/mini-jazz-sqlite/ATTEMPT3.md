@@ -785,3 +785,23 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Learning: the mutable-fate projection repair works for source-branch conflict
 candidates too, because candidate reads join source branch current rows against
 `jazz_tx.outcome`.
+
+## 2026-05-25 18:16 PDT
+
+Starting lens + policy composition. Target: old schema writes a ref field named
+`project`; new schema exposes the same storage column as semantic field
+`workspace` and uses `read_if_ref_readable("workspace")`. This should prove
+renamed refs can still participate in policy lowering and sync.
+
+## 2026-05-25 18:17 PDT
+
+Renamed ref lenses now compose with read policy. Added `ref_lens(name,
+stored_as, table)`, then verified an old-schema `project` ref can be read as
+new-schema semantic field `workspace` and used by `read_if_ref_readable`.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+45 tests.
+
+Learning: the existing field model (`name` plus `storage_name`) was already the
+right abstraction for this. The missing piece was only exposing the same lens
+operation for refs, not just text columns.

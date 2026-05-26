@@ -1648,6 +1648,89 @@ fn rename_lens_writes_export_current_semantic_field_name() {
 }
 
 #[test]
+fn renamed_ref_lens_participates_in_read_policy() {
+    let old_schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+        });
+    let new_schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_lens("workspace", "project", "projects");
+            table.read_if_ref_readable("workspace");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", old_schema.clone())
+            .unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", old_schema).unwrap();
+    let mut reader =
+        Runtime::open_with_schema(Storage::Memory, "alice-reader", "alice", new_schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-visible",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible")),
+                ("project".to_owned(), json!("project-alice")),
+            ]),
+        )
+        .unwrap();
+
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+    )
+    .unwrap();
+    bob.insert_row(
+        "todos",
+        "todo-hidden",
+        BTreeMap::from([
+            ("title".to_owned(), json!("Hidden")),
+            ("project".to_owned(), json!("project-bob")),
+        ]),
+    )
+    .unwrap();
+
+    reader
+        .apply_bundle(&alice.export_table_history("projects").unwrap())
+        .unwrap();
+    reader
+        .apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    reader
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    reader
+        .apply_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let rows = reader.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-visible");
+    assert_eq!(rows[0].values["workspace"], json!("project-alice"));
+    assert!(!rows[0].values.contains_key("project"));
+}
+
+#[test]
 fn branch_sync_preserves_branch_provenance() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
