@@ -387,14 +387,13 @@ fn validate_server_config(
 
 fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, peer={}, topology={:?}",
+        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, topology={:?}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
         auth_config.jwt_public_key.is_some(),
         auth_config.auth_cookie_name.is_some(),
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
-        auth_config.peer_secret.is_some(),
         topology
     );
 }

@@ -34,7 +34,6 @@ pub struct TestingServerBuilder {
     rocksdb_storage: bool,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
-    peer_secret: Option<String>,
     upstream_url: Option<String>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
@@ -108,11 +107,6 @@ impl TestingServerBuilder {
 
     pub fn with_backend_secret(mut self, secret: impl Into<String>) -> Self {
         self.backend_secret = Some(secret.into());
-        self
-    }
-
-    pub fn with_peer_secret(mut self, secret: impl Into<String>) -> Self {
-        self.peer_secret = Some(secret.into());
         self
     }
 
@@ -217,7 +211,6 @@ impl TestingServer {
             rocksdb_storage,
             admin_secret,
             backend_secret,
-            peer_secret,
             upstream_url,
             jwks_url,
             auth_clock,
@@ -248,7 +241,6 @@ impl TestingServer {
             allow_local_first_auth: true,
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
-            peer_secret,
             clock: auth_clock.clone(),
             ..Default::default()
         };

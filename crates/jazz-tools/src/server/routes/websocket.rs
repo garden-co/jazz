@@ -11,9 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::middleware::auth::{
-    extract_session, validate_admin_secret, validate_backend_secret, validate_peer_secret,
-};
+use crate::middleware::auth::{extract_session, validate_admin_secret, validate_backend_secret};
 use crate::server::{ConnectionState, ServerState};
 use crate::sync_manager::ClientId;
 
@@ -42,7 +40,6 @@ pub(super) async fn ws_handler(
 /// Outcome of authenticating a WS handshake.
 #[derive(Debug)]
 pub(super) enum WsClientSetup {
-    Peer,
     Backend,
     Session(crate::query_manager::session::Session),
 }
@@ -50,10 +47,9 @@ pub(super) enum WsClientSetup {
 /// Authenticate a WebSocket `AuthHandshake`.
 ///
 /// Priority is:
-/// 1. legacy `peer_secret` valid → `WsClientSetup::Peer`
-/// 2. `admin_secret` valid → `WsClientSetup::Backend`
-/// 3. `backend_secret` present + no session header → `WsClientSetup::Backend`
-/// 4. Otherwise → `extract_session` → `WsClientSetup::Session`
+/// 1. `admin_secret` valid → `WsClientSetup::Backend`
+/// 2. `backend_secret` present + no session header → `WsClientSetup::Backend`
+/// 3. Otherwise → `extract_session` → `WsClientSetup::Session`
 ///
 /// Returns `Err(message)` on auth failure; the caller should send a
 /// `ServerEvent::Error` frame before closing.
@@ -66,12 +62,6 @@ pub(super) async fn authenticate_ws_handshake(
     use base64::Engine as _;
 
     let auth = &handshake.auth;
-
-    if let Some(peer_secret) = auth.peer_secret.as_deref() {
-        validate_peer_secret(Some(peer_secret), &state.auth_config)
-            .map_err(|(_, msg)| msg.to_string())?;
-        return Ok(WsClientSetup::Peer);
-    }
 
     // `admin_secret` is an explicit request to run this WS transport as the
     // backend. Validate it first and short-circuit all user-scoped auth.
@@ -153,7 +143,6 @@ fn request_uses_cookie_auth(
         || handshake.auth.backend_secret.is_some()
         || handshake.auth.backend_session.is_some()
         || handshake.auth.admin_secret.is_some()
-        || handshake.auth.peer_secret.is_some()
         || request_headers
             .get(axum::http::header::AUTHORIZATION)
             .is_some()
@@ -393,7 +382,6 @@ async fn handle_ws_connection(
         }
     };
     let role = match &setup {
-        WsClientSetup::Peer => "peer",
         WsClientSetup::Backend => "backend",
         WsClientSetup::Session(_) => "session",
     };
@@ -413,14 +401,6 @@ async fn handle_ws_connection(
 
     // 5. Ensure the client state in the runtime.
     match setup {
-        WsClientSetup::Peer => {
-            let _ = state
-                .runtime
-                .ensure_client_as_peer_with_catalogue_state_hash(
-                    client_id,
-                    handshake.catalogue_state_hash.as_deref(),
-                );
-        }
         WsClientSetup::Backend => {
             let _ = state
                 .runtime

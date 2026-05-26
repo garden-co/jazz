@@ -81,14 +81,12 @@ The current transport supports four main auth shapes:
 - JWT bearer auth for normal client sessions
 - backend-secret impersonation for trusted server-side callers
 - admin-secret auth for administrative, catalogue-specific, and edge upstream flows
-- legacy peer-secret auth for explicitly configured peer WebSocket links
 
 The important idea is that auth is checked at the HTTP boundary, while row-level visibility still lives in the runtime's query/policy machinery.
 
 Edge upstream auth is carried in the WebSocket auth handshake as `admin_secret`.
 The core validates it against `AuthConfig.admin_secret`, and the connection is
-registered with trusted backend-style sync permissions. Edges do not require or
-send a separate peer secret for upstream sync.
+registered with trusted backend-style sync permissions.
 
 Catalogue authority remains core-owned. Edge servers learn schemas,
 permissions, and migrations through the sync channel from core for runtime/query
