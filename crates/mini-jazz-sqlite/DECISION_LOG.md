@@ -688,3 +688,9 @@ Design lesson: branch provenance is already durable and syncable as system metad
 Extended conflict metadata through a filtered equality read. Multi-base branch candidates now keep `conflict_count` when queried through a field predicate, not only through the full-table conflict-meta read. Full mini crate suite is green with 189 tests.
 
 Design lesson: conflict metadata needs to be part of semantic row materialization before query filtering, otherwise query APIs will accidentally hide conflict state. The current implementation is intentionally simple and reruns a full conflict-meta read before filtering; a real lowering should push predicates into SQL while preserving candidate expansion.
+
+## 2026-05-26 02:41 PDT
+
+Implemented the first versioned read-set slice. `jazz_tx_read` now records the observed visible transaction for row reads, bundles carry `observed_tx_id`, and untrusted exclusive transactions are rejected with `stale_read_set` when a policy dependency changed since the sender observed it. Full mini crate suite is green with 190 tests.
+
+Design lesson: row identity read sets were enough for sync scoping, but exclusive validation really does need version identity. The first implementation validates pending exclusive bundles before acceptance using the authority's current view, then imports and rejects the stale transaction so replay/fate remains durable. It is intentionally narrow: absence reads, branch-specific base snapshots, and compact read-set encoding still need sharper treatment.

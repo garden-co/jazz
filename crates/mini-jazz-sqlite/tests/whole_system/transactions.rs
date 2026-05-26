@@ -434,6 +434,81 @@ fn exclusive_transaction_conflicts_are_row_based_not_column_based() {
 }
 
 #[test]
+fn untrusted_exclusive_transaction_rejects_stale_policy_read_set() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut authority =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
+    let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
+
+    let project_tx = authority
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Version 1"))]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&project_tx, 1)
+        .unwrap();
+    writer
+        .apply_bundle(&authority.export_table_history("projects").unwrap())
+        .unwrap();
+
+    let todo_tx = writer
+        .transaction()
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Stale exclusive")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+    let mut stale_bundle = writer.export_table_history("todos").unwrap();
+    let read = stale_bundle
+        .reads
+        .iter()
+        .find(|read| read.tx_id == todo_tx && read.table == "projects")
+        .unwrap();
+    assert_eq!(read.observed_tx_id.as_deref(), Some(project_tx.as_str()));
+    stale_bundle
+        .txs
+        .iter_mut()
+        .find(|tx| tx.tx_id == todo_tx)
+        .unwrap()
+        .conflict_mode = 2;
+
+    authority
+        .update_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Version 2"))]),
+        )
+        .unwrap();
+
+    authority.apply_untrusted_bundle(&stale_bundle).unwrap();
+
+    let info = authority.transaction_info(&todo_tx).unwrap();
+    assert_eq!(info.conflict_mode, "exclusive");
+    assert_eq!(info.rejection_code, Some("stale_read_set".to_owned()));
+    assert!(authority.read_rows("todos").unwrap().is_empty());
+}
+
+#[test]
 fn generic_transaction_delete_shadows_pinned_base_row() {
     let schema = support::tasks_schema();
     let mut alice =

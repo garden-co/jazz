@@ -61,6 +61,8 @@ pub struct ReadRecord {
     pub table: String,
     pub row_id: String,
     pub reason: i64,
+    #[serde(default)]
+    pub observed_tx_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

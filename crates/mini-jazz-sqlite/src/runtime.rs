@@ -597,7 +597,19 @@ impl Runtime {
         for read_record in &bundle.reads {
             let tx_num = tx::tx_num(&db, &read_record.tx_id)?;
             let row_num = ensure_row_id(&db, &read_record.table, &read_record.row_id)?;
-            record_tx_read(&db, tx_num, &read_record.table, row_num, read_record.reason)?;
+            let observed_tx_num = read_record
+                .observed_tx_id
+                .as_deref()
+                .map(|observed_tx_id| tx::tx_num(&db, observed_tx_id))
+                .transpose()?;
+            record_tx_read_with_observed(
+                &db,
+                tx_num,
+                &read_record.table,
+                row_num,
+                read_record.reason,
+                observed_tx_num,
+            )?;
         }
         for table in schema.tables() {
             db.execute(
@@ -754,14 +766,38 @@ impl Runtime {
     }
 
     pub fn apply_untrusted_bundle(&mut self, bundle: &Bundle) -> Result<()> {
+        let stale_exclusive_tx_ids = stale_exclusive_tx_ids_in_bundle(&self.conn, bundle)?;
         self.apply_bundle(bundle)?;
         let mut rejected = BTreeSet::new();
+        for tx_id in stale_exclusive_tx_ids {
+            self.reject_transaction_with_detail(
+                &tx_id,
+                "stale_read_set",
+                json!({
+                    "reason": "exclusive_read_dependency_changed",
+                }),
+            )?;
+            rejected.insert(tx_id);
+        }
         for record in &bundle.history {
             if rejected.contains(&record.tx_id) {
                 continue;
             }
             let tx_num = tx::tx_num(&self.conn, &record.tx_id)?;
             if tx_outcome(&self.conn, tx_num)? != tx::OUTCOME_PENDING {
+                continue;
+            }
+            if tx_conflict_mode(&self.conn, tx_num)? == tx::MODE_EXCLUSIVE
+                && tx_read_set_is_stale(&self.conn, tx_num, &record.branch_id)?
+            {
+                self.reject_transaction_with_detail(
+                    &record.tx_id,
+                    "stale_read_set",
+                    json!({
+                        "reason": "exclusive_read_dependency_changed",
+                    }),
+                )?;
+                rejected.insert(record.tx_id.clone());
                 continue;
             }
             let table = self.schema.table_def(&record.table)?;
@@ -2103,7 +2139,14 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
         op: args.op,
     })?;
     if args.op != 1 {
-        record_tx_read(args.db, args.tx_num, args.table_name, row_num, 2)?;
+        record_tx_read(
+            args.db,
+            args.tx_num,
+            args.table_name,
+            row_num,
+            args.branch_num,
+            2,
+        )?;
     }
     record_policy_read_set_for_write(
         args.db,
@@ -2320,7 +2363,7 @@ fn record_policy_read_set_for_write(
         return Ok(());
     };
     let row_num = ensure_row_id(conn, ref_table_name, row_id)?;
-    record_tx_read(conn, tx_num, ref_table_name, row_num, 1)?;
+    record_tx_read(conn, tx_num, ref_table_name, row_num, branch_num, 1)?;
     let ref_table = schema.table_def(ref_table_name)?;
     record_policy_read_dependencies_for_row(
         conn,
@@ -2361,7 +2404,7 @@ fn record_policy_read_dependencies_for_row(
     else {
         return Ok(());
     };
-    record_tx_read(conn, tx_num, ref_table_name, parent_row_num, 1)?;
+    record_tx_read(conn, tx_num, ref_table_name, parent_row_num, branch_num, 1)?;
     let parent_table = schema.table_def(ref_table_name)?;
     record_policy_read_dependencies_for_row(
         conn,
@@ -2501,14 +2544,48 @@ fn record_tx_read(
     tx_num: i64,
     table_name: &str,
     row_num: i64,
+    branch_num: i64,
     reason: i64,
 ) -> Result<()> {
+    let observed_tx_num = current_visible_tx_num(conn, table_name, row_num, branch_num)?;
+    record_tx_read_with_observed(conn, tx_num, table_name, row_num, reason, observed_tx_num)
+}
+
+fn record_tx_read_with_observed(
+    conn: &Connection,
+    tx_num: i64,
+    table_name: &str,
+    row_num: i64,
+    reason: i64,
+    observed_tx_num: Option<i64>,
+) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO jazz_tx_read (tx_num, table_name, row_num, reason)
-         VALUES (?, ?, ?, ?)",
-        params![tx_num, table_name, row_num, reason],
+        "INSERT OR REPLACE INTO jazz_tx_read
+         (tx_num, table_name, row_num, reason, observed_tx_num)
+         VALUES (?, ?, ?, ?, ?)",
+        params![tx_num, table_name, row_num, reason, observed_tx_num],
     )?;
     Ok(())
+}
+
+fn current_visible_tx_num(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<Option<i64>> {
+    conn.query_row(
+        &format!(
+            "SELECT visible_tx_num
+             FROM {}
+             WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn record_tx_write(
@@ -2704,7 +2781,7 @@ impl<'a> TransactionBuilder<'a> {
                 Mutation::DeleteRow { table, id } => {
                     let table_def = self.runtime.schema.table_def(&table)?;
                     let row_num = row_num(&db, &id)?;
-                    record_tx_read(&db, tx_num, &table, row_num, 2)?;
+                    record_tx_read(&db, tx_num, &table, row_num, self.runtime.branch_num, 2)?;
                     let visible_row = delete_snapshots
                         .get(&(table.clone(), id.clone()))
                         .ok_or_else(|| {
@@ -2881,6 +2958,93 @@ fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {
         params![tx_num],
         |row| row.get(0),
     )?)
+}
+
+fn tx_conflict_mode(conn: &Connection, tx_num: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT conflict_mode FROM jazz_tx WHERE tx_num = ?",
+        params![tx_num],
+        |row| row.get(0),
+    )?)
+}
+
+fn tx_id_for_num(conn: &Connection, tx_num: i64) -> Result<String> {
+    Ok(conn.query_row(
+        "SELECT tx_id FROM jazz_tx WHERE tx_num = ?",
+        params![tx_num],
+        |row| row.get(0),
+    )?)
+}
+
+fn tx_read_set_is_stale(conn: &Connection, tx_num: i64, branch_id: &str) -> Result<bool> {
+    let branch_num = branch::checkout(conn, branch_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT table_name, row_num, observed_tx_num
+         FROM jazz_tx_read
+         WHERE tx_num = ?
+           AND observed_tx_num IS NOT NULL
+         ORDER BY table_name, row_num",
+    )?;
+    let reads = stmt.query_map(params![tx_num], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
+    })?;
+    for read in reads {
+        let (table_name, row_num, observed_tx_num) = read?;
+        let Some(observed_tx_num) = observed_tx_num else {
+            continue;
+        };
+        let current_tx_num = current_visible_tx_num(conn, &table_name, row_num, branch_num)?;
+        if current_tx_num != Some(observed_tx_num) && current_tx_num != Some(tx_num) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn stale_exclusive_tx_ids_in_bundle(
+    conn: &Connection,
+    bundle: &Bundle,
+) -> Result<BTreeSet<String>> {
+    let exclusive_pending = bundle
+        .txs
+        .iter()
+        .filter(|tx_record| {
+            tx_record.conflict_mode == tx::MODE_EXCLUSIVE
+                && tx_record.outcome == tx::OUTCOME_PENDING
+        })
+        .map(|tx_record| tx_record.tx_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let branch_by_tx = bundle
+        .history
+        .iter()
+        .map(|record| (record.tx_id.as_str(), record.branch_id.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut stale = BTreeSet::new();
+    for read in &bundle.reads {
+        if !exclusive_pending.contains(read.tx_id.as_str()) {
+            continue;
+        }
+        let Some(observed_tx_id) = &read.observed_tx_id else {
+            continue;
+        };
+        let Some(branch_id) = branch_by_tx.get(read.tx_id.as_str()) else {
+            continue;
+        };
+        let branch_num = branch::checkout(conn, branch_id)?;
+        let row_num = ensure_row_id(conn, &read.table, &read.row_id)?;
+        let current_tx_num = current_visible_tx_num(conn, &read.table, row_num, branch_num)?;
+        let current_tx_id = current_tx_num
+            .map(|tx_num| tx_id_for_num(conn, tx_num))
+            .transpose()?;
+        if current_tx_id.as_deref() != Some(observed_tx_id.as_str()) {
+            stale.insert(read.tx_id.clone());
+        }
+    }
+    Ok(stale)
 }
 
 fn tx_is_remote_pending(conn: &Connection, tx_num: i64, local_node_num: i64) -> Result<bool> {
@@ -3071,9 +3235,10 @@ fn export_reads_for_history(
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(&format!(
-        "SELECT tx.tx_id, reads.table_name, ids.row_id, reads.reason
+        "SELECT tx.tx_id, reads.table_name, ids.row_id, reads.reason, observed.tx_id
          FROM jazz_tx_read reads
          JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+         LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
          WHERE tx.tx_id IN ({placeholders})
          ORDER BY tx.tx_num, reads.table_name, ids.row_id, reads.reason",
@@ -3088,6 +3253,7 @@ fn export_reads_for_history(
             table: row.get(1)?,
             row_id: row.get(2)?,
             reason: row.get(3)?,
+            observed_tx_id: row.get(4)?,
         })
     })?;
     records

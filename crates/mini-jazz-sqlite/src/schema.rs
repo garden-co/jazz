@@ -295,6 +295,7 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           table_name TEXT NOT NULL,
           row_num INTEGER NOT NULL,
           reason INTEGER NOT NULL,
+          observed_tx_num INTEGER,
           PRIMARY KEY (tx_num, table_name, row_num, reason)
         ) WITHOUT ROWID;
 
