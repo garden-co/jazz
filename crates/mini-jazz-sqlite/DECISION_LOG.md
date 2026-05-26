@@ -392,3 +392,14 @@ suite is green with 155 tests.
 Design lesson: SQLite gives us a nearly free coarse storage-version boundary.
 This does not replace catalogue/schema/lens versioning, but it is a good guard
 for physical format changes and migration entry points.
+
+## 2026-05-26 00:48 PDT
+
+Closed a generic write-shape bug: unknown user fields are now rejected instead
+of being silently dropped by schema-column lowering. The check covers both
+inserts and patch updates through the shared transaction insert path. Full mini
+crate suite is green with 156 tests.
+
+Design lesson: a generic SQLite lowering has to validate the semantic row shape
+before it touches physical columns. Otherwise "helpful" projection code becomes
+silent data loss.

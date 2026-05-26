@@ -30,6 +30,55 @@ fn runtime_can_install_and_write_a_non_todo_schema() {
 }
 
 #[test]
+fn writes_reject_unknown_fields_instead_of_dropping_them() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let insert_err = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Precise writes")),
+                ("pinned".to_owned(), json!(false)),
+                ("not_in_schema".to_owned(), json!("must not vanish")),
+            ]),
+        )
+        .unwrap_err();
+    assert!(insert_err
+        .to_string()
+        .contains("unknown field not_in_schema on table notes"));
+    assert!(alice.read_rows("notes").unwrap().is_empty());
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Precise writes")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let update_err = alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("not_in_schema".to_owned(), json!("must not vanish"))]),
+        )
+        .unwrap_err();
+
+    assert!(update_err
+        .to_string()
+        .contains("unknown field not_in_schema on table notes"));
+    assert_eq!(
+        alice.read_rows("notes").unwrap()[0].values["body"],
+        json!("Precise writes")
+    );
+}
+
+#[test]
 fn text_contains_query_matches_status_quo_substring_semantics() {
     let schema = support::notes_schema();
     let mut alice =

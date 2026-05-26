@@ -1396,6 +1396,7 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
 
 fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
     let table = args.schema.table_def(args.table_name)?;
+    validate_write_fields(table, args.values)?;
     let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
     let effective_values = effective_write_values(EffectiveWriteValues {
         db: args.db,
@@ -1504,6 +1505,26 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
             &current_columns,
             &current_values,
         )?;
+    }
+    Ok(())
+}
+
+fn validate_write_fields(
+    table: &crate::schema::TableDef,
+    values: &BTreeMap<String, JsonValue>,
+) -> Result<()> {
+    let schema_fields = table
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for field_name in values.keys() {
+        if !schema_fields.contains(field_name.as_str()) {
+            return Err(crate::Error::new(format!(
+                "unknown field {} on table {}",
+                field_name, table.name
+            )));
+        }
     }
     Ok(())
 }
