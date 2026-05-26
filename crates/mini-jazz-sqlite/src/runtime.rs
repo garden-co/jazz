@@ -543,6 +543,25 @@ impl Runtime {
     }
 
     pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = self.active_branch_base_epoch()? {
+                let mut rows = self.read_rows_from_current(table_name, false)?;
+                rows.extend(self.read_main_snapshot_rows(table_name, base_epoch)?);
+                return Ok(rows);
+            }
+        }
+        self.read_rows_from_current(table_name, true)
+    }
+
+    fn active_branch_base_epoch(&self) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT base_global_epoch FROM jazz_branch WHERE branch_num = ?",
+            params![self.branch_num],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn read_rows_from_current(&self, table_name: &str, overlay_main: bool) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(table_name)?;
         let field_columns = table
             .fields
@@ -565,7 +584,8 @@ impl Runtime {
                AND (
                  current.j_branch_num = ?
                  OR (
-                   ? != 1
+                   ? = 1
+                   AND ? != 1
                    AND current.j_branch_num = 1
                    AND NOT EXISTS (
                      SELECT 1
@@ -588,6 +608,7 @@ impl Runtime {
         let rows = stmt.query_map(
             params![
                 self.branch_num,
+                if overlay_main { 1 } else { 0 },
                 self.branch_num,
                 self.branch_num,
                 tx::OUTCOME_REJECTED
@@ -597,6 +618,87 @@ impl Runtime {
                     .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 Ok(raw_values)
+            },
+        )?;
+
+        let mut views = Vec::new();
+        for raw in rows {
+            let raw = raw?;
+            let mut values = BTreeMap::new();
+            for (idx, field) in table.fields.iter().enumerate() {
+                values.insert(
+                    field.name.clone(),
+                    sql_value_to_json(&self.conn, field, &raw[idx + 2])?,
+                );
+            }
+            views.push(RowView {
+                table: table_name.to_owned(),
+                id: text_value(&raw[0], "row_id")?,
+                tx_id: text_value(&raw[1], "tx_id")?,
+                values,
+                created_by: text_value(&raw[2 + table.fields.len()], "j_created_by")?,
+            });
+        }
+        Ok(views)
+    }
+
+    fn read_main_snapshot_rows(&self, table_name: &str, base_epoch: i64) -> Result<Vec<RowView>> {
+        let table = self.schema.table_def(table_name)?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+        select_columns.push("h.j_created_by".to_owned());
+        let sql = format!(
+            "SELECT {}
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_branch_num = 1
+               AND tx.outcome != ?
+               AND tx.global_epoch IS NOT NULL
+               AND tx.global_epoch <= ?
+               AND h.op != 3
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} newer
+                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 WHERE newer.row_num = h.row_num
+                   AND newer.j_branch_num = 1
+                   AND newer_tx.outcome != ?
+                   AND newer_tx.global_epoch IS NOT NULL
+                   AND newer_tx.global_epoch <= ?
+                   AND newer_tx.global_epoch > tx.global_epoch
+               )
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {current_table} branch_current
+                 WHERE branch_current.row_num = h.row_num
+                   AND branch_current.j_branch_num = ?
+               )
+             ORDER BY h.j_created_at DESC, h.row_num",
+            select_columns.join(", "),
+            crate::schema::history_table(table_name),
+            history_table = crate::schema::history_table(table_name),
+            current_table = crate::schema::current_table(table_name),
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 2 + table.fields.len() + 1;
+        let rows = stmt.query_map(
+            params![
+                tx::OUTCOME_REJECTED,
+                base_epoch,
+                tx::OUTCOME_REJECTED,
+                base_epoch,
+                self.branch_num
+            ],
+            |row| {
+                (0..row_width)
+                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                    .collect::<rusqlite::Result<Vec<_>>>()
             },
         )?;
 

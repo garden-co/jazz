@@ -315,3 +315,22 @@ Still underspecified: branch bases are currently effectively "main now," not a
 pinned snapshot. To be correct, a branch needs to record its flattened effective
 base and read main/base rows as of that base snapshot, not the latest main
 projection.
+
+## 2026-05-25 17:23 PDT
+
+Pinned branch base slice is green. A branch can store `base_global_epoch`; when
+checked out, generic reads combine branch-local current rows with main history
+as of that global epoch. Later accepted main changes are invisible on the branch
+unless the branch has its own overlay for that row.
+
+Decision: for pinned bases, use query-time history lookup instead of creating a
+per-branch base projection table. The test supports the earlier thesis that
+pure-query snapshot reads are acceptable as the simple first implementation.
+
+Limitations:
+
+- Base snapshots currently use only `global_epoch`; local durable txs and dotted
+  version vectors are not represented.
+- Policy for historical base rows is not fully re-evaluated recursively; this
+  path should be revisited once recursive policy lowering exists.
+- Sync payloads do not carry branch provenance yet.

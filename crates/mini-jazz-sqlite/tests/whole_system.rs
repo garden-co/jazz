@@ -506,3 +506,47 @@ fn branch_reads_main_base_with_sparse_overlay() {
         json!("Base title")
     );
 }
+
+#[test]
+fn branch_base_is_pinned_to_global_epoch() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let mut base_task = BTreeMap::new();
+    base_task.insert("title".to_owned(), json!("Base title"));
+    base_task.insert("done".to_owned(), json!(false));
+    let base_tx = alice.insert_row("tasks", "task-1", base_task).unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+
+    let mut main_update = BTreeMap::new();
+    main_update.insert("title".to_owned(), json!("Main after branch"));
+    main_update.insert("done".to_owned(), json!(false));
+    let update_tx = alice.insert_row("tasks", "task-1", main_update).unwrap();
+    alice.accept_transaction_at_global(&update_tx, 2).unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Base title")
+    );
+
+    let mut draft_update = BTreeMap::new();
+    draft_update.insert("title".to_owned(), json!("Draft overlay"));
+    draft_update.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-1", draft_update).unwrap();
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Draft overlay")
+    );
+
+    alice.checkout_branch("main").unwrap();
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Main after branch")
+    );
+}
