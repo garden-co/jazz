@@ -492,6 +492,47 @@ fn trusted_peer_can_read_applied_policy_scoped_facts_without_user_principal() {
 }
 
 #[test]
+fn trusted_peer_generic_transaction_bypasses_user_write_policy() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut trusted =
+        Runtime::open_trusted_with_schema(Storage::Memory, "worker-node", schema).unwrap();
+
+    let mut doc = BTreeMap::new();
+    doc.insert("title".to_owned(), json!("Alice doc"));
+    alice.insert_row("docs", "doc-1", doc).unwrap();
+    trusted
+        .apply_bundle(&alice.export_table_history("docs").unwrap())
+        .unwrap();
+
+    trusted
+        .transaction()
+        .insert_row(
+            "comments",
+            "comment-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Trusted write")),
+                ("doc".to_owned(), json!("doc-1")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    assert_eq!(trusted.read_rows("comments").unwrap().len(), 1);
+    assert_eq!(trusted.storage_stats().unwrap().rejected_transactions, 0);
+}
+
+#[test]
 fn policy_denied_write_is_rejected_history_not_current_state() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

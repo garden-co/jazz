@@ -165,6 +165,7 @@ impl Runtime {
             branch_num: self.branch_num,
             now,
             principal: &self.principal,
+            trusted: self.trusted,
         })?;
         let row_num = row_num(&db, id)?;
         let allowed = self.trusted
@@ -757,20 +758,22 @@ struct InsertRowInTx<'a> {
     branch_num: i64,
     now: i64,
     principal: &'a str,
+    trusted: bool,
 }
 
 fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
     let table = args.schema.table_def(args.table_name)?;
     let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
-    let allowed = policy::write_allowed(
-        args.db,
-        args.schema,
-        table,
-        &table.write_policy,
-        row_num,
-        args.values,
-        args.principal,
-    )?;
+    let allowed = args.trusted
+        || policy::write_allowed(
+            args.db,
+            args.schema,
+            table,
+            &table.write_policy,
+            row_num,
+            args.values,
+            args.principal,
+        )?;
 
     let mut columns = vec![
         "row_num".to_owned(),
@@ -916,6 +919,7 @@ impl<'a> TransactionBuilder<'a> {
                     branch_num: self.runtime.branch_num,
                     now,
                     principal: &self.runtime.principal,
+                    trusted: self.runtime.trusted,
                 })?,
                 Mutation::Project { id, title } => {
                     insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?

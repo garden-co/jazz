@@ -456,6 +456,5 @@ Decision: model untrusted client principals and trusted peers separately, even
 inside the local harness. This matches the product topology better than using
 magic principals in tests.
 
-Open issue: trusted writes currently bypass direct `insert_row` policy checks,
-but the generic transaction-builder path still needs the same trust flag wired
-through.
+Follow-up green: trusted writes now also work through the generic transaction
+builder, bypassing user write policies without recording a rejected transaction.
