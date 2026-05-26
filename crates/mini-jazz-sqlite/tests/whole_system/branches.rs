@@ -1749,6 +1749,106 @@ fn branch_metadata_lists_and_syncs_base_and_sources() {
 }
 
 #[test]
+fn durable_merge_branch_refresh_preserves_pinned_source_branch_bases_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+    let schema = support::tasks_schema();
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "upstream", "alice", schema.clone()).unwrap();
+
+    let base_tx = upstream
+        .insert_row(
+            "tasks",
+            "task-main",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main base")),
+                ("done".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    upstream.accept_transaction_at_global(&base_tx, 5).unwrap();
+    upstream.create_branch("left", Some(5)).unwrap();
+    upstream.create_branch("right", Some(5)).unwrap();
+    upstream
+        .create_branch_from_branches_at_base("merge", Some(5), &["left", "right"])
+        .unwrap();
+    upstream.checkout_branch("merge").unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_eq("tasks", "done", json!(false))
+                    .unwrap(),
+            )
+            .unwrap();
+        worker.checkout_branch("merge").unwrap();
+        assert!(worker
+            .read_rows_where_eq("tasks", "done", json!(false))
+            .unwrap()
+            .is_empty());
+    }
+
+    upstream.checkout_branch("left").unwrap();
+    upstream
+        .insert_row(
+            "tasks",
+            "task-left",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left after restart")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    upstream.checkout_branch("merge").unwrap();
+
+    let mut reopened = Runtime::open_with_schema(
+        Storage::File(worker_path),
+        "worker",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+    let observed = reopened.observed_query_reads().unwrap();
+    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+    reopened.checkout_branch("merge").unwrap();
+
+    let rows = reopened
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "task-left");
+    let branches = reopened.branches().unwrap();
+    for branch_id in ["left", "right", "merge"] {
+        let branch = branches
+            .iter()
+            .find(|branch| branch.id == branch_id)
+            .unwrap();
+        assert_eq!(branch.base_global_epoch, Some(5));
+    }
+    assert_eq!(reopened.branch_backing_rows().unwrap(), branches);
+
+    let mut fresh_tab =
+        Runtime::open_with_schema(Storage::Memory, "fresh-tab", "alice", schema).unwrap();
+    fresh_tab
+        .apply_bundle(&reopened.export_table_history("tasks").unwrap())
+        .unwrap();
+    assert_eq!(
+        fresh_tab.branch_backing_rows().unwrap(),
+        reopened.branches().unwrap()
+    );
+}
+
+#[test]
 fn branch_base_epoch_is_immutable() {
     let schema = support::tasks_schema();
     let mut alice =

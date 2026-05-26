@@ -3646,21 +3646,30 @@ fn include_branch_record(
         return Ok(());
     }
     let mut stmt = conn.prepare(
-        "SELECT source.branch_id
+        "SELECT source.branch_num, source.branch_id
          FROM jazz_branch_source branch_source
          JOIN jazz_branch source ON source.branch_num = branch_source.source_branch_num
          WHERE branch_source.branch_num = ?
          ORDER BY source.branch_id",
     )?;
-    let source_branch_ids = stmt
-        .query_map(params![branch_num], |row| row.get::<_, String>(0))?
+    let source_branches = stmt
+        .query_map(params![branch_num], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let source_branch_ids = source_branches
+        .iter()
+        .map(|(_, branch_id)| branch_id.clone())
+        .collect();
     records.push(BranchRecord {
         branch_id,
         base_global_epoch,
         source_branch_ids,
         source_version,
     });
+    for (source_branch_num, _) in source_branches {
+        include_branch_record(conn, records, source_branch_num)?;
+    }
     Ok(())
 }
 

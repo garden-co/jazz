@@ -23,7 +23,14 @@ pub(crate) fn ensure(
         |row| row.get(0),
     )?;
     if let Some(base_global_epoch) = base_global_epoch {
-        if stored_base != Some(base_global_epoch) {
+        if stored_base.is_none() {
+            conn.execute(
+                "UPDATE jazz_branch
+                 SET base_global_epoch = ?
+                 WHERE branch_num = ? AND base_global_epoch IS NULL",
+                params![base_global_epoch, branch_num],
+            )?;
+        } else if stored_base != Some(base_global_epoch) {
             return Err(crate::Error::new(format!(
                 "branch base mismatch for {branch_id}"
             )));

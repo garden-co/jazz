@@ -1280,3 +1280,18 @@ carries todo, project, and org history, and the edge materializes the accepted
 todo semantically as `workspace` without exposing the old `project` field.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 234 whole-system tests.
+
+## 2026-05-26 04:51 PDT
+
+Added durable merge-branch refresh coverage for pinned source branch bases.
+A worker first observes an empty merge-branch query, restarts, then refreshes
+after one source branch gains a matching row. The worker now keeps the pinned
+base epoch for both the active source and the unchanged source, and can rehydrate
+a fresh memory tab from table history with matching branch backing rows.
+
+Discovery: merge branch exports must recursively include source branch metadata,
+even when a source branch has no row history in the bundle. Placeholder source
+branches created from source lists may be safely upgraded from unknown base to a
+known base, while known base epochs remain immutable.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 235 whole-system tests.
