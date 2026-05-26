@@ -209,6 +209,73 @@ fn id_magic_field_query_scope_syncs_and_repairs_delete() {
 }
 
 #[test]
+fn id_in_query_matches_and_syncs_selected_rows() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    for (id, body) in [
+        ("note-1", "First selected"),
+        ("note-2", "Not selected"),
+        ("note-3", "Third selected"),
+    ] {
+        alice
+            .insert_row(
+                "notes",
+                id,
+                BTreeMap::from([
+                    ("body".to_owned(), json!(body)),
+                    ("pinned".to_owned(), json!(false)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let local_rows = alice
+        .read_rows_where_in("notes", "id", vec![json!("note-1"), json!("note-3")])
+        .unwrap();
+    let mut local_ids = local_rows
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>();
+    local_ids.sort();
+    assert_eq!(local_ids, vec!["note-1", "note-3"]);
+
+    let bundle = alice
+        .export_query_where_in("notes", "id", vec![json!("note-1"), json!("note-3")])
+        .unwrap();
+    assert_eq!(bundle.query_reads[0].op, "in");
+    peer.apply_bundle(&bundle).unwrap();
+
+    let peer_rows = peer.read_rows("notes").unwrap();
+    let mut peer_ids = peer_rows
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>();
+    peer_ids.sort();
+    assert_eq!(peer_ids, vec!["note-1", "note-3"]);
+
+    alice.delete_row("notes", "note-1").unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_in("notes", "id", vec![json!("note-1"), json!("note-3")])
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        peer.read_rows("notes")
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-3"]
+    );
+}
+
+#[test]
 fn created_by_magic_field_query_matches_creator_principal() {
     let schema = support::notes_schema();
     let mut alice =

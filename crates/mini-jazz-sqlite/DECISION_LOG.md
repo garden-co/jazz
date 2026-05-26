@@ -415,3 +415,14 @@ projection rebuild preserves invisibility. Full mini crate suite is green with
 Design lesson: the current fate/projection model already had the right shape
 for whole-transaction rejection. The new test is valuable because this is a core
 status-quo parity point from batches that must remain true after refactors.
+
+## 2026-05-26 00:52 PDT
+
+Added the first `in` predicate slice: `id IN [...]` works for local reads,
+query-scope export, sync, and deletion repair of a selected member. Full mini
+crate suite is green with 158 tests.
+
+Design lesson: array-valued predicate metadata fits the bundle shape cleanly.
+The implementation is intentionally narrow (`id` only) because general
+schema-column `IN` will need a more complete predicate planner that can produce
+variable-arity SQL and repair clauses without ad-hoc branches.

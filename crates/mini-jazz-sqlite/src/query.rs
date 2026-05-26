@@ -4,7 +4,7 @@ use crate::types::RowView;
 use crate::{branch, policy, tx, Result};
 use rusqlite::{params, params_from_iter, Connection};
 use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct QueryContext<'a> {
     pub(crate) conn: &'a Connection,
@@ -73,6 +73,33 @@ impl QueryContext<'_> {
             }
         }
         self.read_rows_from_current_where_eq(table_name, field, &value, true)
+    }
+
+    pub(crate) fn read_rows_where_in(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+    ) -> Result<Vec<RowView>> {
+        if field_name != "id" {
+            return Err(crate::Error::new(format!(
+                "in predicate currently only supports id, got {table_name}.{field_name}"
+            )));
+        }
+        let ids = values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| crate::Error::new("id in expects string values"))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        Ok(self
+            .read_rows(table_name)?
+            .into_iter()
+            .filter(|row| ids.contains(&row.id))
+            .collect())
     }
 
     pub(crate) fn read_rows_where_contains(

@@ -562,36 +562,36 @@ impl Runtime {
         query_read: &QueryReadRecord,
     ) -> Result<()> {
         if query_read.field == "id" {
-            let Some(row_id) = query_read.value.as_str() else {
-                return Err(crate::Error::new("id equality expects a string value"));
-            };
             let branch_num = branch::checkout(db, &query_read.branch_id)?;
-            let row_num = ensure_row_id(db, &query_read.table, row_id)?;
-            db.execute(
-                &format!(
-                    "DELETE FROM {}
-                     WHERE j_branch_num = ?
-                       AND row_num = ?
-                       AND row_num NOT IN (
-                         SELECT h.row_num
-                         FROM {history_table} h
-                         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-                         WHERE h.row_num = ?
-                           AND h.j_branch_num = ?
-                           AND h.op != 3
-                           AND tx.outcome != ?
-                       )",
-                    crate::schema::current_table(&query_read.table),
-                    history_table = crate::schema::history_table(&query_read.table),
-                ),
-                params![
-                    branch_num,
-                    row_num,
-                    row_num,
-                    branch_num,
-                    tx::OUTCOME_REJECTED
-                ],
-            )?;
+            let row_ids = id_predicate_values(&query_read.op, &query_read.value)?;
+            for row_id in row_ids {
+                let row_num = ensure_row_id(db, &query_read.table, &row_id)?;
+                db.execute(
+                    &format!(
+                        "DELETE FROM {}
+                         WHERE j_branch_num = ?
+                           AND row_num = ?
+                           AND row_num NOT IN (
+                             SELECT h.row_num
+                             FROM {history_table} h
+                             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                             WHERE h.row_num = ?
+                               AND h.j_branch_num = ?
+                               AND h.op != 3
+                               AND tx.outcome != ?
+                           )",
+                        crate::schema::current_table(&query_read.table),
+                        history_table = crate::schema::history_table(&query_read.table),
+                    ),
+                    params![
+                        branch_num,
+                        row_num,
+                        row_num,
+                        branch_num,
+                        tx::OUTCOME_REJECTED
+                    ],
+                )?;
+            }
             return Ok(());
         }
         if query_read.field == "$createdBy" {
@@ -1187,6 +1187,16 @@ impl Runtime {
             .read_rows_where_contains(table_name, field_name, needle)
     }
 
+    pub fn read_rows_where_in(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+    ) -> Result<Vec<RowView>> {
+        self.query_context()
+            .read_rows_where_in(table_name, field_name, values)
+    }
+
     pub fn export_query_where_eq(
         &self,
         table_name: &str,
@@ -1214,6 +1224,21 @@ impl Runtime {
             "contains",
             JsonValue::String(needle.to_owned()),
             self.read_rows_where_contains(table_name, field_name, needle)?,
+        )
+    }
+
+    pub fn export_query_where_in(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+    ) -> Result<Bundle> {
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "in",
+            JsonValue::Array(values.clone()),
+            self.read_rows_where_in(table_name, field_name, values)?,
         )
     }
 
@@ -3037,10 +3062,10 @@ fn query_scope_repair_row_nums(
     value: &JsonValue,
 ) -> Result<Vec<i64>> {
     if field_name == "id" {
-        let Some(row_id) = value.as_str() else {
-            return Err(crate::Error::new("id equality expects a string value"));
-        };
-        return Ok(vec![ensure_row_id(conn, &table.name, row_id)?]);
+        return id_predicate_values(op, value)?
+            .into_iter()
+            .map(|row_id| ensure_row_id(conn, &table.name, &row_id))
+            .collect();
     }
     if field_name == "$createdBy" {
         let Some(created_by) = value.as_str() else {
@@ -3086,6 +3111,27 @@ fn query_scope_repair_row_nums(
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn id_predicate_values(op: &str, value: &JsonValue) -> Result<Vec<String>> {
+    match op {
+        "eq" => value
+            .as_str()
+            .map(|row_id| vec![row_id.to_owned()])
+            .ok_or_else(|| crate::Error::new("id equality expects a string value")),
+        "in" => value
+            .as_array()
+            .ok_or_else(|| crate::Error::new("id in expects an array value"))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| crate::Error::new("id in expects string values"))
+            })
+            .collect(),
+        _ => Err(crate::Error::new(format!("unsupported id predicate {op}"))),
+    }
 }
 
 fn dedupe_history_records(records: &mut Vec<HistoryRecord>) {
