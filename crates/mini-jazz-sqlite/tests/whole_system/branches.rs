@@ -609,6 +609,59 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
 }
 
 #[test]
+fn branch_equality_query_uses_effective_branch_policy() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let project_tx = alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&project_tx, 1).unwrap();
+    let todo_tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Find me")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&todo_tx, 2).unwrap();
+    alice.create_branch("draft", Some(2)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    alice.principal_for_test("bob");
+    alice
+        .update_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
+        )
+        .unwrap();
+    alice.principal_for_test("alice");
+
+    assert!(alice
+        .read_rows_where_eq("todos", "title", json!("Find me"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn branch_base_export_preserves_ref_policy_at_base_epoch() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

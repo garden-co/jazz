@@ -1244,6 +1244,10 @@ enum Mutation {
         values: BTreeMap<String, JsonValue>,
         op: i64,
     },
+    DeleteRow {
+        table: String,
+        id: String,
+    },
     Project {
         id: String,
         title: String,
@@ -1295,6 +1299,14 @@ impl<'a> TransactionBuilder<'a> {
             id: id.to_owned(),
             values,
             op: 2,
+        });
+        self
+    }
+
+    pub fn delete_row(mut self, table: &str, id: &str) -> Self {
+        self.mutations.push(Mutation::DeleteRow {
+            table: table.to_owned(),
+            id: id.to_owned(),
         });
         self
     }
@@ -1360,6 +1372,70 @@ impl<'a> TransactionBuilder<'a> {
                     trusted: self.runtime.trusted,
                     op,
                 })?,
+                Mutation::DeleteRow { table, id } => {
+                    let table_def = self.runtime.schema.table_def(&table)?;
+                    let row_num = row_num(&db, &id)?;
+                    let field_columns = table_def
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            crate::schema::quote_ident(&crate::schema::storage_column(field))
+                        })
+                        .collect::<Vec<_>>();
+                    let mut insert_columns = vec![
+                        "row_num".to_owned(),
+                        "tx_num".to_owned(),
+                        "j_branch_num".to_owned(),
+                        "op".to_owned(),
+                    ];
+                    insert_columns.extend(field_columns.iter().cloned());
+                    insert_columns.extend([
+                        "j_created_at".to_owned(),
+                        "j_updated_at".to_owned(),
+                        "j_created_by".to_owned(),
+                        "j_updated_by".to_owned(),
+                    ]);
+                    let mut select_columns = vec![
+                        "row_num".to_owned(),
+                        "?".to_owned(),
+                        "j_branch_num".to_owned(),
+                        "3".to_owned(),
+                    ];
+                    select_columns.extend(field_columns.iter().cloned());
+                    select_columns.extend([
+                        "j_created_at".to_owned(),
+                        "?".to_owned(),
+                        "j_created_by".to_owned(),
+                        "?".to_owned(),
+                    ]);
+                    db.execute(
+                        &format!(
+                            "INSERT OR IGNORE INTO {} ({})
+                             SELECT {}
+                             FROM {}
+                             WHERE row_num = ? AND j_branch_num = ?",
+                            crate::schema::history_table(&table),
+                            insert_columns.join(", "),
+                            select_columns.join(", "),
+                            crate::schema::current_table(&table),
+                        ),
+                        params![
+                            tx_num,
+                            now,
+                            self.runtime.principal,
+                            row_num,
+                            self.runtime.branch_num
+                        ],
+                    )?;
+                    db.execute(
+                        &format!(
+                            "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
+                            crate::schema::current_table(&table)
+                        ),
+                        params![row_num, self.runtime.branch_num],
+                    )?;
+                    record_tx_write(&db, tx_num, &table, row_num, 3)?;
+                }
                 Mutation::Project { id, title } => {
                     insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?;
                     record_tx_write(&db, tx_num, "projects", row_num(&db, &id)?, 1)?;

@@ -47,7 +47,7 @@ impl QueryContext<'_> {
                         .into_iter()
                         .filter(|row| row.values.get(field_name) == Some(&value)),
                 );
-                return Ok(rows);
+                return self.filter_rows_by_effective_branch_policy(table_name, rows);
             }
         }
         self.read_rows_from_current_where_eq(table_name, field, &value, true)

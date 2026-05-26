@@ -1635,3 +1635,38 @@ untrusted_validation_error_does_not_leave_invalid_current_row_visible` passes.
 Verification checkpoint: `cargo test -p mini-jazz-sqlite` passes. This covers
 the crate target, doc tests, and the full whole-system integration suite at 86
 tests.
+
+## 2026-05-25 19:42 PDT
+
+Starting generic delete support inside sealed transactions. The generic
+transaction constructor can now create and update rows, but not delete them;
+that leaves create/update/delete asymmetrical for sealed transactions.
+
+## 2026-05-25 19:43 PDT
+
+Generic delete support inside sealed transactions is green. `TransactionBuilder`
+now supports `delete_row`, and a single sealed transaction can delete one row and
+insert another while materializing both write-set rows under the same tx ID.
+
+Limitation: this first version covers ordinary current-projection deletes. It
+does not yet reuse the richer pinned-base branch delete logic from standalone
+`delete_row`.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+generic_transaction_can_seal_delete_with_other_mutations` passes.
+
+## 2026-05-25 19:44 PDT
+
+Starting branch equality query effective-policy coverage from sidecar review.
+`read_rows` now post-filters pinned-base rows through effective branch policy,
+but `read_rows_where_eq` still appears to return combined branch/base rows
+without that policy pass.
+
+## 2026-05-25 19:45 PDT
+
+Branch equality query effective-policy coverage is green and found the expected
+bug. `read_rows_where_eq` now applies the same effective-branch policy filter as
+`read_rows` after combining branch overlay rows with pinned base snapshot rows.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+branch_equality_query_uses_effective_branch_policy` passes.

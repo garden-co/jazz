@@ -116,6 +116,49 @@ fn generic_transaction_can_seal_updates_atomically() {
 }
 
 #[test]
+fn generic_transaction_can_seal_delete_with_other_mutations() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-delete",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Delete me")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let tx = alice
+        .transaction()
+        .delete_row("notes", "note-delete")
+        .insert_row(
+            "notes",
+            "note-keep",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Keep me")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-keep");
+    assert_eq!(
+        alice.transaction_write_rows(&tx).unwrap(),
+        vec![
+            ("notes".to_owned(), "note-delete".to_owned()),
+            ("notes".to_owned(), "note-keep".to_owned())
+        ]
+    );
+}
+
+#[test]
 fn exclusive_transaction_requires_global_epoch_and_commits_accepted() {
     let schema = support::notes_schema();
     let mut alice =
