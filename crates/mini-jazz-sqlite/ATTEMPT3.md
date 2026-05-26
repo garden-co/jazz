@@ -497,3 +497,19 @@ Learning: this is the right module boundary: policy lowering, branch visibility,
 lens value decoding, and conflict candidates all converge at query execution.
 `runtime.rs` is still large, but the highest-complexity read behavior now has a
 place to evolve.
+
+## 2026-05-25 17:51 PDT
+
+Branch source metadata sync is green. Bundles now carry branch records with
+`branch_id`, `base_global_epoch`, and `source_branch_ids`; apply recreates branch
+metadata before applying row versions. A receiver can apply left/right source
+branch histories plus a merge-branch bundle and recover the same conflict
+candidates.
+
+Decision: branch provenance belongs in sync metadata alongside row-version
+payloads. Row `branch_id` alone is not enough once branches can have source
+branches.
+
+Limitation: source branch histories are still sent as separate bundles in the
+test. A real branch scoped bundle should probably include the source branch
+facts needed to recreate candidates in one scope.

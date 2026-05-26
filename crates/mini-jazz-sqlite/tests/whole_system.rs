@@ -867,6 +867,77 @@ fn branch_multi_base_conflicts_expose_multiple_candidates() {
 }
 
 #[test]
+fn branch_source_metadata_survives_sync() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let left_bundle = alice.export_table_history("tasks").unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let right_bundle = alice.export_table_history("tasks").unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "merge-marker",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Merge marker")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let merge_bundle = alice.export_table_history("tasks").unwrap();
+    let merge_record = merge_bundle
+        .branches
+        .iter()
+        .find(|branch| branch.branch_id == "merge")
+        .unwrap();
+    assert_eq!(merge_record.source_branch_ids, vec!["left", "right"]);
+
+    bob.apply_bundle(&left_bundle).unwrap();
+    bob.apply_bundle(&right_bundle).unwrap();
+    bob.apply_bundle(&merge_bundle).unwrap();
+    bob.checkout_branch("merge").unwrap();
+
+    let candidates = bob.read_row_candidates("tasks", "task-1").unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].values["title"], json!("Left title"));
+    assert_eq!(candidates[1].values["title"], json!("Right title"));
+}
+
+#[test]
 fn rename_lens_reads_old_storage_column_as_new_field_name() {
     let old_schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
@@ -938,6 +1009,7 @@ fn branch_sync_preserves_branch_provenance() {
     alice.insert_row("tasks", "task-draft", task).unwrap();
 
     let bundle = alice.export_table_history("tasks").unwrap();
+    assert_eq!(bundle.branches[0].branch_id, "draft");
     assert_eq!(bundle.history[0].branch_id, "draft");
     bob.apply_bundle(&bundle).unwrap();
 

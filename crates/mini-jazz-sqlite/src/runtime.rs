@@ -1,7 +1,7 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::RowsSubscription;
-use crate::sync::{Bundle, HistoryRecord, TxRecord};
+use crate::sync::{BranchRecord, Bundle, HistoryRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{branch, policy, projection, query, schema, storage, tx, Result, Storage};
 use rusqlite::{params, params_from_iter, Connection};
@@ -231,7 +231,12 @@ impl Runtime {
     pub fn export_query_scope_open_todos(&self) -> Result<Bundle> {
         let txs = export_txs(&self.conn)?;
         let history = export_open_todo_scope_history(&self.conn)?;
-        Ok(Bundle { txs, history })
+        let branches = export_branch_records_for_history(&self.conn, &history)?;
+        Ok(Bundle {
+            branches,
+            txs,
+            history,
+        })
     }
 
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
@@ -244,12 +249,28 @@ impl Runtime {
             &self.principal,
             self.trusted,
         )?;
-        Ok(Bundle { txs, history })
+        let branches = export_branch_records_for_history(&self.conn, &history)?;
+        Ok(Bundle {
+            branches,
+            txs,
+            history,
+        })
     }
 
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
         let schema = self.schema.clone();
         let db = self.conn.transaction()?;
+        for branch_record in &bundle.branches {
+            let branch_num = branch::ensure(
+                &db,
+                &branch_record.branch_id,
+                branch_record.base_global_epoch,
+                now_ms(),
+            )?;
+            for source_branch_id in &branch_record.source_branch_ids {
+                branch::add_source(&db, branch_num, source_branch_id)?;
+            }
+        }
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
             db.execute(
@@ -821,6 +842,43 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     records
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn export_branch_records_for_history(
+    conn: &Connection,
+    history: &[HistoryRecord],
+) -> Result<Vec<BranchRecord>> {
+    let mut branch_ids = history
+        .iter()
+        .map(|record| record.branch_id.clone())
+        .collect::<Vec<_>>();
+    branch_ids.sort();
+    branch_ids.dedup();
+
+    let mut records = Vec::new();
+    for branch_id in branch_ids {
+        let (branch_num, base_global_epoch) = conn.query_row(
+            "SELECT branch_num, base_global_epoch FROM jazz_branch WHERE branch_id = ?",
+            params![branch_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT source.branch_id
+             FROM jazz_branch_source branch_source
+             JOIN jazz_branch source ON source.branch_num = branch_source.source_branch_num
+             WHERE branch_source.branch_num = ?
+             ORDER BY source.branch_id",
+        )?;
+        let source_branch_ids = stmt
+            .query_map(params![branch_num], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        records.push(BranchRecord {
+            branch_id,
+            base_global_epoch,
+            source_branch_ids,
+        });
+    }
+    Ok(records)
 }
 
 fn export_open_todo_scope_history(conn: &Connection) -> Result<Vec<HistoryRecord>> {

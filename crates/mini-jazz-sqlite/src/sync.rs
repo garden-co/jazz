@@ -5,8 +5,16 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bundle {
+    pub branches: Vec<BranchRecord>,
     pub txs: Vec<TxRecord>,
     pub history: Vec<HistoryRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BranchRecord {
+    pub branch_id: String,
+    pub base_global_epoch: Option<i64>,
+    pub source_branch_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
