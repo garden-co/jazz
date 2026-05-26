@@ -544,3 +544,9 @@ mapping is holding up better than expected.
 Added branch query-scope repair coverage for sparse overlays. A peer that first receives a pinned main-base row for a branch query now removes it when a branch-local overlay shadows the same row out of the predicate result. Full mini crate suite is green with 168 tests.
 
 Design lesson: branch query scopes must be evaluated over the effective branch snapshot, not as independent main-base rows plus branch deltas. Overlay shadowing is part of query-scope contraction.
+
+## 2026-05-26 01:42 PDT
+
+Generalized the ordered page-boundary query-scope experiment beyond fixture todos. Generic schemas can now read and export `eq + top createdAt desc` scopes, and refresh removes a displaced boundary row when a newer matching row enters the page. Full mini crate suite is green with 169 tests.
+
+Design lesson: ordered-page repair can be represented as a query descriptor over ordinary schema fields plus system ordering metadata. The implementation is still a narrow descriptor shape, but the invariant no longer depends on todo-specific code.

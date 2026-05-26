@@ -479,6 +479,79 @@ fn contains_query_scope_resync_removes_row_that_left_predicate() {
 }
 
 #[test]
+fn generic_top_created_at_query_scope_refresh_replaces_displaced_boundary_row() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-old",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old boundary")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-middle",
+            BTreeMap::from([
+                ("body".to_owned(), json!("middle")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer.read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-middle", "note-old"]
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-new",
+            BTreeMap::from([
+                ("body".to_owned(), json!("newest")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        peer.read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 3)
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-new", "note-middle"]
+    );
+}
+
+#[test]
 fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

@@ -323,6 +323,25 @@ impl Runtime {
         Ok(todos)
     }
 
+    pub fn read_rows_where_eq_top_created_at_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
+        let created_at_by_id = current_created_at_by_row_id(&self.conn, table_name)?;
+        rows.sort_by(|left, right| {
+            created_at_by_id
+                .get(&right.id)
+                .cmp(&created_at_by_id.get(&left.id))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     pub fn export_query_scope_newest_open_todos(&self, limit: usize) -> Result<Bundle> {
         let todo_ids = self
             .newest_open_todos(limit)?
@@ -603,6 +622,62 @@ impl Runtime {
         db: &Connection,
         query_read: &QueryReadRecord,
     ) -> Result<()> {
+        if query_read.op == "eq_top_created_at_desc" {
+            let value = query_read
+                .value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
+            let limit = query_read
+                .value
+                .get("limit")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
+            let table = schema.table_def(&query_read.table)?;
+            let field = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == query_read.field)
+                .ok_or_else(|| {
+                    crate::Error::new(format!("unknown query field {}", query_read.field))
+                })?;
+            let branch_num = branch::checkout(db, &query_read.branch_id)?;
+            let predicate_column =
+                crate::schema::quote_ident(&crate::schema::storage_column(field));
+            let predicate_sql = query_predicate::sql(field, &predicate_column, "eq")?;
+            let predicate_value = query_predicate::value(field, "eq", value, db)?;
+            db.execute(
+                &format!(
+                    "DELETE FROM {}
+                     WHERE j_branch_num = ?
+                       AND is_deleted = 0
+                       AND {predicate_sql}
+                       AND row_num NOT IN (
+                         SELECT current.row_num
+                         FROM {current_table} current
+                         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                         WHERE current.j_branch_num = ?
+                           AND current.is_deleted = 0
+                           AND tx.outcome != ?
+                           AND {current_predicate_sql}
+                         ORDER BY current.j_created_at DESC, current.row_num
+                         LIMIT ?
+                       )",
+                    crate::schema::current_table(&query_read.table),
+                    current_table = crate::schema::current_table(&query_read.table),
+                    current_predicate_sql =
+                        query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
+                ),
+                params![
+                    branch_num,
+                    predicate_value.clone(),
+                    branch_num,
+                    tx::OUTCOME_REJECTED,
+                    predicate_value,
+                    limit as i64
+                ],
+            )?;
+            return Ok(());
+        }
         if query_read.op == "in" && query_read.field != "id" {
             for value in query_read
                 .value
@@ -1330,6 +1405,25 @@ impl Runtime {
             "in",
             JsonValue::Array(values.clone()),
             self.read_rows_where_in(table_name, field_name, values)?,
+        )
+    }
+
+    pub fn export_query_where_eq_top_created_at_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+    ) -> Result<Bundle> {
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "eq_top_created_at_desc",
+            json!({
+                "eq": value.clone(),
+                "limit": limit,
+            }),
+            self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
         )
     }
 
@@ -3285,6 +3379,12 @@ fn query_scope_repair_row_nums(
     op: &str,
     value: &JsonValue,
 ) -> Result<Vec<i64>> {
+    if op == "eq_top_created_at_desc" {
+        let value = value
+            .get("eq")
+            .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
+        return query_scope_repair_row_nums(conn, table, field_name, "eq", value);
+    }
     if field_name == "id" {
         return id_predicate_values(op, value)?
             .into_iter()
