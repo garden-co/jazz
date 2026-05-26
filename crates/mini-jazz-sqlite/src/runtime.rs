@@ -275,7 +275,7 @@ impl Runtime {
             .collect::<Result<Vec<_>>>()?;
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
         let txs = export_txs(&self.conn)?;
-        let history = export_visible_table_history(
+        let mut history = export_visible_table_history(
             &self.conn,
             &self.schema,
             table_name,
@@ -284,6 +284,17 @@ impl Runtime {
             &branch_nums,
             Some(&row_nums),
         )?;
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
+                history.extend(export_history_versions_for_rows(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    Some(&row_nums),
+                    Some(base_epoch),
+                )?);
+            }
+        }
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {

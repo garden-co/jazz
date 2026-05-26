@@ -1018,6 +1018,67 @@ fn recursive_query_reads_branch_base_and_sparse_overlay() {
 }
 
 #[test]
+fn recursive_query_scope_sync_preserves_branch_base_and_overlay() {
+    let schema = SchemaDef::new().table("folders", |table| {
+        table.text("name");
+        table.ref_("parent", "folders");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let root_tx = alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&root_tx, 1).unwrap();
+    let base_child_tx = alice
+        .insert_row(
+            "folders",
+            "base-child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Base child")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&base_child_tx, 2)
+        .unwrap();
+    alice.create_branch("draft", Some(2)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "draft-child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Draft child")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice
+        .export_recursive_refs("folders", "root", "parent")
+        .unwrap();
+    bob.apply_bundle(&bundle).unwrap();
+    bob.checkout_branch("draft").unwrap();
+    let ids = bob
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root", "base-child", "draft-child"]);
+}
+
+#[test]
 fn policy_scoped_sync_includes_required_parent_rows_only() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

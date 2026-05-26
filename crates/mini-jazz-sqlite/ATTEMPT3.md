@@ -1072,3 +1072,23 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Open issue: this only catches direct and immediate two-table cycles. A real
 schema validator should walk the policy graph completely and report useful
 diagnostics for longer cycles.
+
+## 2026-05-25 18:46 PDT
+
+Starting recursive branch query-scope export. We made recursive branch reads see
+base+overlay rows, but `export_recursive_refs` still exports current visible
+history for the returned row nums. It may omit pinned-base rows needed by a
+receiver.
+
+## 2026-05-25 18:47 PDT
+
+Recursive branch query-scope export is green. `export_recursive_refs` now adds
+pinned base history for returned rows when exporting from a branch with
+`base_global_epoch`, so a receiver can recreate the same recursive result from
+base rows plus overlay rows.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+56 tests.
+
+Open issue: this mirrors the current semantic shortcut: it exports result rows,
+not a resumable recursive scope/read predicate for future matching children.
