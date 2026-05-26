@@ -354,6 +354,56 @@ fn exclusive_transaction_mode_survives_sync() {
 }
 
 #[test]
+fn exclusive_forwarding_export_marks_only_selected_transaction() {
+    let schema = support::notes_schema();
+    let mut edge =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "edge", "service", schema).unwrap();
+
+    let first_tx = edge
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Forward this one")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    let second_tx = edge
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Leave as mergeable")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = edge
+        .export_exclusive_transaction_forwarding("notes", &first_tx, "alice")
+        .unwrap();
+    let forwarded = bundle
+        .txs
+        .iter()
+        .find(|record| record.tx_id == first_tx)
+        .unwrap();
+    assert_eq!(forwarded.conflict_mode, 2);
+    assert_eq!(forwarded.outcome, 1);
+    assert_eq!(forwarded.global_epoch, None);
+    assert_eq!(forwarded.receipt_tiers, Vec::<i64>::new());
+    assert_eq!(forwarded.auth_principal.as_deref(), Some("alice"));
+
+    let untouched = bundle
+        .txs
+        .iter()
+        .find(|record| record.tx_id == second_tx)
+        .unwrap();
+    assert_eq!(untouched.conflict_mode, 1);
+    assert_eq!(untouched.auth_principal, None);
+}
+
+#[test]
 fn authority_acceptance_enriches_existing_transaction() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

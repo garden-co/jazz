@@ -192,6 +192,31 @@ impl Runtime {
         ))
     }
 
+    pub fn export_exclusive_transaction_forwarding(
+        &self,
+        table_name: &str,
+        tx_id: &str,
+        auth_principal: &str,
+    ) -> Result<Bundle> {
+        let mut bundle = self.export_table_history(table_name)?;
+        let tx_record = bundle
+            .txs
+            .iter_mut()
+            .find(|record| record.tx_id == tx_id)
+            .ok_or_else(|| crate::Error::new(format!("transaction {tx_id} is not in bundle")))?;
+        if !bundle.history.iter().any(|record| record.tx_id == tx_id) {
+            return Err(crate::Error::new(format!(
+                "transaction {tx_id} has no exported history"
+            )));
+        }
+        tx_record.conflict_mode = tx::MODE_EXCLUSIVE;
+        tx_record.outcome = tx::OUTCOME_PENDING;
+        tx_record.global_epoch = None;
+        tx_record.receipt_tiers.clear();
+        tx_record.auth_principal = Some(auth_principal.to_owned());
+        Ok(bundle)
+    }
+
     pub fn export_recursive_refs(
         &self,
         table_name: &str,

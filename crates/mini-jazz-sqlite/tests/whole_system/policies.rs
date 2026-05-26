@@ -755,17 +755,12 @@ fn core_validates_forwarded_exclusive_transaction_with_session_principal() {
             ]),
         )
         .unwrap();
-    let mut bundle = edge.export_table_history("todos").unwrap();
-    let tx_record = bundle
-        .txs
-        .iter_mut()
-        .find(|record| record.tx_id == tx)
+    let bundle_without_forwarded_auth = edge
+        .export_exclusive_transaction_forwarding("todos", &tx, "service")
         .unwrap();
-    tx_record.conflict_mode = 2;
-    tx_record.outcome = 1;
 
     core_without_forwarded_auth
-        .apply_untrusted_bundle(&bundle)
+        .apply_untrusted_bundle(&bundle_without_forwarded_auth)
         .unwrap();
     assert_eq!(
         core_without_forwarded_auth
@@ -779,12 +774,9 @@ fn core_validates_forwarded_exclusive_transaction_with_session_principal() {
         .unwrap()
         .is_empty());
 
-    bundle
-        .txs
-        .iter_mut()
-        .find(|record| record.tx_id == tx)
-        .unwrap()
-        .auth_principal = Some("alice".to_owned());
+    let bundle = edge
+        .export_exclusive_transaction_forwarding("todos", &tx, "alice")
+        .unwrap();
 
     core.apply_untrusted_bundle(&bundle).unwrap();
 
