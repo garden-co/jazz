@@ -77,6 +77,23 @@ impl RowsSubscription {
         }
     }
 
+    pub(crate) fn where_recursive_refs(
+        table: &str,
+        root_id: &str,
+        parent_field: &str,
+        rows: Vec<RowView>,
+    ) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+                table,
+                parent_field,
+                "recursive_refs",
+                JsonValue::String(root_id.to_owned()),
+            )),
+            last_rows: rows,
+        }
+    }
+
     pub(crate) fn where_eq_top_created_at_desc(
         table: &str,
         field: &str,

@@ -501,14 +501,21 @@ impl Runtime {
         let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        let query_reads = vec![QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: table_name.to_owned(),
+            field: parent_field.to_owned(),
+            op: "recursive_refs".to_owned(),
+            value: JsonValue::String(root_id.to_owned()),
+        }];
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             schema_fingerprint: self.schema.compatibility_fingerprint(),
-            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &[]),
+            policy_fingerprint: scoped_policy_fingerprint(&self.schema, &history, &query_reads),
             branches,
             txs,
             reads,
-            query_reads: Vec::new(),
+            query_reads,
             history,
         })
     }
@@ -740,6 +747,12 @@ impl Runtime {
                 };
                 self.export_query_where_in(&read.table, &read.field, values.clone())
             }
+            "recursive_refs" => {
+                let Some(root_id) = read.value.as_str() else {
+                    return Err(crate::Error::new("recursive refs expects root id string"));
+                };
+                self.export_recursive_refs(&read.table, root_id, &read.field)
+            }
             "eq_top_created_at_desc" => {
                 let value = read
                     .value
@@ -859,6 +872,10 @@ impl Runtime {
         query_read: &QueryReadRecord,
     ) -> Result<()> {
         if query_read.op == "absent" {
+            schema.table_def(&query_read.table)?;
+            return Ok(());
+        }
+        if query_read.op == "recursive_refs" {
             schema.table_def(&query_read.table)?;
             return Ok(());
         }
@@ -2091,6 +2108,17 @@ impl Runtime {
                 };
                 self.subscribe_rows_where_in(&read.table, &read.field, values.clone())
             }
+            "recursive_refs" => {
+                let Some(root_id) = read.value.as_str() else {
+                    return Err(crate::Error::new("recursive refs expects root id string"));
+                };
+                Ok(RowsSubscription::where_recursive_refs(
+                    &read.table,
+                    root_id,
+                    &read.field,
+                    self.read_recursive_refs(&read.table, root_id, &read.field)?,
+                ))
+            }
             "eq_top_created_at_desc" => {
                 let value = read
                     .value
@@ -2227,6 +2255,12 @@ impl Runtime {
                     return Err(crate::Error::new("in predicate expects an array value"));
                 };
                 self.read_rows_where_in(&query.table, &query.field, values.clone())?
+            }
+            RowsSubscriptionQuery::Predicate(query) if query.op == "recursive_refs" => {
+                let Some(root_id) = query.value.as_str() else {
+                    return Err(crate::Error::new("recursive refs expects root id string"));
+                };
+                self.read_recursive_refs(&query.table, root_id, &query.field)?
             }
             RowsSubscriptionQuery::Predicate(query) if query.op == "eq_top_created_at_desc" => {
                 let value = query

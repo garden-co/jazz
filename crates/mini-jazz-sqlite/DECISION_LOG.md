@@ -913,3 +913,20 @@ storage. The future callback/promise surface can be layered over this list,
 with redaction semantics still deliberately unsettled.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 213 whole-system tests.
+
+## 2026-05-26 03:37 PDT
+
+Added durable observed-query support for recursive refs. `export_recursive_refs`
+now records a `recursive_refs` query descriptor (`table`, parent field, root id);
+reconnect refresh can re-export that recursive tree; and
+`subscribe_observed_query` can turn the descriptor into a subscription that
+diffs later descendants.
+
+Discovery: recursive queries can fit the same query-read/refresh loop without
+inventing a parallel subscription mechanism. The descriptor shape is still
+prototype-simple (`field = parent ref`, `value = root id`), but it is enough to
+prove the "recursive query as durable desired state" model. Recursive query
+repair is currently handled by exporting the right tombstone/history rows rather
+than by special deletion SQL in `apply_query_scope_repair`.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 214 whole-system tests.
