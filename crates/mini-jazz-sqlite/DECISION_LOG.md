@@ -1421,3 +1421,18 @@ predicate descriptors. Treating absence as "table only" was too loose now that
 absence participates in reconnect refresh, branch context, and validation.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 244 whole-system tests.
+
+## 2026-05-26 05:11 PDT
+
+Made exclusive absent-read validation account for branch source overlays. An
+exclusive insert observed `note-1` as absent on a merge branch; before authority
+acceptance, the authority added a source branch containing `note-1`. The
+authority now rejects the incoming exclusive transaction as `stale_read_set`
+instead of accepting a conflicting merge-branch row.
+
+Discovery: read-set validation must use the same effective branch visibility as
+queries, including source branches. The first absent-read implementation checked
+only the branch's own current row and pinned main base, so it missed rows newly
+visible through source provenance.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 245 whole-system tests.

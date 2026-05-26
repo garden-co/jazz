@@ -145,6 +145,15 @@ fn current_visible_tx_num(
     branch_num: i64,
 ) -> Result<Option<i64>> {
     if branch_num != 1 {
+        for source_branch_num in branch::scope_nums(conn, branch_num)?
+            .into_iter()
+            .filter(|source_branch_num| *source_branch_num != branch_num)
+        {
+            let source_tx = current_visible_tx_num(conn, table_name, row_num, source_branch_num)?;
+            if source_tx.is_some() {
+                return Ok(source_tx);
+            }
+        }
         if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
             let branch_tx = conn
                 .query_row(

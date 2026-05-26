@@ -637,6 +637,63 @@ fn untrusted_exclusive_transaction_rejects_stale_absent_row_read_set() {
 }
 
 #[test]
+fn untrusted_exclusive_transaction_rejects_stale_absent_row_from_new_source_branch() {
+    let schema = support::notes_schema();
+    let mut authority =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
+    let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
+
+    writer.create_branch("merge", None).unwrap();
+    writer.checkout_branch("merge").unwrap();
+    let note_tx = writer
+        .transaction()
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Writer thought merge was empty")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+    let mut bundle = writer.export_table_history("notes").unwrap();
+    bundle
+        .txs
+        .iter_mut()
+        .find(|tx| tx.tx_id == note_tx)
+        .unwrap()
+        .conflict_mode = 2;
+
+    authority.create_branch("left", None).unwrap();
+    authority.checkout_branch("left").unwrap();
+    authority
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Source got here first")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority
+        .create_branch_from_branches("merge", &["left"])
+        .unwrap();
+
+    authority.apply_untrusted_bundle(&bundle).unwrap();
+
+    let info = authority.transaction_info(&note_tx).unwrap();
+    assert_eq!(info.conflict_mode, "exclusive");
+    assert_eq!(info.rejection_code, Some("stale_read_set".to_owned()));
+    authority.checkout_branch("merge").unwrap();
+    let rows = authority.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("Source got here first"));
+}
+
+#[test]
 fn branch_exclusive_transaction_observes_inherited_base_read_version() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
