@@ -9,6 +9,8 @@ pub const BUNDLE_PROTOCOL_VERSION: i64 = 1;
 pub struct Bundle {
     #[serde(default = "default_bundle_protocol_version")]
     pub protocol_version: i64,
+    #[serde(default = "legacy_schema_fingerprint")]
+    pub schema_fingerprint: String,
     pub branches: Vec<BranchRecord>,
     pub txs: Vec<TxRecord>,
     pub reads: Vec<ReadRecord>,
@@ -19,6 +21,10 @@ pub struct Bundle {
 
 fn default_bundle_protocol_version() -> i64 {
     BUNDLE_PROTOCOL_VERSION
+}
+
+fn legacy_schema_fingerprint() -> String {
+    "legacy".to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -574,3 +574,9 @@ Design lesson: local listeners and sync query scopes are converging on the same 
 Started consolidating query descriptors. Local row subscriptions now store a `QueryPredicateRecord` instead of one bespoke enum variant per predicate operator, while bundle query reads keep their wire-compatible shape. Full mini crate suite is green with 171 tests.
 
 Design lesson: the right abstraction is not a "subscription" object or a "sync query read" object; it is a semantic query descriptor with branch/snapshot context layered around it when needed. This cleanup is intentionally partial but points the implementation in that direction.
+
+## 2026-05-26 01:51 PDT
+
+Added schema compatibility fingerprints to bundles. Receivers fail closed before applying structurally incompatible bundles, older untagged bundles remain legacy-compatible, and index-only plus rename-lens differences still apply because the fingerprint is based on lowered storage shape rather than semantic names or policies. Full mini crate suite is green with 172 tests.
+
+Design lesson: catalogue compatibility should be split by lane. Structural storage/lens compatibility can be checked at the sync boundary; policy heads should remain separate because peers may evaluate stricter or newer permissions over compatible row storage.

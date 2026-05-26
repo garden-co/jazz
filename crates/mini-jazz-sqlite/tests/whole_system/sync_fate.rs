@@ -355,6 +355,7 @@ fn exported_bundles_carry_protocol_version() {
     let bundle = alice.export_query_scope_open_todos().unwrap();
 
     assert_eq!(bundle.protocol_version, 1);
+    assert_ne!(bundle.schema_fingerprint, "legacy");
 }
 
 #[test]
@@ -370,6 +371,40 @@ fn older_untagged_bundles_decode_as_protocol_version_one() {
     let bundle: mini_jazz_sqlite::sync::Bundle = serde_json::from_str(encoded).unwrap();
 
     assert_eq!(bundle.protocol_version, 1);
+    assert_eq!(bundle.schema_fingerprint, "legacy");
+}
+
+#[test]
+fn incompatible_schema_fingerprint_fails_closed_without_partial_apply() {
+    let writer_schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let receiver_schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+    });
+    let mut writer =
+        Runtime::open_with_schema(Storage::Memory, "writer", "alice", writer_schema).unwrap();
+    let mut receiver =
+        Runtime::open_with_schema(Storage::Memory, "receiver", "alice", receiver_schema).unwrap();
+
+    writer
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("schema mismatch")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    let bundle = writer.export_table_history("notes").unwrap();
+
+    let err = receiver.apply_bundle(&bundle).unwrap_err();
+
+    assert!(err.to_string().contains("incompatible schema"));
+    assert_eq!(receiver.storage_stats().unwrap().history_rows, 0);
+    assert!(receiver.read_rows("notes").unwrap().is_empty());
 }
 
 #[test]

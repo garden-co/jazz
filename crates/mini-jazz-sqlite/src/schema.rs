@@ -43,6 +43,21 @@ impl SchemaDef {
             .get(name)
             .ok_or_else(|| crate::Error::new(format!("unknown table {name}")))
     }
+
+    pub(crate) fn compatibility_fingerprint(&self) -> String {
+        let mut parts = Vec::new();
+        for table in self.tables.values() {
+            parts.push(format!("table:{}", table.name));
+            for field in &table.fields {
+                parts.push(format!(
+                    "field:{}:{}",
+                    field.storage_name,
+                    field.kind.fingerprint()
+                ));
+            }
+        }
+        parts.join("|")
+    }
 }
 
 impl Default for SchemaDef {
@@ -72,6 +87,16 @@ pub(crate) enum FieldKind {
     Text,
     Bool,
     Ref { table: String },
+}
+
+impl FieldKind {
+    fn fingerprint(&self) -> String {
+        match self {
+            FieldKind::Text => "text".to_owned(),
+            FieldKind::Bool => "bool".to_owned(),
+            FieldKind::Ref { table } => format!("ref:{table}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

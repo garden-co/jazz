@@ -307,6 +307,7 @@ impl Runtime {
         )?);
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
+            schema_fingerprint: self.schema.compatibility_fingerprint(),
             branches,
             txs,
             reads,
@@ -359,6 +360,7 @@ impl Runtime {
         let branches = export_branch_records_for_history(&self.conn, &history)?;
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
+            schema_fingerprint: self.schema.compatibility_fingerprint(),
             branches,
             txs,
             reads,
@@ -389,6 +391,7 @@ impl Runtime {
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
+            schema_fingerprint: self.schema.compatibility_fingerprint(),
             branches,
             txs,
             reads,
@@ -474,6 +477,7 @@ impl Runtime {
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
+            schema_fingerprint: self.schema.compatibility_fingerprint(),
             branches,
             txs,
             reads,
@@ -488,6 +492,12 @@ impl Runtime {
                 "unsupported bundle protocol version {}",
                 bundle.protocol_version
             )));
+        }
+        let local_schema_fingerprint = self.schema.compatibility_fingerprint();
+        if bundle.schema_fingerprint != "legacy"
+            && bundle.schema_fingerprint != local_schema_fingerprint
+        {
+            return Err(crate::Error::new("incompatible schema fingerprint"));
         }
         let schema = self.schema.clone();
         let db = self.conn.transaction()?;
@@ -1556,6 +1566,7 @@ impl Runtime {
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
+            schema_fingerprint: self.schema.compatibility_fingerprint(),
             branches,
             txs,
             reads,

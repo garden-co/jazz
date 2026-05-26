@@ -440,4 +440,11 @@ fn index_only_schema_changes_are_semantically_compatible() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values["title"], json!("Compatible"));
+
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq_top_created_at_desc("tasks", "done", json!(false), 1)
+            .unwrap(),
+    )
+    .unwrap();
 }
