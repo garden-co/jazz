@@ -182,7 +182,6 @@ impl Runtime {
         op: i64,
     ) -> Result<String> {
         let table = self.schema.table_def(table_name)?.clone();
-        let write_policy = table.write_policy.clone();
         let db = self.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
@@ -201,14 +200,14 @@ impl Runtime {
         })?;
         let row_num = row_num(&db, id)?;
         let allowed = self.trusted
-            || policy::write_allowed(
+            || local_write_allowed(
                 &db,
                 &self.schema,
                 &table,
-                &write_policy,
                 row_num,
                 &values,
                 &self.principal,
+                op,
             )?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
@@ -1095,14 +1094,14 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
         args.tx_num,
     )?;
     let allowed = args.trusted
-        || policy::write_allowed(
+        || local_write_allowed(
             args.db,
             args.schema,
             table,
-            &table.write_policy,
             row_num,
             args.values,
             args.principal,
+            args.op,
         )?;
 
     let mut columns = vec![
@@ -1138,10 +1137,16 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
         "j_created_by".to_owned(),
         "j_updated_by".to_owned(),
     ]);
+    let (created_at, created_by) = if args.op == 1 {
+        (args.now, args.principal.to_owned())
+    } else {
+        current_creation_metadata(args.db, &table.name, row_num, args.branch_num)?
+            .unwrap_or((args.now, args.principal.to_owned()))
+    };
     sql_values.extend([
+        rusqlite::types::Value::Integer(created_at),
         rusqlite::types::Value::Integer(args.now),
-        rusqlite::types::Value::Integer(args.now),
-        rusqlite::types::Value::Text(args.principal.to_owned()),
+        rusqlite::types::Value::Text(created_by),
         rusqlite::types::Value::Text(args.principal.to_owned()),
     ]);
     insert_dynamic(
@@ -1175,6 +1180,49 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn local_write_allowed(
+    db: &Connection,
+    schema: &SchemaDef,
+    table: &crate::schema::TableDef,
+    row_num: i64,
+    values: &BTreeMap<String, JsonValue>,
+    principal: &str,
+    op: i64,
+) -> Result<bool> {
+    if op == 1 && matches!(table.write_policy, PolicyDef::CreatedByPrincipal) {
+        return Ok(true);
+    }
+    policy::write_allowed(
+        db,
+        schema,
+        table,
+        &table.write_policy,
+        row_num,
+        values,
+        principal,
+    )
+}
+
+fn current_creation_metadata(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<Option<(i64, String)>> {
+    conn.query_row(
+        &format!(
+            "SELECT j_created_at, j_created_by
+             FROM {}
+             WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn record_policy_read_set_for_write(

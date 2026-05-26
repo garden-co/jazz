@@ -464,6 +464,53 @@ fn trusted_edge_rejects_untrusted_delete_policy_violation() {
 }
 
 #[test]
+fn created_by_write_policy_allows_self_create_but_rejects_other_writer() {
+    let schema = SchemaDef::new().table("docs", |table| {
+        table.text("title");
+        table.write_if_created_by_principal();
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "bob-node", "bob", schema.clone())
+            .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    let create_tx = alice
+        .insert_row(
+            "docs",
+            "doc-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice draft"))]),
+        )
+        .unwrap();
+    assert_eq!(alice.read_rows("docs").unwrap().len(), 1);
+
+    let alice_bundle = alice.export_table_history("docs").unwrap();
+    bob.apply_bundle(&alice_bundle).unwrap();
+    edge.apply_untrusted_bundle(&alice_bundle).unwrap();
+    edge.accept_transaction_at_edge(&create_tx).unwrap();
+
+    let update_tx = bob
+        .update_row(
+            "docs",
+            "doc-1",
+            BTreeMap::from([("title".to_owned(), json!("Bob rewrite"))]),
+        )
+        .unwrap();
+    edge.apply_untrusted_bundle(&bob.export_table_history("docs").unwrap())
+        .unwrap();
+
+    assert_eq!(
+        edge.read_rows("docs").unwrap()[0].values["title"],
+        json!("Alice draft")
+    );
+    assert_eq!(
+        edge.transaction_info(&update_tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn untrusted_validation_error_does_not_leave_invalid_current_row_visible() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

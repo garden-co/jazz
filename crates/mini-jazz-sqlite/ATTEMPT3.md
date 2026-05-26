@@ -1772,3 +1772,21 @@ rebuilds projection from history instead of doing an incremental per-row repair.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 direct_global_acceptance_repairs_current_projection_order` passes.
+
+## 2026-05-25 19:59 PDT
+
+Starting created-by write policy creation semantics. Current
+`write_if_created_by_principal` acts like an existing-row owner check and makes
+ordinary self-authored inserts impossible, which is too narrow for row-owner
+policy semantics.
+
+## 2026-05-25 20:00 PDT
+
+Created-by write policy semantics are green. Self-authored inserts are now
+allowed for owner-write tables. The same test exposed a second bug: generic
+updates rewrote `j_created_by` to the updater, effectively transferring row
+ownership on every update. Generic writes now preserve creation metadata from
+the current row for non-insert operations.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+created_by_write_policy_allows_self_create_but_rejects_other_writer` passes.
