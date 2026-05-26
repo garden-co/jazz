@@ -568,3 +568,9 @@ Design lesson: `null` includes are not just missing data; they are observations.
 Added ordered-page local subscription coverage. A `where eq + top createdAt desc` subscription now reports the newer row entering and the old page-boundary row leaving. Full mini crate suite is green with 171 tests.
 
 Design lesson: local listeners and sync query scopes are converging on the same query descriptor problem. Keeping separate subscription enums and bundle query-read records is now clearly duplication; a shared semantic query descriptor should be an architecture cleanup soon.
+
+## 2026-05-26 01:48 PDT
+
+Started consolidating query descriptors. Local row subscriptions now store a `QueryPredicateRecord` instead of one bespoke enum variant per predicate operator, while bundle query reads keep their wire-compatible shape. Full mini crate suite is green with 171 tests.
+
+Design lesson: the right abstraction is not a "subscription" object or a "sync query read" object; it is a semantic query descriptor with branch/snapshot context layered around it when needed. This cleanup is intentionally partial but points the implementation in that direction.

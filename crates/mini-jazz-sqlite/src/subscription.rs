@@ -1,3 +1,4 @@
+use crate::sync::QueryPredicateRecord;
 use crate::types::{RowDiff, RowView};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -10,30 +11,8 @@ pub struct RowsSubscription {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RowsSubscriptionQuery {
-    Table {
-        table: String,
-    },
-    WhereEq {
-        table: String,
-        field: String,
-        value: JsonValue,
-    },
-    WhereContains {
-        table: String,
-        field: String,
-        needle: String,
-    },
-    WhereIn {
-        table: String,
-        field: String,
-        values: Vec<JsonValue>,
-    },
-    WhereEqTopCreatedAtDesc {
-        table: String,
-        field: String,
-        value: JsonValue,
-        limit: usize,
-    },
+    Table { table: String },
+    Predicate(QueryPredicateRecord),
 }
 
 impl RowsSubscription {
@@ -48,11 +27,9 @@ impl RowsSubscription {
 
     pub(crate) fn where_eq(table: &str, field: &str, value: JsonValue, rows: Vec<RowView>) -> Self {
         Self {
-            query: RowsSubscriptionQuery::WhereEq {
-                table: table.to_owned(),
-                field: field.to_owned(),
-                value,
-            },
+            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+                table, field, "eq", value,
+            )),
             last_rows: rows,
         }
     }
@@ -64,11 +41,12 @@ impl RowsSubscription {
         rows: Vec<RowView>,
     ) -> Self {
         Self {
-            query: RowsSubscriptionQuery::WhereContains {
-                table: table.to_owned(),
-                field: field.to_owned(),
-                needle: needle.to_owned(),
-            },
+            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+                table,
+                field,
+                "contains",
+                JsonValue::String(needle.to_owned()),
+            )),
             last_rows: rows,
         }
     }
@@ -80,11 +58,12 @@ impl RowsSubscription {
         rows: Vec<RowView>,
     ) -> Self {
         Self {
-            query: RowsSubscriptionQuery::WhereIn {
-                table: table.to_owned(),
-                field: field.to_owned(),
-                values,
-            },
+            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+                table,
+                field,
+                "in",
+                JsonValue::Array(values),
+            )),
             last_rows: rows,
         }
     }
@@ -97,12 +76,15 @@ impl RowsSubscription {
         rows: Vec<RowView>,
     ) -> Self {
         Self {
-            query: RowsSubscriptionQuery::WhereEqTopCreatedAtDesc {
-                table: table.to_owned(),
-                field: field.to_owned(),
-                value,
-                limit,
-            },
+            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+                table,
+                field,
+                "eq_top_created_at_desc",
+                serde_json::json!({
+                    "eq": value,
+                    "limit": limit,
+                }),
+            )),
             last_rows: rows,
         }
     }

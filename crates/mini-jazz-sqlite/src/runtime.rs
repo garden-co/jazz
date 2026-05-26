@@ -1655,28 +1655,43 @@ impl Runtime {
     ) -> Result<Vec<crate::types::RowDiff>> {
         let next_rows = match &subscription.query {
             RowsSubscriptionQuery::Table { table } => self.read_rows(table)?,
-            RowsSubscriptionQuery::WhereEq {
-                table,
-                field,
-                value,
-            } => self.read_rows_where_eq(table, field, value.clone())?,
-            RowsSubscriptionQuery::WhereContains {
-                table,
-                field,
-                needle,
-            } => self.read_rows_where_contains(table, field, needle)?,
-            RowsSubscriptionQuery::WhereIn {
-                table,
-                field,
-                values,
-            } => self.read_rows_where_in(table, field, values.clone())?,
-            RowsSubscriptionQuery::WhereEqTopCreatedAtDesc {
-                table,
-                field,
-                value,
-                limit,
-            } => {
-                self.read_rows_where_eq_top_created_at_desc(table, field, value.clone(), *limit)?
+            RowsSubscriptionQuery::Predicate(query) if query.op == "eq" => {
+                self.read_rows_where_eq(&query.table, &query.field, query.value.clone())?
+            }
+            RowsSubscriptionQuery::Predicate(query) if query.op == "contains" => {
+                let Some(needle) = query.value.as_str() else {
+                    return Err(crate::Error::new("contains expects a string value"));
+                };
+                self.read_rows_where_contains(&query.table, &query.field, needle)?
+            }
+            RowsSubscriptionQuery::Predicate(query) if query.op == "in" => {
+                let Some(values) = query.value.as_array() else {
+                    return Err(crate::Error::new("in predicate expects an array value"));
+                };
+                self.read_rows_where_in(&query.table, &query.field, values.clone())?
+            }
+            RowsSubscriptionQuery::Predicate(query) if query.op == "eq_top_created_at_desc" => {
+                let value = query
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
+                let limit = query
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
+                self.read_rows_where_eq_top_created_at_desc(
+                    &query.table,
+                    &query.field,
+                    value.clone(),
+                    limit as usize,
+                )?
+            }
+            RowsSubscriptionQuery::Predicate(query) => {
+                return Err(crate::Error::new(format!(
+                    "unsupported subscription query {}",
+                    query.op
+                )));
             }
         };
         Ok(subscription.replace_with_diff(next_rows))
