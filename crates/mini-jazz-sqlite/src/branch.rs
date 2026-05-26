@@ -17,6 +17,18 @@ pub(crate) fn ensure(
         params![branch_id],
         |row| row.get(0),
     )?;
+    let stored_base: Option<i64> = conn.query_row(
+        "SELECT base_global_epoch FROM jazz_branch WHERE branch_num = ?",
+        params![branch_num],
+        |row| row.get(0),
+    )?;
+    if let Some(base_global_epoch) = base_global_epoch {
+        if stored_base != Some(base_global_epoch) {
+            return Err(crate::Error::new(format!(
+                "branch base mismatch for {branch_id}"
+            )));
+        }
+    }
     sync_backing_row(conn, branch_num)?;
     Ok(branch_num)
 }

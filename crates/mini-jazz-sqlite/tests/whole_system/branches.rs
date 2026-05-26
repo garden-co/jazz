@@ -1356,6 +1356,26 @@ fn branch_metadata_lists_and_syncs_base_and_sources() {
 }
 
 #[test]
+fn branch_base_epoch_is_immutable() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("draft", Some(5)).unwrap();
+    alice.create_branch("draft", Some(5)).unwrap();
+    let err = alice.create_branch("draft", Some(6)).unwrap_err();
+
+    assert!(err.to_string().contains("branch base mismatch"));
+    let draft = alice
+        .branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == "draft")
+        .unwrap();
+    assert_eq!(draft.base_global_epoch, Some(5));
+}
+
+#[test]
 fn branch_conflict_resolution_survives_sync() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
