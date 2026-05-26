@@ -628,3 +628,9 @@ Design lesson: policy catalogue state is a separate lane, but sender policy meta
 Added first required-include semantics. Optional todo/project includes still return the parent with `project_title = None`, while `open_todos_require_project` filters the parent when the referenced project is missing or unauthorized and restores it when the project becomes visible. Full mini crate suite is green with 181 tests.
 
 Design lesson: required includes are query semantics, not permission semantics. The parent row may be readable on its own, but the required include changes result membership based on target visibility. This should become a generic query-shape feature rather than a todo-specific helper.
+
+## 2026-05-26 02:14 PDT
+
+Extended required includes through query-scoped sync. A peer can receive a parent row whose required ref target is missing, keep it out of the required-include result, and then include it once the target row arrives later. Full mini crate suite is green with 182 tests.
+
+Design lesson: query-scoped sync can safely deliver parent rows before required include dependencies arrive, as long as result materialization reruns include visibility. Required include semantics need not block storage of the parent history.
