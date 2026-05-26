@@ -1625,3 +1625,19 @@ is visible through branch provenance, it is also visible to the conflict
 inspection path.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 260 whole-system tests.
+
+## 2026-05-26 05:37 PDT
+
+Found and fixed transitive source overlay precedence. The first transitive
+source implementation used the full source closure as a flat branch set, so a
+row written on `middle` and its deeper source row from `left` both appeared on
+`merge`. Current-row query lowering now carries the physical branch number and
+collapses rows by nearest source depth, keeping same-depth candidates as
+conflicts while letting nearer branches shadow deeper sources.
+
+Discovery: branch source semantics need two pieces, not one: the transitive
+source closure for reachability, and source depth for precedence. This mirrors
+the desired branch model better: siblings at the same depth can conflict, but a
+branch-local resolution shadows its own bases.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 261 whole-system tests.

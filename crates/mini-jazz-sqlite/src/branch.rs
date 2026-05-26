@@ -1,6 +1,6 @@
 use crate::Result;
 use rusqlite::{params, Connection};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn ensure(
     conn: &Connection,
@@ -159,13 +159,23 @@ fn bump_source_version(conn: &Connection, branch_num: i64) -> Result<()> {
 }
 
 pub(crate) fn scope_nums(conn: &Connection, branch_num: i64) -> Result<Vec<i64>> {
-    let mut nums = Vec::new();
-    let mut stack = vec![branch_num];
+    Ok(scope_depths(conn, branch_num)?
+        .into_keys()
+        .collect::<Vec<_>>())
+}
+
+pub(crate) fn scope_depths(conn: &Connection, branch_num: i64) -> Result<BTreeMap<i64, i64>> {
+    let mut depths = BTreeMap::new();
+    let mut stack = vec![(branch_num, 0)];
     while let Some(current_branch_num) = stack.pop() {
-        if nums.contains(&current_branch_num) {
+        let (current_branch_num, depth) = current_branch_num;
+        if depths
+            .get(&current_branch_num)
+            .is_some_and(|existing_depth| *existing_depth <= depth)
+        {
             continue;
         }
-        nums.push(current_branch_num);
+        depths.insert(current_branch_num, depth);
         let mut stmt = conn.prepare(
             "SELECT source_branch_num
              FROM jazz_branch_source
@@ -175,11 +185,13 @@ pub(crate) fn scope_nums(conn: &Connection, branch_num: i64) -> Result<Vec<i64>>
         let sources = stmt
             .query_map(params![current_branch_num], |row| row.get::<_, i64>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        stack.extend(sources);
+        stack.extend(
+            sources
+                .into_iter()
+                .map(|source_branch_num| (source_branch_num, depth + 1)),
+        );
     }
-    nums.sort();
-    nums.dedup();
-    Ok(nums)
+    Ok(depths)
 }
 
 fn source_reaches_branch(

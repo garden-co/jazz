@@ -224,17 +224,15 @@ impl QueryContext<'_> {
                     .filter(|row| row.id == id),
             );
         }
-        for row in rows {
-            let mut row = row;
-            let source_branch_num = match row.remove(0) {
-                rusqlite::types::Value::Integer(value) => value,
-                _ => return Err(crate::Error::new("expected source branch num")),
-            };
+        let mut visible_candidates = Vec::new();
+        for mut row in rows {
+            let source_branch_num = branch_num_from_row(&mut row)?;
             let view = row_to_view(self.conn, table_name, table, row)?;
             if self.row_view_visible_in_branch(table_name, &view, source_branch_num)? {
-                candidates.push(view);
+                visible_candidates.push((source_branch_num, view));
             }
         }
+        candidates.extend(self.collapse_shadowed_current_rows(visible_candidates)?);
         Ok(candidates)
     }
 
@@ -532,7 +530,11 @@ impl QueryContext<'_> {
             .iter()
             .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
             .collect::<Vec<_>>();
-        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        let mut select_columns = vec![
+            "current.j_branch_num".to_owned(),
+            "ids.row_id".to_owned(),
+            "tx.tx_id".to_owned(),
+        ];
         select_columns.extend(
             field_columns
                 .iter()
@@ -599,14 +601,20 @@ impl QueryContext<'_> {
             rusqlite::types::Value::Integer(self.branch_num),
         ]);
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = 3 + table.fields.len() + 1;
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
                 .collect::<rusqlite::Result<Vec<_>>>()
         })?;
-        rows.map(|row| row_to_view(self.conn, table_name, table, row?))
-            .collect()
+        let rows = rows
+            .map(|row| {
+                let mut row = row?;
+                let branch_num = branch_num_from_row(&mut row)?;
+                Ok((branch_num, row_to_view(self.conn, table_name, table, row)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.collapse_shadowed_current_rows(rows)
     }
 
     fn read_rows_from_current_where_eq(
@@ -622,7 +630,11 @@ impl QueryContext<'_> {
             .iter()
             .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
             .collect::<Vec<_>>();
-        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        let mut select_columns = vec![
+            "current.j_branch_num".to_owned(),
+            "ids.row_id".to_owned(),
+            "tx.tx_id".to_owned(),
+        ];
         select_columns.extend(
             field_columns
                 .iter()
@@ -718,14 +730,20 @@ impl QueryContext<'_> {
             params.push(predicate_value);
         }
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = 3 + table.fields.len() + 1;
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
                 .collect::<rusqlite::Result<Vec<_>>>()
         })?;
-        rows.map(|row| row_to_view(self.conn, table_name, table, row?))
-            .collect()
+        let rows = rows
+            .map(|row| {
+                let mut row = row?;
+                let branch_num = branch_num_from_row(&mut row)?;
+                Ok((branch_num, row_to_view(self.conn, table_name, table, row)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.collapse_shadowed_current_rows(rows)
     }
 
     fn read_rows_from_current_where_contains(
@@ -741,7 +759,11 @@ impl QueryContext<'_> {
             .iter()
             .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
             .collect::<Vec<_>>();
-        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        let mut select_columns = vec![
+            "current.j_branch_num".to_owned(),
+            "ids.row_id".to_owned(),
+            "tx.tx_id".to_owned(),
+        ];
         select_columns.extend(
             field_columns
                 .iter()
@@ -811,14 +833,53 @@ impl QueryContext<'_> {
             rusqlite::types::Value::Text(needle.to_owned()),
         ]);
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = 3 + table.fields.len() + 1;
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
                 .collect::<rusqlite::Result<Vec<_>>>()
         })?;
-        rows.map(|row| row_to_view(self.conn, table_name, table, row?))
-            .collect()
+        let rows = rows
+            .map(|row| {
+                let mut row = row?;
+                let branch_num = branch_num_from_row(&mut row)?;
+                Ok((branch_num, row_to_view(self.conn, table_name, table, row)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.collapse_shadowed_current_rows(rows)
+    }
+
+    fn collapse_shadowed_current_rows(&self, rows: Vec<(i64, RowView)>) -> Result<Vec<RowView>> {
+        let depths = branch::scope_depths(self.conn, self.branch_num)?;
+        let mut min_depth_by_row: BTreeMap<String, i64> = BTreeMap::new();
+        for (branch_num, row) in &rows {
+            let depth = depths
+                .get(branch_num)
+                .copied()
+                .unwrap_or(if *branch_num == 1 {
+                    i64::MAX / 4
+                } else {
+                    i64::MAX / 2
+                });
+            min_depth_by_row
+                .entry(row.id.clone())
+                .and_modify(|min_depth| *min_depth = (*min_depth).min(depth))
+                .or_insert(depth);
+        }
+        Ok(rows
+            .into_iter()
+            .filter_map(|(branch_num, row)| {
+                let depth = depths
+                    .get(&branch_num)
+                    .copied()
+                    .unwrap_or(if branch_num == 1 {
+                        i64::MAX / 4
+                    } else {
+                        i64::MAX / 2
+                    });
+                (min_depth_by_row.get(&row.id) == Some(&depth)).then_some(row)
+            })
+            .collect())
     }
 
     fn read_main_snapshot_rows(&self, table_name: &str, base_epoch: i64) -> Result<Vec<RowView>> {
@@ -919,6 +980,13 @@ fn row_to_view(
         created_by: text_value(&raw[2 + table.fields.len()], "j_created_by")?,
         conflict_count: 0,
     })
+}
+
+fn branch_num_from_row(raw: &mut Vec<rusqlite::types::Value>) -> Result<i64> {
+    match raw.remove(0) {
+        rusqlite::types::Value::Integer(value) => Ok(value),
+        _ => Err(crate::Error::new("expected branch num")),
+    }
 }
 
 fn placeholders(count: usize) -> String {

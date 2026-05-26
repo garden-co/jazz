@@ -1329,6 +1329,45 @@ fn branch_reads_transitive_source_branch_rows() {
 }
 
 #[test]
+fn branch_transitive_source_overlay_shadows_deeper_source_row() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .create_branch_from_branches("middle", &["left"])
+        .unwrap();
+    alice.checkout_branch("middle").unwrap();
+    alice
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("title".to_owned(), json!("Middle title"))]),
+        )
+        .unwrap();
+    alice
+        .create_branch_from_branches("merge", &["middle"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Middle title"));
+}
+
+#[test]
 fn branch_conflict_candidates_include_transitive_source_branch_rows() {
     let schema = support::tasks_schema();
     let mut alice =
