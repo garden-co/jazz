@@ -821,6 +821,52 @@ fn branch_base_snapshot_respects_deletes_and_excludes_pending_main() {
 }
 
 #[test]
+fn branch_multi_base_conflicts_expose_multiple_candidates() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let candidates = alice.read_row_candidates("tasks", "task-1").unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].values["title"], json!("Left title"));
+    assert_eq!(candidates[1].values["title"], json!("Right title"));
+}
+
+#[test]
 fn rename_lens_reads_old_storage_column_as_new_field_name() {
     let old_schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

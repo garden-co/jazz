@@ -407,6 +407,18 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn create_branch_from_branches(
+        &mut self,
+        branch_id: &str,
+        source_branch_ids: &[&str],
+    ) -> Result<()> {
+        let branch_num = branch::ensure(&self.conn, branch_id, None, now_ms())?;
+        for source_branch_id in source_branch_ids {
+            branch::add_source(&self.conn, branch_num, source_branch_id)?;
+        }
+        Ok(())
+    }
+
     pub fn checkout_branch(&mut self, branch_id: &str) -> Result<()> {
         self.branch_num = branch::checkout(&self.conn, branch_id)?;
         Ok(())
@@ -704,6 +716,66 @@ impl Runtime {
             table_name,
             self.read_rows(table_name)?,
         ))
+    }
+
+    pub fn read_row_candidates(&self, table_name: &str, id: &str) -> Result<Vec<RowView>> {
+        let table = self.schema.table_def(table_name)?;
+        let row_num = row_num(&self.conn, id)?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        select_columns.extend(
+            field_columns
+                .iter()
+                .map(|column| format!("current.{column}")),
+        );
+        select_columns.push("current.j_created_by".to_owned());
+        let sql = format!(
+            "SELECT {}
+             FROM jazz_branch_source source
+             JOIN {} current ON current.j_branch_num = source.source_branch_num
+             JOIN jazz_row_id ids ON ids.row_num = current.row_num
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             WHERE source.branch_num = ?
+               AND current.row_num = ?
+               AND current.is_deleted = 0
+               AND tx.outcome != ?
+             ORDER BY source.source_branch_num",
+            select_columns.join(", "),
+            crate::schema::current_table(table_name),
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 2 + table.fields.len() + 1;
+        let rows = stmt.query_map(
+            params![self.branch_num, row_num, tx::OUTCOME_REJECTED],
+            |row| {
+                (0..row_width)
+                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            },
+        )?;
+        let mut views = Vec::new();
+        for raw in rows {
+            let raw = raw?;
+            let mut values = BTreeMap::new();
+            for (idx, field) in table.fields.iter().enumerate() {
+                values.insert(
+                    field.name.clone(),
+                    sql_value_to_json(&self.conn, field, &raw[idx + 2])?,
+                );
+            }
+            views.push(RowView {
+                table: table_name.to_owned(),
+                id: text_value(&raw[0], "row_id")?,
+                tx_id: text_value(&raw[1], "tx_id")?,
+                values,
+                created_by: text_value(&raw[2 + table.fields.len()], "j_created_by")?,
+            });
+        }
+        Ok(views)
     }
 
     pub fn poll_subscription(

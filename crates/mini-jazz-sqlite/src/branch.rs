@@ -34,3 +34,13 @@ pub(crate) fn base_global_epoch(conn: &Connection, branch_num: i64) -> Result<Op
         |row| row.get(0),
     )?)
 }
+
+pub(crate) fn add_source(conn: &Connection, branch_num: i64, source_branch_id: &str) -> Result<()> {
+    let source_branch_num = checkout(conn, source_branch_id)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO jazz_branch_source (branch_num, source_branch_num)
+         VALUES (?, ?)",
+        params![branch_num, source_branch_num],
+    )?;
+    Ok(())
+}

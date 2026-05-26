@@ -224,6 +224,12 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           created_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS jazz_branch_source (
+          branch_num INTEGER NOT NULL,
+          source_branch_num INTEGER NOT NULL,
+          PRIMARY KEY (branch_num, source_branch_num)
+        ) WITHOUT ROWID;
+
         INSERT OR IGNORE INTO jazz_branch
           (branch_num, branch_id, base_global_epoch, created_at)
           VALUES (1, 'main', NULL, 0);

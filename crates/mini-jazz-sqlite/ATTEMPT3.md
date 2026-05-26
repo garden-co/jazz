@@ -468,3 +468,21 @@ projects/todos current tables.
 Learning: transaction fate handling needs to stay schema-driven and branch-aware
 from the start. Fixture-specific repair paths are especially dangerous because
 they pass product-looking tests while silently breaking generic schemas.
+
+## 2026-05-25 17:44 PDT
+
+First conflict-candidate probe is green. Branches can now record explicit source
+branches in `jazz_branch_source`; a merge branch can expose multiple current
+candidates for the same row via `read_row_candidates`.
+
+Decision: keep conflict candidates as multiple visible row-version candidates,
+not immediate last-writer-wins. For this slice they are exposed through a side
+API rather than folded into ordinary query result metadata.
+
+Limitations:
+
+- Source branch provenance is local-only and not included in sync bundles yet.
+- Candidate reads use source branch current projections, not arbitrary pinned
+  source snapshots.
+- Ordinary `read_rows` still returns normal overlay rows and does not include
+  conflict metadata.
