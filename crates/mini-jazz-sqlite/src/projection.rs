@@ -9,15 +9,19 @@ pub(crate) fn clear(conn: &Connection, schema: &SchemaDef) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn rebuild(conn: &Connection, schema: &SchemaDef) -> Result<()> {
+pub(crate) fn rebuild(conn: &Connection, schema: &SchemaDef, local_node_num: i64) -> Result<()> {
     clear(conn, schema)?;
     for table in schema.tables() {
-        rebuild_table(conn, table)?;
+        rebuild_table(conn, table, local_node_num)?;
     }
     Ok(())
 }
 
-fn rebuild_table(conn: &Connection, table: &crate::schema::TableDef) -> Result<()> {
+fn rebuild_table(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    local_node_num: i64,
+) -> Result<()> {
     let field_columns = table
         .fields
         .iter()
@@ -43,7 +47,11 @@ fn rebuild_table(conn: &Connection, table: &crate::schema::TableDef) -> Result<(
          WHERE tx.outcome != ?
          ORDER BY h.row_num,
                   h.j_branch_num,
-                  CASE WHEN tx.global_epoch IS NULL THEN 1 ELSE 0 END,
+                  CASE
+                    WHEN tx.outcome = ? AND tx.global_epoch IS NULL AND tx.node_num != ? THEN 0
+                    WHEN tx.global_epoch IS NOT NULL OR tx.outcome = ? THEN 1
+                    ELSE 2
+                  END,
                   tx.global_epoch,
                   tx.tx_num",
         select_columns.join(", "),
@@ -51,11 +59,19 @@ fn rebuild_table(conn: &Connection, table: &crate::schema::TableDef) -> Result<(
     );
     let mut stmt = conn.prepare(&sql)?;
     let row_width = 4 + table.fields.len() + 4;
-    let rows = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
-        (0..row_width)
-            .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
-            .collect::<rusqlite::Result<Vec<_>>>()
-    })?;
+    let rows = stmt.query_map(
+        params![
+            tx::OUTCOME_REJECTED,
+            tx::OUTCOME_PENDING,
+            local_node_num,
+            tx::OUTCOME_ACCEPTED
+        ],
+        |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        },
+    )?;
 
     for row in rows {
         let values = row?;

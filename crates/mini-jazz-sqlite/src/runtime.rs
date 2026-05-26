@@ -445,7 +445,7 @@ impl Runtime {
             )?;
         }
         for record in &bundle.history {
-            Self::apply_history_record(&schema, &db, record)?;
+            Self::apply_history_record(&schema, &db, self.node_num, record)?;
         }
         db.commit()?;
         Ok(())
@@ -472,7 +472,7 @@ impl Runtime {
             }
         }
         if !rejected.is_empty() {
-            projection::rebuild(&self.conn, &self.schema)?;
+            projection::rebuild(&self.conn, &self.schema, self.node_num)?;
         }
         Ok(())
     }
@@ -480,6 +480,7 @@ impl Runtime {
     fn apply_history_record(
         schema: &SchemaDef,
         db: &Connection,
+        local_node_num: i64,
         record: &HistoryRecord,
     ) -> Result<()> {
         let table = schema.table_def(&record.table)?;
@@ -535,6 +536,11 @@ impl Runtime {
         record_tx_write(db, tx_num, &record.table, row_num, record.op)?;
 
         let outcome = tx_outcome(db, tx_num)?;
+        if tx_is_remote_pending(db, tx_num, local_node_num)?
+            && durable_version_exists_for_row(db, &record.table, row_num, branch_num)?
+        {
+            return Ok(());
+        }
         if outcome != tx::OUTCOME_REJECTED
             && !is_newest_version_for_current(db, &record.table, row_num, branch_num, tx_num)?
         {
@@ -613,7 +619,7 @@ impl Runtime {
 
     pub fn accept_transaction_at_global(&mut self, tx_id: &str, global_epoch: i64) -> Result<()> {
         tx::accept_global(&self.conn, tx_id, global_epoch)?;
-        projection::rebuild(&self.conn, &self.schema)?;
+        projection::rebuild(&self.conn, &self.schema, self.node_num)?;
         Ok(())
     }
 
@@ -904,7 +910,7 @@ impl Runtime {
     }
 
     pub fn rebuild_current_projection(&mut self) -> Result<()> {
-        projection::rebuild(&self.conn, &self.schema)
+        projection::rebuild(&self.conn, &self.schema, self.node_num)
     }
 
     pub fn physical_row_num_for(&self, row_id: &str) -> Result<i64> {
@@ -1624,6 +1630,43 @@ fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {
         params![tx_num],
         |row| row.get(0),
     )?)
+}
+
+fn tx_is_remote_pending(conn: &Connection, tx_num: i64, local_node_num: i64) -> Result<bool> {
+    let (node_num, outcome): (i64, i64) = conn.query_row(
+        "SELECT node_num, outcome FROM jazz_tx WHERE tx_num = ?",
+        params![tx_num],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(outcome == tx::OUTCOME_PENDING && node_num != local_node_num)
+}
+
+fn durable_version_exists_for_row(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {} h
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.row_num = ?
+               AND h.j_branch_num = ?
+               AND tx.outcome != ?
+               AND (tx.outcome = ? OR tx.global_epoch IS NOT NULL)",
+            crate::schema::history_table(table_name)
+        ),
+        params![
+            row_num,
+            branch_num,
+            tx::OUTCOME_REJECTED,
+            tx::OUTCOME_ACCEPTED
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn write_allowed_for_history_record(

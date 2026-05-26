@@ -1824,3 +1824,22 @@ constrains the referenced parent current row to that branch.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 branch_write_policy_does_not_use_parent_from_different_branch` passes.
+
+## 2026-05-25 20:06 PDT
+
+Starting remote-pending visibility coverage. Local optimistic mergeable
+transactions should be visible on their origin node, but a peer receiving a
+pending remote transaction should not let it override an accepted/global current
+version before a trusted tier accepts it.
+
+## 2026-05-25 20:08 PDT
+
+Remote-pending current ordering is green. First attempt was too broad and hid
+all remote pending rows, breaking table/query scoped sync. Narrowed the rule:
+remote pending rows may materialize when there is no durable version for that
+row/branch, but they cannot displace an accepted/global version. Rebuild orders
+remote pending before durable versions and local pending after durable versions.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+remote_pending_update_does_not_override_global_current_on_peer` passes, and full
+`cargo test -p mini-jazz-sqlite` passes with 98 whole-system tests.
