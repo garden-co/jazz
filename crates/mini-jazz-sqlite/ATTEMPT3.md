@@ -2189,3 +2189,26 @@ The first version of that fix duplicated live history records in an existing
 branch query-scope export test. Added explicit history-record deduping during
 query-scope export assembly. Full `cargo test -p mini-jazz-sqlite` passes with
 119 whole-system tests.
+
+## 2026-05-25 20:47 PDT
+
+Closure synthesis for this stretch:
+
+- Recursive query scope export now handles deleted subtrees with a recursive
+  CTE, not just one-hop deleted descendants.
+- Recursive write policies now record transitive policy read sets. This makes
+  read/write sets closer to being useful causality and replay material.
+- Pinned branch write authorization now uses the base snapshot when a
+  referenced parent has no branch overlay. The matching read-set provenance now
+  also records the base-snapshot parent, not latest main.
+- Edge validation can reproduce that pinned-base recursive write-policy
+  decision from synced branch/base history.
+- Equality query scope resync now repairs rows that leave the predicate through
+  updates or deletes by exporting repair row history, plus predicate metadata.
+- Branch equality query resync also covers the update case.
+- The main tradeoff exposed: query-scope repair wants "rows that ever matched
+  this predicate" as repair candidates, which is correct but could over-export
+  without indexing/query-read persistence. This should feed the next spec pass.
+
+No subagents are left running. Worktree status is clean except for the existing
+untracked `scratch/` directory.
