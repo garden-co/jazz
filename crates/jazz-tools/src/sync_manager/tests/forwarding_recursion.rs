@@ -84,16 +84,9 @@ fn forwarding_a_deep_parent_chain_does_not_overflow_the_stack() {
     );
 }
 
-/// A hot row (e.g. a "last seen" timestamp written every second) accumulates a
-/// long synced history. The per-object `sent_batch_ids` set grows with it, and
-/// forwarding cloned that whole set on every forward — so the cost of an
-/// ordinary single-field update grew with the row's history, independent of
-/// how much is actually being sent.
-///
-/// This is a scaling guard, not a wall-clock budget: it forwards two equal
-/// batches of updates and asserts the second (against a larger already-sent
-/// set) does not take materially longer than the first. With the clone, the
-/// second batch is ~3x slower; checking membership by borrow keeps it flat.
+/// Scaling guard (a ratio, not a wall-clock budget): forwarding a second batch
+/// of updates against a larger already-sent set must not take materially longer
+/// than the first. Cloning the sent set per forward made it ~3x slower.
 #[test]
 fn forwarding_hot_row_updates_do_not_scale_with_synced_history() {
     use std::time::{Duration, Instant};
@@ -105,10 +98,7 @@ fn forwarding_hot_row_updates_do_not_scale_with_synced_history() {
     sm.add_server_with_storage(server_id, false, &io);
     let row_id = ObjectId::new();
 
-    // Build all the update tips up front so the timed phases measure only the
-    // forward itself, not row construction. Each is a parentless tip on the
-    // same row, so forwarding queues it directly while the per-object
-    // sent-batch set keeps growing.
+    // Build the tips up front so the timed phases measure only forwarding.
     let tips: Vec<_> = (0..2 * PER_PHASE)
         .map(|k| {
             visible_row(

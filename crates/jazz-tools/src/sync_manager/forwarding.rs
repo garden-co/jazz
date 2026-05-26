@@ -223,27 +223,8 @@ impl SyncManager {
         let object_id = row.row_id;
         let branch_name = BranchName::new(&row.branch);
 
-        // Every batch in a row's parent closure shares the same row id and
-        // branch, so the set already confirmed sent to this server is the same
-        // for the whole walk — read it once.
-        let already_sent = self
-            .servers
-            .get(&server_id)
-            .and_then(|server| {
-                server
-                    .sent_batch_ids
-                    .get(&(object_id, branch_name))
-                    .cloned()
-            })
-            .unwrap_or_default();
-
-        // Walk the parent closure iteratively (post-order) rather than
-        // recursively: a deep history chain or wide merged DAG would otherwise
-        // push one native frame per ancestor and overflow the stack — fatal on
-        // the WASM worker's small shadow stack. `visited` ensures each batch is
-        // loaded and queued at most once regardless of graph shape. Each frame
-        // tracks how far through its row's parents the walk has progressed; a
-        // row is queued only once all of its parents have been queued.
+        // Iterative post-order walk, not recursion: a deep history chain would
+        // otherwise put one frame per ancestor on the stack and overflow it.
         let mut stack: Vec<(StoredRowBatch, usize)> = vec![(row, 0)];
         while !stack.is_empty() {
             let descend = {
@@ -252,7 +233,13 @@ impl SyncManager {
                 while *parent_index < current.parents.len() {
                     let parent_batch_id = current.parents[*parent_index];
                     *parent_index += 1;
-                    if already_sent.contains(&parent_batch_id) {
+                    // Borrow rather than clone the sent set: it grows with the row's history.
+                    if self
+                        .servers
+                        .get(&server_id)
+                        .and_then(|server| server.sent_batch_ids.get(&(object_id, branch_name)))
+                        .is_some_and(|sent| sent.contains(&parent_batch_id))
+                    {
                         continue;
                     }
                     if !visited.insert(parent_batch_id) {
