@@ -458,6 +458,40 @@ fn policy_scoped_sync_includes_required_parent_rows_only() {
 }
 
 #[test]
+fn trusted_peer_can_read_applied_policy_scoped_facts_without_user_principal() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut trusted =
+        Runtime::open_trusted_with_schema(Storage::Memory, "worker-node", schema).unwrap();
+
+    let mut project = BTreeMap::new();
+    project.insert("title".to_owned(), json!("Alice project"));
+    alice.insert_row("projects", "project-1", project).unwrap();
+    let mut todo = BTreeMap::new();
+    todo.insert("title".to_owned(), json!("Policy-scoped fact"));
+    todo.insert("project".to_owned(), json!("project-1"));
+    alice.insert_row("todos", "todo-1", todo).unwrap();
+
+    trusted
+        .apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let rows = trusted.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+}
+
+#[test]
 fn policy_denied_write_is_rejected_history_not_current_state() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

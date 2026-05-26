@@ -444,3 +444,18 @@ Behavior-preserving module split started: branch SQL moved from `runtime.rs` to
 Learning: small splits are cheap now that whole-system tests are broad. Continue
 peeling runtime responsibilities into branch/query/sync/mutation modules instead
 of letting `runtime.rs` become Attempt 2's `store.rs` again.
+
+## 2026-05-25 17:40 PDT
+
+Trusted peer runtime is green. `open_trusted_with_schema` creates a SQLite-backed
+runtime that bypasses ordinary read-policy filtering, so a worker/trusted peer
+can apply Alice's policy-scoped facts and inspect them without pretending to be
+Alice's user principal.
+
+Decision: model untrusted client principals and trusted peers separately, even
+inside the local harness. This matches the product topology better than using
+magic principals in tests.
+
+Open issue: trusted writes currently bypass direct `insert_row` policy checks,
+but the generic transaction-builder path still needs the same trust flag wired
+through.

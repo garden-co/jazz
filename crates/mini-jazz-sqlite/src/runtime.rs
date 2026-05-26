@@ -16,6 +16,7 @@ pub struct Runtime {
     principal: String,
     node_num: i64,
     branch_num: i64,
+    trusted: bool,
 }
 
 impl Runtime {
@@ -29,6 +30,24 @@ impl Runtime {
         principal: &str,
         schema_def: SchemaDef,
     ) -> Result<Self> {
+        Self::open_with_schema_and_trust(storage, node_id, principal, schema_def, false)
+    }
+
+    pub fn open_trusted_with_schema(
+        storage: Storage,
+        node_id: &str,
+        schema_def: SchemaDef,
+    ) -> Result<Self> {
+        Self::open_with_schema_and_trust(storage, node_id, "trusted", schema_def, true)
+    }
+
+    fn open_with_schema_and_trust(
+        storage: Storage,
+        node_id: &str,
+        principal: &str,
+        schema_def: SchemaDef,
+        trusted: bool,
+    ) -> Result<Self> {
         let conn = storage::open(storage)?;
         schema::install(&conn, &schema_def)?;
         let node_num = tx::ensure_node(&conn, node_id)?;
@@ -39,6 +58,7 @@ impl Runtime {
             principal: principal.to_owned(),
             node_num,
             branch_num: 1,
+            trusted,
         })
     }
 
@@ -147,15 +167,16 @@ impl Runtime {
             principal: &self.principal,
         })?;
         let row_num = row_num(&db, id)?;
-        let allowed = policy::write_allowed(
-            &db,
-            &self.schema,
-            &table,
-            &write_policy,
-            row_num,
-            &values,
-            &self.principal,
-        )?;
+        let allowed = self.trusted
+            || policy::write_allowed(
+                &db,
+                &self.schema,
+                &table,
+                &write_policy,
+                row_num,
+                &values,
+                &self.principal,
+            )?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
             db.execute(
@@ -215,7 +236,13 @@ impl Runtime {
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
         let txs = export_txs(&self.conn)?;
-        let history = export_table_history(&self.conn, &self.schema, table_name, &self.principal)?;
+        let history = export_table_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            &self.principal,
+            self.trusted,
+        )?;
         Ok(Bundle { txs, history })
     }
 
@@ -500,6 +527,14 @@ impl Runtime {
         branch::base_global_epoch(&self.conn, self.branch_num)
     }
 
+    fn read_policy_sql(&self, table: &crate::schema::TableDef) -> Result<String> {
+        if self.trusted {
+            Ok("1 = 1".to_owned())
+        } else {
+            policy::read_policy_sql(&self.schema, table, &self.principal)
+        }
+    }
+
     fn read_rows_from_current(&self, table_name: &str, overlay_main: bool) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(table_name)?;
         let field_columns = table
@@ -540,7 +575,7 @@ impl Runtime {
             select_columns.join(", "),
             crate::schema::current_table(table_name),
             current_table = crate::schema::current_table(table_name),
-            policy_sql = policy::read_policy_sql(&self.schema, table, &self.principal)?,
+            policy_sql = self.read_policy_sql(table)?,
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
@@ -1038,10 +1073,12 @@ fn export_table_history(
     schema: &SchemaDef,
     table_name: &str,
     principal: &str,
+    trusted: bool,
 ) -> Result<Vec<HistoryRecord>> {
-    let mut records = export_visible_table_history(conn, schema, table_name, principal, None)?;
+    let mut records =
+        export_visible_table_history(conn, schema, table_name, principal, trusted, None)?;
     records.extend(export_policy_dependency_history(
-        conn, schema, table_name, principal,
+        conn, schema, table_name, principal, trusted,
     )?);
     Ok(records)
 }
@@ -1051,6 +1088,7 @@ fn export_policy_dependency_history(
     schema: &SchemaDef,
     table_name: &str,
     principal: &str,
+    trusted: bool,
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
     let PolicyDef::RefReadable { field } = &table.read_policy else {
@@ -1070,7 +1108,7 @@ fn export_policy_dependency_history(
             field.name
         )));
     };
-    let policy_sql = policy::read_policy_sql(schema, table, principal)?;
+    let policy_sql = export_read_policy_sql(schema, table, principal, trusted)?;
     let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let sql = format!(
         "SELECT DISTINCT current.{ref_column}
@@ -1086,7 +1124,14 @@ fn export_policy_dependency_history(
     let row_nums = stmt
         .query_map([], |row| row.get::<_, i64>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    export_visible_table_history(conn, schema, parent_table, principal, Some(&row_nums))
+    export_visible_table_history(
+        conn,
+        schema,
+        parent_table,
+        principal,
+        trusted,
+        Some(&row_nums),
+    )
 }
 
 fn export_visible_table_history(
@@ -1094,10 +1139,11 @@ fn export_visible_table_history(
     schema: &SchemaDef,
     table_name: &str,
     principal: &str,
+    trusted: bool,
     row_nums: Option<&[i64]>,
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
-    let policy_sql = policy::read_policy_sql(schema, table, principal)?;
+    let policy_sql = export_read_policy_sql(schema, table, principal, trusted)?;
     let field_columns = table
         .fields
         .iter()
@@ -1186,6 +1232,19 @@ fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
                 .join(", ")
         ),
         None => "1 = 1".to_owned(),
+    }
+}
+
+fn export_read_policy_sql(
+    schema: &SchemaDef,
+    table: &crate::schema::TableDef,
+    principal: &str,
+    trusted: bool,
+) -> Result<String> {
+    if trusted {
+        Ok("1 = 1".to_owned())
+    } else {
+        policy::read_policy_sql(schema, table, principal)
     }
 }
 
