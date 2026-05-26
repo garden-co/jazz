@@ -669,3 +669,28 @@ Open edge: recursive ref-readable policy over historical base rows still follows
 the referenced parent through current projection. For same-branch current reads
 that is fine; for precise historical snapshot policy it may need parent lookup
 against the same historical base epoch.
+
+## 2026-05-25 18:08 PDT
+
+Starting exclusive transaction semantics. Goal for this attempt: one
+transaction constructor can be parameterized as mergeable/pending or
+exclusive/global. Exclusive without a global epoch should throw before writing
+history; exclusive with a global epoch should create an accepted transaction
+that is immediately visible and carries the global receipt metadata.
+
+## 2026-05-25 18:09 PDT
+
+Initial exclusive transaction semantics are green. The generic transaction
+builder now has `.exclusive()` and `.exclusive_at_global(epoch)` modes:
+
+- `.exclusive()` rejects before writing because there is no global authority
+  acceptance in this local runtime
+- `.exclusive_at_global(7)` writes an accepted transaction with exclusive
+  conflict mode, global epoch 7, visible current rows, and a global receipt
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+40 tests.
+
+Open issue: this is still a prototype API. A real authority path should probably
+construct exclusive/global transactions through a distinct trusted submission
+route rather than a local builder method named `exclusive_at_global`.

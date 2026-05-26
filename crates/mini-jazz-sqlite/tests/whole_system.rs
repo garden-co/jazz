@@ -202,6 +202,58 @@ fn generic_transaction_seals_multiple_rows_atomically() {
 }
 
 #[test]
+fn exclusive_transaction_requires_global_epoch_and_commits_accepted() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let err = alice
+        .transaction()
+        .exclusive()
+        .insert_row(
+            "notes",
+            "note-local-exclusive",
+            BTreeMap::from([
+                ("body".to_owned(), json!("No local exclusive")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .commit()
+        .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("exclusive transactions require global"));
+    assert!(alice.read_rows("notes").unwrap().is_empty());
+
+    let tx = alice
+        .transaction()
+        .exclusive_at_global(7)
+        .insert_row(
+            "notes",
+            "note-global-exclusive",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Global exclusive")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-global-exclusive");
+    assert_eq!(alice.transaction_info(&tx).unwrap().global_epoch, Some(7));
+    assert!(alice
+        .transaction_info(&tx)
+        .unwrap()
+        .receipt_tiers
+        .contains(&"global".to_owned()));
+}
+
+#[test]
 fn rebuild_current_projection_from_history_matches_current_reads() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

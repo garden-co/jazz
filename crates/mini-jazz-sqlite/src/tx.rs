@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub(crate) const KIND_DATA: i64 = 1;
 pub(crate) const MODE_MERGEABLE: i64 = 1;
+pub(crate) const MODE_EXCLUSIVE: i64 = 2;
 pub(crate) const OUTCOME_PENDING: i64 = 1;
 pub(crate) const OUTCOME_ACCEPTED: i64 = 2;
 pub(crate) const OUTCOME_REJECTED: i64 = 3;
@@ -26,6 +27,26 @@ pub(crate) fn create_tx(
     node_id: &str,
     now: i64,
 ) -> Result<(i64, String)> {
+    create_tx_with_options(
+        conn,
+        node_num,
+        node_id,
+        now,
+        MODE_MERGEABLE,
+        OUTCOME_PENDING,
+        None,
+    )
+}
+
+pub(crate) fn create_tx_with_options(
+    conn: &Connection,
+    node_num: i64,
+    node_id: &str,
+    now: i64,
+    conflict_mode: i64,
+    outcome: i64,
+    global_epoch: Option<i64>,
+) -> Result<(i64, String)> {
     let next_epoch = conn
         .query_row(
             "SELECT COALESCE(MAX(local_epoch), 0) + 1 FROM jazz_tx WHERE node_num = ?",
@@ -36,19 +57,28 @@ pub(crate) fn create_tx(
     let tx_id = format!("tx-{node_id}-{next_epoch}");
     conn.execute(
         "INSERT INTO jazz_tx
-          (tx_id, node_num, local_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, '{}')",
+          (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')",
         params![
             tx_id,
             node_num,
             next_epoch,
+            global_epoch,
             KIND_DATA,
-            MODE_MERGEABLE,
-            OUTCOME_PENDING,
+            conflict_mode,
+            outcome,
             now
         ],
     )?;
     let tx_num = conn.last_insert_rowid();
+    if let Some(global_epoch) = global_epoch {
+        conn.execute(
+            "INSERT OR REPLACE INTO jazz_tx_receipt
+             (tx_num, tier, observed_at, receipt_json)
+             VALUES (?, ?, ?, '{}')",
+            params![tx_num, TIER_GLOBAL, global_epoch],
+        )?;
+    }
     Ok((tx_num, tx_id))
 }
 

@@ -476,6 +476,7 @@ impl Runtime {
         TransactionBuilder {
             runtime: self,
             mutations: Vec::new(),
+            mode: TransactionMode::Mergeable,
         }
     }
 
@@ -743,6 +744,12 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
 pub struct TransactionBuilder<'a> {
     runtime: &'a mut Runtime,
     mutations: Vec<Mutation>,
+    mode: TransactionMode,
+}
+
+enum TransactionMode {
+    Mergeable,
+    Exclusive { global_epoch: Option<i64> },
 }
 
 enum Mutation {
@@ -764,6 +771,18 @@ enum Mutation {
 }
 
 impl<'a> TransactionBuilder<'a> {
+    pub fn exclusive(mut self) -> Self {
+        self.mode = TransactionMode::Exclusive { global_epoch: None };
+        self
+    }
+
+    pub fn exclusive_at_global(mut self, global_epoch: i64) -> Self {
+        self.mode = TransactionMode::Exclusive {
+            global_epoch: Some(global_epoch),
+        };
+        self
+    }
+
     pub fn insert_row(
         mut self,
         table: &str,
@@ -797,10 +816,28 @@ impl<'a> TransactionBuilder<'a> {
     }
 
     pub fn commit(self) -> Result<String> {
+        let (conflict_mode, outcome, global_epoch) = match self.mode {
+            TransactionMode::Mergeable => (tx::MODE_MERGEABLE, tx::OUTCOME_PENDING, None),
+            TransactionMode::Exclusive {
+                global_epoch: Some(global_epoch),
+            } => (tx::MODE_EXCLUSIVE, tx::OUTCOME_ACCEPTED, Some(global_epoch)),
+            TransactionMode::Exclusive { global_epoch: None } => {
+                return Err(crate::Error::new(
+                    "exclusive transactions require global acceptance",
+                ));
+            }
+        };
         let db = self.runtime.conn.transaction()?;
         let now = now_ms();
-        let (tx_num, tx_id) =
-            tx::create_tx(&db, self.runtime.node_num, &self.runtime.node_id, now)?;
+        let (tx_num, tx_id) = tx::create_tx_with_options(
+            &db,
+            self.runtime.node_num,
+            &self.runtime.node_id,
+            now,
+            conflict_mode,
+            outcome,
+            global_epoch,
+        )?;
         for mutation in self.mutations {
             match mutation {
                 Mutation::Row { table, id, values } => insert_row_in_tx(InsertRowInTx {
