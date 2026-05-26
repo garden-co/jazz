@@ -413,3 +413,15 @@ does not show a pending main row with no global epoch.
 Learning: the query-only branch base implementation already has the essential
 shape for these cases: latest accepted history at-or-before base, `h.op != 3`,
 and `global_epoch IS NOT NULL`.
+
+## 2026-05-25 17:33 PDT
+
+Rename lens write/export is green. A runtime using semantic field `name` over
+stored column `title` writes successfully, exports sync payload values under
+`name`, and another new-schema runtime reads the same semantic field after
+apply.
+
+Learning: field-level storage-name mapping gives us a partial write-forward
+property on the wire even though physical SQLite storage is still the old column
+shape. This does not replace real schema-versioned tables, but it clarifies one
+useful compatibility lane.

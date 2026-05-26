@@ -710,6 +710,32 @@ fn rename_lens_reads_old_storage_column_as_new_field_name() {
 }
 
 #[test]
+fn rename_lens_writes_export_current_semantic_field_name() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text_lens("name", "title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let mut task = BTreeMap::new();
+    task.insert("name".to_owned(), json!("New schema write"));
+    task.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-1", task).unwrap();
+
+    let bundle = alice.export_table_history("tasks").unwrap();
+    assert_eq!(bundle.history[0].values["name"], json!("New schema write"));
+    assert!(!bundle.history[0].values.contains_key("title"));
+
+    bob.apply_bundle(&bundle).unwrap();
+    assert_eq!(
+        bob.read_rows("tasks").unwrap()[0].values["name"],
+        json!("New schema write")
+    );
+}
+
+#[test]
 fn branch_sync_preserves_branch_provenance() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
