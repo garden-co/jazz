@@ -826,3 +826,16 @@ the desired query descriptor, and the upstream peer exports refreshes against
 that descriptor during reconnect.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 208 whole-system tests.
+
+## 2026-05-26 03:28 PDT
+
+Captured declared defaults as a replay/sync invariant rather than only a local
+insert convenience. A durable peer now receives an insert whose omitted scalar
+fields were filled by schema defaults, then reopens and still reads the same
+defaulted values from stored history/current projection.
+
+Discovery: the current placement of defaults in the effective write-value phase
+is holding up under sync and durable rebuild. Defaults are semantic row content
+once the transaction is sealed, not SQLite DDL-side generated values.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 209 whole-system tests.

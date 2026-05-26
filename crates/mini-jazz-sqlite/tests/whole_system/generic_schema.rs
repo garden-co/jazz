@@ -1000,6 +1000,49 @@ fn insert_applies_declared_defaults_for_omitted_fields() {
 }
 
 #[test]
+fn declared_defaults_sync_and_rebuild_as_history_values() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("defaults.sqlite");
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.text_default("status", "draft");
+        table.bool_default("pinned", false);
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer = Runtime::open_with_schema(
+        Storage::File(path.clone()),
+        "peer-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-defaults",
+            BTreeMap::from([("body".to_owned(), json!("Needs defaults"))]),
+        )
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    let rows = peer.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["status"], json!("draft"));
+    assert_eq!(rows[0].values["pinned"], json!(false));
+    drop(peer);
+
+    let reopened =
+        Runtime::open_with_schema(Storage::File(path), "peer-node", "alice", schema).unwrap();
+    let rebuilt = reopened.read_rows("notes").unwrap();
+    assert_eq!(rebuilt.len(), 1);
+    assert_eq!(rebuilt[0].values["status"], json!("draft"));
+    assert_eq!(rebuilt[0].values["pinned"], json!(false));
+}
+
+#[test]
 fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_deleted_match() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
