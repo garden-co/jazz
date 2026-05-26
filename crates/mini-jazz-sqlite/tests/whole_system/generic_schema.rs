@@ -877,6 +877,43 @@ fn nullable_ref_round_trips_filters_and_is_skipped_by_require_ref() {
 }
 
 #[test]
+fn not_equal_null_filters_to_present_optional_values() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.optional_text("tag");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-tagged",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Tagged")),
+                ("tag".to_owned(), json!("work")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-untagged",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Untagged")),
+                ("tag".to_owned(), json!(null)),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice
+        .read_rows_where_ne("notes", "tag", json!(null))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-tagged");
+}
+
+#[test]
 fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_deleted_match() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

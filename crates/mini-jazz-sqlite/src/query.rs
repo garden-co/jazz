@@ -98,6 +98,29 @@ impl QueryContext<'_> {
             .collect())
     }
 
+    pub(crate) fn read_rows_where_ne(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+    ) -> Result<Vec<RowView>> {
+        Ok(self
+            .read_rows(table_name)?
+            .into_iter()
+            .filter(|row| {
+                if field_name == "id" {
+                    JsonValue::String(row.id.clone()) != value
+                } else if field_name == "$createdBy" {
+                    JsonValue::String(row.created_by.clone()) != value
+                } else {
+                    row.values
+                        .get(field_name)
+                        .is_some_and(|row_value| row_value != &value)
+                }
+            })
+            .collect())
+    }
+
     pub(crate) fn read_rows_where_contains(
         &self,
         table_name: &str,

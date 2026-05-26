@@ -1753,6 +1753,16 @@ impl Runtime {
             .read_rows_where_in(table_name, field_name, values)
     }
 
+    pub fn read_rows_where_ne(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+    ) -> Result<Vec<RowView>> {
+        self.query_context()
+            .read_rows_where_ne(table_name, field_name, value)
+    }
+
     pub fn export_query_where_eq(
         &self,
         table_name: &str,

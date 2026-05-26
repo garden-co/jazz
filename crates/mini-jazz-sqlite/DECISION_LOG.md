@@ -766,3 +766,9 @@ Design lesson: nullability needs to be a schema property, not a loose value conv
 Added optional references. Schemas can declare `optional_ref`, rows can store an explicit null ref, null ref equality uses the existing `IS NULL` lowering, and `read_rows_require_ref` skips null refs while keeping linked rows. Full mini crate suite is green with 201 tests.
 
 Design lesson: once nullability is carried on `FieldDef`, refs compose cleanly with the existing storage and semantic row codec. The harder remaining ref work is not basic null storage; it is include/query-scope behavior for null and missing refs, plus policy decisions around nullable ref-readable policies.
+
+## 2026-05-26 03:12 PDT
+
+Added a first `ne` predicate API. `read_rows_where_ne` now supports local semantic filtering over ordinary fields and magic fields, and `ne null` behaves as status quo expects: it returns rows with present optional values. Full mini crate suite is green with 202 tests.
+
+Design lesson: the product semantics are easy to state, but this slice is intentionally not yet SQL-lowered or sync-scoped. Before making `ne` part of `QueryReadRecord`, we should decide the operator contract for null, refs, and index/range read-set capture together.
