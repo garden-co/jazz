@@ -494,3 +494,14 @@ tests.
 Design lesson: treating SQLite errors as the schema validator leaks the lowering
 layer too early. The core should reject incoherent Jazz schemas with Jazz-shaped
 messages before physical DDL is even attempted.
+
+## 2026-05-26 01:03 PDT
+
+Strengthened the fate race test to include structured rejection detail.
+Accepted/global metadata arriving after local rejection still does not resurrect
+the transaction, and it also does not erase the rejection detail. Full mini
+crate suite is green with 163 tests.
+
+Design lesson: mutable transaction fate can still be replayable if precedence is
+monotonic: accepted metadata may enrich a rejected tx, but rejected outcome and
+detail remain authoritative.

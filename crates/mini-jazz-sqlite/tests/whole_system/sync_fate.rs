@@ -1052,7 +1052,7 @@ fn accepted_bundle_does_not_resurrect_rejected_fate() {
     accepted_peer.apply_bundle(&pending).unwrap();
 
     rejected_peer
-        .reject_transaction(&tx, "policy_denied")
+        .reject_transaction_with_detail(&tx, "policy_denied", json!({"reason": "local_rejection"}))
         .unwrap();
     alice.accept_transaction_at_global(&tx, 7).unwrap();
     accepted_peer
@@ -1071,6 +1071,13 @@ fn accepted_bundle_does_not_resurrect_rejected_fate() {
     assert_eq!(
         rejected_peer.transaction_info(&tx).unwrap().global_epoch,
         Some(7)
+    );
+    assert_eq!(
+        rejected_peer
+            .transaction_info(&tx)
+            .unwrap()
+            .rejection_detail,
+        Some(json!({"reason": "local_rejection"}))
     );
 }
 
