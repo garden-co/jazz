@@ -1352,3 +1352,17 @@ separately, while callbacks fire for new transitions relative to the
 subscription baseline.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 239 whole-system tests.
+
+## 2026-05-26 04:58 PDT
+
+Covered optional include repair in both directions through observed-query
+refresh. A todo with a missing project first refreshes to show the late project,
+then refreshes again after the project is deleted and returns to `project_title
+= None` without dropping the parent todo.
+
+Discovery: absence and identity query reads compose into a stable optional
+include loop. Once a missing dependency materializes, the peer records an
+ordinary id query too; later tombstone refresh can repair the included semantic
+child back out while preserving the parent row.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 240 whole-system tests.

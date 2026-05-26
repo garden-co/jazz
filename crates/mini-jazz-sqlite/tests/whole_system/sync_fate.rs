@@ -1127,6 +1127,49 @@ fn missing_optional_ref_include_observed_refresh_delivers_later_dependency() {
 }
 
 #[test]
+fn optional_ref_include_observed_refresh_removes_deleted_dependency_again() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+
+    alice
+        .create_todo(
+            "todo-1",
+            "Project can disappear again",
+            false,
+            "project-late",
+        )
+        .unwrap();
+    peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
+        .unwrap();
+
+    alice
+        .create_project("project-late", "Late arriving project")
+        .unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+    assert_eq!(
+        peer.open_todos().unwrap()[0].project_title.as_deref(),
+        Some("Late arriving project")
+    );
+
+    alice.delete_row("projects", "project-late").unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let peer_todos = peer.open_todos().unwrap();
+    assert_eq!(peer_todos.len(), 1);
+    assert_eq!(peer_todos[0].project_title, None);
+}
+
+#[test]
 fn out_of_order_global_epochs_do_not_regress_current_projection() {
     let schema = support::notes_schema();
     let mut authority =
