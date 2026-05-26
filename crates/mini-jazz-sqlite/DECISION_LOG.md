@@ -664,3 +664,15 @@ Design lesson: required includes can start as a generic query-materialization ru
 Added restarted subscription recovery from persisted query reads. A durable worker can reconstruct a subscription from an observed query descriptor after restart, apply an upstream refresh bundle, and emit the semantic removal diff against the stale local snapshot. Full mini crate suite is green with 186 tests.
 
 Design lesson: durable query descriptors can power both reconnect repair and listener recovery. We still do not persist listener identity/callback state, but the core mechanism now bridges stored query desire, refresh application, and semantic diff emission.
+
+## 2026-05-26 02:25 PDT
+
+Investigated exclusive stale-read validation as the next candidate slice and deliberately did not fake it. Current `jazz_tx_read` records `(tx, table, row, reason)` but not the observed row version/visible transaction, so it cannot prove that a read dependency changed after a transaction's base. The existing exclusive conflict checks are row-write based, not full read-set validation.
+
+Design lesson: precise exclusive validation needs versioned read-set entries or a compact base/snapshot reference that can be resolved to observed row versions. Row identity alone is useful for sync scoping and policy dependencies, but not enough for serializable read validation.
+
+## 2026-05-26 02:26 PDT
+
+Pinned the missing-lens fail-closed behavior. A bundle produced by a schema that semantically renamed `title` to `name` is rejected by a peer whose schema has an unrelated physical `name` column and no lens, leaving no rows or transaction metadata partially applied. Full mini crate suite is green with 187 tests.
+
+Design lesson: the structural compatibility fingerprint is already doing useful catalogue-boundary work: two schemas with the same public field names are not compatible if their storage/lens shapes differ. This is a good default, though a future explicit catalogue-sync lane may want better diagnostics than "incompatible schema fingerprint".

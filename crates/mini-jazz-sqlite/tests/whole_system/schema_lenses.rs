@@ -29,6 +29,39 @@ fn rename_lens_reads_old_storage_column_as_new_field_name() {
 }
 
 #[test]
+fn missing_rename_lens_fails_closed_without_partial_apply() {
+    let renamed_schema = SchemaDef::new().table("tasks", |table| {
+        table.text_lens("name", "title");
+        table.bool("done");
+    });
+    let unrelated_schema = SchemaDef::new().table("tasks", |table| {
+        table.text("name");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", renamed_schema).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", unrelated_schema).unwrap();
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Needs lens")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let bundle = alice.export_table_history("tasks").unwrap();
+
+    let err = bob.apply_bundle(&bundle).unwrap_err();
+    assert!(err.to_string().contains("incompatible schema fingerprint"));
+    assert!(bob.read_rows("tasks").unwrap().is_empty());
+    assert!(bob.transaction_info(&bundle.history[0].tx_id).is_err());
+}
+
+#[test]
 fn rename_lens_writes_export_current_semantic_field_name() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text_lens("name", "title");
