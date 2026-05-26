@@ -1352,6 +1352,100 @@ fn created_by_not_equal_query_scope_syncs_and_refreshes() {
 }
 
 #[test]
+fn durable_created_by_not_equal_query_refreshes_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("created-by-ne-worker.sqlite");
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-alice",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Alice")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "notes",
+        "note-bob",
+        BTreeMap::from([
+            ("body".to_owned(), json!("Bob")),
+            ("pinned".to_owned(), json!(false)),
+        ]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("notes").unwrap())
+        .unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &alice
+                    .export_query_where_ne("notes", "$createdBy", json!("alice"))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            worker.observed_query_reads().unwrap()[0].field,
+            "$createdBy"
+        );
+        assert_eq!(
+            worker
+                .read_rows_where_ne("notes", "$createdBy", json!("alice"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    alice
+        .update_row(
+            "notes",
+            "note-bob",
+            BTreeMap::from([("pinned".to_owned(), json!(true))]),
+        )
+        .unwrap();
+
+    let mut reopened = Runtime::open_with_schema(
+        Storage::File(worker_path),
+        "worker-reopened",
+        "alice",
+        schema,
+    )
+    .unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    let refreshed = reopened
+        .read_rows_where_ne("notes", "$createdBy", json!("alice"))
+        .unwrap();
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0].id, "note-bob");
+    assert_eq!(refreshed[0].values["pinned"], json!(true));
+}
+
+#[test]
 fn created_by_not_equal_query_scope_repairs_deleted_matching_row() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");

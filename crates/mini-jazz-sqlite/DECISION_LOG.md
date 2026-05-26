@@ -1505,3 +1505,15 @@ descriptor path. Optional-field reconnect does not need a separate absence
 mechanism unless the query is specifically about a missing referenced row.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 251 whole-system tests.
+
+## 2026-05-26 05:22 PDT
+
+Added durable reconnect coverage for `$createdBy != principal`. A durable
+worker persists the magic-field query, restarts, and refreshes the matching
+row's later ordinary-column update through the same observed query descriptor.
+
+Discovery: user-facing magic fields participate in durable query refresh like
+ordinary columns. That keeps the API-preservation story cleaner: selected
+magic fields can remain high-level query syntax without a separate sync path.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 252 whole-system tests.
