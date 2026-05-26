@@ -1558,3 +1558,16 @@ same source closure. Cycle rejection from the previous slice makes that closure
 safe to compute.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 255 whole-system tests.
+
+## 2026-05-26 05:27 PDT
+
+Added distributed coverage for transitive source branches. A peer applies a
+query-scope bundle from `merge -> middle -> left`, checks out `merge`, and can
+read the row from `left` with both `merge` and `middle` source provenance
+preserved.
+
+Discovery: export already included enough branch records once the source scope
+became transitive. That is a strong sign that branch provenance and query-scope
+history export are converging on the same closure concept.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 256 whole-system tests.
