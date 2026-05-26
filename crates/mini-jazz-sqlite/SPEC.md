@@ -418,6 +418,21 @@ claim becomes the Jazz principal id.
 Local anonymous users may have durable local principals, but account-linking or
 migration from anonymous principals to hosted principals is not specified here.
 
+Local-first auth is a product mode. A device may mint a durable local principal
+from a platform-generated secret without requiring login. For compatibility with
+current Jazz, the baseline local-first identity is a 32-byte CSPRNG secret used
+to derive an Ed25519 signing key, a self-signed Jazz JWT, and a stable principal
+id derived from the public key, for example UUIDv5 over the public-key bytes in
+a Jazz namespace. Exact token fields may evolve, but the durable invariant is
+that the same local secret reproduces the same principal and clearing local
+storage can lose account continuity.
+
+Auth mode is policy input. Policies may distinguish hosted/external,
+local-first, anonymous, backend, service, and admin sessions. A live client must
+not hot-swap principals: token refresh may update auth state only when the
+principal remains the same. Hybrid account upgrade should preserve identity by
+binding hosted auth to the existing local-first Jazz principal where possible.
+
 Admin sessions bypass row policy entirely. They are still represented as
 sessions for audit, provenance, catalogue checks, and operational controls.
 
@@ -447,7 +462,8 @@ Open issues:
 
 - exact session wire shape
 - valid JWT/auth claim configuration
-- anonymous-to-hosted principal migration
+- exact local-first JWT validation and TTL/skew rules
+- anonymous-to-hosted and local-first-to-hosted migration UX
 - whether service actors and admins share one principal namespace with users
 - which provenance fields are visible by default under policy
 
@@ -478,6 +494,12 @@ db.todos.update(...)
 db.todos.delete(...)
 db.todos.subscribeAll(...)
 ```
+
+Selection is product-visible query semantics. The public row `id` is always
+available in selected result rows. `select("*")` selects all root fields for the
+current query root. Selected root fields may coexist with includes, and selected
+semantic system fields may be filtered, ordered, and projected through nested
+includes where the query builder allows them.
 
 The new core should remove batch terminology from the product surface. Product
 code talks about transactions:
@@ -540,6 +562,8 @@ migrations/
 
 - structural schema
 - relations
+- scalar types such as text, boolean, integer, real, timestamp, UUID, and bytes
+- enums, arrays, refs, JSON schemas, defaults, and nullability
 - merge strategies
 - explicit `indexOnly(...)` declarations
 - branch-backing table declarations
@@ -552,6 +576,11 @@ permission file or bundle.
 
 `migrations/` contains reviewed migration/lens modules between schema hashes.
 Lenses belong in migrations; there is no separate top-level `lenses/` workflow.
+Migration operations include column add/drop/rename, table add/drop, and table
+rename. Table rename may combine with column migrations when the resulting
+structure matches. Create/drop table migrations should not be mixed with column
+migrations in one reviewed migration step unless the migration DSL explicitly
+defines that composition.
 
 Explicit indexes and merge strategies are part of the schema hash. If two
 schema versions differ only by index declarations or merge strategy
@@ -820,13 +849,17 @@ JSON payload, with generated/side indexes added only for proven hot historical
 queries. Current projection remains columnar because ordinary reads, policies,
 subscriptions, and indexes are hot.
 
-Deletes are ordinary append-only history rows. Restore/undelete is also
+Ordinary deletes are append-only history rows. Restore/undelete is also
 append-only: restoring a deleted row writes a new transaction/version derived
 from preserved deleted-row values rather than erasing or mutating the delete
 tombstone. Restore reuses insert authorization semantics over the restored
 visible row.
 
-Delete is a history row version, not physical removal.
+Ordinary delete is a history row version, not physical removal. Hard delete and
+history truncate remain product-visible destructive retention operations, but
+they are distinct from ordinary delete. They must be explicit, policy- or
+admin-authorized, and must have deterministic replication semantics so peers do
+not resurrect truncated state from stale history.
 
 Main must have a current projection for fast ordinary reads. Current projection
 rows contain the resolved visible row value plus conflict metadata.
@@ -860,6 +893,7 @@ Open issues:
 
 - full concurrent-row merge semantics
 - exact conflict metadata shape
+- exact hard-delete/truncate authorization, sync, and historical-query semantics
 - hot branch projection heuristics
 
 ## 13. Visibility And Snapshots
@@ -1085,6 +1119,24 @@ If a required include is missing or unauthorized, the parent row is filtered out
 If an optional include is missing or unauthorized, the parent row remains and
 the include is null.
 
+Required-include edge cases follow current product intent:
+
+- a nullable scalar ref that is explicitly null does not filter the parent
+- a non-null scalar ref whose target row is missing or unauthorized filters the
+  parent
+- a forward array include with missing required members filters the parent
+- a reverse relation include with no matching children does not filter the
+  parent merely because the result array is empty
+- nested required includes apply within their nested scope
+- pagination is applied after required-include filtering
+
+Hop/gather queries are first-class relational IR. The engine must be able to
+express and lower traversals across scalar refs, UUID-array refs, and multiple
+relation hops, and subscriptions must react when any FK path changes. Gather
+queries are relation traversal roots rather than simple includes; current
+product constraints such as gather not combining with include should be
+preserved or intentionally replaced by a more general relational query model.
+
 Optional missing includes must produce absence facts. A receiver cannot
 reproduce an optional-null result from row locators alone. Absence facts are
 standing query descriptors while the corresponding subscription/sync session is
@@ -1122,8 +1174,8 @@ bound values, table/schema identity, and branch/source context. The exact normal
 form is open; until then only planner-supported predicate forms are stable.
 Planner-supported predicate forms currently include equality, text contains,
 `IN`, `!=`, `!= null` as present optional value, selected semantic system-field
-predicates, ordered page descriptors, absence descriptors, and recursive ref
-descriptors.
+predicates, ordered page descriptors, absence descriptors, hop/gather relation
+descriptors, and recursive ref descriptors.
 
 Query-scoped sync must include enough repair information for a receiver that
 previously synced the same scope to remove stale rows. Exporting only the
@@ -1347,6 +1399,12 @@ A query settled signal means: for this query, branch view, catalogue revision,
 policy context, and durability tier, the runtime has applied the row history,
 transaction outcomes, durability receipts, branch metadata, catalogue metadata,
 and policy facts required to publish the current semantic result.
+
+Tiered query settlement is a delivery barrier separate from row delivery. Rows,
+outcomes, or metadata may arrive before the barrier is satisfied; they must not
+be published as the settled result for that query/tier until the barrier is
+met. First subscription delivery waits for the requested tier's settled result,
+and later updates are also gated by that tier.
 
 Rows may arrive before a query is settled. Missing catalogue or sync state that
 may still arrive should keep the query unsettled rather than immediately error.
@@ -1645,6 +1703,11 @@ Hosted apps have app id, sync URL, global authority placement, optional edge
 placement, catalogue heads/revisions, hosted auth configuration, quotas, upload
 limits, and observability namespace.
 
+Storage is isolated by app, environment/namespace, and storage driver. A runtime
+must not accidentally share row history, transaction state, auth secrets, or
+catalogue state across apps or namespaces merely because they use the same
+physical browser/native storage backend.
+
 Transport should stay thin. It carries typed sync and catalogue messages; it
 does not implement a second query engine.
 
@@ -1666,8 +1729,14 @@ Open issues:
 
 ## 23. Files, Images, And Binary Data
 
-Files are not part of the relational core in the same way rows are. The core
-requirements are:
+Files are product-visible as row-modeled assets. Applications should be able to
+declare conventional file metadata and chunk/part tables, use normal row
+permissions and relation inheritance for access, and load authorized file bytes
+through product APIs such as `loadFileAsBlob`. The byte storage mechanics may
+move out of row history, but the product shape remains relational and
+policy-controlled.
+
+The core requirements are:
 
 - rows may reference external blobs
 - blob metadata is ordinary policy-controlled relational data
@@ -1675,9 +1744,8 @@ requirements are:
 - blob fetch must be authorized through the same session/policy model
 - immutable blob chunks may be shared by digest across branches
 
-Applications declare file metadata and chunk/part tables according to Jazz
-conventions. File bytes may live in SQLite blobs, OPFS/blob storage, object
-storage, filesystem storage, or another byte store.
+File bytes may live in SQLite blobs, OPFS/blob storage, object storage,
+filesystem storage, or another byte store.
 
 File content is immutable in v0. Replacing a file creates a new content version.
 
@@ -1691,7 +1759,8 @@ policy rather than treating stored bytes as public once uploaded.
 
 Open issues:
 
-- conventional schema for file and part tables
+- exact conventional schema for file and part tables
+- product API shape for loading authorized file bytes
 - upload limits and validation
 - partial/resumable upload protocol
 - mutable file/chunk strategy
@@ -1980,6 +2049,12 @@ CREATE TABLE jazz_branch_id (
 The implementation may combine identity mapping with hot tables when the
 public/physical boundary remains clear.
 
+Identity and ordinal mapping updates must be crash-safe. A crash must not leave
+torn public-id/physical-id, branch-id/branch-ordinal, or source-list mappings
+that can later hydrate the same public identity to two different physical
+identities or attach branch provenance to the wrong branch. SQLite transactions
+should be used as the atomicity boundary for all such mapping updates.
+
 ### 26.5 Indexes
 
 Indexes are part of the lowering plan, not handwritten per feature.
@@ -2109,6 +2184,7 @@ tooling integration, and idiomatic UI bindings over those semantics.
 Bindings must agree on:
 
 - row and result semantics
+- idiomatic value conversion semantics
 - transaction modes, outcomes, and durability receipts
 - subscription diff semantics
 - tiered query delivery semantics
@@ -2117,6 +2193,24 @@ Bindings must agree on:
 - schema/catalogue/lens interpretation
 - conflict metadata shape
 - error/rejection shape
+
+Higher-level language bindings should expose idiomatic values while preserving
+the same database semantics. TypeScript/JavaScript bindings are the concrete
+compatibility example: `BYTEA` values become `Uint8Array`, timestamps become
+`Date` values at the JS boundary, JSON payloads parse into JS values, provenance
+timestamps use JS millisecond conventions, and invalid JSON/date/bytea/enum
+values fail loudly rather than silently coercing. Other language bindings should
+choose idiomatic equivalents while keeping validation and round-trip behavior
+explicit.
+
+Transformed columns may expose transformed read/write types at the product
+boundary, but query predicates such as `where` operate over the raw stored
+semantic type unless a transformed-query contract is explicitly specified.
+
+Generated row/result layout must be stable. Runtime row alignment follows
+declared schema order plus requested includes and subscription deltas, so typed
+bindings and generated clients can decode results without depending on
+incidental SQL column order.
 
 Framework integrations should be thin adapters over the same reactive Jazz
 client. Jazz's reactive machinery lives in the core/client runtime.
@@ -2142,7 +2236,45 @@ Open issues:
 - NAPI/native distribution
 - generated TypeScript types and Rust catalogue codec lockstep
 
-## 30. Undefined Areas
+## 30. Developer Tooling, Admin Workflow, And Inspector
+
+Developer tooling is a product surface. The exact CLI and package names may
+evolve, but the workflow invariants should remain:
+
+- project creation scaffolds schema, permissions, migrations, app id, and local
+  development configuration
+- dev plugins/watchers compile schema and permissions, detect catalogue changes,
+  and surface diagnostics without requiring application restarts where possible
+- schema/catalogue tooling computes stable hashes/revisions, validates
+  `schema.ts` and `permissions.ts` together, and fails closed on missing
+  explicit permissions
+- migration tooling generates reviewed stubs, loads custom migration
+  directories, supports schema import/export by hash, and publishes catalogue
+  heads through an admin-controlled workflow
+- permission-only changes do not require structural storage migrations
+- tooling warns when delete policy is omitted and the runtime would fall back to
+  update semantics
+- admin/server configuration and secrets are separate from normal user identity
+  and row authorship
+
+Inspector/devtools are product surfaces too. They should connect by app/server
+identity, environment, admin/service credentials, and branch/view context, and
+should inspect catalogue state, generated storage layout, policies, indexes,
+sync state, transactions, query scopes, and branch/history state without
+exposing private physical ids as public API.
+
+MCP, SQL-over-HTTP, webhooks, and additional language bindings are integration
+surfaces above the same semantic core. They should not define separate database
+semantics.
+
+Open issues:
+
+- exact CLI/package names and command surface
+- inspector permission model and redaction
+- generated type/codegen lockstep across Rust and TypeScript
+- dev dashboard, billing, and hosted operational workflows
+
+## 31. Undefined Areas
 
 The following areas remain intentionally underspecified:
 
@@ -2151,6 +2283,7 @@ The following areas remain intentionally underspecified:
 - local-to-global vector upgrade broadcast
 - predicate/range scope closure
 - query-scope repair candidate bounding
+- full hop/gather query lowering and product constraints
 - active query-descriptor replay across reconnects and upstream restarts
 - retained-data cache eviction for rows no longer covered by active queries
 - authority validation over large read sets
@@ -2163,11 +2296,12 @@ The following areas remain intentionally underspecified:
 - subscription settlement and reconnection protocol
 - hot branch projection heuristics
 - audit-grade append-only receipt history
+- hard-delete/truncate authorization, sync, and retention semantics
 - garbage collection and compaction
 - benchmark thresholds for launch readiness
 - representative adopter-shaped benchmark datasets
 
-## 31. Performance Research Discipline
+## 32. Performance Research Discipline
 
 The embedded-database direction is justified only if it improves realistic Jazz
 workloads while preserving local-first, policy, history, branch, lens, and sync
@@ -2361,7 +2495,7 @@ in-memory SQLite so tests can run several local/edge/global runtimes without
 browser-specific APIs. It should also support durable SQLite-file nodes in the
 same topology so crash safety and reconciliation can be tested.
 
-Performance tests should follow Section 31: scenario-shaped, comparative, and
+Performance tests should follow Section 32: scenario-shaped, comparative, and
 tied to falsifying concrete layout, lowering, sync, and topology choices.
 
 Ongoing work should bias toward whole-system tests over narrow helper tests. The
@@ -2546,6 +2680,8 @@ feature exists.
 - Logical row ids are globally unique.
 - Node ids are writer identities, not authorization principals.
 - One principal may write from multiple nodes.
+- Public-id/physical-id and branch-id/ordinal mappings are crash-atomic; a
+  public identity cannot hydrate to two local physical identities after restart.
 
 ### D.2 Transaction Invariants
 
@@ -2578,7 +2714,9 @@ feature exists.
 ### D.3 History And Projection Invariants
 
 - History rows are append-only for application state.
-- Deletes are history versions, not physical history removal.
+- Ordinary deletes are history versions, not physical history removal.
+- Hard delete/truncate are explicit product-visible destructive retention
+  operations with deterministic sync semantics.
 - Main current projection is rebuildable from history plus transaction
   outcome/receipts.
 - Rebuilding a projection twice from the same inputs is byte-for-byte
@@ -2659,7 +2797,16 @@ feature exists.
 - Required includes filter out the parent when missing or unauthorized.
 - Optional includes preserve the parent and return null/absent when missing or
   unauthorized.
+- Required includes do not filter a parent solely because a nullable scalar ref
+  is null or a reverse relation result is empty.
+- Required includes do filter a parent when a non-null scalar target or required
+  forward-array member is missing or unauthorized.
+- Required-include filtering happens before pagination.
 - Optional missing includes produce absence facts.
+- Selection always preserves public row `id`; selected root fields may coexist
+  with includes and selected semantic system fields.
+- Hop/gather relation traversals are first-class query IR and subscription
+  dependencies.
 - Policy dependencies are observed facts distinct from result dependencies.
 - Rows needed only for policy do not automatically appear in semantic results.
 - Predicate, range, absence, page-boundary, branch/source, and catalogue facts
@@ -2719,6 +2866,10 @@ feature exists.
 
 - Policy sees the same session context across local, worker, edge, and global
   evaluation.
+- Local-first auth can derive a stable principal from a durable local secret.
+- Auth refresh may update session state only when principal identity is
+  preserved.
+- Auth mode is available as policy input.
 - Non-admin sessions fail closed when policy metadata is missing.
 - Admin sessions bypass row policy but remain auditable sessions.
 - Trusted peers may read applied policy-scoped facts without an end-user
@@ -2773,6 +2924,9 @@ feature exists.
   compatibility.
 - Lenses live in `migrations/`.
 - Lenses used by v0 are SQL-lowerable.
+- Migration DSLs support column add/drop/rename, table add/drop, and table
+  rename with structural validation.
+- Permission-only changes do not require structural storage migrations.
 - Writes through an old schema view append current-schema history.
 - Product-level restore/undelete reuses insert authorization semantics.
 - Conflict resolution may require explicit conflict-resolution permission where
@@ -2852,10 +3006,18 @@ feature exists.
 - User columns colliding with physical prefixes are escaped by the codec.
 - SQL fragments and bind parameters travel together in implementation plans.
 - The identity codec is centralized.
+- Higher-level bindings expose idiomatic value types while preserving explicit
+  validation and round-trip semantics.
+- TypeScript bindings convert bytes, timestamps, JSON, enums, and transformed
+  columns according to stable JS boundary rules.
+- Generated row/result layout follows declared schema order plus requested
+  includes and subscription deltas.
 
 ### D.15 File/Blob Invariants
 
 - Blob metadata is ordinary policy-controlled relational data.
+- Files are product-visible row-modeled assets with conventional file metadata
+  and part/chunk tables.
 - Blob bytes do not bypass Jazz session or policy checks.
 - Blob durability may gate transaction publication at a tier.
 - File content is immutable in v0.
@@ -2928,6 +3090,19 @@ feature exists.
   projection on reopen.
 - Policy and lens state survive durable restart through catalogue state, not
   ambient process memory.
+- Storage isolation keeps app/environment/namespace/driver state separated.
+
+### D.18 Developer Tooling And Admin Workflow Invariants
+
+- Schema and permissions are validated together.
+- Missing explicit permissions fail closed in tooling and runtime.
+- Catalogue publication is admin-controlled.
+- Permission-only changes do not require structural storage migrations.
+- Migration stubs are reviewed artifacts, not invisible runtime guesses.
+- Inspector/devtools use admin/service credentials and respect redaction.
+- Tooling surfaces generated storage layout, policies, indexes, sync state,
+  transactions, query scopes, and branch/history state without making physical
+  ids public API.
 
 ## Appendix E: Prototype Test Traceability
 
@@ -2949,7 +3124,7 @@ Coverage labels:
 | -------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | D.1 Identity               | covered for prototype | Public row ids, physical id locality, replica-local physical ids, and one principal writing from multiple nodes are tested.                                                                                                                        |
 | D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                    |
-| D.3 History/projection     | covered for prototype | Append-only deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Full merge/conflict projection semantics remain partial.                                                                 |
+| D.3 History/projection     | partial               | Append-only ordinary deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Hard delete/truncate and full merge/conflict projection semantics remain partial.                               |
 | D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                      |
 | D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                     |
 | D.6 Queries/observed facts | partial               | Equality, contains, IN, not-equal, null-present, selected system fields, ordered pages, absence facts, recursive query scopes, policy dependencies, query-scope repair, and predicate serialization are tested. Range and catalogue facts are not. |
@@ -2964,6 +3139,7 @@ Coverage labels:
 | D.15 Files/blobs           | untested              | No file/blob implementation in the prototype.                                                                                                                                                                                                      |
 | D.16 Privacy/encryption    | untested              | No E2EE/encrypted-index implementation in the prototype.                                                                                                                                                                                           |
 | D.17 Harness               | partial               | In-memory SQLite, file-backed durable nodes, multi-runtime local/edge/global tests, duplicate/reordered bundles, and durable reopen are tested. Drop/delay/reconnect protocol and deterministic clock APIs are not.                                |
+| D.18 Tooling/admin         | untested              | Tooling, inspector, admin catalogue publication, and codegen workflows are not implemented in the prototype.                                                                                                                                       |
 
 ### E.2 Test Module Mapping
 
