@@ -245,13 +245,8 @@ impl PolicyFilterNode {
         {
             inherits_tables.extend(collect_policy_dependency_tables(table_policy, &descriptor));
         }
-        let (has_branch_policy, branch_dependency_tables) = branch_policy_dependency_tables(
-            &schema,
-            &descriptor,
-            &table_name,
-            &branch,
-            policy_operation,
-        );
+        let (has_branch_policy, branch_dependency_tables) =
+            branch_policy_dependency_tables(&schema, &descriptor, &table_name, policy_operation);
         inherits_tables.extend(branch_dependency_tables);
         let has_inherits = has_branch_policy || !inherits_tables.is_empty();
         Self {
@@ -324,7 +319,8 @@ impl PolicyFilterNode {
                 continue;
             };
 
-            if self.evaluate_with_context(&row, io, &mut row_loader) {
+            let policy_branch = tuple_branch_for_row(&tuple, row.id, &self.branch);
+            if self.evaluate_with_context(&row, policy_branch, io, &mut row_loader) {
                 self.current_tuples.insert(tuple.clone());
                 result.added.push(tuple);
             }
@@ -347,10 +343,16 @@ impl PolicyFilterNode {
             let new_row = tuple_to_row(&new_tuple);
 
             let old_passes = old_row
-                .map(|r| self.evaluate_with_context(&r, io, &mut row_loader))
+                .map(|r| {
+                    let policy_branch = tuple_branch_for_row(&old_tuple, r.id, &self.branch);
+                    self.evaluate_with_context(&r, policy_branch, io, &mut row_loader)
+                })
                 .unwrap_or(false);
             let new_passes = new_row
-                .map(|r| self.evaluate_with_context(&r, io, &mut row_loader))
+                .map(|r| {
+                    let policy_branch = tuple_branch_for_row(&new_tuple, r.id, &self.branch);
+                    self.evaluate_with_context(&r, policy_branch, io, &mut row_loader)
+                })
                 .unwrap_or(false);
 
             match (old_passes, new_passes) {
@@ -385,7 +387,10 @@ impl PolicyFilterNode {
 
         for tuple in all_tuples {
             let passes = tuple_to_row(&tuple)
-                .map(|row| self.evaluate_with_context(&row, io, row_loader))
+                .map(|row| {
+                    let policy_branch = tuple_branch_for_row(&tuple, row.id, &self.branch);
+                    self.evaluate_with_context(&row, policy_branch, io, row_loader)
+                })
                 .unwrap_or(false);
             let currently_visible = self.current_tuples.contains(&tuple);
 
@@ -410,10 +415,13 @@ impl PolicyFilterNode {
     fn evaluate_with_context(
         &self,
         row: &Row,
+        policy_branch: BranchName,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
-        if let Some(result) = self.evaluate_branch_scoped_with_context(row, io, row_loader) {
+        if let Some(result) =
+            self.evaluate_branch_scoped_with_context(row, policy_branch, io, row_loader)
+        {
             return result;
         }
 
@@ -428,7 +436,7 @@ impl PolicyFilterNode {
         let mut evaluator = PolicyContextEvaluator::new(
             &self.schema,
             &self.session,
-            &self.branch,
+            policy_branch.as_str(),
             self.row_policy_mode,
         );
         let mut visited_referencing = HashSet::new();
@@ -448,11 +456,12 @@ impl PolicyFilterNode {
     fn evaluate_branch_scoped_with_context(
         &self,
         row: &Row,
+        policy_branch: BranchName,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> Option<bool> {
         let target_table = TableName::new(&self.table_name);
-        let route = self.resolve_permission_route(io, target_table)?;
+        let route = self.resolve_permission_route(io, policy_branch, target_table)?;
         if route.is_denied() {
             return Some(false);
         }
@@ -465,7 +474,7 @@ impl PolicyFilterNode {
         let mut evaluator = PolicyContextEvaluator::new(
             &self.schema,
             &self.session,
-            &self.branch,
+            policy_branch.as_str(),
             self.row_policy_mode,
         );
         if let Some(branch_context) = branch_context.as_ref() {
@@ -488,11 +497,12 @@ impl PolicyFilterNode {
     fn resolve_permission_route(
         &self,
         io: &dyn Storage,
+        policy_branch: BranchName,
         target_table: TableName,
     ) -> Option<PermissionRoute<'_>> {
-        branch_policy_scope(&BranchName::new(&self.branch))?;
+        branch_policy_scope(&policy_branch)?;
         Some(resolve_permission_route_with_backing_loader(
-            BranchName::new(&self.branch),
+            policy_branch,
             target_table,
             &self.schema,
             self.row_policy_mode,
@@ -759,13 +769,8 @@ fn branch_policy_dependency_tables(
     schema: &Schema,
     descriptor: &RowDescriptor,
     table_name: &str,
-    branch: &str,
     policy_operation: Operation,
 ) -> (bool, HashSet<String>) {
-    if branch_policy_scope(&BranchName::new(branch)).is_none() {
-        return (false, HashSet::new());
-    }
-
     let Some(table_schema) = schema.get(&TableName::new(table_name)) else {
         return (false, HashSet::new());
     };
@@ -901,6 +906,14 @@ fn tuple_to_row(tuple: &Tuple) -> Option<Row> {
         )),
         TupleElement::Id(_) => None, // Not materialized
     }
+}
+
+fn tuple_branch_for_row(tuple: &Tuple, row_id: ObjectId, fallback_branch: &str) -> BranchName {
+    tuple
+        .provenance()
+        .iter()
+        .find_map(|(id, branch)| (*id == row_id).then_some(*branch))
+        .unwrap_or_else(|| BranchName::new(fallback_branch))
 }
 
 #[cfg(test)]
@@ -1157,10 +1170,11 @@ mod tests {
         let storage = crate::storage::MemoryStorage::new();
         let mut seen = Vec::new();
 
-        let allowed = node.evaluate_with_context(&row, &storage, &mut |id, hint| {
-            seen.push((id, hint));
-            None
-        });
+        let allowed =
+            node.evaluate_with_context(&row, BranchName::new("main"), &storage, &mut |id, hint| {
+                seen.push((id, hint));
+                None
+            });
 
         assert!(!allowed);
         assert_eq!(seen, vec![(parent_id, Some(TableName::new("folders")))]);

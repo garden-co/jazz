@@ -457,9 +457,7 @@ impl QueryManager {
         }
 
         let output_rows_are_visible = tuple.iter().all(|element| {
-            authorized
-                .iter()
-                .any(|(object_id, _)| *object_id == element.id())
+            Self::nested_row_authorized(element.id(), tuple.provenance(), &authorized)
         });
         output_rows_are_visible.then_some(authorized)
     }
@@ -543,6 +541,12 @@ impl QueryManager {
         authorized_provenance: TupleProvenance,
     ) -> Option<Tuple> {
         let tuple_provenance = tuple.provenance().clone();
+        if !tuple.iter().all(|element| {
+            Self::nested_row_authorized(element.id(), &tuple_provenance, &authorized_provenance)
+        }) {
+            return None;
+        }
+
         if tuple.len() == 1
             && let Some(TupleElement::Row { content, .. }) = tuple.get_mut(0)
         {
@@ -2250,5 +2254,37 @@ impl QueryManager {
                     .reject_permission_check(storage, state.pending_check, reason);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType};
+
+    #[test]
+    fn tuple_with_authorized_scope_drops_row_when_same_id_has_denied_scope() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]);
+        let row_id = ObjectId::new();
+        let allowed_branch = BranchName::new("allowed");
+        let denied_branch = BranchName::new("denied");
+        let content = encode_row(&descriptor, &[Value::Text("denied content".into())]).unwrap();
+        let tuple = Tuple::new_with_provenance(
+            vec![TupleElement::Row {
+                id: row_id,
+                content: content.into(),
+                batch_id: BatchId::new(),
+                row_provenance: RowProvenance::for_insert("jazz:test", 0),
+            }],
+            [(row_id, allowed_branch), (row_id, denied_branch)]
+                .into_iter()
+                .collect(),
+        );
+        let authorized_provenance = [(row_id, allowed_branch)].into_iter().collect();
+
+        assert!(
+            QueryManager::tuple_with_authorized_scope(tuple, &descriptor, authorized_provenance,)
+                .is_none()
+        );
     }
 }

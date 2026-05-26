@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, PolicyValue};
@@ -615,6 +615,167 @@ fn local_union_branch_read_uses_branch_select_policy_in_graph_filter() {
     qm.process(&mut storage);
 
     assert!(qm.get_subscription_results(sub_id).is_empty());
+}
+
+#[test]
+fn multi_branch_read_uses_each_rows_branch_for_branch_ref_policy() {
+    let (mut qm, mut storage, schema) = manager_with_branch_schema(true);
+    let project_a = ObjectId::new();
+    let project_b = ObjectId::new();
+    let branch_a = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_a), Value::Text("alice".into())],
+        )
+        .expect("insert branch A")
+        .row_id;
+    let branch_b = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_b), Value::Text("alice".into())],
+        )
+        .expect("insert branch B")
+        .row_id;
+    let branch_a_name = branch_name_for(&schema, branch_a);
+    let branch_b_name = branch_name_for(&schema, branch_b);
+    let allowed_a = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_a_name,
+            &[Value::Uuid(project_a), Value::Text("allowed A".into())],
+            None,
+        )
+        .expect("insert branch A todo")
+        .row_id;
+    let allowed_b = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_b_name,
+            &[Value::Uuid(project_b), Value::Text("allowed B".into())],
+            None,
+        )
+        .expect("insert branch B todo")
+        .row_id;
+    let denied_b = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_b_name,
+            &[Value::Uuid(project_a), Value::Text("denied B".into())],
+            None,
+        )
+        .expect("insert branch B todo with branch A project")
+        .row_id;
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("todos")
+            .branches(&[branch_a_name.as_str(), branch_b_name.as_str()])
+            .build(),
+        Some(Session::new("alice")),
+    );
+    let returned_ids: HashSet<_> = rows.into_iter().map(|(id, _)| id).collect();
+
+    assert_eq!(
+        returned_ids,
+        HashSet::from([allowed_a, allowed_b]),
+        "each branch row should be checked against its own backing row"
+    );
+    assert!(!returned_ids.contains(&denied_b));
+}
+
+#[test]
+fn explicit_auth_drops_same_id_tuple_when_any_content_branch_is_denied() {
+    let auth_schema = branch_schema(true);
+    let structural_schema = strip_test_policies(&auth_schema);
+    let mut qm = create_query_manager(SyncManager::new(), structural_schema.clone());
+    qm.set_authorization_schema(auth_schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_a = ObjectId::new();
+    let project_b = ObjectId::new();
+    let branch_a = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_a), Value::Text("alice".into())],
+        )
+        .expect("insert branch A")
+        .row_id;
+    let branch_b = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_b), Value::Text("alice".into())],
+        )
+        .expect("insert branch B")
+        .row_id;
+    let branch_a_name = branch_name_for(&structural_schema, branch_a);
+    let branch_b_name = branch_name_for(&structural_schema, branch_b);
+    let shared_todo_id = ObjectId::new();
+    let todos_descriptor = structural_schema
+        .get(&TableName::new("todos"))
+        .expect("todos table should exist")
+        .columns
+        .clone();
+    for (branch_name, project_id, title, timestamp) in [
+        (&branch_b_name, project_a, "denied branch B content", 2_000),
+        (&branch_a_name, project_a, "allowed branch A content", 1_000),
+    ] {
+        let commit = stored_row_commit(
+            smallvec![],
+            encode_row(
+                &todos_descriptor,
+                &[Value::Uuid(project_id), Value::Text(title.into())],
+            )
+            .unwrap(),
+            timestamp,
+            "alice",
+            None,
+        );
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(ServerId::new()),
+            payload: row_batch_created_payload(
+                shared_todo_id,
+                branch_name,
+                Some(RowMetadata {
+                    id: shared_todo_id,
+                    metadata: todos_metadata(),
+                }),
+                &commit,
+            ),
+        });
+    }
+    qm.process(&mut storage);
+
+    let mut query = QueryBuilder::new("todos").build();
+    query.relation_ir = RelExpr::Union {
+        inputs: vec![
+            RelExpr::Branch {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("todos"),
+                }),
+                branches: vec![branch_b_name],
+            },
+            RelExpr::Branch {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("todos"),
+                }),
+                branches: vec![branch_a_name],
+            },
+        ],
+    };
+
+    let rows = query_rows(&mut qm, &mut storage, query, Some(Session::new("alice")));
+
+    assert!(
+        rows.is_empty(),
+        "same-id tuple should be dropped when it may carry denied branch content"
+    );
 }
 
 #[test]
