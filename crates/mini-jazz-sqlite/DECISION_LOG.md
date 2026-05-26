@@ -1452,3 +1452,18 @@ they are part of the semantic branch state that transaction read/write sets
 must validate against.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 246 whole-system tests.
+
+## 2026-05-26 05:17 PDT
+
+Pinned branch source graphs as acyclic. Direct self-sources and indirect source
+cycles now fail when adding/replacing source metadata, and the branch remains
+readable after the rejected edit. This became more important once source
+branches started feeding effective row lookup for writes and exclusive read-set
+validation.
+
+Discovery: branch provenance is now executable semantic state, not just
+metadata for conflict UIs. The system should reject impossible provenance at
+the catalogue boundary instead of relying on every query/read-set traversal to
+defend itself against cycles.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 247 whole-system tests.

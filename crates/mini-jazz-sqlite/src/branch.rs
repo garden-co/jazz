@@ -1,5 +1,6 @@
 use crate::Result;
 use rusqlite::{params, Connection};
+use std::collections::BTreeSet;
 
 pub(crate) fn ensure(
     conn: &Connection,
@@ -58,6 +59,11 @@ pub(crate) fn base_global_epoch(conn: &Connection, branch_num: i64) -> Result<Op
 
 pub(crate) fn add_source(conn: &Connection, branch_num: i64, source_branch_id: &str) -> Result<()> {
     let source_branch_num = ensure(conn, source_branch_id, None, 0)?;
+    if source_reaches_branch(conn, source_branch_num, branch_num, None)? {
+        return Err(crate::Error::new(format!(
+            "branch source cycle involving {source_branch_id}"
+        )));
+    }
     conn.execute(
         "INSERT OR IGNORE INTO jazz_branch_source (branch_num, source_branch_num)
          VALUES (?, ?)",
@@ -89,12 +95,25 @@ pub(crate) fn set_sources(
     branch_num: i64,
     source_branch_ids: &[String],
 ) -> Result<()> {
+    let source_branch_nums = source_branch_ids
+        .iter()
+        .map(|source_branch_id| ensure(conn, source_branch_id, None, 0))
+        .collect::<Result<Vec<_>>>()?;
+    for source_branch_num in &source_branch_nums {
+        if source_reaches_branch(
+            conn,
+            *source_branch_num,
+            branch_num,
+            Some(&source_branch_nums),
+        )? {
+            return Err(crate::Error::new("branch source cycle"));
+        }
+    }
     conn.execute(
         "DELETE FROM jazz_branch_source WHERE branch_num = ?",
         params![branch_num],
     )?;
-    for source_branch_id in source_branch_ids {
-        let source_branch_num = ensure(conn, source_branch_id, None, 0)?;
+    for source_branch_num in source_branch_nums {
         conn.execute(
             "INSERT OR IGNORE INTO jazz_branch_source (branch_num, source_branch_num)
              VALUES (?, ?)",
@@ -154,6 +173,40 @@ pub(crate) fn scope_nums(conn: &Connection, branch_num: i64) -> Result<Vec<i64>>
     nums.sort();
     nums.dedup();
     Ok(nums)
+}
+
+fn source_reaches_branch(
+    conn: &Connection,
+    source_branch_num: i64,
+    target_branch_num: i64,
+    target_replacement_sources: Option<&[i64]>,
+) -> Result<bool> {
+    let mut stack = vec![source_branch_num];
+    let mut visited = BTreeSet::new();
+    while let Some(branch_num) = stack.pop() {
+        if branch_num == target_branch_num {
+            return Ok(true);
+        }
+        if !visited.insert(branch_num) {
+            continue;
+        }
+        if let Some(replacement_sources) = target_replacement_sources {
+            if branch_num == target_branch_num {
+                stack.extend(replacement_sources.iter().copied());
+                continue;
+            }
+        }
+        let mut stmt = conn.prepare(
+            "SELECT source_branch_num
+             FROM jazz_branch_source
+             WHERE branch_num = ?",
+        )?;
+        let sources = stmt
+            .query_map(params![branch_num], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        stack.extend(sources);
+    }
+    Ok(false)
 }
 
 fn sync_backing_row(conn: &Connection, branch_num: i64) -> Result<()> {

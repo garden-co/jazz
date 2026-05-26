@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn branch_sources_reject_direct_and_indirect_cycles() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    assert!(alice.add_branch_source("left", "left").is_err());
+
+    alice.create_branch("right", None).unwrap();
+    alice.add_branch_source("left", "right").unwrap();
+
+    let err = alice.add_branch_source("right", "left").unwrap_err();
+    assert!(err.to_string().contains("branch source cycle"));
+
+    alice.checkout_branch("left").unwrap();
+    alice
+        .create_todo("todo-left", "Still readable", false, "project-missing")
+        .unwrap();
+    alice.checkout_branch("right").unwrap();
+    assert!(alice.read_rows("todos").unwrap().is_empty());
+}
+
+#[test]
 fn branch_local_write_is_invisible_on_main() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
