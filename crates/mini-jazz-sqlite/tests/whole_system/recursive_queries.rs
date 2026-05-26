@@ -587,6 +587,107 @@ fn recursive_observed_query_refresh_removes_deleted_descendant_with_subscription
 }
 
 #[test]
+fn recursive_observed_query_refresh_removes_policy_hidden_descendant_with_subscription_diff() {
+    let schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("folders", |table| {
+            table.text("name");
+            table.ref_("parent", "folders");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "orgs",
+            "org-alice",
+            BTreeMap::from([("name".to_owned(), json!("Alice org"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+                ("org".to_owned(), json!("org-alice")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Child")),
+                ("parent".to_owned(), json!("root")),
+                ("org".to_owned(), json!("org-alice")),
+            ]),
+        )
+        .unwrap();
+
+    peer.apply_bundle(
+        &alice
+            .export_recursive_refs("folders", "root", "parent")
+            .unwrap(),
+    )
+    .unwrap();
+    let observed = peer.observed_query_reads().unwrap();
+    let mut subscription = peer.subscribe_observed_query(&observed[0]).unwrap();
+    assert_eq!(subscription.initial_rows().len(), 2);
+
+    bob.insert_row(
+        "orgs",
+        "org-bob",
+        BTreeMap::from([("name".to_owned(), json!("Bob org"))]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("orgs").unwrap())
+        .unwrap();
+    alice
+        .update_row(
+            "folders",
+            "child",
+            BTreeMap::from([("org".to_owned(), json!("org-bob"))]),
+        )
+        .unwrap();
+    assert_eq!(
+        alice
+            .read_recursive_refs("folders", "root", "parent")
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["root"]
+    );
+
+    for refresh in alice.export_query_read_refreshes(&observed).unwrap() {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let diffs = peer.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "child"));
+    let ids = peer
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root"]);
+}
+
+#[test]
 fn recursive_query_scope_sync_exports_deleted_descendant_tombstone() {
     let schema = support::folders_schema();
     let mut alice =

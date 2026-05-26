@@ -1135,3 +1135,18 @@ shape: no extra subscription machinery is needed once the broad query repair
 paths are operator-aware and projection-convergent.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 227 whole-system tests.
+
+## 2026-05-26 04:21 PDT
+
+Added recursive observed-query subscription coverage for a descendant that
+stays structurally reachable but becomes hidden by a recursive policy dependency
+change. The upstream moves the child from Alice's readable org to Bob's
+unreadable org; refresh removes it from the worker and the subscription emits a
+semantic removal.
+
+Discovery: recursive query refresh already handles this harder policy case. The
+same descriptor shape that repairs deleted and reparented descendants also
+exports enough state for policy-hidden descendants to disappear without adding a
+new repair mechanism.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
