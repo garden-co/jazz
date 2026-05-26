@@ -297,6 +297,15 @@ impl Runtime {
             &branch_nums,
             Some(&row_nums),
         )?;
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            &self.principal,
+            self.trusted,
+            &branch_nums,
+            Some(&row_nums),
+        )?);
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
                 history.extend(export_history_versions_for_rows(
@@ -305,6 +314,15 @@ impl Runtime {
                     table_name,
                     Some(&row_nums),
                     Some(base_epoch),
+                )?);
+                history.extend(export_snapshot_policy_dependency_history(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    &self.principal,
+                    self.trusted,
+                    base_epoch,
+                    Some(&row_nums),
                 )?);
             }
         }

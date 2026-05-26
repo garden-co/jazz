@@ -1000,6 +1000,76 @@ fn recursive_query_scope_sync_recreates_policy_filtered_tree() {
 }
 
 #[test]
+fn recursive_query_scope_sync_includes_recursive_policy_ancestors() {
+    let schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("folders", |table| {
+            table.text("name");
+            table.ref_("parent", "folders");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "orgs",
+            "org-alice",
+            BTreeMap::from([("name".to_owned(), json!("Alice org"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+                ("org".to_owned(), json!("org-alice")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Child")),
+                ("parent".to_owned(), json!("root")),
+                ("org".to_owned(), json!("org-alice")),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice
+        .export_recursive_refs("folders", "root", "parent")
+        .unwrap();
+    let synced = bundle
+        .history
+        .iter()
+        .map(|record| (record.table.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(synced.contains(&("folders", "root")));
+    assert!(synced.contains(&("folders", "child")));
+    assert!(synced.contains(&("orgs", "org-alice")));
+
+    peer.apply_bundle(&bundle).unwrap();
+    let ids = peer
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root", "child"]);
+}
+
+#[test]
 fn recursive_query_reads_branch_base_and_sparse_overlay() {
     let schema = SchemaDef::new().table("folders", |table| {
         table.text("name");

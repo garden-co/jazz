@@ -1198,3 +1198,22 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Design note: this is still coarse: validation happens after apply, then repairs
 projection by rejecting. A production authority likely wants a transactional
 "stage, validate, then publish fate" path.
+
+## 2026-05-25 19:02 PDT
+
+Starting recursive query plus recursive permission export coverage. The current
+runtime can query recursive self-ref trees and can export transitive policy
+dependencies for ordinary table scopes, but recursive query scopes may still
+omit ancestors required to re-evaluate nested read policies on the receiver.
+
+## 2026-05-25 19:03 PDT
+
+Recursive query plus policy dependency export is green. The red test confirmed
+that `export_recursive_refs` exported the recursive rows but omitted parent rows
+needed by `read_if_ref_readable`; the receiver then could not reproduce
+visibility. Fixed by applying the existing current/snapshot policy-dependency
+export expansion to recursive query scopes, filtered to the recursive result
+row set.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+recursive_query_scope_sync_includes_recursive_policy_ancestors` passes.
