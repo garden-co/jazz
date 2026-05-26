@@ -1,4 +1,4 @@
-use mini_jazz_sqlite::{Runtime, SchemaDef, Storage};
+use mini_jazz_sqlite::{RowDiff, Runtime, SchemaDef, Storage};
 use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
@@ -398,4 +398,49 @@ fn policy_denied_write_is_rejected_history_not_current_state() {
     assert_eq!(stats.current_rows, 1);
     assert_eq!(stats.rejected_transactions, 1);
     assert!(stats.physical_tx_num_for(&rejected_tx).is_some());
+}
+
+#[test]
+fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let mut first = BTreeMap::new();
+    first.insert("title".to_owned(), json!("Initial"));
+    first.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-1", first).unwrap();
+
+    let mut subscription = alice.subscribe_rows("tasks").unwrap();
+    assert_eq!(
+        subscription.initial_rows(),
+        alice.read_rows("tasks").unwrap()
+    );
+
+    let mut second = BTreeMap::new();
+    second.insert("title".to_owned(), json!("Added later"));
+    second.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-2", second).unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Added(row)] if row.id == "task-2"));
+
+    let mut update = BTreeMap::new();
+    update.insert("title".to_owned(), json!("Renamed"));
+    update.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-1", update).unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(
+        &diffs[..],
+        [RowDiff::Updated { before, after }]
+            if before.id == "task-1"
+                && before.values["title"] == json!("Initial")
+                && after.values["title"] == json!("Renamed")
+    ));
+
+    alice.delete_row("tasks", "task-2").unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "task-2"));
 }

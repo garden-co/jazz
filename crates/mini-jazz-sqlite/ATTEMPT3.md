@@ -269,3 +269,17 @@ seems enough for projection rebuild and sync reasoning.
 Open issue: creation policies based on `CreatedByPrincipal` are awkward because
 a brand-new row has no prior current version. We will need separate create vs
 update policy semantics or a more expressive policy language.
+
+## 2026-05-25 17:17 PDT
+
+Subscription baseline is green. `subscribe_rows(table)` captures the same rows
+as the one-shot `read_rows(table)`, and `poll_subscription` reruns the query and
+emits semantic `Added`, `Updated`, and `Removed` row diffs.
+
+Decision: for Attempt 3, start with rerun-and-diff semantics instead of SQLite
+triggers or an incremental query graph. This keeps correctness behavior clear
+while leaving invalidation/indexing as an optimization layer.
+
+Open issue: the current subscription object is an in-process test harness, not a
+durable subscription protocol. It does not yet track read-set scope, policy
+facts, pagination windows, or reconnect delivery cursors.

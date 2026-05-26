@@ -12,6 +12,13 @@ pub struct RowView {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowDiff {
+    Added(RowView),
+    Updated { before: RowView, after: RowView },
+    Removed(RowView),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TodoView {
     pub id: String,
     pub title: String,

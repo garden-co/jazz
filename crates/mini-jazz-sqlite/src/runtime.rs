@@ -1,5 +1,6 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
 use crate::schema::{FieldDef, FieldKind, SchemaDef};
+use crate::subscription::RowsSubscription;
 use crate::sync::{Bundle, HistoryRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{policy, projection, schema, storage, tx, Result, Storage};
@@ -426,6 +427,58 @@ impl Runtime {
         Ok(tx_id)
     }
 
+    pub fn delete_row(&mut self, table_name: &str, id: &str) -> Result<String> {
+        let table = self.schema.table_def(table_name)?.clone();
+        let db = self.conn.transaction()?;
+        let now = now_ms();
+        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
+        let row_num = row_num(&db, id)?;
+
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut insert_columns = vec!["row_num".to_owned(), "tx_num".to_owned(), "op".to_owned()];
+        insert_columns.extend(field_columns.iter().cloned());
+        insert_columns.extend([
+            "j_created_at".to_owned(),
+            "j_updated_at".to_owned(),
+            "j_created_by".to_owned(),
+            "j_updated_by".to_owned(),
+        ]);
+        let mut select_columns = vec!["row_num".to_owned(), "?".to_owned(), "3".to_owned()];
+        select_columns.extend(field_columns.iter().cloned());
+        select_columns.extend([
+            "j_created_at".to_owned(),
+            "?".to_owned(),
+            "j_created_by".to_owned(),
+            "?".to_owned(),
+        ]);
+        db.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {} ({})
+                 SELECT {}
+                 FROM {}
+                 WHERE row_num = ?",
+                crate::schema::history_table(&table.name),
+                insert_columns.join(", "),
+                select_columns.join(", "),
+                crate::schema::current_table(&table.name),
+            ),
+            params![tx_num, now, self.principal, row_num],
+        )?;
+        db.execute(
+            &format!(
+                "DELETE FROM {} WHERE row_num = ?",
+                crate::schema::current_table(&table.name)
+            ),
+            params![row_num],
+        )?;
+        db.commit()?;
+        Ok(tx_id)
+    }
+
     pub fn clear_current_projection_for_test(&mut self) -> Result<()> {
         projection::clear(&self.conn, &self.schema)
     }
@@ -493,6 +546,21 @@ impl Runtime {
             });
         }
         Ok(views)
+    }
+
+    pub fn subscribe_rows(&self, table_name: &str) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::new(
+            table_name,
+            self.read_rows(table_name)?,
+        ))
+    }
+
+    pub fn poll_subscription(
+        &self,
+        subscription: &mut RowsSubscription,
+    ) -> Result<Vec<crate::types::RowDiff>> {
+        let next_rows = self.read_rows(&subscription.table)?;
+        Ok(subscription.replace_with_diff(next_rows))
     }
 
     pub fn storage_stats(&self) -> Result<StorageStats> {
