@@ -832,3 +832,26 @@ a place to put shared fixtures instead of continuing to bloat
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, still
 45 tests.
+
+## 2026-05-25 18:21 PDT
+
+Starting trusted-edge topology test. Goal: an untrusted memory client can submit
+a mergeable tx, a trusted durable edge can accept it globally, and untrusted
+peers still apply their own read policy after receiving the edge's accepted
+bundle.
+
+## 2026-05-25 18:21 PDT
+
+Trusted-edge topology is green. A memory Alice client writes a pending mergeable
+transaction, a trusted file-backed edge applies and accepts it at global epoch
+11, Alice's second untrusted peer receives the accepted result, and Bob's
+untrusted peer receives the same bundle but still reads zero rows because local
+read policy applies.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+46 tests.
+
+Learning: the trusted/untrusted split is holding up as a useful axis separate
+from local/edge/global durability. Trusted peers can bypass policy while
+importing/exporting facts; untrusted peers still enforce their own visible
+result locally.

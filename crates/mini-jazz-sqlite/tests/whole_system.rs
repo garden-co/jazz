@@ -966,6 +966,50 @@ fn trusted_peer_generic_transaction_bypasses_user_write_policy() {
 }
 
 #[test]
+fn trusted_edge_accepts_mergeable_tx_then_untrusted_peers_enforce_policy() {
+    let dir = tempdir().unwrap();
+    let edge_path = dir.path().join("edge.sqlite");
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+        table.read_if_created_by_principal();
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-tab", "alice", schema.clone()).unwrap();
+    let mut edge =
+        Runtime::open_trusted_with_schema(Storage::File(edge_path), "edge", schema.clone())
+            .unwrap();
+    let mut alice_phone =
+        Runtime::open_with_schema(Storage::Memory, "alice-phone", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-tab", "bob", schema).unwrap();
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Accepted at edge")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    edge.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    edge.accept_transaction_at_global(&tx, 11).unwrap();
+
+    let accepted_bundle = edge.export_table_history("notes").unwrap();
+    alice_phone.apply_bundle(&accepted_bundle).unwrap();
+    bob.apply_bundle(&accepted_bundle).unwrap();
+
+    assert_eq!(alice_phone.read_rows("notes").unwrap().len(), 1);
+    assert_eq!(
+        alice_phone.transaction_info(&tx).unwrap().global_epoch,
+        Some(11)
+    );
+    assert!(bob.read_rows("notes").unwrap().is_empty());
+}
+
+#[test]
 fn policy_denied_write_is_rejected_history_not_current_state() {
     let schema = SchemaDef::new()
         .table("docs", |table| {
