@@ -1585,3 +1585,16 @@ reconnect, later source-row arrival, mutation lowering, and authority
 validation.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 257 whole-system tests.
+
+## 2026-05-26 05:30 PDT
+
+Added observed-query refresh coverage for detaching a transitive source branch.
+A peer observes a row through `merge -> middle -> left`; upstream removes
+`left` from `middle`; refresh removes the row and syncs the emptied `middle`
+source provenance.
+
+Discovery: transitive branch closure handles both growth and shrinkage of the
+source graph. The same persisted query read can repair result rows and branch
+metadata when the graph changes below the checked-out branch.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 258 whole-system tests.
