@@ -2172,3 +2172,20 @@ pins down that query repair is at least respecting branch-scoped current rows
 for sparse branch overlays.
 
 Full `cargo test -p mini-jazz-sqlite` passes with 118 whole-system tests.
+
+## 2026-05-25 20:44 PDT
+
+Adjacent query-scope repair case: a row can leave a predicate by being deleted,
+not only by being updated to a non-matching value. Testing whether equality
+query scope refreshes export enough tombstone information to repair a stale
+peer.
+
+Result: the delete repair test failed red. Query-scope export was still only
+sending currently visible history for repair rows, so deleted rows had no
+tombstone in the bundle. Extended equality-query export to include history
+versions for repair rows, including tombstones. The targeted test now passes.
+
+The first version of that fix duplicated live history records in an existing
+branch query-scope export test. Added explicit history-record deduping during
+query-scope export assembly. Full `cargo test -p mini-jazz-sqlite` passes with
+119 whole-system tests.

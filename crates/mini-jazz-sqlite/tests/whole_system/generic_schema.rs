@@ -213,6 +213,54 @@ fn equality_query_scope_resync_removes_row_that_left_predicate() {
 }
 
 #[test]
+fn equality_query_scope_resync_removes_deleted_matching_row() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Delete me")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer.read_rows_where_eq("tasks", "done", json!(false))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice.delete_row("tasks", "task-1").unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert!(peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn branch_equality_query_scope_records_branch_predicate_read() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

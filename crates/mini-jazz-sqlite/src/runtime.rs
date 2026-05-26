@@ -375,6 +375,7 @@ impl Runtime {
                 )?);
             }
         }
+        dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
@@ -1063,6 +1064,13 @@ impl Runtime {
             &branch_nums,
             Some(&row_nums),
         )?;
+        history.extend(export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            table_name,
+            Some(&row_nums),
+            None,
+        )?);
         history.extend(export_policy_dependency_history(
             &self.conn,
             &self.schema,
@@ -1092,6 +1100,7 @@ impl Runtime {
                 )?);
             }
         }
+        dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
@@ -2722,6 +2731,19 @@ fn query_scope_repair_row_nums(
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn dedupe_history_records(records: &mut Vec<HistoryRecord>) {
+    let mut seen = BTreeSet::new();
+    records.retain(|record| {
+        seen.insert((
+            record.table.clone(),
+            record.row_id.clone(),
+            record.branch_id.clone(),
+            record.tx_id.clone(),
+            record.op,
+        ))
+    });
 }
 
 fn export_visible_table_history(
