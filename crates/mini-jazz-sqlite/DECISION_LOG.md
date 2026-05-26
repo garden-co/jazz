@@ -1436,3 +1436,19 @@ only the branch's own current row and pinned main base, so it missed rows newly
 visible through source provenance.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 245 whole-system tests.
+
+## 2026-05-26 05:15 PDT
+
+Extended the same invariant from absent rows to present source-branch rows.
+Before the fix, a branch could read rows inherited from a source branch, but an
+update transaction could not materialize that inherited row as its write base.
+`effective::row_values` now checks branch-local current rows, then source
+branches, then pinned base snapshots. The stale exclusive transaction test then
+rejects when the source branch updates after the writer's read.
+
+Discovery: "effective row" is the right boundary for both query reads and
+mutation lowering. Source branches are not just a read-time display feature;
+they are part of the semantic branch state that transaction read/write sets
+must validate against.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 246 whole-system tests.

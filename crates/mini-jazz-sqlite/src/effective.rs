@@ -13,16 +13,29 @@ pub(crate) fn row_values(
 ) -> Result<Option<BTreeMap<String, JsonValue>>> {
     let table = schema.table_def(table_name)?;
     if branch_num != 1 {
+        if let Some(values) = current_row_values_exact(conn, table, row_num, branch_num)? {
+            return Ok(Some(values));
+        }
+        for source_branch_num in branch::scope_nums(conn, branch_num)?
+            .into_iter()
+            .filter(|source_branch_num| *source_branch_num != branch_num)
+        {
+            if let Some(values) = row_values(conn, schema, table_name, row_num, source_branch_num)?
+            {
+                return Ok(Some(values));
+            }
+        }
         if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
             if !current_row_exists_on_branch(conn, table_name, row_num, branch_num)? {
                 return snapshot_row_values(conn, table, row_num, base_epoch);
             }
         }
+        return Ok(None);
     }
-    current_row_values(conn, table, row_num, branch_num)
+    current_row_values_exact(conn, table, row_num, branch_num)
 }
 
-fn current_row_values(
+fn current_row_values_exact(
     conn: &Connection,
     table: &crate::schema::TableDef,
     row_num: i64,
@@ -38,17 +51,15 @@ fn current_row_values(
          FROM {} current
          JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
          WHERE current.row_num = ?
-           AND {}
+           AND current.j_branch_num = ?
            AND current.is_deleted = 0
            AND tx.outcome != ?
-         ORDER BY CASE WHEN current.j_branch_num = ? THEN 0 ELSE 1 END
          LIMIT 1",
         field_columns.join(", "),
-        current_table(&table.name),
-        effective_branch_sql("current", &table.name, branch_num)
+        current_table(&table.name)
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query_map(params![row_num, tx::OUTCOME_REJECTED, branch_num], |row| {
+    let mut rows = stmt.query_map(params![row_num, branch_num, tx::OUTCOME_REJECTED], |row| {
         (0..table.fields.len())
             .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -150,23 +161,4 @@ fn current_row_exists_on_branch(
         |row| row.get(0),
     )?;
     Ok(count > 0)
-}
-
-fn effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> String {
-    if branch_num == 1 {
-        return format!("{alias}.j_branch_num = 1");
-    }
-    format!(
-        "({alias}.j_branch_num = {branch_num}
-          OR (
-            {alias}.j_branch_num = 1
-            AND NOT EXISTS (
-              SELECT 1
-              FROM {} branch_shadow
-              WHERE branch_shadow.row_num = {alias}.row_num
-                AND branch_shadow.j_branch_num = {branch_num}
-            )
-          ))",
-        current_table(table_name)
-    )
 }
