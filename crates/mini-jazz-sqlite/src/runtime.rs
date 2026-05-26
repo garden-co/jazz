@@ -455,24 +455,24 @@ impl Runtime {
         self.apply_bundle(bundle)?;
         let mut rejected = BTreeSet::new();
         for record in &bundle.history {
-            if record.op == 3 || rejected.contains(&record.tx_id) {
+            if rejected.contains(&record.tx_id) {
+                continue;
+            }
+            let tx_num = tx::tx_num(&self.conn, &record.tx_id)?;
+            if tx_outcome(&self.conn, tx_num)? != tx::OUTCOME_PENDING {
                 continue;
             }
             let table = self.schema.table_def(&record.table)?;
             let row_num = ensure_row_id(&self.conn, &record.table, &record.row_id)?;
-            let allowed = policy::write_allowed(
-                &self.conn,
-                &self.schema,
-                table,
-                &table.write_policy,
-                row_num,
-                &record.values,
-                &record.created_by,
-            )?;
+            let allowed =
+                write_allowed_for_history_record(&self.conn, &self.schema, table, row_num, record)?;
             if !allowed {
                 self.reject_transaction(&record.tx_id, "policy_denied")?;
                 rejected.insert(record.tx_id.clone());
             }
+        }
+        if !rejected.is_empty() {
+            projection::rebuild(&self.conn, &self.schema)?;
         }
         Ok(())
     }
@@ -1478,6 +1478,32 @@ fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {
         params![tx_num],
         |row| row.get(0),
     )?)
+}
+
+fn write_allowed_for_history_record(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table: &crate::schema::TableDef,
+    row_num: i64,
+    record: &HistoryRecord,
+) -> Result<bool> {
+    let principal = if record.op == 1 {
+        &record.created_by
+    } else {
+        &record.updated_by
+    };
+    if record.op == 3 && matches!(table.write_policy, PolicyDef::CreatedByPrincipal) {
+        return Ok(record.created_by == *principal);
+    }
+    policy::write_allowed(
+        conn,
+        schema,
+        table,
+        &table.write_policy,
+        row_num,
+        &record.values,
+        principal,
+    )
 }
 
 fn is_newest_version_for_current(

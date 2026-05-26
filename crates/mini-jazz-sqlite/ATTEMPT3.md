@@ -1687,3 +1687,22 @@ tie-breaker before publishing to current.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 out_of_order_global_epochs_do_not_regress_current_projection` passes.
+
+## 2026-05-25 19:49 PDT
+
+Starting untrusted delete validation coverage. Sidecar review noticed that
+`apply_untrusted_bundle` skipped delete records entirely, which may let an
+untrusted peer hide rows through deletes that an edge would have rejected if the
+same policy were enforced symmetrically.
+
+## 2026-05-25 19:51 PDT
+
+Untrusted delete validation is green. The failing test showed Bob could delete
+Alice's row at the edge because delete records bypassed policy validation. The
+runtime now validates pending delete records too, uses `updated_by` as the actor
+for updates/deletes, skips revalidating transactions that are no longer pending,
+and rebuilds current projection after any untrusted rejection so rejected deletes
+restore the prior visible version.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+trusted_edge_rejects_untrusted_delete_policy_violation` passes.
