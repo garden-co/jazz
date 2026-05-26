@@ -1151,3 +1151,22 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 Design note: read-set export is currently broad: all local read-set rows are
 included in every bundle. That is acceptable for the attempt but too coarse for
 real sync scopes.
+
+## 2026-05-25 18:55 PDT
+
+Starting scoped read-set export cleanup. Goal: a bundle should only include read
+sets for transactions whose history is actually in that bundle, not every
+read-set row known locally.
+
+## 2026-05-25 18:57 PDT
+
+Scoped read-set export is green. Bundle read sets are now filtered to tx IDs
+present in exported history, so exporting `todos` does not leak read-set rows for
+an unrelated `milestones` transaction.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+60 tests.
+
+Design note: this is still tx-history scoped, not query-predicate scoped. It is
+a meaningful improvement over "all reads everywhere" but not the final sync
+scope model.

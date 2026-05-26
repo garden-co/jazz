@@ -1462,6 +1462,64 @@ fn policy_read_set_survives_sync() {
 }
 
 #[test]
+fn bundle_read_sets_are_scoped_to_exported_history_transactions() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        })
+        .table("milestones", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let todo_tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Todo")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    let milestone_tx = alice
+        .insert_row(
+            "milestones",
+            "milestone-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Milestone")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    let read_txs = bundle
+        .reads
+        .iter()
+        .map(|read| read.tx_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(read_txs.contains(&todo_tx.as_str()));
+    assert!(!read_txs.contains(&milestone_tx.as_str()));
+}
+
+#[test]
 fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

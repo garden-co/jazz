@@ -232,8 +232,8 @@ impl Runtime {
 
     pub fn export_query_scope_open_todos(&self) -> Result<Bundle> {
         let txs = export_txs(&self.conn)?;
-        let reads = export_reads(&self.conn)?;
         let history = export_open_todo_scope_history(&self.conn)?;
+        let reads = export_reads_for_history(&self.conn, &history)?;
         let branches = export_branch_records_for_history(&self.conn, &history)?;
         Ok(Bundle {
             branches,
@@ -246,7 +246,6 @@ impl Runtime {
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
         let txs = export_txs(&self.conn)?;
-        let reads = export_reads(&self.conn)?;
         let history = export_table_history(
             &self.conn,
             &self.schema,
@@ -255,6 +254,7 @@ impl Runtime {
             self.trusted,
             self.branch_num,
         )?;
+        let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {
@@ -279,7 +279,6 @@ impl Runtime {
             .collect::<Result<Vec<_>>>()?;
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
         let txs = export_txs(&self.conn)?;
-        let reads = export_reads(&self.conn)?;
         let mut history = export_visible_table_history(
             &self.conn,
             &self.schema,
@@ -300,6 +299,7 @@ impl Runtime {
                 )?);
             }
         }
+        let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {
@@ -1108,15 +1108,32 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
         .map_err(Into::into)
 }
 
-fn export_reads(conn: &Connection) -> Result<Vec<ReadRecord>> {
-    let mut stmt = conn.prepare(
+fn export_reads_for_history(
+    conn: &Connection,
+    history: &[HistoryRecord],
+) -> Result<Vec<ReadRecord>> {
+    let mut tx_ids = history
+        .iter()
+        .map(|record| record.tx_id.clone())
+        .collect::<Vec<_>>();
+    tx_ids.sort();
+    tx_ids.dedup();
+    if tx_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(&format!(
         "SELECT tx.tx_id, reads.table_name, ids.row_id, reads.reason
          FROM jazz_tx_read reads
          JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
+         WHERE tx.tx_id IN ({placeholders})
          ORDER BY tx.tx_num, reads.table_name, ids.row_id, reads.reason",
-    )?;
-    let records = stmt.query_map([], |row| {
+        placeholders = (0..tx_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))?;
+    let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
         Ok(ReadRecord {
             tx_id: row.get(0)?,
             table: row.get(1)?,
