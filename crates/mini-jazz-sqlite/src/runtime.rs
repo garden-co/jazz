@@ -1,4 +1,4 @@
-use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
+use crate::rows::{ensure_row_id, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
@@ -75,90 +75,6 @@ impl Runtime {
             branch_num: 1,
             trusted,
         })
-    }
-
-    pub fn create_project(&mut self, id: &str, title: &str) -> Result<String> {
-        self.schema.table_def("projects")?;
-        let db = self.conn.transaction()?;
-        let now = now_ms();
-        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        let row_num = ensure_row_id(&db, "projects", id)?;
-        db.execute(
-            "INSERT OR IGNORE INTO projects__schema_v1_history
-             (row_num, tx_num, j_branch_num, op, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)",
-            params![
-                row_num,
-                tx_num,
-                self.branch_num,
-                title,
-                now,
-                now,
-                self.principal,
-                self.principal
-            ],
-        )?;
-        record_tx_write(&db, tx_num, "projects", row_num, 1)?;
-        db.execute(
-            "INSERT OR REPLACE INTO projects__schema_v1_current
-             (row_num, j_branch_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)",
-            params![row_num, self.branch_num, tx_num, title, now, now, self.principal, self.principal],
-        )?;
-        db.commit()?;
-        Ok(tx_id)
-    }
-
-    pub fn create_todo(
-        &mut self,
-        id: &str,
-        title: &str,
-        done: bool,
-        project_id: &str,
-    ) -> Result<String> {
-        self.schema.table_def("todos")?;
-        let db = self.conn.transaction()?;
-        let now = now_ms();
-        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        let row_num = ensure_row_id(&db, "todos", id)?;
-        let project_row_num = ensure_row_id(&db, "projects", project_id)?;
-        db.execute(
-            "INSERT OR IGNORE INTO todos__schema_v1_history
-             (row_num, tx_num, j_branch_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                row_num,
-                tx_num,
-                self.branch_num,
-                title,
-                i64::from(done),
-                project_row_num,
-                now,
-                now,
-                self.principal,
-                self.principal
-            ],
-        )?;
-        record_tx_write(&db, tx_num, "todos", row_num, 1)?;
-        db.execute(
-            "INSERT OR REPLACE INTO todos__schema_v1_current
-             (row_num, j_branch_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                row_num,
-                self.branch_num,
-                tx_num,
-                title,
-                i64::from(done),
-                project_row_num,
-                now,
-                now,
-                self.principal,
-                self.principal
-            ],
-        )?;
-        db.commit()?;
-        Ok(tx_id)
     }
 
     pub fn insert_row(
@@ -1603,28 +1519,6 @@ impl Runtime {
             mutations: Vec::new(),
             mode: TransactionMode::Mergeable,
         }
-    }
-
-    pub fn delete_todo(&mut self, id: &str) -> Result<String> {
-        let db = self.conn.transaction()?;
-        let now = now_ms();
-        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        let row_num = row_num(&db, id)?;
-        db.execute(
-            "INSERT OR IGNORE INTO todos__schema_v1_history
-	             (row_num, tx_num, j_branch_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-	             SELECT row_num, ?, j_branch_num, 3, title, done, project_row_num, j_created_at, ?, j_created_by, ?
-	             FROM todos__schema_v1_current
-	             WHERE row_num = ? AND j_branch_num = ?",
-            params![tx_num, now, self.principal, row_num, self.branch_num],
-        )?;
-        record_tx_write(&db, tx_num, "todos", row_num, 3)?;
-        db.execute(
-            "DELETE FROM todos__schema_v1_current WHERE row_num = ? AND j_branch_num = ?",
-            params![row_num, self.branch_num],
-        )?;
-        db.commit()?;
-        Ok(tx_id)
     }
 
     pub fn delete_row(&mut self, table_name: &str, id: &str) -> Result<String> {
@@ -3080,16 +2974,6 @@ enum Mutation {
         table: String,
         id: String,
     },
-    Project {
-        id: String,
-        title: String,
-    },
-    Todo {
-        id: String,
-        title: String,
-        done: bool,
-        project_id: String,
-    },
 }
 
 impl<'a> TransactionBuilder<'a> {
@@ -3143,24 +3027,6 @@ impl<'a> TransactionBuilder<'a> {
         self
     }
 
-    pub fn create_project(mut self, id: &str, title: &str) -> Self {
-        self.mutations.push(Mutation::Project {
-            id: id.to_owned(),
-            title: title.to_owned(),
-        });
-        self
-    }
-
-    pub fn create_todo(mut self, id: &str, title: &str, done: bool, project_id: &str) -> Self {
-        self.mutations.push(Mutation::Todo {
-            id: id.to_owned(),
-            title: title.to_owned(),
-            done,
-            project_id: project_id.to_owned(),
-        });
-        self
-    }
-
     pub fn commit(self) -> Result<String> {
         let mutations = self.mutations;
         let mut delete_snapshots = BTreeMap::new();
@@ -3193,8 +3059,6 @@ impl<'a> TransactionBuilder<'a> {
                     Mutation::Row { table, id, .. } | Mutation::DeleteRow { table, id } => {
                         (table.as_str(), id.as_str())
                     }
-                    Mutation::Project { id, .. } => ("projects", id.as_str()),
-                    Mutation::Todo { id, .. } => ("todos", id.as_str()),
                 };
                 let row_num = ensure_row_id(&self.runtime.conn, table, id)?;
                 if exclusive_write_conflict_exists(&self.runtime.conn, table, row_num)? {
@@ -3405,30 +3269,6 @@ impl<'a> TransactionBuilder<'a> {
                         )?;
                     }
                     record_tx_write(&db, tx_num, &table, row_num, 3)?;
-                }
-                Mutation::Project { id, title } => {
-                    insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?;
-                    record_tx_write(&db, tx_num, "projects", row_num(&db, &id)?, 1)?;
-                }
-                Mutation::Todo {
-                    id,
-                    title,
-                    done,
-                    project_id,
-                } => {
-                    insert_todo(
-                        &db,
-                        tx_num,
-                        NewTodo {
-                            id: &id,
-                            title: &title,
-                            done,
-                            project_id: &project_id,
-                            now,
-                            principal: &self.runtime.principal,
-                        },
-                    )?;
-                    record_tx_write(&db, tx_num, "todos", row_num(&db, &id)?, 1)?;
                 }
             }
         }

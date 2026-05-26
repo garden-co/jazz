@@ -424,6 +424,18 @@ sessions for audit, provenance, catalogue checks, and operational controls.
 Untrusted clients cannot forge authority-only facts such as global acceptance,
 rejection, durability receipts, or catalogue publication.
 
+Trusted peers may accept mergeable transactions on behalf of an authenticated
+session according to their policy authority role. Once an edge accepts such a
+transaction, downstream clients may treat that acceptance as authoritative for
+visibility in the edge trust topology; the original session authentication does
+not have to be replayed by every downstream client.
+
+Exclusive transactions are different: they require final fate from the global
+authority. If an edge or other intermediary forwards an exclusive transaction
+instead of deciding it locally, it must forward enough authenticated session
+context for the global authority to evaluate the transaction under the same
+principal, admin/trust role, and policy context as the initiating session.
+
 Non-admin sessions fail closed when required policy metadata is missing.
 
 Application-visible provenance fields include at least:

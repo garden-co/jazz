@@ -6,9 +6,29 @@ fn explicit_transaction_seals_multiple_mutations_atomically() {
 
     let tx = alice
         .transaction()
-        .create_project("project-1", "Atomic project")
-        .create_todo("todo-1", "First todo", false, "project-1")
-        .create_todo("todo-2", "Second todo", false, "project-1")
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Atomic project"))]),
+        )
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("First todo")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .insert_row(
+            "todos",
+            "todo-2",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Second todo")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
         .commit()
         .unwrap();
 
@@ -27,9 +47,29 @@ fn rejecting_multi_row_transaction_hides_all_written_rows_but_keeps_history() {
 
     let tx = alice
         .transaction()
-        .create_project("project-1", "Atomic project")
-        .create_todo("todo-1", "First todo", false, "project-1")
-        .create_todo("todo-2", "Second todo", false, "project-1")
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Atomic project"))]),
+        )
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("First todo")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .insert_row(
+            "todos",
+            "todo-2",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Second todo")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
         .commit()
         .unwrap();
     assert_eq!(alice.open_todos().unwrap().len(), 2);
