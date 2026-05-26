@@ -397,6 +397,46 @@ fn rebuild_uses_global_epoch_order_not_local_tx_order() {
 }
 
 #[test]
+fn direct_global_acceptance_repairs_current_projection_order() {
+    let schema = support::notes_schema();
+    let mut authority =
+        Runtime::open_with_schema(Storage::Memory, "authority", "alice", schema).unwrap();
+
+    let first_tx = authority
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("epoch 20")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&first_tx, 20)
+        .unwrap();
+
+    let second_tx = authority
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("epoch 10")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&second_tx, 10)
+        .unwrap();
+
+    assert_eq!(
+        authority.read_rows("notes").unwrap()[0].values["body"],
+        json!("epoch 20")
+    );
+}
+
+#[test]
 fn accepted_bundle_does_not_resurrect_rejected_fate() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut rejected_peer = Runtime::open(Storage::Memory, "rejected-peer", "alice").unwrap();

@@ -1755,3 +1755,20 @@ branch tombstone from a pinned-base row, matching standalone `delete_row`.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 generic_transaction_delete_shadows_pinned_base_row` passes.
+
+## 2026-05-25 19:57 PDT
+
+Starting direct global-acceptance projection repair. Apply-time and rebuild-time
+ordering now use global epochs, but a local authority call that assigns an older
+global epoch to the latest local tx can leave current projection on the older
+durable version until an explicit rebuild.
+
+## 2026-05-25 19:58 PDT
+
+Direct global-acceptance projection repair is green. A local authority can now
+assign global fate out of local tx order without leaving current projection on
+the wrong version. Current fix is intentionally coarse: direct global acceptance
+rebuilds projection from history instead of doing an incremental per-row repair.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+direct_global_acceptance_repairs_current_projection_order` passes.

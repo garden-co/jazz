@@ -613,6 +613,7 @@ impl Runtime {
 
     pub fn accept_transaction_at_global(&mut self, tx_id: &str, global_epoch: i64) -> Result<()> {
         tx::accept_global(&self.conn, tx_id, global_epoch)?;
+        projection::rebuild(&self.conn, &self.schema)?;
         Ok(())
     }
 
