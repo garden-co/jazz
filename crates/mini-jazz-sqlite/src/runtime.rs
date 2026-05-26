@@ -769,6 +769,16 @@ impl Runtime {
                 )
             }
             "absent" => {
+                if read.field == "id" {
+                    let Some(row_id) = read.value.as_str() else {
+                        return Err(crate::Error::new("absent id expects string value"));
+                    };
+                    return self.export_query_where_eq(
+                        &read.table,
+                        &read.field,
+                        JsonValue::String(row_id.to_owned()),
+                    );
+                }
                 let query_reads = vec![read.clone()];
                 Ok(make_bundle(
                     &self.schema,

@@ -1088,6 +1088,45 @@ fn stale_pending_bundle_does_not_resurrect_rejected_fate_after_reconnect() {
 }
 
 #[test]
+fn missing_optional_ref_include_observed_refresh_delivers_later_dependency() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+
+    alice
+        .create_todo(
+            "todo-1",
+            "Project may arrive by refresh",
+            false,
+            "project-late",
+        )
+        .unwrap();
+    peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
+        .unwrap();
+    assert_eq!(peer.open_todos().unwrap()[0].project_title, None);
+    let observed = peer.observed_query_reads().unwrap();
+    assert!(observed.iter().any(|read| {
+        read.table == "projects"
+            && read.field == "id"
+            && read.op == "absent"
+            && read.value == json!("project-late")
+    }));
+
+    alice
+        .create_project("project-late", "Late arriving project")
+        .unwrap();
+    for refresh in alice.export_query_read_refreshes(&observed).unwrap() {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let peer_todos = peer.open_todos().unwrap();
+    assert_eq!(peer_todos.len(), 1);
+    assert_eq!(
+        peer_todos[0].project_title.as_deref(),
+        Some("Late arriving project")
+    );
+}
+
+#[test]
 fn out_of_order_global_epochs_do_not_regress_current_projection() {
     let schema = support::notes_schema();
     let mut authority =

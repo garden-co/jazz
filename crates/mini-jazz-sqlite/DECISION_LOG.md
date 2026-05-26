@@ -1309,3 +1309,17 @@ rejection notifications are a transaction-fate stream keyed by public tx id,
 while semantic row subscriptions continue to report visibility diffs.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 236 whole-system tests.
+
+## 2026-05-26 04:55 PDT
+
+Made missing optional-ref absence facts repairable through observed-query
+refresh. A peer can sync an open todo whose optional project is absent, persist
+the `projects.id absent project-late` observed fact, and later receive the
+created project via `export_query_read_refreshes` without table-history sync.
+
+Discovery: absence facts are not only validation/read-set metadata. They are
+standing desired-state queries: if the absent id materializes later, refresh must
+send ordinary scoped history for that row. The v0 implementation handles
+`absent id` by lowering refresh to an `id = value` query.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 237 whole-system tests.
