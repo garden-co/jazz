@@ -462,6 +462,73 @@ fn recursive_query_read_refresh_delivers_later_descendant_and_subscription_diff(
 }
 
 #[test]
+fn durable_recursive_query_read_refreshes_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("recursive-worker.sqlite");
+    let schema = support::folders_schema();
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    upstream
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_recursive_refs("folders", "root", "parent")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(worker.observed_query_reads().unwrap().len(), 1);
+    }
+
+    upstream
+        .insert_row(
+            "folders",
+            "child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Child after restart")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+
+    let mut reopened =
+        Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
+    let desired_queries = reopened.observed_query_reads().unwrap();
+    assert_eq!(desired_queries[0].op, "recursive_refs");
+    for refresh in upstream
+        .export_query_read_refreshes(&desired_queries)
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    let ids = reopened
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["root", "child"]);
+}
+
+#[test]
 fn recursive_query_scope_sync_exports_deleted_descendant_tombstone() {
     let schema = support::folders_schema();
     let mut alice =

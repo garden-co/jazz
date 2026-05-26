@@ -960,3 +960,17 @@ special undo log; it just changes which history rows are eligible for current
 projection.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 216 whole-system tests.
+
+## 2026-05-26 03:40 PDT
+
+Added durable restart coverage for recursive query descriptors. A worker syncs
+a recursive root query, shuts down, upstream adds a descendant, the worker
+reopens, reads the persisted `recursive_refs` descriptor, and uses reconnect
+refresh to receive the new descendant.
+
+Discovery: once recursive queries use the same `jazz_query_read` table as
+ordinary predicates, durability and reconnect behavior comes mostly for free.
+This strengthens the case that "query descriptors as desired state" can cover
+both flat and recursive local-first subscriptions.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 217 whole-system tests.
