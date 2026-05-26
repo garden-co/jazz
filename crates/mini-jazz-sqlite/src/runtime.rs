@@ -473,6 +473,9 @@ impl Runtime {
                 params![tx::OUTCOME_REJECTED],
             )?;
         }
+        for query_read in &bundle.query_reads {
+            Self::apply_query_scope_repair(&schema, &db, query_read)?;
+        }
         for record in &bundle.history {
             Self::apply_history_record(&schema, &db, self.node_num, record)?;
         }
@@ -503,6 +506,57 @@ impl Runtime {
         if !rejected.is_empty() {
             projection::rebuild(&self.conn, &self.schema, self.node_num)?;
         }
+        Ok(())
+    }
+
+    fn apply_query_scope_repair(
+        schema: &SchemaDef,
+        db: &Connection,
+        query_read: &QueryReadRecord,
+    ) -> Result<()> {
+        let table = schema.table_def(&query_read.table)?;
+        let field = table
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == query_read.field)
+            .ok_or_else(|| {
+                crate::Error::new(format!("unknown query field {}", query_read.field))
+            })?;
+        let branch_num = branch::checkout(db, &query_read.branch_id)?;
+        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        let predicate_value =
+            crate::schema::field_sql_value(field, &query_read.value, |ref_table, row_id| {
+                ensure_row_id(db, ref_table, row_id)
+            })?;
+        db.execute(
+            &format!(
+                "DELETE FROM {}
+                 WHERE j_branch_num = ?
+                   AND is_deleted = 0
+                   AND {predicate_column} = ?
+                   AND row_num NOT IN (
+                     SELECT ids.row_num
+                     FROM jazz_row_id ids
+                     JOIN {history_table} h ON h.row_num = ids.row_num
+                     JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                     WHERE ids.table_name = ?
+                       AND h.j_branch_num = ?
+                       AND h.op != 3
+                       AND tx.outcome != ?
+                       AND h.{predicate_column} = ?
+                   )",
+                crate::schema::current_table(&query_read.table),
+                history_table = crate::schema::history_table(&query_read.table),
+            ),
+            params![
+                branch_num,
+                predicate_value,
+                query_read.table,
+                branch_num,
+                tx::OUTCOME_REJECTED,
+                predicate_value
+            ],
+        )?;
         Ok(())
     }
 
@@ -987,12 +1041,17 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
     ) -> Result<Bundle> {
-        self.schema.table_def(table_name)?;
+        let table = self.schema.table_def(table_name)?;
         let rows = self.read_rows_where_eq(table_name, field_name, value.clone())?;
-        let row_nums = rows
+        let mut row_nums = rows
             .iter()
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
+        row_nums.extend(query_scope_repair_row_nums(
+            &self.conn, table, field_name, &value,
+        )?);
+        row_nums.sort();
+        row_nums.dedup();
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
         let txs = export_txs(&self.conn)?;
         let mut history = export_visible_table_history(
@@ -2632,6 +2691,37 @@ fn export_deleted_recursive_descendant_history(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), None)
+}
+
+fn query_scope_repair_row_nums(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    field_name: &str,
+    value: &JsonValue,
+) -> Result<Vec<i64>> {
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field_name)
+        .ok_or_else(|| crate::Error::new(format!("unknown query field {field_name}")))?;
+    let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let predicate_value = crate::schema::field_sql_value(field, value, |ref_table, row_id| {
+        ensure_row_id(conn, ref_table, row_id)
+    })?;
+    let sql = format!(
+        "SELECT DISTINCT h.row_num
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.{predicate_column} = ?
+           AND tx.outcome != ?",
+        crate::schema::history_table(&table.name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![predicate_value, tx::OUTCOME_REJECTED], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn export_visible_table_history(

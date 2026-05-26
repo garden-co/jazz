@@ -2131,3 +2131,19 @@ work. That gives confidence that the branch metadata and base-history export
 are sufficient for the edge to reproduce the pinned-base authorization decision.
 
 Full `cargo test -p mini-jazz-sqlite` passes with 115 whole-system tests.
+
+## 2026-05-25 20:39 PDT
+
+Explorer found a high-signal query-scope gap: if a peer syncs `done = false`
+and a row later changes to `done = true`, a second sync of the same query scope
+must repair the peer by removing the stale row from that query result. Testing
+that now.
+
+Result: the test failed red. A receiver-side negative repair alone was
+insufficient because the peer's old history still made the stale row look like
+part of the query. Changed `export_query_where_eq` to include current versions
+of rows that have local history matching the predicate, so a query-scope
+refresh can send "this row moved out" as ordinary row history. The targeted
+test now passes.
+
+Full `cargo test -p mini-jazz-sqlite` passes with 116 whole-system tests.
