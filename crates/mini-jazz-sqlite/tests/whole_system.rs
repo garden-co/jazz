@@ -1152,7 +1152,11 @@ fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
                 && after.values["title"] == json!("Renamed")
     ));
 
-    alice.delete_row("tasks", "task-2").unwrap();
+    let delete_tx = alice.delete_row("tasks", "task-2").unwrap();
+    assert_eq!(
+        alice.transaction_write_rows(&delete_tx).unwrap(),
+        vec![("tasks".to_owned(), "task-2".to_owned())]
+    );
     let diffs = alice.poll_subscription(&mut subscription).unwrap();
     assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "task-2"));
 }

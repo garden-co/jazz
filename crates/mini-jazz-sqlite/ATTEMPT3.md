@@ -961,3 +961,17 @@ Open semantic question for the spec: numeric max works for this prototype
 because `pending < accepted < rejected` and `mergeable < exclusive`, but real
 transaction fate may need an explicit partial-order merge function if accepted
 vs rejected can ever race.
+
+## 2026-05-25 18:34 PDT
+
+Starting write-set completeness cleanup: generic `delete_row` writes a delete
+history version but does not yet materialize a `jazz_tx_write` row.
+
+## 2026-05-25 18:35 PDT
+
+Generic delete write-set completeness is green. `delete_row` now records the
+deleted row in `jazz_tx_write`, and the subscription diff test probes the delete
+transaction's write set.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, still
+50 tests.

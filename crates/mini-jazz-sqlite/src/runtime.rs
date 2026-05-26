@@ -631,6 +631,7 @@ impl Runtime {
             ),
             params![row_num, self.branch_num],
         )?;
+        record_tx_write(&db, tx_num, &table.name, row_num, 3)?;
         db.commit()?;
         Ok(tx_id)
     }
