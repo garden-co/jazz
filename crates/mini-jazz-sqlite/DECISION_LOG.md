@@ -86,3 +86,21 @@ runtime path. A memory node can start empty, and a durable SQLite node can be
 the trusted upstream that replays the current query scope. This directly
 supports the spec direction that all nodes use SQLite, with durability/topology
 as configuration rather than a different semantic engine.
+
+## 2026-05-26 00:13 PDT
+
+Added two more distributed fate/order tests; full mini crate suite is green
+with 127 tests.
+
+- A stale in-memory phone can reconnect to a durable worker after the worker
+  has rejected the optimistic transaction. Reapplying the phone's old pending
+  bundle must not resurrect the row or erase the rejection reason.
+- A globally accepted mergeable update at an older epoch cannot override a
+  newer exclusive transaction. The current projection can still use global
+  epoch order as the visible-state rule; exclusivity is a validation/admission
+  property, not a special read-time precedence rule.
+
+Design lesson: fate monotonicity and global ordering are doing useful work
+across reconnects. The next stress area is less "which accepted tx wins" and
+more "which facts must be present for an edge/global authority to safely decide
+acceptance or rejection after a disconnect."

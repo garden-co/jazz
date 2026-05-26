@@ -328,6 +328,47 @@ fn stale_pending_bundle_does_not_downgrade_accepted_fate() {
 }
 
 #[test]
+fn stale_pending_bundle_does_not_resurrect_rejected_fate_after_reconnect() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+
+    let mut alice = Runtime::open(Storage::Memory, "alice-tab", "alice").unwrap();
+    let mut worker =
+        Runtime::open(Storage::File(worker_path.clone()), "alice-worker", "alice").unwrap();
+    let mut stale_phone = Runtime::open(Storage::Memory, "alice-phone", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo(
+            "todo-1",
+            "Rejected while phone is offline",
+            false,
+            "project-1",
+        )
+        .unwrap();
+    let pending_bundle = alice.export_table_history("todos").unwrap();
+    stale_phone.apply_bundle(&pending_bundle).unwrap();
+    worker.apply_bundle(&pending_bundle).unwrap();
+
+    worker.reject_transaction(&tx, "policy_denied").unwrap();
+    assert!(worker.open_todos().unwrap().is_empty());
+
+    drop(worker);
+    let mut worker = Runtime::open(Storage::File(worker_path), "alice-worker", "alice").unwrap();
+
+    worker.apply_bundle(&pending_bundle).unwrap();
+    worker
+        .apply_bundle(&stale_phone.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(worker.open_todos().unwrap().is_empty());
+    assert_eq!(
+        worker.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn out_of_order_global_epochs_do_not_regress_current_projection() {
     let schema = support::notes_schema();
     let mut authority =
@@ -574,6 +615,63 @@ fn accepted_remote_pending_update_repairs_peer_current_projection() {
     assert_eq!(
         peer.read_rows("notes").unwrap()[0].values["body"],
         json!("accepted later")
+    );
+}
+
+#[test]
+fn older_global_mergeable_update_cannot_override_newer_exclusive_current() {
+    let schema = support::notes_schema();
+    let mut authority =
+        Runtime::open_with_schema(Storage::Memory, "authority", "alice", schema.clone()).unwrap();
+    let mut stale_writer =
+        Runtime::open_with_schema(Storage::Memory, "stale-writer", "alice", schema.clone())
+            .unwrap();
+    let mut peer = Runtime::open_with_schema(Storage::Memory, "peer", "alice", schema).unwrap();
+
+    let base_tx = authority
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("base")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority.accept_transaction_at_global(&base_tx, 1).unwrap();
+    let base_bundle = authority.export_table_history("notes").unwrap();
+    stale_writer.apply_bundle(&base_bundle).unwrap();
+    peer.apply_bundle(&base_bundle).unwrap();
+
+    let stale_tx = stale_writer
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("stale accepted mergeable"))]),
+        )
+        .unwrap();
+    stale_writer
+        .accept_transaction_at_global(&stale_tx, 10)
+        .unwrap();
+    let stale_bundle = stale_writer.export_table_history("notes").unwrap();
+
+    authority
+        .transaction()
+        .exclusive_at_global(20)
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("exclusive current"))]),
+        )
+        .commit()
+        .unwrap();
+    peer.apply_bundle(&authority.export_table_history("notes").unwrap())
+        .unwrap();
+    peer.apply_bundle(&stale_bundle).unwrap();
+
+    assert_eq!(
+        peer.read_rows("notes").unwrap()[0].values["body"],
+        json!("exclusive current")
     );
 }
 
