@@ -1565,6 +1565,235 @@ fn patch_update_uses_preserved_ref_for_write_policy_validation() {
 }
 
 #[test]
+fn ref_retarget_update_validates_new_parent_policy() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Original")),
+                ("project".to_owned(), json!("project-alice")),
+            ]),
+        )
+        .unwrap();
+
+    let tx = alice
+        .update_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([("project".to_owned(), json!("project-bob"))]),
+        )
+        .unwrap();
+
+    let rows = alice.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["project"], json!("project-alice"));
+    assert_eq!(
+        alice.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
+fn policy_denied_delete_restores_previous_visible_row_and_subscription() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    bob.insert_row(
+        "docs",
+        "doc-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob doc"))]),
+    )
+    .unwrap();
+    bob.insert_row(
+        "comments",
+        "comment-1",
+        BTreeMap::from([
+            ("body".to_owned(), json!("Kept after rejected delete")),
+            ("doc".to_owned(), json!("doc-bob")),
+        ]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("docs").unwrap())
+        .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("comments").unwrap())
+        .unwrap();
+    let mut subscription = alice.subscribe_rows("comments").unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+
+    let tx = alice.delete_row("comments", "comment-1").unwrap();
+
+    assert_eq!(
+        alice.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+    let rows = alice.read_rows("comments").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "comment-1");
+    assert!(alice
+        .poll_subscription(&mut subscription)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn multi_row_transaction_rejects_atomically_when_one_policy_check_fails() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice doc"))]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "docs",
+        "doc-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob doc"))]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("docs").unwrap())
+        .unwrap();
+
+    let tx = alice
+        .transaction()
+        .insert_row(
+            "comments",
+            "comment-allowed",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Would be allowed alone")),
+                ("doc".to_owned(), json!("doc-alice")),
+            ]),
+        )
+        .insert_row(
+            "comments",
+            "comment-denied",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Rejects whole transaction")),
+                ("doc".to_owned(), json!("doc-bob")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    assert_eq!(
+        alice.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+    assert!(alice.read_rows("comments").unwrap().is_empty());
+    assert_eq!(
+        alice.transaction_write_rows(&tx).unwrap(),
+        vec![
+            ("comments".to_owned(), "comment-allowed".to_owned()),
+            ("comments".to_owned(), "comment-denied".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn trusted_admin_write_bypasses_policy_but_preserves_author_provenance() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut admin =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "admin-node", "service", schema)
+            .unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice doc"))]),
+        )
+        .unwrap();
+    admin
+        .apply_bundle(&alice.export_table_history("docs").unwrap())
+        .unwrap();
+    let tx = admin
+        .insert_row(
+            "comments",
+            "comment-service",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Inserted by service")),
+                ("doc".to_owned(), json!("doc-alice")),
+            ]),
+        )
+        .unwrap();
+
+    let rows = admin.read_rows("comments").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].created_by, "service");
+    assert_eq!(rows[0].tx_id, tx);
+    assert_eq!(admin.transaction_info(&tx).unwrap().rejection_code, None);
+}
+
+#[test]
 fn recursive_write_policy_records_transitive_policy_read_set() {
     let schema = SchemaDef::new()
         .table("orgs", |table| {

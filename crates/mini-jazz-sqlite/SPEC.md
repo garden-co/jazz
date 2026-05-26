@@ -424,6 +424,18 @@ sessions for audit, provenance, catalogue checks, and operational controls.
 Untrusted clients cannot forge authority-only facts such as global acceptance,
 rejection, durability receipts, or catalogue publication.
 
+Trusted peers may accept mergeable transactions on behalf of an authenticated
+session according to their policy authority role. Once an edge accepts such a
+transaction, downstream clients may treat that acceptance as authoritative for
+visibility in the edge trust topology; the original session authentication does
+not have to be replayed by every downstream client.
+
+Exclusive transactions are different: they require final fate from the global
+authority. If an edge or other intermediary forwards an exclusive transaction
+instead of deciding it locally, it must forward enough authenticated session
+context for the global authority to evaluate the transaction under the same
+principal, admin/trust role, and policy context as the initiating session.
+
 Non-admin sessions fail closed when required policy metadata is missing.
 
 Application-visible provenance fields include at least:
@@ -2736,6 +2748,18 @@ feature exists.
 - `write_if_created_by_principal` allows self-authored inserts and preserves
   original `created_by` on updates.
 - Updates and deletes record the previously visible row as a read dependency.
+- Partial updates preserve omitted fields when constructing the proposed row for
+  write-policy validation, including omitted refs used by policy checks.
+- Ref-retarget updates validate the proposed row against policy dependencies
+  reached through the new ref target, and a denied retarget leaves the previous
+  visible ref intact.
+- A policy-denied local delete records the rejection and repairs current,
+  query, and subscription-visible state back to the previously authorized row.
+- Multi-row transactions reject atomically when any row mutation fails local
+  write-policy validation, while preserving write-set history for the rejected
+  transaction.
+- Trusted/admin writes may bypass user row policies while preserving explicit
+  author/provenance attribution.
 
 ### D.10 Catalogue And Lens Invariants
 
@@ -3067,6 +3091,14 @@ Coverage labels:
 - `durable_edge_rejects_after_restart_and_repairs_memory_client`: D.9, D.17
 - `policy_denied_write_is_rejected_history_not_current_state`: D.2, D.3, D.9
 - `write_policy_parent_check_records_policy_read_set`: D.9, D.11
+- `patch_update_uses_preserved_ref_for_write_policy_validation`: D.9
+- `ref_retarget_update_validates_new_parent_policy`: D.9
+- `policy_denied_delete_restores_previous_visible_row_and_subscription`: D.8,
+  D.9
+- `multi_row_transaction_rejects_atomically_when_one_policy_check_fails`: D.2,
+  D.9
+- `trusted_admin_write_bypasses_policy_but_preserves_author_provenance`: D.1,
+  D.9
 - `recursive_write_policy_records_transitive_policy_read_set`: D.9, D.11
 - `policy_read_set_survives_sync`: D.7, D.9
 - `bundle_read_sets_are_scoped_to_exported_history_transactions`: D.7, D.9

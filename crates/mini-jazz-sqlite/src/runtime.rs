@@ -1,4 +1,4 @@
-use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
+use crate::rows::{ensure_row_id, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
@@ -77,90 +77,6 @@ impl Runtime {
         })
     }
 
-    pub fn create_project(&mut self, id: &str, title: &str) -> Result<String> {
-        self.schema.table_def("projects")?;
-        let db = self.conn.transaction()?;
-        let now = now_ms();
-        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        let row_num = ensure_row_id(&db, "projects", id)?;
-        db.execute(
-            "INSERT OR IGNORE INTO projects__schema_v1_history
-             (row_num, tx_num, j_branch_num, op, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)",
-            params![
-                row_num,
-                tx_num,
-                self.branch_num,
-                title,
-                now,
-                now,
-                self.principal,
-                self.principal
-            ],
-        )?;
-        record_tx_write(&db, tx_num, "projects", row_num, 1)?;
-        db.execute(
-            "INSERT OR REPLACE INTO projects__schema_v1_current
-             (row_num, j_branch_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)",
-            params![row_num, self.branch_num, tx_num, title, now, now, self.principal, self.principal],
-        )?;
-        db.commit()?;
-        Ok(tx_id)
-    }
-
-    pub fn create_todo(
-        &mut self,
-        id: &str,
-        title: &str,
-        done: bool,
-        project_id: &str,
-    ) -> Result<String> {
-        self.schema.table_def("todos")?;
-        let db = self.conn.transaction()?;
-        let now = now_ms();
-        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        let row_num = ensure_row_id(&db, "todos", id)?;
-        let project_row_num = ensure_row_id(&db, "projects", project_id)?;
-        db.execute(
-            "INSERT OR IGNORE INTO todos__schema_v1_history
-             (row_num, tx_num, j_branch_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                row_num,
-                tx_num,
-                self.branch_num,
-                title,
-                i64::from(done),
-                project_row_num,
-                now,
-                now,
-                self.principal,
-                self.principal
-            ],
-        )?;
-        record_tx_write(&db, tx_num, "todos", row_num, 1)?;
-        db.execute(
-            "INSERT OR REPLACE INTO todos__schema_v1_current
-             (row_num, j_branch_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-             VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                row_num,
-                self.branch_num,
-                tx_num,
-                title,
-                i64::from(done),
-                project_row_num,
-                now,
-                now,
-                self.principal,
-                self.principal
-            ],
-        )?;
-        db.commit()?;
-        Ok(tx_id)
-    }
-
     pub fn insert_row(
         &mut self,
         table_name: &str,
@@ -205,7 +121,7 @@ impl Runtime {
         let db = self.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        insert_row_in_tx(InsertRowInTx {
+        let allowed = insert_row_in_tx(InsertRowInTx {
             db: &db,
             schema: &self.schema,
             table_name,
@@ -219,27 +135,6 @@ impl Runtime {
             op,
         })?;
         let row_num = row_num(&db, id)?;
-        let effective_values = effective_write_values(EffectiveWriteValues {
-            db: &db,
-            schema: &self.schema,
-            table_name,
-            id,
-            row_num,
-            branch_num: self.branch_num,
-            patch_values: &values,
-            op,
-        })?;
-        let allowed = self.trusted
-            || local_write_allowed(LocalWriteCheck {
-                db: &db,
-                schema: &self.schema,
-                table: &table,
-                row_num,
-                branch_num: self.branch_num,
-                values: &effective_values,
-                principal: &self.principal,
-                op,
-            })?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
             db.execute(
@@ -1626,28 +1521,6 @@ impl Runtime {
         }
     }
 
-    pub fn delete_todo(&mut self, id: &str) -> Result<String> {
-        let db = self.conn.transaction()?;
-        let now = now_ms();
-        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        let row_num = row_num(&db, id)?;
-        db.execute(
-            "INSERT OR IGNORE INTO todos__schema_v1_history
-	             (row_num, tx_num, j_branch_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-	             SELECT row_num, ?, j_branch_num, 3, title, done, project_row_num, j_created_at, ?, j_created_by, ?
-	             FROM todos__schema_v1_current
-	             WHERE row_num = ? AND j_branch_num = ?",
-            params![tx_num, now, self.principal, row_num, self.branch_num],
-        )?;
-        record_tx_write(&db, tx_num, "todos", row_num, 3)?;
-        db.execute(
-            "DELETE FROM todos__schema_v1_current WHERE row_num = ? AND j_branch_num = ?",
-            params![row_num, self.branch_num],
-        )?;
-        db.commit()?;
-        Ok(tx_id)
-    }
-
     pub fn delete_row(&mut self, table_name: &str, id: &str) -> Result<String> {
         let table = self.schema.table_def(table_name)?.clone();
         let visible_row = self
@@ -1659,6 +1532,26 @@ impl Runtime {
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
         let row_num = row_num(&db, id)?;
+        record_policy_read_set_for_write(
+            &db,
+            &self.schema,
+            &table,
+            &table.write_policy,
+            &visible_row.values,
+            self.branch_num,
+            tx_num,
+        )?;
+        let allowed = self.trusted
+            || local_write_allowed(LocalWriteCheck {
+                db: &db,
+                schema: &self.schema,
+                table: &table,
+                row_num,
+                branch_num: self.branch_num,
+                values: &visible_row.values,
+                principal: &self.principal,
+                op: 3,
+            })?;
 
         let field_columns = table
             .fields
@@ -1787,6 +1680,10 @@ impl Runtime {
             )?;
         }
         record_tx_write(&db, tx_num, &table.name, row_num, 3)?;
+        if !allowed {
+            tx::reject(&db, &tx_id, "policy_denied")?;
+            projection::rebuild(&db, &self.schema, self.node_num)?;
+        }
         db.commit()?;
         Ok(tx_id)
     }
@@ -2483,7 +2380,7 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
     Ok(current)
 }
 
-fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
+fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     validate_write_fields(table, args.values)?;
     let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
@@ -2610,7 +2507,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
             &current_values,
         )?;
     }
-    Ok(())
+    Ok(allowed)
 }
 
 fn validate_write_fields(
@@ -3077,16 +2974,6 @@ enum Mutation {
         table: String,
         id: String,
     },
-    Project {
-        id: String,
-        title: String,
-    },
-    Todo {
-        id: String,
-        title: String,
-        done: bool,
-        project_id: String,
-    },
 }
 
 impl<'a> TransactionBuilder<'a> {
@@ -3140,24 +3027,6 @@ impl<'a> TransactionBuilder<'a> {
         self
     }
 
-    pub fn create_project(mut self, id: &str, title: &str) -> Self {
-        self.mutations.push(Mutation::Project {
-            id: id.to_owned(),
-            title: title.to_owned(),
-        });
-        self
-    }
-
-    pub fn create_todo(mut self, id: &str, title: &str, done: bool, project_id: &str) -> Self {
-        self.mutations.push(Mutation::Todo {
-            id: id.to_owned(),
-            title: title.to_owned(),
-            done,
-            project_id: project_id.to_owned(),
-        });
-        self
-    }
-
     pub fn commit(self) -> Result<String> {
         let mutations = self.mutations;
         let mut delete_snapshots = BTreeMap::new();
@@ -3190,8 +3059,6 @@ impl<'a> TransactionBuilder<'a> {
                     Mutation::Row { table, id, .. } | Mutation::DeleteRow { table, id } => {
                         (table.as_str(), id.as_str())
                     }
-                    Mutation::Project { id, .. } => ("projects", id.as_str()),
-                    Mutation::Todo { id, .. } => ("todos", id.as_str()),
                 };
                 let row_num = ensure_row_id(&self.runtime.conn, table, id)?;
                 if exclusive_write_conflict_exists(&self.runtime.conn, table, row_num)? {
@@ -3210,6 +3077,7 @@ impl<'a> TransactionBuilder<'a> {
             outcome,
             global_epoch,
         )?;
+        let mut allowed = true;
         for mutation in mutations {
             match mutation {
                 Mutation::Row {
@@ -3217,19 +3085,21 @@ impl<'a> TransactionBuilder<'a> {
                     id,
                     values,
                     op,
-                } => insert_row_in_tx(InsertRowInTx {
-                    db: &db,
-                    schema: &self.runtime.schema,
-                    table_name: &table,
-                    id: &id,
-                    values: &values,
-                    tx_num,
-                    branch_num: self.runtime.branch_num,
-                    now,
-                    principal: &self.runtime.principal,
-                    trusted: self.runtime.trusted,
-                    op,
-                })?,
+                } => {
+                    allowed &= insert_row_in_tx(InsertRowInTx {
+                        db: &db,
+                        schema: &self.runtime.schema,
+                        table_name: &table,
+                        id: &id,
+                        values: &values,
+                        tx_num,
+                        branch_num: self.runtime.branch_num,
+                        now,
+                        principal: &self.runtime.principal,
+                        trusted: self.runtime.trusted,
+                        op,
+                    })?;
+                }
                 Mutation::DeleteRow { table, id } => {
                     let table_def = self.runtime.schema.table_def(&table)?;
                     let row_num = row_num(&db, &id)?;
@@ -3245,6 +3115,26 @@ impl<'a> TransactionBuilder<'a> {
                         .get(&(table.clone(), id.clone()))
                         .ok_or_else(|| {
                             crate::Error::new(format!("missing delete snapshot {id}"))
+                        })?;
+                    record_policy_read_set_for_write(
+                        &db,
+                        &self.runtime.schema,
+                        table_def,
+                        &table_def.write_policy,
+                        &visible_row.values,
+                        self.runtime.branch_num,
+                        tx_num,
+                    )?;
+                    allowed &= self.runtime.trusted
+                        || local_write_allowed(LocalWriteCheck {
+                            db: &db,
+                            schema: &self.runtime.schema,
+                            table: table_def,
+                            row_num,
+                            branch_num: self.runtime.branch_num,
+                            values: &visible_row.values,
+                            principal: &self.runtime.principal,
+                            op: 3,
                         })?;
                     let field_columns = table_def
                         .fields
@@ -3380,31 +3270,11 @@ impl<'a> TransactionBuilder<'a> {
                     }
                     record_tx_write(&db, tx_num, &table, row_num, 3)?;
                 }
-                Mutation::Project { id, title } => {
-                    insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?;
-                    record_tx_write(&db, tx_num, "projects", row_num(&db, &id)?, 1)?;
-                }
-                Mutation::Todo {
-                    id,
-                    title,
-                    done,
-                    project_id,
-                } => {
-                    insert_todo(
-                        &db,
-                        tx_num,
-                        NewTodo {
-                            id: &id,
-                            title: &title,
-                            done,
-                            project_id: &project_id,
-                            now,
-                            principal: &self.runtime.principal,
-                        },
-                    )?;
-                    record_tx_write(&db, tx_num, "todos", row_num(&db, &id)?, 1)?;
-                }
             }
+        }
+        if !allowed {
+            tx::reject(&db, &tx_id, "policy_denied")?;
+            projection::rebuild(&db, &self.runtime.schema, self.runtime.node_num)?;
         }
         db.commit()?;
         Ok(tx_id)
