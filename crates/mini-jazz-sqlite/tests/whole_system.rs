@@ -357,4 +357,8 @@ fn policy_filters_reads_through_required_parent_ref() {
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].id, "todo-visible");
     assert_eq!(visible[0].values["project"], json!("project-alice"));
+
+    let scoped_bundle = alice.export_table_history("todos").unwrap();
+    assert_eq!(scoped_bundle.history.len(), 1);
+    assert_eq!(scoped_bundle.history[0].row_id, "todo-visible");
 }

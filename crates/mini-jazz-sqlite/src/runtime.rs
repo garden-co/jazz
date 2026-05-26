@@ -1,8 +1,8 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
-use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
+use crate::schema::{FieldDef, FieldKind, SchemaDef};
 use crate::sync::{Bundle, HistoryRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
-use crate::{projection, schema, storage, tx, Result, Storage};
+use crate::{policy, projection, schema, storage, tx, Result, Storage};
 use rusqlite::{params, params_from_iter, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -130,7 +130,8 @@ impl Runtime {
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
         let row_num = ensure_row_id(&db, table_name, id)?;
-        let allowed = write_allowed(&db, &table.name, &write_policy, row_num, &self.principal)?;
+        let allowed =
+            policy::write_allowed(&db, &table.name, &write_policy, row_num, &self.principal)?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
         }
@@ -242,7 +243,7 @@ impl Runtime {
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
         let txs = export_txs(&self.conn)?;
-        let history = export_table_history(&self.conn, &self.schema, table_name)?;
+        let history = export_table_history(&self.conn, &self.schema, table_name, &self.principal)?;
         Ok(Bundle { txs, history })
     }
 
@@ -455,7 +456,7 @@ impl Runtime {
              ORDER BY current.j_created_at DESC, current.row_num",
             select_columns.join(", "),
             crate::schema::current_table(table_name),
-            policy_sql = self.read_policy_sql(table)?,
+            policy_sql = policy::read_policy_sql(&self.schema, table, &self.principal)?,
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
@@ -511,56 +512,6 @@ impl Runtime {
             rejected_transactions,
             tx_nums,
         ))
-    }
-
-    fn read_policy_sql(&self, table: &crate::schema::TableDef) -> Result<String> {
-        match &table.read_policy {
-            PolicyDef::AllowAll => Ok("1 = 1".to_owned()),
-            PolicyDef::CreatedByPrincipal => Ok(format!(
-                "current.j_created_by = '{}'",
-                self.principal.replace('\'', "''")
-            )),
-            PolicyDef::RefReadable { field } => {
-                let field = table
-                    .fields
-                    .iter()
-                    .find(|candidate| candidate.name == *field)
-                    .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
-                let FieldKind::Ref { table: ref_table } = &field.kind else {
-                    return Err(crate::Error::new(format!(
-                        "policy field {} is not a ref",
-                        field.name
-                    )));
-                };
-                let ref_table = self.schema.table_def(ref_table)?;
-                let ref_policy = match &ref_table.read_policy {
-                    PolicyDef::AllowAll => "1 = 1".to_owned(),
-                    PolicyDef::CreatedByPrincipal => format!(
-                        "parent.j_created_by = '{}'",
-                        self.principal.replace('\'', "''")
-                    ),
-                    PolicyDef::RefReadable { .. } => {
-                        return Err(crate::Error::new(
-                            "recursive ref-readable policy not implemented yet",
-                        ))
-                    }
-                };
-                Ok(format!(
-                    "EXISTS (
-                       SELECT 1
-                       FROM {} parent
-                       JOIN jazz_tx parent_tx ON parent_tx.tx_num = parent.visible_tx_num
-                       WHERE parent.row_num = current.{}
-                         AND parent.is_deleted = 0
-                         AND parent_tx.outcome != {}
-                         AND {ref_policy}
-                     )",
-                    crate::schema::current_table(&ref_table.name),
-                    crate::schema::quote_ident(&crate::schema::storage_column(field)),
-                    tx::OUTCOME_REJECTED,
-                ))
-            }
-        }
     }
 }
 
@@ -672,33 +623,6 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
         .map_err(Into::into)
 }
 
-fn write_allowed(
-    db: &Connection,
-    table_name: &str,
-    policy: &PolicyDef,
-    row_num: i64,
-    principal: &str,
-) -> Result<bool> {
-    match policy {
-        PolicyDef::AllowAll => Ok(true),
-        PolicyDef::CreatedByPrincipal => {
-            let count: i64 = db.query_row(
-                &format!(
-                    "SELECT COUNT(*)
-                     FROM {} current
-                     WHERE current.row_num = ?
-                       AND current.j_created_by = ?",
-                    crate::schema::current_table(table_name)
-                ),
-                params![row_num, principal],
-                |row| row.get(0),
-            )?;
-            Ok(count > 0)
-        }
-        PolicyDef::RefReadable { .. } => Ok(true),
-    }
-}
-
 fn export_open_todo_scope_history(conn: &Connection) -> Result<Vec<HistoryRecord>> {
     let mut records = Vec::new();
     records.extend(export_open_todo_projects(conn)?);
@@ -796,8 +720,10 @@ fn export_table_history(
     conn: &Connection,
     schema: &SchemaDef,
     table_name: &str,
+    principal: &str,
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
+    let policy_sql = policy::read_policy_sql(schema, table, principal)?;
     let field_columns = table
         .fields
         .iter()
@@ -820,9 +746,20 @@ fn export_table_history(
          FROM {} h
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE EXISTS (
+           SELECT 1
+           FROM {} current
+           JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+           WHERE current.row_num = h.row_num
+             AND current.is_deleted = 0
+             AND current_tx.outcome != {}
+             AND {policy_sql}
+         )
          ORDER BY h.row_num, h.tx_num",
         select_columns.join(", "),
         crate::schema::history_table(table_name),
+        crate::schema::current_table(table_name),
+        tx::OUTCOME_REJECTED,
     );
     let mut stmt = conn.prepare(&sql)?;
     let row_width = 3 + table.fields.len() + 4;

@@ -233,3 +233,24 @@ Decisions and limitations:
   are known-hard.
 - Current policy-scoped sync is not solved yet: `export_table_history(table)`
   still exports table history without session policy filtering.
+
+## 2026-05-25 17:13 PDT
+
+Structural cleanup: policy lowering moved out of `runtime.rs` into `policy.rs`.
+This keeps the runtime facade from absorbing every behavior and gives recursive
+policy lowering a natural place to evolve.
+
+Next: make generic table export respect the same read policy. Otherwise policy
+reads and sync scope would diverge immediately.
+
+## 2026-05-25 17:14 PDT
+
+Generic table export now applies the same read-policy SQL as `read_rows`.
+The test proves Alice exports only the todo whose required parent project is
+readable to Alice.
+
+Decision: a table-history export currently means "for each row visible in the
+current policy-filtered projection, include that row's full history." This is
+simple and aligns with the current spec direction of syncing full row history
+for result rows, but it will need later scrutiny for pagination and for policy
+changes that make only some historical versions sensitive.
