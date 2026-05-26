@@ -155,3 +155,23 @@ Design lesson: tx/fate rows are a good durable landing zone independent of
 history delivery order. This supports treating sync as idempotent fact
 application rather than ordered messages, at least for the basic
 accepted/rejected cases.
+
+## 2026-05-26 00:22 PDT
+
+Added three more product/distributed invariant tests; full mini crate suite is
+green with 136 tests.
+
+- Subscriptions emit `Removed` when the visible transaction for a row is
+  rejected, and the subscription snapshot converges to one-shot reads.
+- Same global epoch, same row, opposite apply order converges across peers and
+  survives projection rebuild. Current tie-break is stable physical tx ordering
+  after public tx import, which is acceptable for now but should eventually be
+  specified in public terms.
+- Global acceptance of a branch-local transaction does not make it visible on
+  main after sync/rebuild. Acceptance means admitted/durable, not visible in
+  every branch.
+
+Design lesson: current projection rebuild is proving a good oracle. When a
+test asserts both online apply and clear/rebuild, it quickly catches whether
+we encoded the semantics in durable history/metadata or only in incidental
+current-table mutation order.

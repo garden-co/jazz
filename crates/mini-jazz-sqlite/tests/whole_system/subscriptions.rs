@@ -89,6 +89,36 @@ fn subscription_removes_child_when_parent_policy_dependency_changes() {
 }
 
 #[test]
+fn subscription_removes_row_when_visible_transaction_is_rejected() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Optimistic")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let mut subscription = alice.subscribe_rows("notes").unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+
+    alice.reject_transaction(&tx, "policy_denied").unwrap();
+
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "note-1"));
+    assert_eq!(
+        subscription.initial_rows(),
+        alice.read_rows("notes").unwrap()
+    );
+    assert!(alice.read_rows("notes").unwrap().is_empty());
+}
+
+#[test]
 fn subscription_diffs_when_active_branch_changes() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

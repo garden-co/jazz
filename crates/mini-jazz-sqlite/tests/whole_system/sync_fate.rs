@@ -561,6 +561,77 @@ fn rebuild_uses_global_epoch_order_not_local_tx_order() {
 }
 
 #[test]
+fn same_global_epoch_same_row_uses_stable_tie_breaker_across_apply_order_and_rebuild() {
+    let schema = support::notes_schema();
+    let mut authority =
+        Runtime::open_with_schema(Storage::Memory, "authority", "alice", schema.clone()).unwrap();
+    let mut peer_a =
+        Runtime::open_with_schema(Storage::Memory, "peer-a", "alice", schema.clone()).unwrap();
+    let mut peer_b = Runtime::open_with_schema(Storage::Memory, "peer-b", "alice", schema).unwrap();
+
+    let base_tx = authority
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("base")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority.accept_transaction_at_global(&base_tx, 1).unwrap();
+    let base_bundle = authority.export_table_history("notes").unwrap();
+    peer_a.apply_bundle(&base_bundle).unwrap();
+    peer_b.apply_bundle(&base_bundle).unwrap();
+
+    let first_tx = authority
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("first same epoch"))]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&first_tx, 2)
+        .unwrap();
+    let first_bundle = authority.export_table_history("notes").unwrap();
+
+    let second_tx = authority
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("second same epoch"))]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&second_tx, 2)
+        .unwrap();
+    let second_bundle = authority.export_table_history("notes").unwrap();
+
+    peer_a.apply_bundle(&first_bundle).unwrap();
+    peer_a.apply_bundle(&second_bundle).unwrap();
+    peer_b.apply_bundle(&second_bundle).unwrap();
+    peer_b.apply_bundle(&first_bundle).unwrap();
+
+    let peer_a_body = peer_a.read_rows("notes").unwrap()[0].values["body"].clone();
+    let peer_b_body = peer_b.read_rows("notes").unwrap()[0].values["body"].clone();
+    assert_eq!(peer_a_body, peer_b_body);
+
+    peer_a.clear_current_projection_for_test().unwrap();
+    peer_b.clear_current_projection_for_test().unwrap();
+    peer_a.rebuild_current_projection().unwrap();
+    peer_b.rebuild_current_projection().unwrap();
+    assert_eq!(
+        peer_a.read_rows("notes").unwrap()[0].values["body"],
+        peer_a_body
+    );
+    assert_eq!(
+        peer_b.read_rows("notes").unwrap()[0].values["body"],
+        peer_b_body
+    );
+}
+
+#[test]
 fn direct_global_acceptance_repairs_current_projection_order() {
     let schema = support::notes_schema();
     let mut authority =

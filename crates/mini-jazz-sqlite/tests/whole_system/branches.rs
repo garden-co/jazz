@@ -26,6 +26,39 @@ fn branch_local_write_is_invisible_on_main() {
 }
 
 #[test]
+fn branch_global_acceptance_does_not_make_branch_row_visible_on_main_after_sync() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    let tx = alice
+        .insert_row(
+            "tasks",
+            "task-draft",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Accepted branch row")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&tx, 7).unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("tasks").unwrap())
+        .unwrap();
+    peer.rebuild_current_projection().unwrap();
+
+    peer.checkout_branch("main").unwrap();
+    assert!(peer.read_rows("tasks").unwrap().is_empty());
+    peer.checkout_branch("draft").unwrap();
+    assert_eq!(peer.read_rows("tasks").unwrap()[0].id, "task-draft");
+    assert_eq!(peer.transaction_info(&tx).unwrap().global_epoch, Some(7));
+}
+
+#[test]
 fn branch_scoped_export_excludes_unrelated_branch_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
