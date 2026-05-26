@@ -1150,3 +1150,17 @@ exports enough state for policy-hidden descendants to disappear without adding a
 new repair mechanism.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
+
+## 2026-05-26 04:22 PDT
+
+Pinned missing-policy-dependency rejection as permanent rather than parked. An
+edge rejects an untrusted write whose referenced policy row is missing, later
+receives that policy row, and then replays a complete bundle for the same
+transaction; the transaction stays rejected with the original durable detail.
+
+Discovery: current fate merging already gives us the simple model we wanted:
+authoritative rejection is replayable durable state. If we ever want a parked
+"awaiting dependencies" state, it should be a separate state machine decision,
+not an accidental consequence of late dependency arrival.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.

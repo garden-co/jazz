@@ -700,6 +700,20 @@ fn trusted_edge_rejects_untrusted_write_when_policy_dependency_is_missing() {
     edge.apply_bundle(&bob.export_table_history("projects").unwrap())
         .unwrap();
     assert!(edge.read_rows("todos").unwrap().is_empty());
+
+    edge.apply_untrusted_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        edge.transaction_info(&tx).unwrap().rejection_detail,
+        Some(json!({
+            "reason": "policy_dependency_unavailable",
+            "table": "todos",
+            "row_id": "todo-1",
+            "dependency_table": "projects",
+            "dependency_row_id": "project-bob"
+        }))
+    );
 }
 
 #[test]
