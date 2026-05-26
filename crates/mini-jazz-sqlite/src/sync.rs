@@ -23,6 +23,7 @@ pub struct TxRecord {
     pub node_id: String,
     pub local_epoch: i64,
     pub global_epoch: Option<i64>,
+    pub conflict_mode: i64,
     pub outcome: i64,
     pub created_at: i64,
 }

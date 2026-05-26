@@ -315,14 +315,15 @@ impl Runtime {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
                  ON CONFLICT(tx_id) DO UPDATE SET
                    outcome = excluded.outcome,
-                   global_epoch = excluded.global_epoch",
+                   global_epoch = excluded.global_epoch,
+                   conflict_mode = excluded.conflict_mode",
                 params![
                     tx_record.tx_id,
                     node_num,
                     tx_record.local_epoch,
                     tx_record.global_epoch,
                     tx::KIND_DATA,
-                    tx::MODE_MERGEABLE,
+                    tx_record.conflict_mode,
                     tx_record.outcome,
                     tx_record.created_at
                 ],
@@ -460,10 +461,16 @@ impl Runtime {
     }
 
     pub fn transaction_info(&self, tx_id: &str) -> Result<TransactionInfo> {
-        let (tx_id, global_epoch) = self.conn.query_row(
-            "SELECT tx_id, global_epoch FROM jazz_tx WHERE tx_id = ?",
+        let (tx_id, global_epoch, conflict_mode) = self.conn.query_row(
+            "SELECT tx_id, global_epoch, conflict_mode FROM jazz_tx WHERE tx_id = ?",
             params![tx_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    conflict_mode_name(row.get::<_, i64>(2)?),
+                ))
+            },
         )?;
         let mut stmt = self.conn.prepare(
             "SELECT tier FROM jazz_tx_receipt receipt
@@ -488,6 +495,7 @@ impl Runtime {
         Ok(TransactionInfo {
             tx_id,
             global_epoch,
+            conflict_mode,
             receipt_tiers,
             rejection_code,
         })
@@ -983,7 +991,7 @@ fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.outcome, tx.created_at
+        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, tx.created_at
          FROM jazz_tx tx
          JOIN jazz_node node ON node.node_num = tx.node_num
          ORDER BY tx.tx_num",
@@ -994,8 +1002,9 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             node_id: row.get(1)?,
             local_epoch: row.get(2)?,
             global_epoch: row.get(3)?,
-            outcome: row.get(4)?,
-            created_at: row.get(5)?,
+            conflict_mode: row.get(4)?,
+            outcome: row.get(5)?,
+            created_at: row.get(6)?,
         })
     })?;
     records
@@ -1716,6 +1725,15 @@ fn tier_name(tier: i64) -> rusqlite::Result<String> {
         _ => "unknown",
     }
     .to_owned())
+}
+
+fn conflict_mode_name(mode: i64) -> String {
+    match mode {
+        tx::MODE_EXCLUSIVE => "exclusive",
+        tx::MODE_MERGEABLE => "mergeable",
+        _ => "unknown",
+    }
+    .to_owned()
 }
 
 fn insert_dynamic(

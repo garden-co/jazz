@@ -922,3 +922,20 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, still
 Design note: this is intentionally row-level. Per-column data may still be
 useful for merge strategies, but write-set causality/conflict semantics should
 start with the whole row as the item.
+
+## 2026-05-25 18:29 PDT
+
+Starting transaction mode propagation. Found while adding write sets: bundles
+carry tx outcome and global epoch, but apply hardcodes `conflict_mode =
+mergeable`. That would turn exclusive/global transactions into mergeable ones on
+receiving peers.
+
+## 2026-05-25 18:31 PDT
+
+Transaction conflict mode propagation is green. `TxRecord` now carries
+`conflict_mode`; export includes it, apply upserts it, and `TransactionInfo`
+surfaces `"mergeable"` vs `"exclusive"` as a probe. Exclusive/global
+transactions now remain exclusive after sync.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+49 tests.

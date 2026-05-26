@@ -41,6 +41,7 @@ pub struct StorageStats {
 pub struct TransactionInfo {
     pub tx_id: String,
     pub global_epoch: Option<i64>,
+    pub conflict_mode: String,
     pub receipt_tiers: Vec<String>,
     pub rejection_code: Option<String>,
 }

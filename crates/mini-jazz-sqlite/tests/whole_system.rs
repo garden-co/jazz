@@ -299,6 +299,36 @@ fn exclusive_transaction_requires_global_epoch_and_commits_accepted() {
 }
 
 #[test]
+fn exclusive_transaction_mode_survives_sync() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    let tx = alice
+        .transaction()
+        .exclusive_at_global(7)
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Exclusive sync")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+
+    let info = peer.transaction_info(&tx).unwrap();
+    assert_eq!(info.global_epoch, Some(7));
+    assert_eq!(info.conflict_mode, "exclusive");
+}
+
+#[test]
 fn rebuild_current_projection_from_history_matches_current_reads() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
