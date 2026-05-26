@@ -678,6 +678,75 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
 }
 
 #[test]
+fn query_scope_bundle_dedupes_shared_policy_dependency_history() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Shared project"))]),
+        )
+        .unwrap();
+    for id in ["task-a", "task-b"] {
+        alice
+            .insert_row(
+                "tasks",
+                id,
+                BTreeMap::from([
+                    ("title".to_owned(), json!(id)),
+                    ("done".to_owned(), json!(false)),
+                    ("project".to_owned(), json!("project-1")),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let bundle = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(
+        bundle
+            .history
+            .iter()
+            .filter(|record| record.table == "tasks")
+            .count(),
+        2
+    );
+    assert_eq!(
+        bundle
+            .history
+            .iter()
+            .filter(|record| record.table == "projects" && record.row_id == "project-1")
+            .count(),
+        1
+    );
+
+    peer.apply_bundle(&bundle).unwrap();
+    let peer_rows = peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    assert_eq!(peer_rows.len(), 2);
+    assert!(peer_rows
+        .iter()
+        .all(|row| row.values["project"] == json!("project-1")));
+}
+
+#[test]
 fn equality_query_scope_resync_removes_row_that_left_predicate() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

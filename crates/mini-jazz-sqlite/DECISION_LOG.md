@@ -1323,3 +1323,17 @@ send ordinary scoped history for that row. The v0 implementation handles
 `absent id` by lowering refresh to an `id = value` query.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 237 whole-system tests.
+
+## 2026-05-26 04:56 PDT
+
+Pinned query-scope bundle deduplication for shared policy dependencies. Two
+matching task result rows can both depend on the same readable project; the
+exported query bundle includes both task history rows and exactly one project
+history row, then a peer can read both tasks after applying the bundle.
+
+Discovery: the existing history dedupe path already handles repeated concrete
+policy dependencies. This test makes that performance/correctness invariant
+explicit: observed facts may repeat conceptually, but sync payloads should not
+multiply the same row version.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 238 whole-system tests.
