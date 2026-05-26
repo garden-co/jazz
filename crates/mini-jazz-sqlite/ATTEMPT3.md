@@ -299,3 +299,19 @@ reads currently filter to the active branch's current rows, so they prove
 isolation but not "base snapshot plus sparse overlay." Next branch work should
 make branch reads fall back to main/base rows when a row has no branch-local
 candidate, then add branch provenance to sync payloads.
+
+## 2026-05-25 17:22 PDT
+
+Sparse branch overlay baseline is green. Generic reads on a branch now return
+active-branch current rows plus main rows for row ids that do not have a
+branch-local candidate. A branch-local version overrides main for that branch,
+while main still sees its own version.
+
+Decision: implement overlay reads as one SQL query over current projection, not
+branch projection tables. This is the shape we wanted to test for "many
+branches, sparse overlays."
+
+Still underspecified: branch bases are currently effectively "main now," not a
+pinned snapshot. To be correct, a branch needs to record its flattened effective
+base and read main/base rows as of that base snapshot, not the latest main
+projection.

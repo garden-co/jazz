@@ -562,22 +562,43 @@ impl Runtime {
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
             WHERE current.is_deleted = 0
-               AND current.j_branch_num = ?
+               AND (
+                 current.j_branch_num = ?
+                 OR (
+                   ? != 1
+                   AND current.j_branch_num = 1
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM {current_table} branch_current
+                     WHERE branch_current.row_num = current.row_num
+                       AND branch_current.j_branch_num = ?
+                   )
+                 )
+               )
                AND tx.outcome != ?
                AND {policy_sql}
              ORDER BY current.j_created_at DESC, current.row_num",
             select_columns.join(", "),
             crate::schema::current_table(table_name),
+            current_table = crate::schema::current_table(table_name),
             policy_sql = policy::read_policy_sql(&self.schema, table, &self.principal)?,
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
-        let rows = stmt.query_map(params![self.branch_num, tx::OUTCOME_REJECTED], |row| {
-            let raw_values = (0..row_width)
-                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(raw_values)
-        })?;
+        let rows = stmt.query_map(
+            params![
+                self.branch_num,
+                self.branch_num,
+                self.branch_num,
+                tx::OUTCOME_REJECTED
+            ],
+            |row| {
+                let raw_values = (0..row_width)
+                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(raw_values)
+            },
+        )?;
 
         let mut views = Vec::new();
         for raw in rows {

@@ -469,3 +469,40 @@ fn branch_local_write_is_invisible_on_main() {
     alice.checkout_branch("draft").unwrap();
     assert_eq!(alice.read_rows("tasks").unwrap()[0].id, "task-draft");
 }
+
+#[test]
+fn branch_reads_main_base_with_sparse_overlay() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let mut main_task = BTreeMap::new();
+    main_task.insert("title".to_owned(), json!("Base title"));
+    main_task.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-1", main_task).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Base title")
+    );
+
+    let mut draft_task = BTreeMap::new();
+    draft_task.insert("title".to_owned(), json!("Draft title"));
+    draft_task.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-1", draft_task).unwrap();
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Draft title")
+    );
+
+    alice.checkout_branch("main").unwrap();
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Base title")
+    );
+}
