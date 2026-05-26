@@ -64,6 +64,51 @@ fn policy_filters_reads_through_required_parent_ref() {
 }
 
 #[test]
+fn required_ref_include_filters_parent_when_target_is_unauthorized() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+    )
+    .unwrap();
+    bob.insert_row(
+        "todos",
+        "todo-hidden-include",
+        BTreeMap::from([
+            ("title".to_owned(), json!("Needs hidden project")),
+            ("done".to_owned(), json!(false)),
+            ("project".to_owned(), json!("project-bob")),
+        ]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let optional = alice.open_todos().unwrap();
+    assert_eq!(optional.len(), 1);
+    assert_eq!(optional[0].project_title, None);
+    assert!(alice.open_todos_require_project().unwrap().is_empty());
+}
+
+#[test]
 fn schema_rejects_ref_policy_that_does_not_point_at_ref_field() {
     let missing_ref = SchemaDef::new().table("todos", |table| {
         table.text("title");

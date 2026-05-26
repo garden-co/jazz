@@ -289,6 +289,14 @@ impl Runtime {
         Ok(todos)
     }
 
+    pub fn open_todos_require_project(&self) -> Result<Vec<TodoView>> {
+        Ok(self
+            .open_todos()?
+            .into_iter()
+            .filter(|todo| todo.project_title.is_some())
+            .collect())
+    }
+
     pub fn export_query_scope_open_todos(&self) -> Result<Bundle> {
         let txs = export_txs(&self.conn)?;
         let history = export_open_todo_scope_history(&self.conn)?;

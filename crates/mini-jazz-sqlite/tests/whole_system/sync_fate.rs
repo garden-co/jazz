@@ -380,6 +380,28 @@ fn missing_optional_ref_include_round_trips_as_null_then_updates_when_dependency
 }
 
 #[test]
+fn required_ref_include_filters_parent_until_dependency_arrives() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice
+        .create_todo("todo-1", "Project required", false, "project-late")
+        .unwrap();
+    assert_eq!(alice.open_todos().unwrap().len(), 1);
+    assert!(alice.open_todos_require_project().unwrap().is_empty());
+
+    alice
+        .create_project("project-late", "Late arriving project")
+        .unwrap();
+
+    let todos = alice.open_todos_require_project().unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(
+        todos[0].project_title.as_deref(),
+        Some("Late arriving project")
+    );
+}
+
+#[test]
 fn table_scope_sync_exports_delete_so_peer_removes_row() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();

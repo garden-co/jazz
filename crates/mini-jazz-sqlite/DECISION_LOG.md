@@ -622,3 +622,9 @@ Design lesson: persisted query descriptors do not need to explicitly encode ever
 Added policy fingerprints as bundle metadata and clarified their semantics. Bundles now carry a separate policy fingerprint from structural schema compatibility; untrusted acceptance still uses the authority runtime policy, not the sender policy fingerprint. Full mini crate suite is green with 179 tests.
 
 Design lesson: policy catalogue state is a separate lane, but sender policy metadata is not an authorization precondition for data bundles. The authority must evaluate its local trusted policy catalogue; remote policy fingerprints are useful for diagnostics/negotiation and future catalogue sync, not for replacing authority-side validation.
+
+## 2026-05-26 02:13 PDT
+
+Added first required-include semantics. Optional todo/project includes still return the parent with `project_title = None`, while `open_todos_require_project` filters the parent when the referenced project is missing or unauthorized and restores it when the project becomes visible. Full mini crate suite is green with 181 tests.
+
+Design lesson: required includes are query semantics, not permission semantics. The parent row may be readable on its own, but the required include changes result membership based on target visibility. This should become a generic query-shape feature rather than a todo-specific helper.
