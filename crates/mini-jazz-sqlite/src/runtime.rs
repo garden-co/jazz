@@ -6,7 +6,7 @@ use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{branch, policy, projection, query, schema, storage, tx, Result, Storage};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Runtime {
@@ -39,6 +39,15 @@ impl Runtime {
         schema_def: SchemaDef,
     ) -> Result<Self> {
         Self::open_with_schema_and_trust(storage, node_id, "trusted", schema_def, true)
+    }
+
+    pub fn open_trusted_as_with_schema(
+        storage: Storage,
+        node_id: &str,
+        principal: &str,
+        schema_def: SchemaDef,
+    ) -> Result<Self> {
+        Self::open_with_schema_and_trust(storage, node_id, principal, schema_def, true)
     }
 
     fn open_with_schema_and_trust(
@@ -376,6 +385,32 @@ impl Runtime {
             Self::apply_history_record(&schema, &db, record)?;
         }
         db.commit()?;
+        Ok(())
+    }
+
+    pub fn apply_untrusted_bundle(&mut self, bundle: &Bundle) -> Result<()> {
+        self.apply_bundle(bundle)?;
+        let mut rejected = BTreeSet::new();
+        for record in &bundle.history {
+            if record.op == 3 || rejected.contains(&record.tx_id) {
+                continue;
+            }
+            let table = self.schema.table_def(&record.table)?;
+            let row_num = ensure_row_id(&self.conn, &record.table, &record.row_id)?;
+            let allowed = policy::write_allowed(
+                &self.conn,
+                &self.schema,
+                table,
+                &table.write_policy,
+                row_num,
+                &record.values,
+                &record.created_by,
+            )?;
+            if !allowed {
+                self.reject_transaction(&record.tx_id, "policy_denied")?;
+                rejected.insert(record.tx_id.clone());
+            }
+        }
         Ok(())
     }
 

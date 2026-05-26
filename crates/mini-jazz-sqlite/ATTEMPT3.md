@@ -1176,3 +1176,25 @@ scope model.
 Verification checkpoint: `cargo test -p mini-jazz-sqlite` passes. This includes
 the full whole-system integration suite, now 60 tests, plus crate unit/doc test
 targets.
+
+## 2026-05-25 18:58 PDT
+
+Starting automatic trusted-edge validation. The manual trusted-edge rejection
+test proved fate mechanics, but authority behavior should be expressible as
+"apply this untrusted bundle and validate policy", not as a separate manual
+rejection call.
+
+## 2026-05-25 19:00 PDT
+
+Automatic trusted-edge validation is green. Added `apply_untrusted_bundle`,
+which applies incoming facts, evaluates write policies using the record author
+as principal, and rejects violating transactions with `policy_denied`. Added a
+harness-only `open_trusted_as_with_schema` constructor to simulate Bob-authored
+facts that bypass local client validation.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+61 tests.
+
+Design note: this is still coarse: validation happens after apply, then repairs
+projection by rejecting. A production authority likely wants a transactional
+"stage, validate, then publish fate" path.
