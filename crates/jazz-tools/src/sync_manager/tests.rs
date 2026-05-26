@@ -390,6 +390,7 @@ fn push_query_subscription(
 /// reconcile.
 mod basic;
 mod client_lifecycle;
+mod forwarding_recursion;
 mod permissions;
 mod query_scope;
 mod server_sync;
