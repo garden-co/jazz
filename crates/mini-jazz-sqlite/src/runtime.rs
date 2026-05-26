@@ -1213,7 +1213,107 @@ fn export_main_base_snapshot_history(
             |row| row.get::<_, i64>(0),
         )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), Some(base_epoch))
+    let mut records = export_history_versions_for_rows(
+        conn,
+        schema,
+        table_name,
+        Some(&row_nums),
+        Some(base_epoch),
+    )?;
+    records.extend(export_snapshot_policy_dependency_history(
+        conn,
+        schema,
+        table_name,
+        principal,
+        trusted,
+        base_epoch,
+        Some(&row_nums),
+    )?);
+    Ok(records)
+}
+
+fn export_snapshot_policy_dependency_history(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    principal: &str,
+    trusted: bool,
+    base_epoch: i64,
+    child_row_nums: Option<&[i64]>,
+) -> Result<Vec<HistoryRecord>> {
+    let table = schema.table_def(table_name)?;
+    let PolicyDef::RefReadable { field } = &table.read_policy else {
+        return Ok(Vec::new());
+    };
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *field)
+        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+    let FieldKind::Ref {
+        table: parent_table,
+    } = &field.kind
+    else {
+        return Err(crate::Error::new(format!(
+            "policy field {} is not a ref",
+            field.name
+        )));
+    };
+    let policy_sql = if trusted {
+        "1 = 1".to_owned()
+    } else {
+        policy::snapshot_read_policy_sql_for_alias(schema, table, "h", principal, base_epoch)?
+    };
+    let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let sql = format!(
+        "SELECT DISTINCT h.{ref_column}
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE {row_filter}
+           AND h.j_branch_num = 1
+           AND h.op != 3
+           AND tx.outcome != {}
+           AND tx.global_epoch IS NOT NULL
+           AND tx.global_epoch <= {base_epoch}
+           AND {policy_sql}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM {history_table} newer
+             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+             WHERE newer.row_num = h.row_num
+               AND newer.j_branch_num = 1
+               AND newer_tx.outcome != {}
+               AND newer_tx.global_epoch IS NOT NULL
+               AND newer_tx.global_epoch <= {base_epoch}
+               AND newer_tx.global_epoch > tx.global_epoch
+           )",
+        crate::schema::history_table(table_name),
+        tx::OUTCOME_REJECTED,
+        tx::OUTCOME_REJECTED,
+        row_filter = history_row_filter_sql("h", child_row_nums),
+        history_table = crate::schema::history_table(table_name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_nums = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut records = export_history_versions_for_rows(
+        conn,
+        schema,
+        parent_table,
+        Some(&row_nums),
+        Some(base_epoch),
+    )?;
+    records.extend(export_snapshot_policy_dependency_history(
+        conn,
+        schema,
+        parent_table,
+        principal,
+        trusted,
+        base_epoch,
+        Some(&row_nums),
+    )?);
+    Ok(records)
 }
 
 fn export_policy_dependency_history(
@@ -1471,6 +1571,21 @@ fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
 }
 
 fn current_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
+    match row_nums {
+        Some([]) => "0 = 1".to_owned(),
+        Some(row_nums) => format!(
+            "{alias}.row_num IN ({})",
+            row_nums
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => "1 = 1".to_owned(),
+    }
+}
+
+fn history_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
     match row_nums {
         Some([]) => "0 = 1".to_owned(),
         Some(row_nums) => format!(

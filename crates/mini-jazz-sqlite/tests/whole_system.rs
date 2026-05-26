@@ -1476,6 +1476,78 @@ fn branch_base_snapshot_ref_policy_uses_parent_at_base_epoch() {
 }
 
 #[test]
+fn branch_base_export_preserves_ref_policy_at_base_epoch() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema.clone())
+            .unwrap();
+    let mut charlie =
+        Runtime::open_with_schema(Storage::Memory, "charlie-node", "charlie", schema).unwrap();
+
+    let project_tx = alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&project_tx, 1).unwrap();
+    let todo_tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible at branch base")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&todo_tx, 2).unwrap();
+    alice.create_branch("draft", Some(2)).unwrap();
+
+    let charlie_project_tx = charlie
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Charlie later"))]),
+        )
+        .unwrap();
+    charlie
+        .accept_transaction_at_global(&charlie_project_tx, 3)
+        .unwrap();
+    alice
+        .apply_bundle(&charlie.export_table_history("projects").unwrap())
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let bundle = alice.export_table_history("todos").unwrap();
+    let synced = bundle
+        .history
+        .iter()
+        .map(|record| (record.table.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(synced.contains(&("todos", "todo-1")));
+    assert!(synced.contains(&("projects", "project-1")));
+
+    bob.apply_bundle(&bundle).unwrap();
+    bob.checkout_branch("draft").unwrap();
+    let rows = bob.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+}
+
+#[test]
 fn branch_multi_base_conflicts_expose_multiple_candidates() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

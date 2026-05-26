@@ -878,3 +878,24 @@ Learning: policy lowering needs a context, not just a policy expression:
 current-projection policy, historical-snapshot policy, and eventually
 branch-overlay historical policy have different SQL shapes even for the same
 high-level permission.
+
+## 2026-05-25 18:24 PDT
+
+Starting sync-side historical policy check. The previous fix made local branch
+reads use parent rows at the base epoch; now verify branch export sends enough
+base history for another node to recreate the same policy-filtered branch.
+
+## 2026-05-25 18:26 PDT
+
+Sync-side historical ref policy is green. Branch-base export now follows
+snapshot policy dependencies recursively: exporting a pinned-base child row also
+exports the referenced parent row versions at or before the same base epoch, so
+a receiver can recreate branch visibility even if the parent changed later.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+48 tests.
+
+Learning: query-scope export and branch-base export need parallel dependency
+walkers, but one walks current projection and the other walks historical
+snapshot rows. This is another point in favor of making "query context" an
+explicit lowering parameter in attempt 4 or the next spec pass.
