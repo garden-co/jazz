@@ -20,17 +20,6 @@ pub enum RowDiff {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TodoView {
-    pub id: String,
-    pub title: String,
-    pub done: bool,
-    pub project_id: String,
-    pub project_title: Option<String>,
-    pub created_by: String,
-    pub tx_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchInfo {
     pub id: String,
     pub base_global_epoch: Option<i64>,

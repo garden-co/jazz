@@ -5,7 +5,7 @@ use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
 };
-use crate::types::{BranchInfo, RejectionInfo, RowView, StorageStats, TodoView, TransactionInfo};
+use crate::types::{BranchInfo, RejectionInfo, RowView, StorageStats, TransactionInfo};
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
     storage, tx, Result, Storage,
@@ -149,102 +149,6 @@ impl Runtime {
         Ok(tx_id)
     }
 
-    pub fn open_todos(&self) -> Result<Vec<TodoView>> {
-        let projects = self
-            .query_context()
-            .read_rows("projects")?
-            .into_iter()
-            .map(|row| {
-                (
-                    row.id,
-                    row.values
-                        .get("title")
-                        .and_then(JsonValue::as_str)
-                        .map(str::to_owned),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let mut todos = self
-            .query_context()
-            .read_rows("todos")?
-            .into_iter()
-            .filter(|row| row.values.get("done") == Some(&JsonValue::Bool(false)))
-            .map(|row| {
-                let title = row
-                    .values
-                    .get("title")
-                    .and_then(JsonValue::as_str)
-                    .ok_or_else(|| crate::Error::new("todo missing title"))?
-                    .to_owned();
-                let project_id = row
-                    .values
-                    .get("project")
-                    .and_then(JsonValue::as_str)
-                    .ok_or_else(|| crate::Error::new("todo missing project"))?
-                    .to_owned();
-                let project_title = projects.get(&project_id).cloned().flatten();
-                Ok(TodoView {
-                    id: row.id,
-                    title,
-                    done: false,
-                    project_id,
-                    project_title,
-                    created_by: row.created_by,
-                    tx_id: row.tx_id,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        todos.sort_by(|left, right| left.id.cmp(&right.id));
-        Ok(todos)
-    }
-
-    pub fn open_todos_require_project(&self) -> Result<Vec<TodoView>> {
-        Ok(self
-            .open_todos()?
-            .into_iter()
-            .filter(|todo| todo.project_title.is_some())
-            .collect())
-    }
-
-    pub fn export_query_scope_open_todos(&self) -> Result<Bundle> {
-        let txs = export_txs(&self.conn)?;
-        let history = export_open_todo_scope_history(&self.conn, self.branch_num)?;
-        let reads = export_reads_for_history(&self.conn, &history)?;
-        let branches = export_branch_records_for_history(&self.conn, &history)?;
-        let mut query_reads = vec![QueryReadRecord {
-            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
-            table: "todos".to_owned(),
-            field: "done".to_owned(),
-            op: "eq".to_owned(),
-            value: JsonValue::Bool(false),
-        }];
-        query_reads.extend(open_todo_missing_project_query_reads(
-            &self.conn,
-            self.branch_num,
-        )?);
-        Ok(make_bundle(
-            &self.schema,
-            branches,
-            txs,
-            reads,
-            query_reads,
-            history,
-        ))
-    }
-
-    pub fn newest_open_todos(&self, limit: usize) -> Result<Vec<TodoView>> {
-        let mut todos = self.open_todos()?;
-        let created_at_by_id = current_created_at_by_row_id(&self.conn, "todos")?;
-        todos.sort_by(|left, right| {
-            created_at_by_id
-                .get(&right.id)
-                .cmp(&created_at_by_id.get(&left.id))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        todos.truncate(limit);
-        Ok(todos)
-    }
-
     pub fn read_rows_where_eq_top_created_at_desc(
         &self,
         table_name: &str,
@@ -262,37 +166,6 @@ impl Runtime {
         });
         rows.truncate(limit);
         Ok(rows)
-    }
-
-    pub fn export_query_scope_newest_open_todos(&self, limit: usize) -> Result<Bundle> {
-        let todo_ids = self
-            .newest_open_todos(limit)?
-            .into_iter()
-            .map(|todo| todo.id)
-            .collect::<Vec<_>>();
-        let txs = export_txs(&self.conn)?;
-        let history =
-            export_open_todo_scope_history_for_ids(&self.conn, self.branch_num, &todo_ids)?;
-        let reads = export_reads_for_history(&self.conn, &history)?;
-        let branches = export_branch_records_for_history(&self.conn, &history)?;
-        let query_reads = vec![QueryReadRecord {
-            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
-            table: "todos".to_owned(),
-            field: "done".to_owned(),
-            op: "eq_top_created_at_desc".to_owned(),
-            value: json!({
-                "eq": false,
-                "limit": limit,
-            }),
-        }];
-        Ok(make_bundle(
-            &self.schema,
-            branches,
-            txs,
-            reads,
-            query_reads,
-            history,
-        ))
     }
 
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
@@ -1849,6 +1722,24 @@ impl Runtime {
             "eq",
             value.clone(),
             self.read_rows_where_eq(table_name, field_name, value)?,
+            &[],
+        )
+    }
+
+    pub fn export_query_where_eq_with_ref_include(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        ref_field_name: &str,
+    ) -> Result<Bundle> {
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "eq",
+            value.clone(),
+            self.read_rows_where_eq(table_name, field_name, value)?,
+            &[ref_field_name],
         )
     }
 
@@ -1864,6 +1755,7 @@ impl Runtime {
             "contains",
             JsonValue::String(needle.to_owned()),
             self.read_rows_where_contains(table_name, field_name, needle)?,
+            &[],
         )
     }
 
@@ -1879,6 +1771,7 @@ impl Runtime {
             "in",
             JsonValue::Array(values.clone()),
             self.read_rows_where_in(table_name, field_name, values)?,
+            &[],
         )
     }
 
@@ -1894,6 +1787,7 @@ impl Runtime {
             "ne",
             value.clone(),
             self.read_rows_where_ne(table_name, field_name, value)?,
+            &[],
         )
     }
 
@@ -1913,6 +1807,28 @@ impl Runtime {
                 "limit": limit,
             }),
             self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
+            &[],
+        )
+    }
+
+    pub fn export_query_where_eq_top_created_at_desc_with_ref_include(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+        ref_field_name: &str,
+    ) -> Result<Bundle> {
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "eq_top_created_at_desc",
+            json!({
+                "eq": value.clone(),
+                "limit": limit,
+            }),
+            self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
+            &[ref_field_name],
         )
     }
 
@@ -1923,6 +1839,7 @@ impl Runtime {
         op: &str,
         value: JsonValue,
         rows: Vec<RowView>,
+        ref_include_fields: &[&str],
     ) -> Result<Bundle> {
         let table = self.schema.table_def(table_name)?;
         let mut row_nums = rows
@@ -1964,6 +1881,14 @@ impl Runtime {
                 child_row_nums: Some(&row_nums),
             },
         )?);
+        for ref_field_name in ref_include_fields {
+            history.extend(self.export_ref_include_history(
+                table,
+                &rows,
+                ref_field_name,
+                &branch_nums,
+            )?);
+        }
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
                 history.extend(export_history_versions_for_rows(
@@ -2003,6 +1928,68 @@ impl Runtime {
             query_reads,
             history,
         ))
+    }
+
+    fn export_ref_include_history(
+        &self,
+        table: &crate::schema::TableDef,
+        rows: &[RowView],
+        ref_field_name: &str,
+        branch_nums: &[i64],
+    ) -> Result<Vec<HistoryRecord>> {
+        let field = table
+            .fields
+            .iter()
+            .find(|field| field.name == ref_field_name)
+            .ok_or_else(|| crate::Error::new(format!("unknown include field {ref_field_name}")))?;
+        let FieldKind::Ref {
+            table: ref_table_name,
+        } = &field.kind
+        else {
+            return Err(crate::Error::new(format!(
+                "include field {ref_field_name} is not a ref"
+            )));
+        };
+        let ref_row_nums = rows
+            .iter()
+            .filter_map(|row| row.values.get(ref_field_name).and_then(JsonValue::as_str))
+            .map(|id| row_num(&self.conn, id))
+            .collect::<Result<Vec<_>>>()?;
+        let mut ref_row_nums = ref_row_nums;
+        ref_row_nums.sort();
+        ref_row_nums.dedup();
+        if ref_row_nums.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut history = export_visible_table_history(
+            &self.conn,
+            &self.schema,
+            ref_table_name,
+            &self.principal,
+            self.trusted,
+            branch_nums,
+            Some(&ref_row_nums),
+        )?;
+        history.extend(export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            ref_table_name,
+            Some(&ref_row_nums),
+            None,
+        )?);
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            PolicyDependencyExport {
+                table_name: ref_table_name,
+                policy: &self.schema.table_def(ref_table_name)?.read_policy,
+                principal: &self.principal,
+                trusted: self.trusted,
+                branch_nums,
+                child_row_nums: Some(&ref_row_nums),
+            },
+        )?);
+        Ok(history)
     }
 
     pub fn read_recursive_refs(
@@ -3619,220 +3606,6 @@ fn current_created_at_by_row_id(
     })?;
     rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
         .map_err(Into::into)
-}
-
-fn export_open_todo_scope_history(
-    conn: &Connection,
-    branch_num: i64,
-) -> Result<Vec<HistoryRecord>> {
-    let mut records = Vec::new();
-    records.extend(export_open_todo_projects(conn, branch_num)?);
-    records.extend(export_open_todos(conn, branch_num)?);
-    Ok(records)
-}
-
-fn open_todo_missing_project_query_reads(
-    conn: &Connection,
-    branch_num: i64,
-) -> Result<Vec<QueryReadRecord>> {
-    let branch_id = branch_id_for_num(conn, branch_num)?;
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT project_ids.row_id
-         FROM todos__schema_v1_current todo
-         JOIN jazz_row_id project_ids ON project_ids.row_num = todo.project_row_num
-         LEFT JOIN projects__schema_v1_current project
-           ON project.row_num = todo.project_row_num
-          AND project.j_branch_num = todo.j_branch_num
-          AND project.is_deleted = 0
-         JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
-         WHERE todo.j_branch_num = ?
-           AND todo.is_deleted = 0
-           AND todo.done = 0
-           AND todo_tx.outcome != ?
-           AND project.row_num IS NULL
-         ORDER BY project_ids.row_id",
-    )?;
-    let rows = stmt.query_map(params![branch_num, tx::OUTCOME_REJECTED], |row| {
-        Ok(QueryReadRecord {
-            branch_id: branch_id.clone(),
-            table: "projects".to_owned(),
-            field: "id".to_owned(),
-            op: "absent".to_owned(),
-            value: JsonValue::String(row.get(0)?),
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn export_open_todo_scope_history_for_ids(
-    conn: &Connection,
-    branch_num: i64,
-    todo_ids: &[String],
-) -> Result<Vec<HistoryRecord>> {
-    let mut records = Vec::new();
-    let row_nums = todo_ids
-        .iter()
-        .map(|id| row_num(conn, id))
-        .collect::<Result<Vec<_>>>()?;
-    records.extend(export_open_todo_projects_for_row_nums(
-        conn, branch_num, &row_nums,
-    )?);
-    records.extend(export_open_todos_for_row_nums(conn, branch_num, &row_nums)?);
-    Ok(records)
-}
-
-fn export_open_todo_projects(conn: &Connection, branch_num: i64) -> Result<Vec<HistoryRecord>> {
-    export_open_todo_projects_for_row_nums(conn, branch_num, &[])
-}
-
-fn export_open_todo_projects_for_row_nums(
-    conn: &Connection,
-    branch_num: i64,
-    row_nums: &[i64],
-) -> Result<Vec<HistoryRecord>> {
-    let row_filter = sql_row_num_filter("todo", row_nums);
-    let mut stmt = conn.prepare(&format!(
-        "SELECT ids.row_id,
-                tx.tx_id,
-                h.op,
-                h.title,
-                h.j_created_at,
-                h.j_updated_at,
-                h.j_created_by,
-                h.j_updated_by,
-                branch.branch_id
-         FROM projects__schema_v1_history h
-         JOIN jazz_row_id ids ON ids.row_num = h.row_num
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-         JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
-         WHERE h.row_num IN (
-           SELECT DISTINCT project_row_num
-           FROM todos__schema_v1_current todo
-           JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
-           WHERE todo.is_deleted = 0
-             AND todo.done = 0
-             AND todo.j_branch_num = ?
-             AND todo_tx.outcome != ?
-             {row_filter}
-         )
-         ORDER BY h.row_num, h.tx_num",
-    ))?;
-    let mut query_params = vec![
-        rusqlite::types::Value::Integer(branch_num),
-        rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
-    ];
-    query_params.extend(
-        row_nums
-            .iter()
-            .copied()
-            .map(rusqlite::types::Value::Integer),
-    );
-    let records = stmt.query_map(params_from_iter(query_params.iter()), |row| {
-        let mut values = BTreeMap::new();
-        values.insert("title".to_owned(), JsonValue::String(row.get(3)?));
-        Ok(HistoryRecord {
-            table: "projects".to_owned(),
-            row_id: row.get(0)?,
-            branch_id: row.get(8)?,
-            tx_id: row.get(1)?,
-            op: row.get(2)?,
-            values,
-            created_at: row.get(4)?,
-            updated_at: row.get(5)?,
-            created_by: row.get(6)?,
-            updated_by: row.get(7)?,
-        })
-    })?;
-    records
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn export_open_todos(conn: &Connection, branch_num: i64) -> Result<Vec<HistoryRecord>> {
-    export_open_todos_for_row_nums(conn, branch_num, &[])
-}
-
-fn export_open_todos_for_row_nums(
-    conn: &Connection,
-    branch_num: i64,
-    row_nums: &[i64],
-) -> Result<Vec<HistoryRecord>> {
-    let row_filter = sql_row_num_filter("todo", row_nums);
-    let mut stmt = conn.prepare(&format!(
-        "SELECT ids.row_id,
-                tx.tx_id,
-                h.op,
-                h.title,
-                h.done,
-                project_ids.row_id,
-                h.j_created_at,
-                h.j_updated_at,
-                h.j_created_by,
-                h.j_updated_by,
-                branch.branch_id
-         FROM todos__schema_v1_history h
-         JOIN jazz_row_id ids ON ids.row_num = h.row_num
-         JOIN jazz_row_id project_ids ON project_ids.row_num = h.project_row_num
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-         JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
-         WHERE h.row_num IN (
-           SELECT todo.row_num
-           FROM todos__schema_v1_current todo
-           JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
-           WHERE todo.is_deleted = 0
-             AND todo.done = 0
-             AND todo.j_branch_num = ?
-             AND todo_tx.outcome != ?
-             {row_filter}
-         )
-         ORDER BY h.row_num, h.tx_num",
-    ))?;
-    let mut query_params = vec![
-        rusqlite::types::Value::Integer(branch_num),
-        rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
-    ];
-    query_params.extend(
-        row_nums
-            .iter()
-            .copied()
-            .map(rusqlite::types::Value::Integer),
-    );
-    let records = stmt.query_map(params_from_iter(query_params.iter()), |row| {
-        let mut values = BTreeMap::new();
-        values.insert("title".to_owned(), JsonValue::String(row.get(3)?));
-        values.insert(
-            "done".to_owned(),
-            JsonValue::Bool(row.get::<_, i64>(4)? != 0),
-        );
-        values.insert("project".to_owned(), JsonValue::String(row.get(5)?));
-        Ok(HistoryRecord {
-            table: "todos".to_owned(),
-            row_id: row.get(0)?,
-            branch_id: row.get(10)?,
-            tx_id: row.get(1)?,
-            op: row.get(2)?,
-            values,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
-            created_by: row.get(8)?,
-            updated_by: row.get(9)?,
-        })
-    })?;
-    records
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn sql_row_num_filter(alias: &str, row_nums: &[i64]) -> String {
-    if row_nums.is_empty() {
-        String::new()
-    } else {
-        let placeholders = std::iter::repeat_n("?", row_nums.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("AND {alias}.row_num IN ({placeholders})")
-    }
 }
 
 fn export_table_history(
