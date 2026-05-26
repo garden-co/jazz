@@ -458,3 +458,13 @@ magic principals in tests.
 
 Follow-up green: trusted writes now also work through the generic transaction
 builder, bypassing user write policies without recording a rejected transaction.
+
+## 2026-05-25 17:42 PDT
+
+Generic rejection repair is green. `reject_transaction` now repairs current
+projection by iterating schema tables instead of deleting from hardcoded
+projects/todos current tables.
+
+Learning: transaction fate handling needs to stay schema-driven and branch-aware
+from the start. Fixture-specific repair paths are especially dangerous because
+they pass product-looking tests while silently breaking generic schemas.

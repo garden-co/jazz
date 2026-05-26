@@ -358,14 +358,15 @@ impl Runtime {
     pub fn reject_transaction(&mut self, tx_id: &str, code: &str) -> Result<()> {
         let db = self.conn.transaction()?;
         let tx_num = tx::reject(&db, tx_id, code)?;
-        db.execute(
-            "DELETE FROM todos__schema_v1_current WHERE visible_tx_num = ?",
-            params![tx_num],
-        )?;
-        db.execute(
-            "DELETE FROM projects__schema_v1_current WHERE visible_tx_num = ?",
-            params![tx_num],
-        )?;
+        for table in self.schema.tables() {
+            db.execute(
+                &format!(
+                    "DELETE FROM {} WHERE visible_tx_num = ?",
+                    crate::schema::current_table(&table.name)
+                ),
+                params![tx_num],
+            )?;
+        }
         db.commit()?;
         Ok(())
     }

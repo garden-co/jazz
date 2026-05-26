@@ -69,6 +69,35 @@ fn rejected_transaction_remains_history_but_is_hidden_from_current() {
 }
 
 #[test]
+fn rejecting_generic_transaction_repairs_schema_driven_projection() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Reject me")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    assert_eq!(alice.read_rows("notes").unwrap().len(), 1);
+
+    alice.reject_transaction(&tx, "policy_denied").unwrap();
+
+    assert!(alice.read_rows("notes").unwrap().is_empty());
+    let stats = alice.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 1);
+    assert_eq!(stats.current_rows, 0);
+    assert_eq!(stats.rejected_transactions, 1);
+}
+
+#[test]
 fn durable_nodes_survive_reopen_but_memory_nodes_start_empty() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("durable.sqlite");
