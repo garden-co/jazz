@@ -1437,3 +1437,18 @@ branch tombstones too.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 branch_delete_shadows_pinned_base_row` passes, including sync and projection
 rebuild.
+
+## 2026-05-25 19:25 PDT
+
+Starting explicit generic update operation. So far the generic write API is
+insert/upsert-shaped and delete-shaped; adding an explicit update op should
+make history semantics closer to the intended create/update/delete model.
+
+## 2026-05-25 19:25 PDT
+
+Explicit generic update is green. Added `update_row`, which records history op
+`2`, updates current projection, syncs through bundles, and preserves row-level
+write-set materialization.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+generic_update_records_update_op_and_syncs_current_value` passes.

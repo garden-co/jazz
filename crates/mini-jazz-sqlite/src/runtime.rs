@@ -161,6 +161,26 @@ impl Runtime {
         id: &str,
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
+        self.write_row(table_name, id, values, 1)
+    }
+
+    pub fn update_row(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        values: BTreeMap<String, JsonValue>,
+    ) -> Result<String> {
+        self.physical_row_num_for(id)?;
+        self.write_row(table_name, id, values, 2)
+    }
+
+    fn write_row(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        values: BTreeMap<String, JsonValue>,
+        op: i64,
+    ) -> Result<String> {
         let table = self.schema.table_def(table_name)?.clone();
         let write_policy = table.write_policy.clone();
         let db = self.conn.transaction()?;
@@ -177,6 +197,7 @@ impl Runtime {
             now,
             principal: &self.principal,
             trusted: self.trusted,
+            op,
         })?;
         let row_num = row_num(&db, id)?;
         let allowed = self.trusted
@@ -1050,6 +1071,7 @@ struct InsertRowInTx<'a> {
     now: i64,
     principal: &'a str,
     trusted: bool,
+    op: i64,
 }
 
 fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
@@ -1083,7 +1105,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
         rusqlite::types::Value::Integer(row_num),
         rusqlite::types::Value::Integer(args.tx_num),
         rusqlite::types::Value::Integer(args.branch_num),
-        rusqlite::types::Value::Integer(1),
+        rusqlite::types::Value::Integer(args.op),
     ];
 
     for field in &table.fields {
@@ -1118,7 +1140,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
         &columns,
         &sql_values,
     )?;
-    record_tx_write(args.db, args.tx_num, &table.name, row_num, 1)?;
+    record_tx_write(args.db, args.tx_num, &table.name, row_num, args.op)?;
 
     if allowed {
         let mut current_columns = vec![
@@ -1310,6 +1332,7 @@ impl<'a> TransactionBuilder<'a> {
                     now,
                     principal: &self.runtime.principal,
                     trusted: self.runtime.trusted,
+                    op: 1,
                 })?,
                 Mutation::Project { id, title } => {
                     insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?;

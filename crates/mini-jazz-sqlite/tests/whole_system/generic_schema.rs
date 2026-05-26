@@ -205,3 +205,51 @@ fn generic_equality_query_lowers_public_ref_ids_to_physical_row_ids() {
     assert_eq!(rows[0].id, "task-2");
     assert_eq!(rows[0].values["project"], json!("project-2"));
 }
+
+#[test]
+fn generic_update_records_update_op_and_syncs_current_value() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Original")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let update_tx = alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Updated")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice.export_table_history("notes").unwrap();
+    let update_record = bundle
+        .history
+        .iter()
+        .find(|record| record.tx_id == update_tx)
+        .unwrap();
+    assert_eq!(update_record.op, 2);
+    assert_eq!(update_record.values["body"], json!("Updated"));
+
+    peer.apply_bundle(&bundle).unwrap();
+    let rows = peer.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("Updated"));
+    assert_eq!(
+        peer.transaction_write_rows(&update_tx).unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned())]
+    );
+}
