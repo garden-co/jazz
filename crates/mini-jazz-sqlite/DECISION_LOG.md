@@ -853,3 +853,18 @@ confirmation that the branch/query integration is becoming operator-shaped
 rather than equality-shaped.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 210 whole-system tests.
+
+## 2026-05-26 03:31 PDT
+
+Locked in stale row-version validation for untrusted exclusive updates. A
+writer updates a row after observing version A, the authority advances the row
+to version B before receiving the writer's exclusive transaction, and authority
+acceptance rejects the writer transaction with `stale_read_set` while preserving
+the authority's newer current row.
+
+Discovery: row update read sets were already precise enough for this invariant;
+the missing piece was coverage. Together with absent-row and policy-read stale
+tests, exclusive validation now covers the three most important read-set shapes
+for untrusted acceptance.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 211 whole-system tests.

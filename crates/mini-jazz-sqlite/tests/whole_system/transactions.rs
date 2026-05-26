@@ -517,6 +517,70 @@ fn untrusted_exclusive_transaction_rejects_stale_policy_read_set() {
 }
 
 #[test]
+fn untrusted_exclusive_transaction_rejects_stale_row_update_read_set() {
+    let schema = support::notes_schema();
+    let mut authority =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
+    let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
+
+    let original_tx = authority
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Version 1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&original_tx, 1)
+        .unwrap();
+    writer
+        .apply_bundle(&authority.export_table_history("notes").unwrap())
+        .unwrap();
+
+    let update_tx = writer
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("Writer stale update"))]),
+        )
+        .unwrap();
+    let mut stale_bundle = writer.export_table_history("notes").unwrap();
+    let read = stale_bundle
+        .reads
+        .iter()
+        .find(|read| read.tx_id == update_tx && read.table == "notes" && read.row_id == "note-1")
+        .expect("update should record previous row read");
+    assert_eq!(read.observed_tx_id.as_deref(), Some(original_tx.as_str()));
+    stale_bundle
+        .txs
+        .iter_mut()
+        .find(|tx| tx.tx_id == update_tx)
+        .unwrap()
+        .conflict_mode = 2;
+
+    authority
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("Version 2"))]),
+        )
+        .unwrap();
+
+    authority.apply_untrusted_bundle(&stale_bundle).unwrap();
+
+    let info = authority.transaction_info(&update_tx).unwrap();
+    assert_eq!(info.conflict_mode, "exclusive");
+    assert_eq!(info.rejection_code, Some("stale_read_set".to_owned()));
+    let rows = authority.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("Version 2"));
+}
+
+#[test]
 fn untrusted_exclusive_transaction_rejects_stale_absent_row_read_set() {
     let schema = support::notes_schema();
     let mut authority =
