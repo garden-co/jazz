@@ -2,6 +2,10 @@ import { SubscriptionManager, type SubscriptionDelta } from "./runtime/subscript
 import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { Session } from "./runtime/context.js";
 
+export type QuerySubscriptionOptions = QueryOptions & {
+  branch?: string;
+};
+
 type UseAllStatePending<T> = {
   status: "pending";
   data: undefined;
@@ -15,7 +19,7 @@ type UseAllStatefulfilledData<T> = {
   error: null;
 };
 
-type UseAllStateError<T> = {
+type UseAllStateError = {
   status: "rejected";
   data: undefined;
   error: unknown;
@@ -24,7 +28,7 @@ type UseAllStateError<T> = {
 export type UseAllState<T extends { id: string }> =
   | UseAllStatePending<T>
   | UseAllStatefulfilledData<T>
-  | UseAllStateError<T>;
+  | UseAllStateError;
 
 export type QueryEntryCallbacks<T extends { id: string }> = {
   onfulfilled?: (data: T[]) => void;
@@ -123,6 +127,7 @@ export function makeDeferred<T>(snapshot?: {
 interface QueryDefinition<T extends { id: string }> {
   query: QueryBuilder<T>;
   options?: QueryOptions;
+  branch?: string;
   snapshot?: T[];
 }
 
@@ -130,6 +135,7 @@ interface InternalCacheEntry<T extends { id: string }> {
   key: string;
   query: QueryBuilder<T>;
   options?: QueryOptions;
+  branch?: string;
   state: UseAllState<T>;
   promise: TrackedPromise<T[]>;
   resolvefulfilled: (data: T[]) => void;
@@ -150,6 +156,7 @@ interface DbLike {
     options?: QueryOptions,
     session?: Session,
   ): () => void;
+  branch(branchId: string): DbLike;
 }
 
 export class SubscriptionsOrchestrator {
@@ -190,13 +197,18 @@ export class SubscriptionsOrchestrator {
 
   makeQueryKey<T extends { id: string }>(
     query: QueryBuilder<T>,
-    options?: QueryOptions,
+    options?: QuerySubscriptionOptions,
     snapshot?: T[],
   ): string {
-    const key = `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
+    const { branch, options: queryOptions } = splitQuerySubscriptionOptions(options);
+    const key = `${this.config.appId}:${serializeQuerySubscriptionOptions(
+      branch,
+      queryOptions,
+    )}:${query._build()}`;
     this.queryDefinitions.set(key, {
       query,
-      options,
+      options: queryOptions,
+      branch,
       snapshot: snapshot ? [...snapshot] : undefined,
     });
 
@@ -239,6 +251,7 @@ export class SubscriptionsOrchestrator {
       key,
       query: queryDef.query,
       options: queryDef.options,
+      branch: queryDef.branch,
       state: initialState,
       promise: deferred,
       resolvefulfilled: (data) => {
@@ -321,7 +334,8 @@ export class SubscriptionsOrchestrator {
         entry.subscriptionManager = new SubscriptionManager<T>();
       }
 
-      entry.unsubscribe = this.db.subscribeAll<T>(
+      const db = entry.branch ? this.db.branch(entry.branch) : this.db;
+      entry.unsubscribe = db.subscribeAll<T>(
         entry.query,
         (delta) => {
           const wasPending = entry.state.status === "pending";
@@ -384,4 +398,28 @@ function serializeQueryOptions(options?: QueryOptions): string {
   }
 
   return JSON.stringify(options);
+}
+
+function splitQuerySubscriptionOptions(options?: QuerySubscriptionOptions): {
+  branch?: string;
+  options?: QueryOptions;
+} {
+  if (!options) {
+    return {};
+  }
+  const { branch, ...queryOptions } = options;
+  return {
+    ...(branch ? { branch } : {}),
+    options: Object.keys(queryOptions).length > 0 ? queryOptions : undefined,
+  };
+}
+
+function serializeQuerySubscriptionOptions(branch?: string, options?: QueryOptions): string {
+  if (!branch) {
+    return serializeQueryOptions(options);
+  }
+  return JSON.stringify({
+    ...options,
+    branch,
+  });
 }

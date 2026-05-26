@@ -34,6 +34,12 @@ const map: Record<ScalarSqlType, ColumnType> = {
   BYTEA: { type: "Bytea" },
 };
 
+type DslOperationPolicy =
+  | DslTablePolicies["select"]
+  | DslTablePolicies["insert"]
+  | DslTablePolicies["update"]
+  | DslTablePolicies["delete"];
+
 /**
  * Convert a DSL SqlType to WasmColumnType format.
  */
@@ -199,9 +205,7 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
   }
 }
 
-function cloneOperationPolicy(
-  policy: DslTablePolicies[keyof DslTablePolicies],
-): TablePolicies["select"] {
+function cloneOperationPolicy(policy: DslOperationPolicy): TablePolicies["select"] {
   const out: TablePolicies["select"] = {};
   if (!policy) {
     return out;
@@ -216,12 +220,21 @@ function cloneOperationPolicy(
 }
 
 function clonePolicies(policies: DslTablePolicies): TablePolicies {
-  return {
+  const out: TablePolicies = {
     select: cloneOperationPolicy(policies.select),
     insert: cloneOperationPolicy(policies.insert),
     update: cloneOperationPolicy(policies.update),
     delete: cloneOperationPolicy(policies.delete),
   };
+  if (policies.for_branch) {
+    out.for_branch = Object.fromEntries(
+      Object.entries(policies.for_branch).map(([backingTable, branchPolicies]) => [
+        backingTable,
+        clonePolicies(branchPolicies),
+      ]),
+    );
+  }
+  return out;
 }
 
 /**

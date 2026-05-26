@@ -202,6 +202,12 @@ export interface QueryBuilder<T> {
 
 export type QueryOptions = QueryExecutionOptions;
 
+const DB_BRANCH_SCOPE = Symbol("JazzDbBranchScope");
+
+type BranchScopedDb = Db & {
+  [DB_BRANCH_SCOPE]?: string;
+};
+
 type DbRuntimeOperationContext = {
   session?: Session;
   attribution?: string;
@@ -212,7 +218,33 @@ function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
 }
 
 function queryUsesRelationTraversal(builtQuery: NormalizedBuiltQuery): boolean {
-  return builtQuery.hops.length > 0 || builtQuery.gather !== undefined;
+  return (
+    builtQuery.hops.length > 0 || builtQuery.gather !== undefined || builtQuery.union !== undefined
+  );
+}
+
+function withDefaultQueryBranch(queryJson: string, defaultBranchId: string | null): string {
+  if (!defaultBranchId) {
+    return queryJson;
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(queryJson) as Record<string, unknown>;
+  } catch {
+    return queryJson;
+  }
+
+  const branches = parsed.branches;
+  if (
+    Array.isArray(branches) &&
+    branches.some((branch): branch is string => typeof branch === "string")
+  ) {
+    return queryJson;
+  }
+
+  parsed.branches = [defaultBranchId];
+  return JSON.stringify(parsed);
 }
 
 export interface ActiveQuerySubscriptionTrace {
@@ -333,6 +365,10 @@ function resolveBuiltQueryOutputTable(
   schema: WasmSchema,
   builtQuery: ReturnType<typeof normalizeBuiltQuery>,
 ): string {
+  if (builtQuery.union) {
+    return resolveBuiltRelationOutputTable(schema, { union: builtQuery.union });
+  }
+
   if (builtQuery.gather?.seed) {
     const gatherTable = resolveBuiltRelationOutputTable(schema, builtQuery.gather.seed);
     return builtQuery.hops.length > 0
@@ -546,6 +582,8 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     private readonly bindingName: "DbTransaction" | "DbDirectBatch",
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
     private readonly beginRuntimeHandle: (client: JazzClient) => TRuntimeHandle,
+    private readonly resolveDefaultRuntimeBranch: (client: JazzClient) => string | null,
+    private readonly resolveDefaultQueryBranch: () => string | null,
   ) {}
 
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbBatchHandleBinding {
@@ -659,7 +697,9 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const rows = await runtimeHandle.query(translateQuery(builderJson, planningSchema), options);
+    const translatedQuery = translateQuery(builderJson, planningSchema);
+    const wasmQuery = withDefaultQueryBranch(translatedQuery, this.resolveDefaultQueryBranch());
+    const rows = await runtimeHandle.query(wasmQuery, options);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -695,8 +735,16 @@ export class DbTransaction extends DbBatchHandleBase<RuntimeTransaction> {
   constructor(
     resolveClient: (schema: WasmSchema) => JazzClient,
     beginRuntimeTransaction: (client: JazzClient) => RuntimeTransaction,
+    resolveDefaultRuntimeBranch: (client: JazzClient) => string | null,
+    resolveDefaultQueryBranch: () => string | null,
   ) {
-    super("DbTransaction", resolveClient, beginRuntimeTransaction);
+    super(
+      "DbTransaction",
+      resolveClient,
+      beginRuntimeTransaction,
+      resolveDefaultRuntimeBranch,
+      resolveDefaultQueryBranch,
+    );
   }
 }
 
@@ -713,8 +761,16 @@ export class DbDirectBatch extends DbBatchHandleBase<RuntimeDirectBatch> {
   constructor(
     resolveClient: (schema: WasmSchema) => JazzClient,
     beginRuntimeBatch: (client: JazzClient) => RuntimeDirectBatch,
+    resolveDefaultRuntimeBranch: (client: JazzClient) => string | null,
+    resolveDefaultQueryBranch: () => string | null,
   ) {
-    super("DbDirectBatch", resolveClient, beginRuntimeBatch);
+    super(
+      "DbDirectBatch",
+      resolveClient,
+      beginRuntimeBatch,
+      resolveDefaultRuntimeBranch,
+      resolveDefaultQueryBranch,
+    );
   }
 }
 
@@ -1045,6 +1101,30 @@ export class Db {
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
     return null;
+  }
+
+  /** @internal */
+  getClientForBranchView(schema: WasmSchema): JazzClient {
+    return this.getClient(schema);
+  }
+
+  /** @internal */
+  getRuntimeOperationContextForBranchView(): DbRuntimeOperationContext | null {
+    return this.getRuntimeOperationContext();
+  }
+
+  /** @internal */
+  async ensureBranchViewQueryReady(options?: QueryOptions): Promise<void> {
+    await this.ensureQueryReady(options);
+  }
+
+  protected resolveDefaultRuntimeBranch(_client: JazzClient): string | null {
+    const branchId = (this as BranchScopedDb)[DB_BRANCH_SCOPE];
+    return branchId ? _client.branchNameForBranchId(branchId) : null;
+  }
+
+  protected resolveDefaultQueryBranch(): string | null {
+    return (this as BranchScopedDb)[DB_BRANCH_SCOPE] ?? null;
   }
 
   /**
@@ -1617,6 +1697,21 @@ export class Db {
     return structuredClone(this.config);
   }
 
+  branch(branchId: string): Db {
+    const scopedDb = Object.create(this) as BranchScopedDb;
+    Object.defineProperty(scopedDb, DB_BRANCH_SCOPE, {
+      value: branchId,
+      enumerable: false,
+      configurable: true,
+    });
+    Object.defineProperty(scopedDb, "shutdown", {
+      value: async () => undefined,
+      enumerable: false,
+      configurable: true,
+    });
+    return scopedDb;
+  }
+
   setDevMode(enabled: boolean): void {
     this.config.devMode = enabled;
   }
@@ -1657,6 +1752,17 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
+    const branchName = this.resolveDefaultRuntimeBranch(client);
+    if (branchName) {
+      const batch = context
+        ? client.beginBatchInternal(context.session, context.attribution, branchName)
+        : client.beginBatchInternal(undefined, undefined, branchName);
+      const row = batch.create(table._table, values, options);
+      const handle = batch.commit();
+      return new WriteResult(row, handle.batchId, client).mapValue((createdRow) =>
+        transformOutputRow(table, transformRow(createdRow, table._schema, table._table)),
+      );
+    }
     const inserted = context
       ? client.createHandleInternal(
           table._table,
@@ -1685,6 +1791,14 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const values = toUpdateRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
+    const branchName = this.resolveDefaultRuntimeBranch(client);
+    if (branchName) {
+      const batch = context
+        ? client.beginBatchInternal(context.session, context.attribution, branchName)
+        : client.beginBatchInternal(undefined, undefined, branchName);
+      batch.upsert(table._table, values, options);
+      return batch.commit();
+    }
     return context
       ? client.upsertHandleInternal(
           table._table,
@@ -1712,6 +1826,14 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const updates = toUpdateRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
+    const branchName = this.resolveDefaultRuntimeBranch(client);
+    if (branchName) {
+      const batch = context
+        ? client.beginBatchInternal(context.session, context.attribution, branchName)
+        : client.beginBatchInternal(undefined, undefined, branchName);
+      batch.update(id, updates, options?.updatedAt);
+      return batch.commit();
+    }
     return context
       ? client.updateHandleInternal(
           id,
@@ -1732,6 +1854,14 @@ export class Db {
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
+    const branchName = this.resolveDefaultRuntimeBranch(client);
+    if (branchName) {
+      const batch = context
+        ? client.beginBatchInternal(context.session, context.attribution, branchName)
+        : client.beginBatchInternal(undefined, undefined, branchName);
+      batch.delete(id);
+      return batch.commit();
+    }
     return context
       ? client.deleteHandleInternal(id, context.session, context.attribution)
       : client.delete(id);
@@ -1750,7 +1880,14 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbTransaction(
       (schema) => this.getClient(schema),
-      (client) => client.beginTransactionInternal(context?.session, context?.attribution),
+      (client) => {
+        const branchName = this.resolveDefaultRuntimeBranch(client);
+        return branchName
+          ? client.beginTransactionInternal(context?.session, context?.attribution, branchName)
+          : client.beginTransactionInternal(context?.session, context?.attribution);
+      },
+      (client) => this.resolveDefaultRuntimeBranch(client),
+      () => this.resolveDefaultQueryBranch(),
     );
   }
 
@@ -1789,7 +1926,14 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbDirectBatch(
       (schema) => this.getClient(schema),
-      (client) => client.beginBatchInternal(context?.session, context?.attribution),
+      (client) => {
+        const branchName = this.resolveDefaultRuntimeBranch(client);
+        return branchName
+          ? client.beginBatchInternal(context?.session, context?.attribution, branchName)
+          : client.beginBatchInternal(context?.session, context?.attribution);
+      },
+      (client) => this.resolveDefaultRuntimeBranch(client),
+      () => this.resolveDefaultQueryBranch(),
     );
   }
 
@@ -1894,7 +2038,8 @@ export class Db {
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
     await this.ensureQueryReady(queryOptions);
-    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const translatedQuery = translateQuery(builderJson, planningSchema);
+    const wasmQuery = withDefaultQueryBranch(translatedQuery, this.resolveDefaultQueryBranch());
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const runtimeQueryOptions = usesRelationTraversal
       ? { ...queryOptions, runtimeSettledTier: null }
@@ -2036,7 +2181,8 @@ export class Db {
       outputIncludes,
       builtQuery.select,
     );
-    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const translatedQuery = translateQuery(builderJson, planningSchema);
+    const wasmQuery = withDefaultQueryBranch(translatedQuery, this.resolveDefaultQueryBranch());
 
     const transform = (row: WasmRow): T =>
       transformOutputRow(

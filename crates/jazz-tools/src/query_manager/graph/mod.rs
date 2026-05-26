@@ -179,6 +179,19 @@ impl QueryGraph {
         self.nodes.get_mut(id.0 as usize).map(|c| &mut c.node)
     }
 
+    pub(crate) fn scan_branches(&self) -> Vec<String> {
+        let mut branches = Vec::new();
+        for compact in &self.nodes {
+            let GraphNode::IndexScan(scan) = &compact.node else {
+                continue;
+            };
+            if !branches.iter().any(|branch| branch == &scan.branch) {
+                branches.push(scan.branch.clone());
+            }
+        }
+        branches
+    }
+
     /// Get input edges for a node.
     pub(super) fn get_inputs(&self, id: NodeId) -> &[NodeId] {
         &self.nodes[id.0 as usize].inputs

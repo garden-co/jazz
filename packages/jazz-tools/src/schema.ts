@@ -100,6 +100,11 @@ export type PolicyValue =
   | {
       type: "SessionRef";
       path: string[];
+    }
+  | {
+      type: "BranchRef";
+      column: string;
+      value?: never;
     };
 
 export type PolicyLiteralValue = Extract<PolicyValue, { type: "Literal" }>;
@@ -204,11 +209,14 @@ export interface OperationPolicy {
   with_check?: PolicyExpr;
 }
 
+export type BranchTablePolicies = Record<string, TablePolicies>;
+
 export interface TablePolicies {
   select?: OperationPolicy;
   insert?: OperationPolicy;
   update?: OperationPolicy;
   delete?: OperationPolicy;
+  for_branch?: BranchTablePolicies;
 }
 
 export interface Table {

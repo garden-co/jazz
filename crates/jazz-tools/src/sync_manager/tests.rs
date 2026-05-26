@@ -22,6 +22,14 @@ fn users_schema_hash() -> SchemaHash {
     SchemaHash::compute(&users_test_schema())
 }
 
+#[test]
+fn dev_server_migration_create_console_call_names_global_runner() {
+    assert_eq!(
+        dev_server_migration_create_console_call(),
+        "runJazzMigrations()"
+    );
+}
+
 fn seed_users_schema(storage: &mut MemoryStorage) {
     persist_test_schema(storage, &users_test_schema());
 }

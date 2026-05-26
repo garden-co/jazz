@@ -398,6 +398,11 @@ impl ComposedBranchName {
         })
     }
 
+    pub fn parse_non_main(name: &BranchName) -> Option<Self> {
+        let composed = Self::parse(name)?;
+        (composed.user_branch != "main").then_some(composed)
+    }
+
     /// Check if this branch matches an environment and user branch,
     /// ignoring the schema hash (for finding related branches).
     pub fn matches_env_and_branch(&self, env: &str, user_branch: &str) -> bool {

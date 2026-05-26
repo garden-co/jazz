@@ -8,6 +8,7 @@ export type RelRowIdRef = "Current" | "Outer" | "Frontier";
 export type RelValueRef =
   | { Literal: unknown }
   | { SessionRef: string[] }
+  | { BranchRef: string }
   | { OuterColumn: RelColumnRef }
   | { FrontierColumn: RelColumnRef }
   | { RowId: RelRowIdRef };
@@ -57,6 +58,7 @@ export type RelOrderByExpr = {
 
 export type RelExpr =
   | { TableScan: { table: string } }
+  | { Branch: { input: RelExpr; branches: string[] } }
   | { Filter: { input: RelExpr; predicate: RelPredicateExpr } }
   | { Union: { inputs: RelExpr[] } }
   | { Join: { left: RelExpr; right: RelExpr; on: RelJoinCondition[]; join_kind: RelJoinKind } }

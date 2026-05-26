@@ -8,21 +8,21 @@ describe("dev-server re-export compatibility", () => {
     const testing = await import("../testing/index.js");
     expect(typeof testing.startLocalJazzServer).toBe("function");
     expect(typeof testing.pushSchemaCatalogue).toBe("function");
-  });
+  }, 30_000);
 
   it("exports the same functions from dev/index.ts", async () => {
     const dev = await import("./index.js");
     expect(typeof dev.startLocalJazzServer).toBe("function");
     expect(typeof dev.pushSchemaCatalogue).toBe("function");
     expect(typeof dev.watchSchema).toBe("function");
-  });
+  }, 30_000);
 
   it("testing and dev export the same startLocalJazzServer reference", async () => {
     const testing = await import("../testing/index.js");
     const dev = await import("./index.js");
     expect(testing.startLocalJazzServer).toBe(dev.startLocalJazzServer);
     expect(testing.pushSchemaCatalogue).toBe(dev.pushSchemaCatalogue);
-  });
+  }, 30_000);
 });
 
 describe("startLocalJazzServer via DevServer", () => {

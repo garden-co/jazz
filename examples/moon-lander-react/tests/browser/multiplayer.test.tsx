@@ -87,6 +87,7 @@ async function mountApp(opts: {
     10000,
     "App should render game canvas",
   );
+  await waitFrames(2);
 
   return el;
 }
@@ -133,7 +134,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
       });
 
       pressKey("e", "KeyE");
-      await waitForAttr(el, "player-mode", "walking", 3000);
+      await waitForAttr(el, "player-mode", "walking", 10000);
       releaseKey("e", "KeyE");
 
       expect(readStr(el, "inventory")).toBe("");

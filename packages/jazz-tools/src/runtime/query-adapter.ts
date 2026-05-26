@@ -723,7 +723,23 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
   let relation: RelExpr;
   let relationTable: string;
 
-  if (builder.gather?.seed) {
+  if (builder.union) {
+    const translated = translateBuiltRelationToRelExpr(
+      {
+        union: builder.union,
+      },
+      relations,
+      schema,
+    );
+    relation = translated.expr;
+    relationTable = translated.outputTable;
+    relation = applyFilter(
+      relation,
+      conditionsToRelPredicate(builder.conditions, schema, relationTable, relationTable),
+    );
+    relation = lowerHopsToRelExpr(relation, relationTable, hops, relations, schema);
+    relationTable = resolveHopsOutputTable(relationTable, hops, relations);
+  } else if (builder.gather?.seed) {
     const seed = translateBuiltRelationToRelExpr(builder.gather.seed, relations, schema);
     relation = gatherToRelExpr(builder.gather, seed.outputTable, seed.expr, relations, schema);
     relationTable = seed.outputTable;

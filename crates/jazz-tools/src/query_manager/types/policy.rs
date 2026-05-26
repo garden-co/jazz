@@ -1,5 +1,6 @@
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RowPolicyMode {
@@ -12,6 +13,12 @@ impl RowPolicyMode {
     pub fn denies_missing_explicit_policy(self) -> bool {
         matches!(self, Self::Enforcing)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PermissionPhase {
+    Using,
+    Check,
 }
 
 /// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).
@@ -62,6 +69,7 @@ pub struct TablePolicies {
     pub insert: OperationPolicy,
     pub update: OperationPolicy,
     pub delete: OperationPolicy,
+    pub for_branch: HashMap<TableName, TablePolicies>,
 }
 
 impl TablePolicies {
@@ -113,6 +121,10 @@ impl TablePolicies {
             || self.update.using.is_some()
             || self.update.with_check.is_some()
             || self.delete.using.is_some()
+            || self
+                .for_branch
+                .values()
+                .any(TablePolicies::has_any_explicit_policy)
     }
 
     pub fn select_policy(&self) -> Option<&PolicyExpr> {
@@ -133,5 +145,19 @@ impl TablePolicies {
 
     pub fn has_explicit_update_policy(&self) -> bool {
         self.update.using.is_some() || self.update.with_check.is_some()
+    }
+
+    pub(crate) fn policy_for_operation(
+        &self,
+        operation: Operation,
+        phase: PermissionPhase,
+    ) -> Option<&PolicyExpr> {
+        match (operation, phase) {
+            (Operation::Select, _) => self.select_policy(),
+            (Operation::Insert, _) => self.insert_policy(),
+            (Operation::Update, PermissionPhase::Using) => self.update_using_policy(),
+            (Operation::Update, PermissionPhase::Check) => self.update_check_policy(),
+            (Operation::Delete, _) => self.effective_delete_using(),
+        }
     }
 }

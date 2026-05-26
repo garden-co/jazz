@@ -348,7 +348,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     fn query_with_overlay_rows(
         &mut self,
-        query: Query,
+        mut query: Query,
         session: Option<Session>,
         durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
@@ -362,6 +362,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         )
         .entered();
         let (sender, receiver) = oneshot::channel();
+        query.compose_logical_branches_for_context(
+            self.schema_manager.query_manager().schema_context(),
+        );
 
         let sub_id = match self
             .schema_manager

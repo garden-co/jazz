@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::object::ObjectId;
 use crate::query_manager::policy::{
-    Operation, PolicyExpr, bind_outer_row_refs, bind_relation_refs,
-    evaluate_expr_recursive_with_row_id, normalize_recursive_max_depth,
+    BranchPolicyContext, Operation, PolicyExpr, bind_branch_refs, bind_outer_row_refs,
+    bind_relation_refs, evaluate_expr_recursive_with_context, normalize_recursive_max_depth,
 };
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
@@ -21,6 +21,7 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     session: &'a Session,
     branch: &'a str,
     row_policy_mode: RowPolicyMode,
+    branch_context: Option<&'a BranchPolicyContext<'a>>,
     settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
 }
 
@@ -36,8 +37,17 @@ impl<'a> PolicyContextEvaluator<'a> {
             session,
             branch,
             row_policy_mode,
+            branch_context: None,
             settlement_eval_cache: None,
         }
+    }
+
+    pub(crate) fn with_branch_context(
+        mut self,
+        branch_context: &'a BranchPolicyContext<'a>,
+    ) -> Self {
+        self.branch_context = Some(branch_context);
+        self
     }
 
     pub(crate) fn with_settlement_eval_cache(
@@ -307,13 +317,14 @@ impl<'a> PolicyContextEvaluator<'a> {
                 visited,
                 visited_referencing,
             ),
-            _ => evaluate_expr_recursive_with_row_id(
+            _ => evaluate_expr_recursive_with_context(
                 expr,
                 &row.data,
                 &row.provenance,
                 descriptor,
                 self.session,
                 Some(row.id),
+                self.branch_context,
                 depth,
             ),
         }
@@ -466,6 +477,14 @@ impl<'a> PolicyContextEvaluator<'a> {
                 Some(expr) => expr,
                 None => return false,
             };
+        let bound_condition = if let Some(branch_context) = self.branch_context {
+            match bind_branch_refs(&bound_condition, branch_context) {
+                Some(expr) => expr,
+                None => return false,
+            }
+        } else {
+            bound_condition
+        };
 
         let table_name = TableName::new(table);
         let mut graph = match PolicyGraph::for_exists(
@@ -510,11 +529,17 @@ impl<'a> PolicyContextEvaluator<'a> {
             return false;
         }
 
-        let bound_rel =
-            match bind_relation_refs(rel, &row.data, descriptor, self.session, Some(row.id)) {
-                Some(expr) => expr,
-                None => return false,
-            };
+        let bound_rel = match bind_relation_refs(
+            rel,
+            &row.data,
+            descriptor,
+            self.session,
+            Some(row.id),
+            self.branch_context,
+        ) {
+            Some(expr) => expr,
+            None => return false,
+        };
 
         let current_table = TableName::new(table_name);
         let mut graph = match PolicyGraph::for_exists_rel(
@@ -615,6 +640,7 @@ fn collect_relation_tables(rel: &RelExpr, tables: &mut HashSet<String>) {
             }
         }
         RelExpr::Filter { input, .. }
+        | RelExpr::Branch { input, .. }
         | RelExpr::Project { input, .. }
         | RelExpr::Distinct { input, .. }
         | RelExpr::OrderBy { input, .. }

@@ -1,1 +1,1 @@
-export { useAll, useAllSuspense } from "../react-core/use-all.js";
+export { useAll, useAllSuspense, type UseAllQueryOptions } from "../react-core/use-all.js";

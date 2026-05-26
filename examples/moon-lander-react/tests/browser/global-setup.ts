@@ -11,7 +11,6 @@ import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
 const TEST_PORT = parseInt(process.env.TEST_PORT!, 10);
 const ADMIN_SECRET = "test-admin-secret-for-moon-lander-tests";
 const APP_ID = "00000000-0000-0000-0000-000000000003";
-const APP_ID_MULTI = "00000000-0000-0000-0000-000000000004";
 
 let server: Promise<TestingServer> | null = null;
 
@@ -33,14 +32,6 @@ export async function setup(): Promise<void> {
   await pushSchemaCatalogue({
     serverUrl: handle.url,
     appId: APP_ID,
-    adminSecret: ADMIN_SECRET,
-    schemaDir,
-  });
-  // Register schema for the isolated multi-player namespace so test 837
-  // starts with an empty event history (no stream connect timeout).
-  await pushSchemaCatalogue({
-    serverUrl: handle.url,
-    appId: APP_ID_MULTI,
     adminSecret: ADMIN_SECRET,
     schemaDir,
   });

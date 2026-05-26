@@ -1689,6 +1689,65 @@ fn contributing_ids_for_array_subquery_include_inner_rows() {
 }
 
 #[test]
+// Array include branch materialization:
+//
+//   users on main branch
+//          |
+//          v
+//   include posts from draft branch
+//
+//   Row location                 Expected result
+//   ---------------------------  ------------------------
+//   users[Alice] on main         outer row is visible
+//   posts[Draft post] on draft   nested array has 1 row
+fn subscription_array_subquery_materializes_rows_from_explicit_inner_branch() {
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let draft_branch = get_branch_for_user_branch(&qm, "draft");
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert_on_branch(
+        &mut storage,
+        "posts",
+        &draft_branch,
+        &[
+            Value::Integer(100),
+            Value::Text("Draft post".into()),
+            Value::Integer(1),
+        ],
+        None,
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts")
+                .branch(&draft_branch)
+                .correlate("author_id", "users.id")
+        })
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 1, "outer main row should remain visible");
+    let posts = results[0].1[2].as_array().expect("posts array");
+    assert_eq!(
+        posts.len(),
+        1,
+        "array subquery should materialize rows from its explicit branch"
+    );
+}
+
+#[test]
 fn e2e_client_receives_array_subquery_server_data_via_subscription() {
     use crate::sync_manager::{ClientId, ServerId};
     use uuid::Uuid;

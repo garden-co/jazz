@@ -285,6 +285,225 @@ fn transactional_insert_uses_frozen_target_branch_schema() {
 }
 
 #[test]
+fn transactional_insert_preserves_same_schema_target_user_branch() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("email", ColumnType::Text),
+        )
+        .build();
+
+    let mut manager =
+        SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+    let mut storage = MemoryStorage::new();
+    let main_branch = manager.branch_name().as_str().to_string();
+    let target_branch = crate::query_manager::types::ComposedBranchName::new(
+        "dev",
+        manager.current_hash(),
+        "branch-row-1",
+    )
+    .to_branch_name()
+    .as_str()
+    .to_string();
+
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+        .with_target_branch_name(target_branch.clone());
+
+    let inserted = manager
+        .insert(
+            &mut storage,
+            "users",
+            HashMap::from([
+                ("id".to_string(), Value::Uuid(ObjectId::new())),
+                (
+                    "email".to_string(),
+                    Value::Text("alice@example.com".to_string()),
+                ),
+            ]),
+            None,
+            Some(&write_context),
+        )
+        .expect("same-schema target branch should be accepted");
+
+    let target_rows = execute_query_with_local_overlay(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users")
+            .branch(target_branch.clone())
+            .build(),
+        inserted.row_id,
+        &target_branch,
+        inserted.batch_id,
+    );
+    assert_eq!(target_rows.len(), 1);
+    assert_eq!(target_rows[0].0, inserted.row_id);
+
+    let main_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users").branch(main_branch).build(),
+    );
+    assert!(
+        main_rows.is_empty(),
+        "same-schema target branch writes should not be canonicalized back to main"
+    );
+}
+
+#[test]
+fn update_preserves_same_schema_target_user_branch() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("email", ColumnType::Text),
+        )
+        .build();
+
+    let mut manager =
+        SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+    let mut storage = MemoryStorage::new();
+    let main_branch = manager.branch_name().as_str().to_string();
+    let target_branch = crate::query_manager::types::ComposedBranchName::new(
+        "dev",
+        manager.current_hash(),
+        "branch-row-1",
+    )
+    .to_branch_name()
+    .as_str()
+    .to_string();
+    let write_context = WriteContext::default().with_target_branch_name(target_branch.clone());
+    let column_id = ObjectId::new();
+
+    let inserted = manager
+        .insert(
+            &mut storage,
+            "users",
+            HashMap::from([
+                ("id".to_string(), Value::Uuid(column_id)),
+                (
+                    "email".to_string(),
+                    Value::Text("alice@example.com".to_string()),
+                ),
+            ]),
+            None,
+            Some(&write_context),
+        )
+        .expect("same-schema target branch insert should succeed");
+
+    manager
+        .update(
+            &mut storage,
+            inserted.row_id,
+            &[(
+                "email".to_string(),
+                Value::Text("alice+branch@example.com".to_string()),
+            )],
+            Some(&write_context),
+        )
+        .expect("same-schema target branch update should find the branch row");
+
+    let target_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users").branch(target_branch).build(),
+    );
+    assert_eq!(target_rows.len(), 1);
+    assert_eq!(target_rows[0].0, inserted.row_id);
+    assert_eq!(
+        target_rows[0].1,
+        vec![
+            Value::Uuid(column_id),
+            Value::Text("alice+branch@example.com".to_string()),
+        ]
+    );
+
+    let main_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users").branch(main_branch).build(),
+    );
+    assert!(
+        main_rows.is_empty(),
+        "same-schema target branch update should not write to main"
+    );
+}
+
+#[test]
+fn delete_preserves_same_schema_target_user_branch() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("email", ColumnType::Text),
+        )
+        .build();
+
+    let mut manager =
+        SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+    let mut storage = MemoryStorage::new();
+    let main_branch = manager.branch_name().as_str().to_string();
+    let target_branch = crate::query_manager::types::ComposedBranchName::new(
+        "dev",
+        manager.current_hash(),
+        "branch-row-1",
+    )
+    .to_branch_name()
+    .as_str()
+    .to_string();
+    let write_context = WriteContext::default().with_target_branch_name(target_branch.clone());
+
+    let inserted = manager
+        .insert(
+            &mut storage,
+            "users",
+            HashMap::from([
+                ("id".to_string(), Value::Uuid(ObjectId::new())),
+                (
+                    "email".to_string(),
+                    Value::Text("alice@example.com".to_string()),
+                ),
+            ]),
+            None,
+            Some(&write_context),
+        )
+        .expect("same-schema target branch insert should succeed");
+
+    manager
+        .delete(&mut storage, inserted.row_id, Some(&write_context))
+        .expect("same-schema target branch delete should find the branch row");
+
+    let target_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users")
+            .branch(target_branch.clone())
+            .build(),
+    );
+    assert!(
+        target_rows.is_empty(),
+        "same-schema target branch delete should hide the branch row"
+    );
+    assert!(manager.query_manager().row_is_deleted_on_branch(
+        &storage,
+        "users",
+        &target_branch,
+        inserted.row_id
+    ));
+
+    let main_rows = execute_query(
+        &mut manager,
+        &mut storage,
+        QueryBuilder::new("users").branch(main_branch).build(),
+    );
+    assert!(
+        main_rows.is_empty(),
+        "same-schema target branch delete should not write to main"
+    );
+}
+
+#[test]
 fn transactional_insert_rejects_target_branch_outside_current_family() {
     let schema = SchemaBuilder::new()
         .table(

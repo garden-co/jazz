@@ -19,7 +19,7 @@ use super::lens::{LensOp, LensTransform};
 /// Current encoding version.
 const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V6 as u8;
 const LENS_VERSION: u8 = 2;
-const PERMISSIONS_VERSION: u8 = 1;
+const PERMISSIONS_VERSION: u8 = 2;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
 const PERMISSIONS_HEAD_VERSION: u8 = 2;
 
@@ -1004,12 +1004,26 @@ const POLICY_EXPR_SESSION_IN_LIST: u8 = 21;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
+const POLICY_VALUE_BRANCH_REF: u8 = 3;
 
 fn encode_table_policies(buf: &mut Vec<u8>, policies: &TablePolicies) {
     encode_operation_policy(buf, &policies.select);
     encode_operation_policy(buf, &policies.insert);
     encode_operation_policy(buf, &policies.update);
     encode_operation_policy(buf, &policies.delete);
+}
+
+fn encode_permissions_table_policies(buf: &mut Vec<u8>, policies: &TablePolicies) {
+    encode_table_policies(buf, policies);
+
+    let mut entries: Vec<_> = policies.for_branch.iter().collect();
+    entries.sort_by_key(|(name, _)| name.as_str());
+    write_u32(buf, entries.len() as u32);
+
+    for (backing_table, branch_policies) in entries {
+        write_string(buf, backing_table.as_str());
+        encode_permissions_table_policies(buf, branch_policies);
+    }
 }
 
 fn decode_table_policies(
@@ -1021,7 +1035,29 @@ fn decode_table_policies(
         insert: decode_operation_policy(data, offset)?,
         update: decode_operation_policy(data, offset)?,
         delete: decode_operation_policy(data, offset)?,
+        for_branch: HashMap::new(),
     })
+}
+
+fn decode_permissions_table_policies(
+    data: &[u8],
+    offset: &mut usize,
+    version: u8,
+) -> Result<TablePolicies, CatalogueEncodingError> {
+    let mut policies = decode_table_policies(data, offset)?;
+
+    if version >= 2 {
+        let count = read_u32(data, offset)? as usize;
+        let mut for_branch = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let backing_table = TableName::new(read_string(data, offset, "branch_policy_table")?);
+            let branch_policies = decode_permissions_table_policies(data, offset, version)?;
+            for_branch.insert(backing_table, branch_policies);
+        }
+        policies.for_branch = for_branch;
+    }
+
+    Ok(policies)
 }
 
 pub fn encode_permissions(permissions: &HashMap<TableName, TablePolicies>) -> Vec<u8> {
@@ -1034,7 +1070,7 @@ pub fn encode_permissions(permissions: &HashMap<TableName, TablePolicies>) -> Ve
 
     for (table_name, policies) in entries {
         write_string(&mut buf, table_name.as_str());
-        encode_table_policies(&mut buf, policies);
+        encode_permissions_table_policies(&mut buf, policies);
     }
 
     buf
@@ -1051,7 +1087,7 @@ pub fn decode_permissions(
     }
 
     let version = data[0];
-    if version != PERMISSIONS_VERSION {
+    if version != 1 && version != PERMISSIONS_VERSION {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: PERMISSIONS_VERSION,
@@ -1064,7 +1100,7 @@ pub fn decode_permissions(
 
     for _ in 0..table_count {
         let table_name = TableName::new(read_string(data, &mut offset, "table_name")?);
-        let policies = decode_table_policies(data, &mut offset)?;
+        let policies = decode_permissions_table_policies(data, &mut offset, version)?;
         permissions.insert(table_name, policies);
     }
 
@@ -1647,6 +1683,10 @@ fn encode_policy_value(buf: &mut Vec<u8>, value: &PolicyValue) {
                 write_string(buf, part);
             }
         }
+        PolicyValue::BranchRef(column) => {
+            buf.push(POLICY_VALUE_BRANCH_REF);
+            write_string(buf, column.as_str());
+        }
     }
 }
 
@@ -1665,6 +1705,11 @@ fn decode_policy_value(
             }
             Ok(PolicyValue::SessionRef(path))
         }
+        POLICY_VALUE_BRANCH_REF => Ok(PolicyValue::BranchRef(ColumnName::new(read_string(
+            data,
+            offset,
+            "policy_branch_ref_column",
+        )?))),
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "policy_value",
@@ -2502,6 +2547,27 @@ mod tests {
             decoded.get(&TableName::new("todos")),
             permissions.get(&TableName::new("todos"))
         );
+    }
+
+    #[test]
+    fn permissions_roundtrip_preserves_branch_policies() {
+        let branch_select = PolicyExpr::Cmp {
+            column: "projectId".to_string(),
+            op: CmpOp::Eq,
+            value: PolicyValue::BranchRef(ColumnName::new("projectId")),
+        };
+        let mut todo_policies = TablePolicies::new().with_select(PolicyExpr::True);
+        todo_policies.for_branch = HashMap::from([(
+            TableName::new("branches"),
+            TablePolicies::new().with_select(branch_select),
+        )]);
+        let permissions = HashMap::from([(TableName::new("todos"), todo_policies)]);
+
+        let encoded = encode_permissions(&permissions);
+        assert_eq!(encoded[0], PERMISSIONS_VERSION);
+        let decoded = decode_permissions(&encoded).expect("permissions should decode");
+
+        assert_eq!(decoded, permissions);
     }
 
     #[test]

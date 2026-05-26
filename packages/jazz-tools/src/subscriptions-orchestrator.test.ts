@@ -20,6 +20,7 @@ type SubscribeCall = {
   options?: QueryOptions;
   session?: Session;
   unsubscribe: ReturnType<typeof vi.fn>;
+  branch?: string;
 };
 
 type UnitHarness = {
@@ -31,6 +32,16 @@ type UnitHarness = {
   calls: SubscribeCall[];
   emit: (index: number, delta: SubscriptionDelta<Todo>) => void;
   setThrowOnSubscribe: (error: Error | null) => void;
+};
+
+type DbMock = {
+  subscribeAll<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): () => void;
+  branch(branchId: string): DbMock;
 };
 
 function makeTodo(id: string, title = `todo-${id}`): Todo {
@@ -69,14 +80,7 @@ function createUnitHarness(
   const calls: SubscribeCall[] = [];
   let throwOnSubscribe: Error | null = null;
 
-  const db: {
-    subscribeAll<T extends { id: string }>(
-      query: QueryBuilder<T>,
-      callback: (delta: SubscriptionDelta<T>) => void,
-      options?: QueryOptions,
-      session?: Session,
-    ): () => void;
-  } = {
+  const createDb = (branch?: string): DbMock => ({
     subscribeAll<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
@@ -93,10 +97,15 @@ function createUnitHarness(
         options,
         session,
         unsubscribe,
+        branch,
       });
       return unsubscribe;
     },
-  };
+    branch(branchId: string) {
+      return createDb(branchId);
+    },
+  });
+  const db = createDb();
 
   const manager = new SubscriptionsOrchestrator({ appId }, db, initialSession);
 
