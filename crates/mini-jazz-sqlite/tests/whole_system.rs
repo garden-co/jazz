@@ -117,6 +117,41 @@ fn explicit_transaction_seals_multiple_mutations_atomically() {
 }
 
 #[test]
+fn generic_transaction_seals_multiple_rows_atomically() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let tx = alice
+        .transaction()
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("First")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Second")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.tx_id == tx));
+}
+
+#[test]
 fn rebuild_current_projection_from_history_matches_current_reads() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

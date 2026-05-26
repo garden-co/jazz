@@ -135,7 +135,18 @@ impl Runtime {
         let db = self.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        let row_num = ensure_row_id(&db, table_name, id)?;
+        insert_row_in_tx(InsertRowInTx {
+            db: &db,
+            schema: &self.schema,
+            table_name,
+            id,
+            values: &values,
+            tx_num,
+            branch_num: self.branch_num,
+            now,
+            principal: &self.principal,
+        })?;
+        let row_num = row_num(&db, id)?;
         let allowed = policy::write_allowed(
             &db,
             &self.schema,
@@ -147,73 +158,12 @@ impl Runtime {
         )?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
-        }
-
-        let mut columns = vec![
-            "row_num".to_owned(),
-            "tx_num".to_owned(),
-            "j_branch_num".to_owned(),
-            "op".to_owned(),
-        ];
-        let mut sql_values = vec![
-            rusqlite::types::Value::Integer(row_num),
-            rusqlite::types::Value::Integer(tx_num),
-            rusqlite::types::Value::Integer(self.branch_num),
-            rusqlite::types::Value::Integer(1),
-        ];
-
-        for field in &table.fields {
-            let value = values
-                .get(&field.name)
-                .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
-            columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
-                field,
-            )));
-            sql_values.push(crate::schema::field_sql_value(
-                field,
-                value,
-                |ref_table, row_id| ensure_row_id(&db, ref_table, row_id),
-            )?);
-        }
-        columns.extend([
-            "j_created_at".to_owned(),
-            "j_updated_at".to_owned(),
-            "j_created_by".to_owned(),
-            "j_updated_by".to_owned(),
-        ]);
-        sql_values.extend([
-            rusqlite::types::Value::Integer(now),
-            rusqlite::types::Value::Integer(now),
-            rusqlite::types::Value::Text(self.principal.clone()),
-            rusqlite::types::Value::Text(self.principal.clone()),
-        ]);
-        insert_dynamic(
-            &db,
-            &crate::schema::history_table(&table.name),
-            &columns,
-            &sql_values,
-        )?;
-
-        if allowed {
-            let mut current_columns = vec![
-                "row_num".to_owned(),
-                "visible_tx_num".to_owned(),
-                "is_deleted".to_owned(),
-            ];
-            let mut current_values = vec![
-                rusqlite::types::Value::Integer(row_num),
-                rusqlite::types::Value::Integer(tx_num),
-                rusqlite::types::Value::Integer(0),
-            ];
-            current_columns.insert(1, "j_branch_num".to_owned());
-            current_values.insert(1, rusqlite::types::Value::Integer(self.branch_num));
-            current_columns.extend(columns.iter().skip(4).cloned());
-            current_values.extend(sql_values.iter().skip(4).cloned());
-            insert_dynamic(
-                &db,
-                &crate::schema::current_table(&table.name),
-                &current_columns,
-                &current_values,
+            db.execute(
+                &format!(
+                    "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ? AND visible_tx_num = ?",
+                    crate::schema::current_table(&table.name)
+                ),
+                params![row_num, self.branch_num, tx_num],
             )?;
         }
         db.commit()?;
@@ -770,12 +720,113 @@ fn count_rows(conn: &Connection, table: &str) -> Result<i64> {
     )
 }
 
+struct InsertRowInTx<'a> {
+    db: &'a Connection,
+    schema: &'a SchemaDef,
+    table_name: &'a str,
+    id: &'a str,
+    values: &'a BTreeMap<String, JsonValue>,
+    tx_num: i64,
+    branch_num: i64,
+    now: i64,
+    principal: &'a str,
+}
+
+fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
+    let table = args.schema.table_def(args.table_name)?;
+    let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
+    let allowed = policy::write_allowed(
+        args.db,
+        args.schema,
+        table,
+        &table.write_policy,
+        row_num,
+        args.values,
+        args.principal,
+    )?;
+
+    let mut columns = vec![
+        "row_num".to_owned(),
+        "tx_num".to_owned(),
+        "j_branch_num".to_owned(),
+        "op".to_owned(),
+    ];
+    let mut sql_values = vec![
+        rusqlite::types::Value::Integer(row_num),
+        rusqlite::types::Value::Integer(args.tx_num),
+        rusqlite::types::Value::Integer(args.branch_num),
+        rusqlite::types::Value::Integer(1),
+    ];
+
+    for field in &table.fields {
+        let value = args
+            .values
+            .get(&field.name)
+            .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
+        columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
+            field,
+        )));
+        sql_values.push(crate::schema::field_sql_value(
+            field,
+            value,
+            |ref_table, row_id| ensure_row_id(args.db, ref_table, row_id),
+        )?);
+    }
+    columns.extend([
+        "j_created_at".to_owned(),
+        "j_updated_at".to_owned(),
+        "j_created_by".to_owned(),
+        "j_updated_by".to_owned(),
+    ]);
+    sql_values.extend([
+        rusqlite::types::Value::Integer(args.now),
+        rusqlite::types::Value::Integer(args.now),
+        rusqlite::types::Value::Text(args.principal.to_owned()),
+        rusqlite::types::Value::Text(args.principal.to_owned()),
+    ]);
+    insert_dynamic(
+        args.db,
+        &crate::schema::history_table(&table.name),
+        &columns,
+        &sql_values,
+    )?;
+
+    if allowed {
+        let mut current_columns = vec![
+            "row_num".to_owned(),
+            "j_branch_num".to_owned(),
+            "visible_tx_num".to_owned(),
+            "is_deleted".to_owned(),
+        ];
+        let mut current_values = vec![
+            rusqlite::types::Value::Integer(row_num),
+            rusqlite::types::Value::Integer(args.branch_num),
+            rusqlite::types::Value::Integer(args.tx_num),
+            rusqlite::types::Value::Integer(0),
+        ];
+        current_columns.extend(columns.iter().skip(4).cloned());
+        current_values.extend(sql_values.iter().skip(4).cloned());
+        insert_dynamic(
+            args.db,
+            &crate::schema::current_table(&table.name),
+            &current_columns,
+            &current_values,
+        )?;
+    }
+    Ok(())
+}
+
 pub struct TransactionBuilder<'a> {
     runtime: &'a mut Runtime,
     mutations: Vec<Mutation>,
 }
 
 enum Mutation {
+    Row {
+        table: String,
+        id: String,
+        values: BTreeMap<String, JsonValue>,
+    },
     Project {
         id: String,
         title: String,
@@ -789,6 +840,20 @@ enum Mutation {
 }
 
 impl<'a> TransactionBuilder<'a> {
+    pub fn insert_row(
+        mut self,
+        table: &str,
+        id: &str,
+        values: BTreeMap<String, JsonValue>,
+    ) -> Self {
+        self.mutations.push(Mutation::Row {
+            table: table.to_owned(),
+            id: id.to_owned(),
+            values,
+        });
+        self
+    }
+
     pub fn create_project(mut self, id: &str, title: &str) -> Self {
         self.mutations.push(Mutation::Project {
             id: id.to_owned(),
@@ -814,6 +879,17 @@ impl<'a> TransactionBuilder<'a> {
             tx::create_tx(&db, self.runtime.node_num, &self.runtime.node_id, now)?;
         for mutation in self.mutations {
             match mutation {
+                Mutation::Row { table, id, values } => insert_row_in_tx(InsertRowInTx {
+                    db: &db,
+                    schema: &self.runtime.schema,
+                    table_name: &table,
+                    id: &id,
+                    values: &values,
+                    tx_num,
+                    branch_num: self.runtime.branch_num,
+                    now,
+                    principal: &self.runtime.principal,
+                })?,
                 Mutation::Project { id, title } => {
                     insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?
                 }

@@ -425,3 +425,13 @@ Learning: field-level storage-name mapping gives us a partial write-forward
 property on the wire even though physical SQLite storage is still the old column
 shape. This does not replace real schema-versioned tables, but it clarifies one
 useful compatibility lane.
+
+## 2026-05-25 17:35 PDT
+
+Generic transaction builder path is green. `transaction().insert_row(...)` can
+seal multiple arbitrary-schema rows under one transaction id, and generic reads
+show both rows with that tx id.
+
+Decision: keep fixture transaction helpers for existing tests, but stop treating
+them as the only transaction constructor. Future transaction semantics should be
+implemented against generic row mutations first.
