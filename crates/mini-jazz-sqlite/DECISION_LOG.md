@@ -345,3 +345,14 @@ This is only the first slice of the planner idea; `id` and `$createdBy` are
 still special repair branches in `runtime.rs`. But the direction is clearer:
 predicate descriptions should own their local SQL, history expansion, and
 repair behavior.
+
+## 2026-05-26 00:41 PDT
+
+Hardened query predicate bundle serialization. Non-equality predicate operators
+now have an explicit test proving they survive JSON roundtrip, and older bundle
+shapes without an operator decode as equality. Full mini crate suite is green
+with 150 tests.
+
+Design lesson: predicate metadata is part of the sync contract, not just a local
+planner concern. Backward-compatible defaults are useful, but only if tests make
+the default precise.

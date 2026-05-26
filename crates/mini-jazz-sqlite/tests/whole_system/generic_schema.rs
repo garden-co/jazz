@@ -857,30 +857,50 @@ fn branch_query_scope_repair_does_not_delete_same_predicate_row_on_main() {
 
 #[test]
 fn query_predicate_reads_survive_bundle_serialization() {
-    let schema = SchemaDef::new().table("tasks", |table| {
-        table.text("title");
-        table.bool("done");
-    });
+    let schema = support::notes_schema();
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
     alice
         .insert_row(
-            "tasks",
-            "task-1",
+            "notes",
+            "note-1",
             BTreeMap::from([
-                ("title".to_owned(), json!("Open")),
-                ("done".to_owned(), json!(false)),
+                ("body".to_owned(), json!("Open predicate")),
+                ("pinned".to_owned(), json!(false)),
             ]),
         )
         .unwrap();
 
     let bundle = alice
-        .export_query_where_eq("tasks", "done", json!(false))
+        .export_query_where_contains("notes", "body", "predicate")
         .unwrap();
     let encoded = serde_json::to_string(&bundle).unwrap();
     let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_str(&encoded).unwrap();
 
     assert_eq!(decoded.query_reads, bundle.query_reads);
+    assert_eq!(decoded.query_reads[0].op, "contains");
+}
+
+#[test]
+fn older_query_read_records_without_operator_decode_as_equality() {
+    let encoded = r#"{
+        "branches": [],
+        "txs": [],
+        "reads": [],
+        "query_reads": [
+            {
+                "branch_id": "main",
+                "table": "tasks",
+                "field": "done",
+                "value": false
+            }
+        ],
+        "history": []
+    }"#;
+
+    let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_str(encoded).unwrap();
+
+    assert_eq!(decoded.query_reads[0].op, "eq");
 }
 
 #[test]
