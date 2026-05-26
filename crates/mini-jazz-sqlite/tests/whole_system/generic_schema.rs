@@ -932,6 +932,107 @@ fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() 
 }
 
 #[test]
+fn durable_query_read_refresh_repairs_policy_dependency_change_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("policy-query-worker.sqlite");
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+
+    upstream
+        .insert_row(
+            "projects",
+            "project-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    upstream
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Still open")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-alice")),
+            ]),
+        )
+        .unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(
+                &upstream
+                    .export_query_where_eq("tasks", "done", json!(false))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            worker
+                .read_rows_where_eq("tasks", "done", json!(false))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+    )
+    .unwrap();
+    upstream
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    upstream
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("project".to_owned(), json!("project-bob"))]),
+        )
+        .unwrap();
+
+    let mut reopened = Runtime::open_with_schema(
+        Storage::File(worker_path),
+        "worker-reopened",
+        "alice",
+        schema,
+    )
+    .unwrap();
+    let desired_queries = reopened.observed_query_reads().unwrap();
+    for refresh in upstream
+        .export_query_read_refreshes(&desired_queries)
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(reopened
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn branch_equality_query_scope_records_branch_predicate_read() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

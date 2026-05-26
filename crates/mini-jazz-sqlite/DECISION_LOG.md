@@ -610,3 +610,9 @@ Design lesson: persisted query descriptors need branch context, but they do not 
 Added explicit forgetting for persisted query reads. A durable peer can remove an observed query descriptor, the removal survives restart, and reconnect refresh generation no longer produces work for that forgotten scope. Full mini crate suite is green with 177 tests.
 
 Design lesson: durable query state needs lifecycle, not just persistence. This is the beginning of unsubscribe semantics: desired scopes should be durable, inspectable, refreshable, and intentionally removable.
+
+## 2026-05-26 02:06 PDT
+
+Covered reconnect refresh when query visibility changes through a policy dependency. A durable worker syncs an open task through a readable project, restarts, then refreshes its persisted query after the task is re-pointed to an unreadable project; the row is removed from the query result. Full mini crate suite is green with 178 tests.
+
+Design lesson: persisted query descriptors do not need to explicitly encode every policy dependency if refresh reruns semantic export against current policy state and sends repair history. Predicate descriptors plus policy-aware export are enough for this class of reconnect repair.
