@@ -167,6 +167,31 @@ fn rejecting_generic_transaction_repairs_schema_driven_projection() {
 }
 
 #[test]
+fn query_scope_rejection_refresh_removes_previously_delivered_row() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Visible before rejection", false, "project-1")
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
+        .unwrap();
+    assert_eq!(peer.open_todos().unwrap().len(), 1);
+
+    alice.reject_transaction(&tx, "policy_denied").unwrap();
+    peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
+        .unwrap();
+
+    assert!(peer.open_todos().unwrap().is_empty());
+    assert_eq!(
+        peer.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn table_scope_sync_exports_delete_so_peer_removes_row() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
@@ -325,6 +350,70 @@ fn stale_pending_bundle_does_not_downgrade_accepted_fate() {
         peer.transaction_info(&tx).unwrap().conflict_mode,
         "mergeable"
     );
+}
+
+#[test]
+fn rejected_fate_arriving_before_history_keeps_later_rows_invisible() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Fate before rows", false, "project-1")
+        .unwrap();
+    let history_bundle = alice.export_table_history("todos").unwrap();
+    let mut fate_first_bundle = history_bundle.clone();
+    fate_first_bundle.history.clear();
+    fate_first_bundle.reads.clear();
+
+    alice.reject_transaction(&tx, "policy_denied").unwrap();
+    let rejected_bundle = alice.export_table_history("todos").unwrap();
+    fate_first_bundle.txs = rejected_bundle.txs;
+
+    peer.apply_bundle(&fate_first_bundle).unwrap();
+    assert_eq!(
+        peer.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+
+    peer.apply_bundle(&history_bundle).unwrap();
+
+    assert!(peer.open_todos().unwrap().is_empty());
+    assert_eq!(peer.storage_stats().unwrap().history_rows, 1);
+    assert_eq!(
+        peer.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
+fn accepted_fate_arriving_before_history_materializes_later_rows() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Accepted fate before rows", false, "project-1")
+        .unwrap();
+    let history_bundle = alice.export_table_history("todos").unwrap();
+
+    alice.accept_transaction_at_global(&tx, 7).unwrap();
+    let accepted_bundle = alice.export_table_history("todos").unwrap();
+    let mut fate_first_bundle = accepted_bundle.clone();
+    fate_first_bundle.history.clear();
+    fate_first_bundle.reads.clear();
+
+    peer.apply_bundle(&fate_first_bundle).unwrap();
+    assert_eq!(peer.transaction_info(&tx).unwrap().global_epoch, Some(7));
+    assert!(peer.open_todos().unwrap().is_empty());
+
+    peer.apply_bundle(&history_bundle).unwrap();
+
+    let todos = peer.open_todos().unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].id, "todo-1");
+    assert_eq!(todos[0].tx_id, tx);
+    assert_eq!(peer.transaction_info(&tx).unwrap().global_epoch, Some(7));
 }
 
 #[test]

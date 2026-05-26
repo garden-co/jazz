@@ -138,3 +138,20 @@ diffs on rejection, optional include absence/null semantics, same-epoch
 same-row tie-break determinism, branch global acceptance visibility, and a
 small edge/core/edge topology. Next focus: message-order and query-scope repair
 tests because they are likely to expose sync-contract holes quickly.
+
+## 2026-05-26 00:20 PDT
+
+Message-order/query-scope cluster is green; full mini crate suite now has 133
+tests.
+
+- Query-scope refresh after rejection removes a row that was previously
+  delivered by the same query scope, while preserving the rejection reason.
+- Rejected fate can arrive before history: later history append remains
+  invisible.
+- Accepted/global fate can arrive before history: later history append
+  materializes the row with the same public tx id and global receipt metadata.
+
+Design lesson: tx/fate rows are a good durable landing zone independent of
+history delivery order. This supports treating sync as idempotent fact
+application rather than ordered messages, at least for the basic
+accepted/rejected cases.
