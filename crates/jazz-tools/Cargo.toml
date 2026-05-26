@@ -41,7 +41,7 @@ server = [
   "dep:bytes",
   "dep:reqwest",
 ]
-cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc"]
+cli = ["server", "rocksdb", "dep:clap", "dep:tikv-jemallocator"]
 test-utils = ["server", "client", "sqlite"]
 test = ["test-utils", "cli"]
 otel-core = [
@@ -78,7 +78,7 @@ ahash = "0.8"
 sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
-rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["lz4", "zstd"], optional = true }
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["jemalloc", "lz4", "zstd"], optional = true }
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 axum = { version = "0.7", features = ["ws"], optional = true }
@@ -102,7 +102,7 @@ async-stream = { version = "0.3", optional = true }
 jsonwebtoken = { version = "9", optional = true }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-mimalloc = { version = "0.1", default-features = false, optional = true }
+tikv-jemallocator = { version = "0.6", default-features = false, optional = true }
 
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
