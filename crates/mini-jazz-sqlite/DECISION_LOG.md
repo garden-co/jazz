@@ -303,3 +303,13 @@ Design lesson: magic fields need a small registry/planner rather than being
 special-cased forever. `id` and `$createdBy` can filter over decoded visible
 rows for now, but `$createdAt` and pagination/order will need SQL lowering and
 observed range/page facts.
+
+## 2026-05-26 00:35 PDT
+
+Closed the sync half of `id` magic-field queries. `export_query_where_eq(...,
+"id", ...)` can now sync the matching row and repair deletion through query
+scope refresh. Full mini crate suite is green with 147 tests.
+
+Design lesson: every product-visible predicate needs both local evaluation and
+observed-fact repair semantics. Even a simple `id` predicate needed special
+repair handling because it is not a user schema column.

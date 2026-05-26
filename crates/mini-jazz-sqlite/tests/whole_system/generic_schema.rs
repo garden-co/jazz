@@ -116,6 +116,50 @@ fn id_magic_field_query_matches_public_row_id() {
 }
 
 #[test]
+fn id_magic_field_query_scope_syncs_and_repairs_delete() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-public-id",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Find by id")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("notes", "id", json!("note-public-id"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer.read_rows_where_eq("notes", "id", json!("note-public-id"))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice.delete_row("notes", "note-public-id").unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("notes", "id", json!("note-public-id"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(peer
+        .read_rows_where_eq("notes", "id", json!("note-public-id"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn created_by_magic_field_query_matches_creator_principal() {
     let schema = support::notes_schema();
     let mut alice =

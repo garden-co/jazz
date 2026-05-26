@@ -539,6 +539,39 @@ impl Runtime {
         db: &Connection,
         query_read: &QueryReadRecord,
     ) -> Result<()> {
+        if query_read.field == "id" {
+            let Some(row_id) = query_read.value.as_str() else {
+                return Err(crate::Error::new("id equality expects a string value"));
+            };
+            let branch_num = branch::checkout(db, &query_read.branch_id)?;
+            let row_num = ensure_row_id(db, &query_read.table, row_id)?;
+            db.execute(
+                &format!(
+                    "DELETE FROM {}
+                     WHERE j_branch_num = ?
+                       AND row_num = ?
+                       AND row_num NOT IN (
+                         SELECT h.row_num
+                         FROM {history_table} h
+                         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                         WHERE h.row_num = ?
+                           AND h.j_branch_num = ?
+                           AND h.op != 3
+                           AND tx.outcome != ?
+                       )",
+                    crate::schema::current_table(&query_read.table),
+                    history_table = crate::schema::history_table(&query_read.table),
+                ),
+                params![
+                    branch_num,
+                    row_num,
+                    row_num,
+                    branch_num,
+                    tx::OUTCOME_REJECTED
+                ],
+            )?;
+            return Ok(());
+        }
         let table = schema.table_def(&query_read.table)?;
         let field = table
             .fields
@@ -2853,6 +2886,12 @@ fn query_scope_repair_row_nums(
     op: &str,
     value: &JsonValue,
 ) -> Result<Vec<i64>> {
+    if field_name == "id" {
+        let Some(row_id) = value.as_str() else {
+            return Err(crate::Error::new("id equality expects a string value"));
+        };
+        return Ok(vec![ensure_row_id(conn, &table.name, row_id)?]);
+    }
     let field = table
         .fields
         .iter()
