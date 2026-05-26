@@ -11,7 +11,7 @@ use crate::{
     Result, Storage,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use serde_json::Value as JsonValue;
+use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -463,10 +463,11 @@ impl Runtime {
             if tx_record.outcome == tx::OUTCOME_REJECTED {
                 if let Some(code) = &tx_record.rejection_code {
                     let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
+                    let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
                     db.execute(
                         "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
-                         VALUES (?, ?, '{}')",
-                        params![tx_num, code],
+                         VALUES (?, ?, ?)",
+                        params![tx_num, code, detail_json],
                     )?;
                 }
             }
@@ -537,7 +538,15 @@ impl Runtime {
             let allowed =
                 write_allowed_for_history_record(&self.conn, &self.schema, table, row_num, record)?;
             if !allowed {
-                self.reject_transaction(&record.tx_id, "policy_denied")?;
+                self.reject_transaction_with_detail(
+                    &record.tx_id,
+                    "policy_denied",
+                    json!({
+                        "reason": "write_policy_denied",
+                        "table": record.table,
+                        "row_id": record.row_id,
+                    }),
+                )?;
                 rejected.insert(record.tx_id.clone());
             }
         }
@@ -790,8 +799,27 @@ impl Runtime {
     }
 
     pub fn reject_transaction(&mut self, tx_id: &str, code: &str) -> Result<()> {
+        self.reject_transaction_with_optional_detail(tx_id, code, None)
+    }
+
+    pub fn reject_transaction_with_detail(
+        &mut self,
+        tx_id: &str,
+        code: &str,
+        detail: JsonValue,
+    ) -> Result<()> {
+        self.reject_transaction_with_optional_detail(tx_id, code, Some(detail))
+    }
+
+    fn reject_transaction_with_optional_detail(
+        &mut self,
+        tx_id: &str,
+        code: &str,
+        detail: Option<JsonValue>,
+    ) -> Result<()> {
+        let detail_json = encode_optional_json(detail.as_ref())?;
         let db = self.conn.transaction()?;
-        let tx_num = tx::reject(&db, tx_id, code)?;
+        let tx_num = tx::reject_with_detail_json(&db, tx_id, code, &detail_json)?;
         for table in self.schema.tables() {
             db.execute(
                 &format!(
@@ -838,23 +866,31 @@ impl Runtime {
         let receipt_tiers = stmt
             .query_map(params![tx_id], |row| tier_name(row.get::<_, i64>(0)?))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let rejection_code = self
+        let rejection = self
             .conn
             .query_row(
-                "SELECT rejection.code
+                "SELECT rejection.code, rejection.detail_json
                  FROM jazz_tx_rejection rejection
                  JOIN jazz_tx tx ON tx.tx_num = rejection.tx_num
                  WHERE tx.tx_id = ?",
                 params![tx_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
+        let (rejection_code, rejection_detail) = match rejection {
+            Some((code, detail_json)) => {
+                let detail = parse_rejection_detail(&detail_json)?;
+                (Some(code), detail)
+            }
+            None => (None, None),
+        };
         Ok(TransactionInfo {
             tx_id,
             global_epoch,
             conflict_mode,
             receipt_tiers,
             rejection_code,
+            rejection_detail,
         })
     }
 
@@ -2226,7 +2262,7 @@ fn is_newest_version_for_current(
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, tx.created_at
+        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at
          FROM jazz_tx tx
          JOIN jazz_node node ON node.node_num = tx.node_num
          LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
@@ -2252,13 +2288,54 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
             rejection_code: row.get(6)?,
+            rejection_detail: row
+                .get::<_, Option<String>>(7)?
+                .map(|detail_json| parse_rejection_detail_for_sqlite(&detail_json, 7))
+                .transpose()?
+                .flatten(),
             receipt_tiers,
-            created_at: row.get(7)?,
+            created_at: row.get(8)?,
         })
     })?;
     records
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
+    let detail = serde_json::from_str::<JsonValue>(detail_json)
+        .map_err(|err| crate::Error::new(format!("invalid rejection detail JSON: {err}")))?;
+    if detail.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(detail))
+    }
+}
+
+fn parse_rejection_detail_for_sqlite(
+    detail_json: &str,
+    column: usize,
+) -> rusqlite::Result<Option<JsonValue>> {
+    let detail = serde_json::from_str::<JsonValue>(detail_json).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(err),
+        )
+    })?;
+    if detail.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(detail))
+    }
+}
+
+fn encode_optional_json(value: Option<&JsonValue>) -> Result<String> {
+    value
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|err| crate::Error::new(format!("invalid JSON detail: {err}")))
+        .map(|value| value.unwrap_or_else(|| "null".to_owned()))
 }
 
 fn export_reads_for_history(

@@ -368,3 +368,16 @@ Design lesson: version tags are cheap to add at the boundary and valuable
 because the bundle apply path already has strong atomicity expectations. This
 only tags `Bundle`; storage/catalogue/worker protocol versioning still needs
 separate treatment.
+
+## 2026-05-26 00:45 PDT
+
+Added structured rejection details to transaction fate. Rejected transaction
+records now carry an optional JSON detail in storage, bundles, and
+`transaction_info`. Authority-side policy rejection records a safe detail with
+`reason`, `table`, and `row_id`, and that detail survives sync back to the
+writer. Full mini crate suite is green with 153 tests.
+
+Design lesson: the code/detail split feels right. Product code can branch on a
+stable rejection code while trusted-debug surfaces can inspect structured detail.
+The open product question is still what detail is safe to expose to untrusted
+clients for more complex policies.

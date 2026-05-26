@@ -94,6 +94,15 @@ pub(crate) fn tx_num(conn: &Connection, tx_id: &str) -> Result<i64> {
 }
 
 pub(crate) fn reject(conn: &Connection, tx_id: &str, code: &str) -> Result<i64> {
+    reject_with_detail_json(conn, tx_id, code, "null")
+}
+
+pub(crate) fn reject_with_detail_json(
+    conn: &Connection,
+    tx_id: &str,
+    code: &str,
+    detail_json: &str,
+) -> Result<i64> {
     let tx_num = tx_num(conn, tx_id)?;
     conn.execute(
         "UPDATE jazz_tx SET outcome = ? WHERE tx_num = ?",
@@ -101,8 +110,8 @@ pub(crate) fn reject(conn: &Connection, tx_id: &str, code: &str) -> Result<i64> 
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
-         VALUES (?, ?, '{}')",
-        params![tx_num, code],
+         VALUES (?, ?, ?)",
+        params![tx_num, code, detail_json],
     )?;
     Ok(tx_num)
 }

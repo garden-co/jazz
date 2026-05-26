@@ -47,6 +47,7 @@ pub struct TransactionInfo {
     pub conflict_mode: String,
     pub receipt_tiers: Vec<String>,
     pub rejection_code: Option<String>,
+    pub rejection_detail: Option<JsonValue>,
 }
 
 impl StorageStats {

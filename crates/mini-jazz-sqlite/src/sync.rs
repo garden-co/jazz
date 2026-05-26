@@ -37,6 +37,8 @@ pub struct TxRecord {
     pub conflict_mode: i64,
     pub outcome: i64,
     pub rejection_code: Option<String>,
+    #[serde(default)]
+    pub rejection_detail: Option<JsonValue>,
     pub receipt_tiers: Vec<i64>,
     pub created_at: i64,
 }

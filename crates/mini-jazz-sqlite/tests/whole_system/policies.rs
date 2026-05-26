@@ -475,6 +475,25 @@ fn trusted_edge_authoritatively_rejects_untrusted_policy_violation_on_apply() {
         edge.transaction_info(&tx).unwrap().rejection_code,
         Some("policy_denied".to_owned())
     );
+    assert_eq!(
+        edge.transaction_info(&tx).unwrap().rejection_detail,
+        Some(json!({
+            "reason": "write_policy_denied",
+            "table": "todos",
+            "row_id": "todo-1"
+        }))
+    );
+
+    bob.apply_bundle(&edge.export_table_history("todos").unwrap())
+        .unwrap();
+    assert_eq!(
+        bob.transaction_info(&tx).unwrap().rejection_detail,
+        Some(json!({
+            "reason": "write_policy_denied",
+            "table": "todos",
+            "row_id": "todo-1"
+        }))
+    );
 }
 
 #[test]
