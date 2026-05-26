@@ -141,6 +141,11 @@ impl QueryContext<'_> {
 
     fn read_main_snapshot_rows(&self, table_name: &str, base_epoch: i64) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(table_name)?;
+        let policy_sql = if self.trusted {
+            "1 = 1".to_owned()
+        } else {
+            policy::read_policy_sql_for_alias(self.schema, table, "h", self.principal)?
+        };
         let field_columns = table
             .fields
             .iter()
@@ -159,6 +164,7 @@ impl QueryContext<'_> {
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
                AND h.op != 3
+               AND {policy_sql}
                AND NOT EXISTS (
                  SELECT 1
                  FROM {history_table} newer
@@ -181,6 +187,7 @@ impl QueryContext<'_> {
             crate::schema::history_table(table_name),
             history_table = crate::schema::history_table(table_name),
             current_table = crate::schema::current_table(table_name),
+            policy_sql = policy_sql,
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;

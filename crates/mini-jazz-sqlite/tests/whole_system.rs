@@ -1133,6 +1133,52 @@ fn branch_base_snapshot_respects_deletes_and_excludes_pending_main() {
 }
 
 #[test]
+fn branch_base_snapshot_applies_row_policy() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+        table.read_if_created_by_principal();
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let alice_tx = alice
+        .insert_row(
+            "tasks",
+            "task-alice",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Alice visible")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&alice_tx, 1).unwrap();
+
+    let bob_tx = bob
+        .insert_row(
+            "tasks",
+            "task-bob",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Bob hidden")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    bob.accept_transaction_at_global(&bob_tx, 2).unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("tasks").unwrap())
+        .unwrap();
+
+    alice.create_branch("draft", Some(2)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "task-alice");
+}
+
+#[test]
 fn branch_multi_base_conflicts_expose_multiple_candidates() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

@@ -648,3 +648,24 @@ Learning: branch-scoped sync has three kinds of provenance to carry:
 active-branch metadata, source-branch metadata/history for merge candidates, and
 pinned main-base snapshot history. Treating sync scope as "branches mentioned by
 history rows" was insufficient.
+
+## 2026-05-25 18:06 PDT
+
+Starting branch snapshot policy check. Concern: branch base reads use history
+queries rather than current projection queries, so they may bypass the
+`read_policy_sql` predicates that current reads use.
+
+## 2026-05-25 18:07 PDT
+
+Branch base snapshot policy is green. History-backed snapshot reads now lower
+read policy against an explicit SQL alias (`h`) instead of assuming the
+projection alias `current`, so `read_if_created_by_principal` is enforced for
+pinned base rows too.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+39 tests.
+
+Open edge: recursive ref-readable policy over historical base rows still follows
+the referenced parent through current projection. For same-branch current reads
+that is fine; for precise historical snapshot policy it may need parent lookup
+against the same historical base epoch.

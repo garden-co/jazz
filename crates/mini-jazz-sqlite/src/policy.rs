@@ -86,6 +86,15 @@ pub(crate) fn read_policy_sql(
     lower_policy(schema, table, "current", &table.read_policy, principal, 0)
 }
 
+pub(crate) fn read_policy_sql_for_alias(
+    schema: &SchemaDef,
+    table: &TableDef,
+    alias: &str,
+    principal: &str,
+) -> Result<String> {
+    lower_policy(schema, table, alias, &table.read_policy, principal, 0)
+}
+
 fn lower_policy(
     schema: &SchemaDef,
     table: &TableDef,
