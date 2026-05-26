@@ -539,6 +539,43 @@ fn stale_pending_bundle_does_not_downgrade_accepted_fate() {
 }
 
 #[test]
+fn accepted_bundle_does_not_resurrect_rejected_fate() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut rejected_peer = Runtime::open(Storage::Memory, "rejected-peer", "alice").unwrap();
+    let mut accepted_peer = Runtime::open(Storage::Memory, "accepted-peer", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Rejected should win", false, "project-1")
+        .unwrap();
+    let pending = alice.export_table_history("todos").unwrap();
+    rejected_peer.apply_bundle(&pending).unwrap();
+    accepted_peer.apply_bundle(&pending).unwrap();
+
+    rejected_peer
+        .reject_transaction(&tx, "policy_denied")
+        .unwrap();
+    alice.accept_transaction_at_global(&tx, 7).unwrap();
+    accepted_peer
+        .apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+
+    rejected_peer
+        .apply_bundle(&accepted_peer.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(rejected_peer.open_todos().unwrap().is_empty());
+    assert_eq!(
+        rejected_peer.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+    assert_eq!(
+        rejected_peer.transaction_info(&tx).unwrap().global_epoch,
+        Some(7)
+    );
+}
+
+#[test]
 fn runtime_can_install_and_write_a_non_todo_schema() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");

@@ -1092,3 +1092,22 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 
 Open issue: this mirrors the current semantic shortcut: it exports result rows,
 not a resumable recursive scope/read predicate for future matching children.
+
+## 2026-05-25 18:48 PDT
+
+Starting rejected-vs-accepted fate ordering test. Current monotonic merge makes
+rejected numerically win over accepted; make that behavior explicit so it is a
+known semantic decision rather than an accidental enum trick.
+
+## 2026-05-25 18:49 PDT
+
+Rejected-over-accepted fate ordering is now explicit in tests. A peer that has
+rejected a tx stays without current rows after receiving an accepted/global
+bundle for the same tx, while still learning the global epoch metadata.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+57 tests.
+
+Design question: this is a strong semantic stance. If authorities can reverse
+rejections later, that should be modeled as a new fate transition with explicit
+provenance rather than ordinary accepted/rejected bundle reordering.
