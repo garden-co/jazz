@@ -764,3 +764,24 @@ Design note: this is result-set export, not a full predicate/range read set.
 For a live subscription or correctness-preserving sync scope, we would still
 need to encode "all current/future children where parent is in this recursive
 frontier" rather than only the rows returned right now.
+
+## 2026-05-25 18:15 PDT
+
+Starting durable branch-conflict/fate test. Goal: a merge branch's source
+candidate rows should survive sync and durable reopen, then a rejected candidate
+transaction should disappear from candidate reads without deleting the other
+candidate.
+
+## 2026-05-25 18:15 PDT
+
+Durable branch conflict candidate fate is green. A durable worker can apply a
+merge-branch bundle containing left/right source candidates, reopen, still see
+both candidates, then apply a rejected fate update for the left candidate's tx
+and see only the right candidate.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+44 tests.
+
+Learning: the mutable-fate projection repair works for source-branch conflict
+candidates too, because candidate reads join source branch current rows against
+`jazz_tx.outcome`.

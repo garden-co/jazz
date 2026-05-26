@@ -1504,6 +1504,96 @@ fn branch_source_metadata_survives_sync() {
 }
 
 #[test]
+fn branch_conflict_candidates_survive_durable_sync_and_rejected_fate() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    let left_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "merge-marker",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Merge marker")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(worker_path.clone()),
+            "worker",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker
+            .apply_bundle(&alice.export_table_history("tasks").unwrap())
+            .unwrap();
+        worker.checkout_branch("merge").unwrap();
+        assert_eq!(
+            worker.read_row_candidates("tasks", "task-1").unwrap().len(),
+            2
+        );
+    }
+
+    let mut reopened =
+        Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
+    reopened.checkout_branch("merge").unwrap();
+    assert_eq!(
+        reopened
+            .read_row_candidates("tasks", "task-1")
+            .unwrap()
+            .len(),
+        2
+    );
+
+    alice.reject_transaction(&left_tx, "policy_denied").unwrap();
+    reopened
+        .apply_bundle(&alice.export_table_history("tasks").unwrap())
+        .unwrap();
+    let candidates = reopened.read_row_candidates("tasks", "task-1").unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].values["title"], json!("Right title"));
+}
+
+#[test]
 fn rename_lens_reads_old_storage_column_as_new_field_name() {
     let old_schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
