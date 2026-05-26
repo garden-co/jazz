@@ -3,7 +3,9 @@ use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::RowsSubscription;
 use crate::sync::{BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
-use crate::{branch, effective, policy, projection, query, schema, storage, tx, Result, Storage};
+use crate::{
+    branch, effective, policy, projection, query, schema, stats, storage, tx, Result, Storage,
+};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1163,37 +1165,7 @@ impl Runtime {
     }
 
     pub fn storage_stats(&self) -> Result<StorageStats> {
-        let mut history_rows = 0;
-        let mut current_rows = 0;
-        for table in self.schema.tables() {
-            history_rows += count_rows(&self.conn, &crate::schema::history_table(&table.name))?;
-            current_rows += count_rows(&self.conn, &crate::schema::current_table(&table.name))?;
-        }
-        let rejected_transactions: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM jazz_tx WHERE outcome = ?",
-            params![tx::OUTCOME_REJECTED],
-            |row| row.get(0),
-        )?;
-        let mut stmt = self.conn.prepare("SELECT tx_id, tx_num FROM jazz_tx")?;
-        let tx_nums = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?
-            .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
-        let page_count: i64 = self
-            .conn
-            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
-        let page_size: i64 = self
-            .conn
-            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
-        Ok(StorageStats::new(
-            history_rows,
-            current_rows,
-            rejected_transactions,
-            page_count,
-            page_size,
-            tx_nums,
-        ))
+        stats::collect(&self.conn, &self.schema)
     }
 
     fn query_context(&self) -> query::QueryContext<'_> {
@@ -1205,14 +1177,6 @@ impl Runtime {
             trusted: self.trusted,
         }
     }
-}
-
-fn count_rows(conn: &Connection, table: &str) -> Result<i64> {
-    Ok(
-        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-            row.get(0)
-        })?,
-    )
 }
 
 struct InsertRowInTx<'a> {

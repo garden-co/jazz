@@ -7,6 +7,7 @@ mod query;
 mod rows;
 mod runtime;
 mod schema;
+mod stats;
 mod storage;
 mod subscription;
 pub mod sync;

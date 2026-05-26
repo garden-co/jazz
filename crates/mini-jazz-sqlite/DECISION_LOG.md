@@ -205,3 +205,14 @@ Design lesson: query-scope repair can stay narrower than table replication even
 when handling deletions. We still need richer observed facts for optional
 absence/range/page scopes, but simple equality/deletion repair has a workable
 shape.
+
+## 2026-05-26 00:25 PDT
+
+Small architecture cleanup: extracted storage statistics collection from
+`runtime.rs` into `stats.rs`. Full mini crate suite remains green with 139
+tests.
+
+Design lesson: the useful module boundaries are verb/process boundaries, not
+entity nouns. `stats::collect` is a tiny example; larger candidates remain
+bundle application/export and write lowering. The low-risk path is to keep
+Runtime as the facade and move process-shaped implementations behind it.
