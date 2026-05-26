@@ -294,18 +294,23 @@ impl Runtime {
         let history = export_open_todo_scope_history(&self.conn)?;
         let reads = export_reads_for_history(&self.conn, &history)?;
         let branches = export_branch_records_for_history(&self.conn, &history)?;
+        let mut query_reads = vec![QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: "todos".to_owned(),
+            field: "done".to_owned(),
+            op: "eq".to_owned(),
+            value: JsonValue::Bool(false),
+        }];
+        query_reads.extend(open_todo_missing_project_query_reads(
+            &self.conn,
+            self.branch_num,
+        )?);
         Ok(Bundle {
             protocol_version: BUNDLE_PROTOCOL_VERSION,
             branches,
             txs,
             reads,
-            query_reads: vec![QueryReadRecord {
-                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
-                table: "todos".to_owned(),
-                field: "done".to_owned(),
-                op: "eq".to_owned(),
-                value: JsonValue::Bool(false),
-            }],
+            query_reads,
             history,
         })
     }
@@ -668,6 +673,10 @@ impl Runtime {
         db: &Connection,
         query_read: &QueryReadRecord,
     ) -> Result<()> {
+        if query_read.op == "absent" {
+            schema.table_def(&query_read.table)?;
+            return Ok(());
+        }
         if query_read.op == "eq_top_created_at_desc" {
             let value = query_read
                 .value
@@ -2815,6 +2824,40 @@ fn export_open_todo_scope_history(conn: &Connection) -> Result<Vec<HistoryRecord
     records.extend(export_open_todo_projects(conn)?);
     records.extend(export_open_todos(conn)?);
     Ok(records)
+}
+
+fn open_todo_missing_project_query_reads(
+    conn: &Connection,
+    branch_num: i64,
+) -> Result<Vec<QueryReadRecord>> {
+    let branch_id = branch_id_for_num(conn, branch_num)?;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT project_ids.row_id
+         FROM todos__schema_v1_current todo
+         JOIN jazz_row_id project_ids ON project_ids.row_num = todo.project_row_num
+         LEFT JOIN projects__schema_v1_current project
+           ON project.row_num = todo.project_row_num
+          AND project.j_branch_num = todo.j_branch_num
+          AND project.is_deleted = 0
+         JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
+         WHERE todo.j_branch_num = ?
+           AND todo.is_deleted = 0
+           AND todo.done = 0
+           AND todo_tx.outcome != ?
+           AND project.row_num IS NULL
+         ORDER BY project_ids.row_id",
+    )?;
+    let rows = stmt.query_map(params![branch_num, tx::OUTCOME_REJECTED], |row| {
+        Ok(QueryReadRecord {
+            branch_id: branch_id.clone(),
+            table: "projects".to_owned(),
+            field: "id".to_owned(),
+            op: "absent".to_owned(),
+            value: JsonValue::String(row.get(0)?),
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn export_open_todo_scope_history_for_ids(

@@ -203,8 +203,21 @@ fn missing_optional_ref_include_round_trips_as_null_then_updates_when_dependency
     assert_eq!(alice_todos.len(), 1);
     assert_eq!(alice_todos[0].project_title, None);
 
-    peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
-        .unwrap();
+    let bundle = alice.export_query_scope_open_todos().unwrap();
+    assert!(bundle.query_reads.iter().any(|read| {
+        read.table == "projects"
+            && read.field == "id"
+            && read.op == "absent"
+            && read.value == json!("project-late")
+    }));
+
+    peer.apply_bundle(&bundle).unwrap();
+    assert!(peer.observed_query_reads().unwrap().iter().any(|read| {
+        read.table == "projects"
+            && read.field == "id"
+            && read.op == "absent"
+            && read.value == json!("project-late")
+    }));
     let peer_todos = peer.open_todos().unwrap();
     assert_eq!(peer_todos.len(), 1);
     assert_eq!(peer_todos[0].project_title, None);

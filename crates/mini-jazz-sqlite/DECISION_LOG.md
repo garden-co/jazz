@@ -556,3 +556,9 @@ Design lesson: ordered-page repair can be represented as a query descriptor over
 Persisted observed query-read descriptors. Applying a query-scoped bundle now records its query read in SQLite, dedupes repeated application, survives durable reopen, and still rolls back the observation when malformed query metadata fails closed. Full mini crate suite is green with 170 tests.
 
 Design lesson: query-scoped sync needs a durable desired/observed-query lane, not just query metadata inside transient bundles. This first table only records observations; using it to drive reconnect/resubscribe work remains a larger next slice.
+
+## 2026-05-26 01:45 PDT
+
+Represented optional include absence as a query-read fact. The open-todos export now emits an `absent` id read for a missing project include, receivers persist it, and later project arrival still updates the semantic row. Full mini crate suite is green with 170 tests.
+
+Design lesson: `null` includes are not just missing data; they are observations. Even a fixture-shaped absence descriptor clarifies the future generic model: optional relationships need explicit absence facts so reconnect and invalidation can distinguish "not requested" from "requested and absent/unauthorized."
