@@ -56,6 +56,87 @@ fn runtime_query_composes_logical_branch_ids() {
 }
 
 #[test]
+fn runtime_subscription_composes_logical_branch_ids() {
+    let mut core = create_runtime_with_schema(test_schema(), "runtime-logical-branch-subscribe");
+    let draft_branch =
+        ComposedBranchName::new("dev", core.schema_manager().current_hash(), "draft")
+            .to_branch_name()
+            .as_str()
+            .to_string();
+    let write_context = WriteContext::default().with_target_branch_name(draft_branch);
+    let ((object_id, row_values), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Draft"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    core.immediate_tick();
+    core.batched_tick();
+
+    let updates = Arc::new(Mutex::new(Vec::<(ObjectId, Vec<Value>)>::new()));
+    let updates_clone = updates.clone();
+    let handle = core
+        .subscribe(
+            QueryBuilder::new("users").branch("draft").build(),
+            move |delta| {
+                updates_clone
+                    .lock()
+                    .unwrap()
+                    .extend(decode_added_rows(&delta));
+            },
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(*updates.lock().unwrap(), vec![(object_id, row_values)]);
+    core.unsubscribe(handle);
+}
+
+#[test]
+fn runtime_two_phase_subscription_composes_logical_branch_ids() {
+    let mut core =
+        create_runtime_with_schema(test_schema(), "runtime-logical-branch-two-phase-subscribe");
+    let draft_branch =
+        ComposedBranchName::new("dev", core.schema_manager().current_hash(), "draft")
+            .to_branch_name()
+            .as_str()
+            .to_string();
+    let write_context = WriteContext::default().with_target_branch_name(draft_branch);
+    let ((object_id, row_values), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Draft"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    core.immediate_tick();
+    core.batched_tick();
+
+    let handle = core.create_subscription(
+        QueryBuilder::new("users").branch("draft").build(),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let updates = Arc::new(Mutex::new(Vec::<(ObjectId, Vec<Value>)>::new()));
+    let updates_clone = updates.clone();
+    core.execute_subscription(handle, move |delta| {
+        updates_clone
+            .lock()
+            .unwrap()
+            .extend(decode_added_rows(&delta));
+    })
+    .unwrap();
+
+    assert_eq!(*updates.lock().unwrap(), vec![(object_id, row_values)]);
+    core.unsubscribe(handle);
+}
+
+#[test]
 fn runtime_branch_include_keeps_outer_row_when_inner_branch_read_denies() {
     let mut todo_policies = TablePolicies::new()
         .with_select(PolicyExpr::True)
@@ -137,9 +218,7 @@ fn runtime_branch_include_keeps_outer_row_when_inner_branch_read_denies() {
         &mut core,
         QueryBuilder::new("projects")
             .with_array("todosViaProject", |sub| {
-                sub.from("todos")
-                    .branch(&branch.0.to_string())
-                    .correlate("projectId", "projects.id")
+                sub.from("todos").correlate("projectId", "projects.id")
             })
             .build(),
         Some(Session::new("alice")),

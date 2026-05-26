@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
+import { WriteHandle, type JazzClient, type Row } from "./client.js";
 import { Db } from "./db.js";
-import { WriteHandle, type JazzClient, type MutationErrorEvent, type Row } from "./client.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const app = s.defineApp({
@@ -66,7 +66,19 @@ function makeClient() {
 }
 
 describe("Db.branch", () => {
-  it("returns a db view that injects the selected branch into reads", async () => {
+  it("returns a prototype-scoped db view without shadowing the branch method", () => {
+    const { client } = makeClient();
+    const db = new TestDb(client);
+
+    const branchDb = db.branch("branch-row-1");
+    const nestedBranchDb = branchDb.branch("branch-row-2");
+
+    expect(Object.getPrototypeOf(branchDb)).toBe(db);
+    expect(Object.getPrototypeOf(nestedBranchDb)).toBe(branchDb);
+    expect(typeof branchDb.branch).toBe("function");
+  });
+
+  it("injects the selected logical branch into reads", async () => {
     const { client } = makeClient();
     const db = new TestDb(client);
 
@@ -79,38 +91,7 @@ describe("Db.branch", () => {
     );
   });
 
-  it("lets query-level branch selection override the db branch view", async () => {
-    const { client } = makeClient();
-    const db = new TestDb(client);
-
-    await db.branch("branch-row-1").all(app.todos.branch("query-branch"));
-
-    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
-    expect(client.query).toHaveBeenCalledWith(
-      expect.stringContaining('"branches":["query-branch"]'),
-      expect.anything(),
-    );
-    expect(client.query).not.toHaveBeenCalledWith(
-      expect.stringContaining('"branches":["branch-row-1"]'),
-      expect.anything(),
-    );
-  });
-
-  it("treats branch-looking query input as a logical branch id", async () => {
-    const { client } = makeClient();
-    const db = new TestDb(client);
-    const branchLikeInput = "otherenv-deadbeefcafe-branch-row-1";
-
-    await db.all(app.todos.branch(branchLikeInput));
-
-    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
-    expect(client.query).toHaveBeenCalledWith(
-      expect.stringContaining(`"branches":["${branchLikeInput}"]`),
-      expect.anything(),
-    );
-  });
-
-  it("uses a branch-targeted direct batch for immediate inserts", () => {
+  it("uses the selected branch for immediate writes", () => {
     const { client, directBatch } = makeClient();
     const db = new TestDb(client);
 
@@ -119,6 +100,7 @@ describe("Db.branch", () => {
       title: "Draft todo",
     });
 
+    expect(client.branchNameForUserBranch).toHaveBeenCalledWith("branch-row-1");
     expect(client.beginBatchInternal).toHaveBeenCalledWith(
       undefined,
       undefined,
@@ -135,31 +117,7 @@ describe("Db.branch", () => {
     expect(directBatch.commit).toHaveBeenCalled();
   });
 
-  it("serializes explicit query branches from table builders", () => {
-    expect(JSON.parse(app.todos.branch("query-branch")._build())).toMatchObject({
-      branches: ["query-branch"],
-    });
-  });
-
-  it("preserves explicit branches on included relation builders", async () => {
-    const { client } = makeClient();
-    const db = new TestDb(client);
-
-    await db.branch("outer-branch").all(
-      app.projects.include({
-        todosViaProject: app.todos.branch("included-branch"),
-      }),
-    );
-
-    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
-
-    const [queryJson] = vi.mocked(client.query).mock.calls.at(-1)! as [string];
-    const query = JSON.parse(queryJson);
-    expect(query.branches).toEqual(["outer-branch"]);
-    expect(query.array_subqueries[0].branches).toEqual(["included-branch"]);
-  });
-
-  it("applies the db branch view to plain included relations", async () => {
+  it("applies the db branch view to included relations", async () => {
     const { client } = makeClient();
     vi.mocked(client.query).mockResolvedValueOnce([
       {
@@ -192,11 +150,10 @@ describe("Db.branch", () => {
       }),
     );
 
-    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
-
     const [queryJson] = vi.mocked(client.query).mock.calls.at(-1)! as [string];
     const query = JSON.parse(queryJson);
     expect(query.branches).toEqual(["outer-branch"]);
+    expect(query.array_subqueries[0].branches).toBeUndefined();
     expect(rows).toEqual([
       {
         id: "project-1",
@@ -210,60 +167,5 @@ describe("Db.branch", () => {
         ],
       },
     ]);
-  });
-
-  it("preserves explicit branches on each union relation seed", async () => {
-    const { client } = makeClient();
-    const db = new TestDb(client);
-    const queryBuilder = app.union([
-      app.todos.where({ title: "Draft A" }).branch("union-branch-a"),
-      app.todos.where({ title: "Draft B" }).branch("union-branch-b"),
-    ]);
-
-    const builtQuery = JSON.parse(queryBuilder._build());
-    expect(builtQuery.branches).toBeUndefined();
-    expect(builtQuery.union.inputs[0].branches).toEqual(["union-branch-a"]);
-    expect(builtQuery.union.inputs[1].branches).toEqual(["union-branch-b"]);
-
-    await db.branch("outer-branch").all(queryBuilder);
-
-    expect(client.branchNameForUserBranch).not.toHaveBeenCalled();
-
-    const [queryJson] = vi.mocked(client.queryInternal).mock.calls.at(-1)! as [string];
-    const query = JSON.parse(queryJson);
-    expect(query.branches).toEqual(["outer-branch"]);
-    expect(query.relation_ir.Union.inputs[0].Branch.branches).toEqual(["union-branch-a"]);
-    expect(query.relation_ir.Union.inputs[1].Branch.branches).toEqual(["union-branch-b"]);
-  });
-
-  it("delegates branch mutation error listeners to the parent db", () => {
-    const { client } = makeClient();
-    const db = new TestDb(client);
-    const branchDb = db.branch("branch-row-1");
-    const listener = vi.fn();
-    const unsubscribeFromParent = vi.fn();
-    const event = {
-      code: "permission_denied",
-      reason: "denied",
-      batch: {
-        batchId: "batch-1",
-        mode: "direct",
-        sealed: true,
-        latestSettlement: null,
-      },
-    } as MutationErrorEvent;
-    let parentListener: ((event: MutationErrorEvent) => void) | undefined;
-    const parentOnMutationError = vi.spyOn(db, "onMutationError").mockImplementation((callback) => {
-      parentListener = callback;
-      return unsubscribeFromParent;
-    });
-
-    const unsubscribe = branchDb.onMutationError(listener);
-    parentListener?.(event);
-    unsubscribe();
-
-    expect(parentOnMutationError).toHaveBeenCalledWith(listener);
-    expect(listener).toHaveBeenCalledWith(event);
-    expect(unsubscribeFromParent).toHaveBeenCalled();
   });
 });

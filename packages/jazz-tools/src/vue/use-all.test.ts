@@ -74,6 +74,14 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
+  it("VU-ALL-03b: forwards adapter branch options to makeQueryKey", () => {
+    const query = makeQuery();
+    const scope = effectScope();
+    scope.run(() => useAll(query, { branch: "draft-branch" }));
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { branch: "draft-branch" });
+    scope.stop();
+  });
+
   it("VU-ALL-04: reactive options trigger re-subscription on change", async () => {
     const query = makeQuery();
     const options = ref<any>({ tier: "local" });

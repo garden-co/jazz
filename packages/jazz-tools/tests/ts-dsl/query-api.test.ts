@@ -2,6 +2,9 @@ import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, it, expect, assert, expectTypeOf } from "vitest";
 import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
 import { insertProject, insertTodo, insertUser, uniqueDbName } from "./factories";
+import type { useAll as useAllHook } from "../../src/react-core/use-all.js";
+
+declare const useAllForTypeCheck: typeof useAllHook;
 
 function makeFriends(db: Db, user1: User, user2: User) {
   const user1Friends = [...user1.friendsIds, user2.id];
@@ -30,6 +33,16 @@ describe("TS Query API", () => {
   });
 
   describe("filtering", () => {
+    it("keeps branch scoping off query builders and db query options at the type level", () => {
+      if (false) {
+        // @ts-expect-error branch scoping belongs on db.branch(...), not query builders
+        app.todos.branch("draft");
+        // @ts-expect-error branch is adapter-only and not accepted by Db query options
+        void db.all(app.todos, { branch: "draft" });
+        useAllForTypeCheck(app.todos, { branch: "draft" });
+      }
+    });
+
     it("queries by id", async () => {
       const { id } = insertProject(db, "Project A");
 

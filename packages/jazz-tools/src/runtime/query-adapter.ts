@@ -331,7 +331,6 @@ function toArraySubqueries(
         order_by: orderBy,
         limit: spec.limit ?? null,
         ...(requirement ? { requirement } : {}),
-        ...(spec.branches.length > 0 ? { branches: spec.branches } : {}),
         nested_arrays: nestedArrays,
       });
     } else {
@@ -347,7 +346,6 @@ function toArraySubqueries(
         select_columns: selectColumns,
         order_by: orderBy,
         limit: spec.limit ?? null,
-        ...(spec.branches.length > 0 ? { branches: spec.branches } : {}),
         nested_arrays: nestedArrays,
       });
     }
@@ -700,15 +698,6 @@ function translateBuiltRelationToRelExpr(
   expr = lowerHopsToRelExpr(expr, outputTable, hops, relations, schema);
   outputTable = resolveHopsOutputTable(outputTable, hops, relations);
 
-  if (relation.branches && relation.branches.length > 0) {
-    expr = {
-      Branch: {
-        input: expr,
-        branches: relation.branches,
-      },
-    };
-  }
-
   return { expr, outputTable };
 }
 
@@ -837,7 +826,6 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const projectedColumns = visibleSelectColumns(selectColumns, includeProjectionColumns);
   const query = {
     table: builder.table,
-    ...(builder.branches.length > 0 ? { branches: builder.branches } : {}),
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
       hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: builder.requireIncludes,

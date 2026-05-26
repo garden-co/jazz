@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { col } from "./dsl.js";
 import { definePermissions } from "./permissions/index.js";
-import { normalizePermissionsForWasm } from "./schema-permissions.js";
+import {
+  collectMissingExplicitPolicyDiagnostics,
+  normalizePermissionsForWasm,
+} from "./schema-permissions.js";
 import { defineApp, defineTable } from "./typed-app.js";
 
 function collectRelationLiteralTextValues(value: unknown): string[] {
@@ -153,5 +156,31 @@ describe("normalizePermissionsForWasm", () => {
     expect(doneCheck.value.value.value).toBe(false);
     expect(branchPolicies?.update).toBeUndefined();
     expect(branchPolicies?.delete).toBeUndefined();
+  });
+
+  it("treats branch-scoped table policies as explicit policy coverage", () => {
+    const app = defineApp({
+      projects: defineTable({
+        title: col.string(),
+      }),
+      branches: defineTable({
+        projectId: col.ref("projects"),
+      }),
+      todos: defineTable({
+        projectId: col.ref("projects"),
+        title: col.string(),
+      }),
+    });
+
+    const permissions = definePermissions(app, ({ policy }) => {
+      policy.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+        branchPolicy.todos.allowRead.where({ projectId: $branch.projectId });
+        branchPolicy.todos.allowInsert.where({ projectId: $branch.projectId });
+        branchPolicy.todos.allowUpdate.where({ projectId: $branch.projectId });
+        branchPolicy.todos.allowDelete.where({ projectId: $branch.projectId });
+      });
+    });
+
+    expect(collectMissingExplicitPolicyDiagnostics(["todos"], permissions)).toEqual([]);
   });
 });

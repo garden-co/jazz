@@ -788,7 +788,6 @@ describe("branch permissions browser integration", () => {
        *   db.all(todos where main title)       normal read
        *   db.all(todos where branch title)     normal read, no branch leak
        *   db.branch(id).all(todos)             branch read
-       *   db.all(todos.branch(id))             branch read
        */
       it("applies normal read policy on main and branch read policy on branches", async () => {
         const caseName = `read normal=${normalMode} branch=${branchMode}`;
@@ -868,18 +867,6 @@ describe("branch permissions browser integration", () => {
             app.todos.where({ title: branchTitle }),
             expectedBranch,
             `${readerCase} branch db`,
-          );
-          await expectRows(
-            readerDb,
-            app.todos.where({ title: branchTitle }).branch(branch.id),
-            expectedBranch,
-            `${readerCase} query branch`,
-          );
-          await expectRows(
-            readerDb.branch(branch.id),
-            app.todos.where({ title: branchTitle }).branch(branch.id),
-            expectedBranch,
-            `${readerCase} branch db with query branch`,
           );
         }
       });
@@ -1371,10 +1358,8 @@ describe("branch query permissions browser integration", () => {
        *   ------------------------------------  -------------  -----------
        *   db.all(todos where project=P)         main           normal read
        *   db.branch(A).all(todos)               A              branch read
-       *   db.all(todos.branch(A))               A              branch read
-       *   db.branch(A).all(todos.branch(B))     B              branch read
        */
-      it("applies normal, branch, and override read policies", async () => {
+      it("applies normal and branch read policies", async () => {
         const caseName = `normal=${normalReadMode} branch=${branchReadMode}`;
         const { app, seedDb } = await createSyncedBranchQueryCaseDbs(
           {
@@ -1399,12 +1384,6 @@ describe("branch query permissions browser integration", () => {
           [{ id: fixture.branchATodo.id, owner: "bob" }],
           reader,
         );
-        const expectedBranchB = expectedReadIdsForMode(
-          branchReadMode,
-          [{ id: fixture.branchBTodo.id, owner: "alice" }],
-          reader,
-        );
-
         await expectRowIds(
           seedDb,
           app.todos.where({ projectId: fixture.project.id }),
@@ -1426,59 +1405,9 @@ describe("branch query permissions browser integration", () => {
           `${caseName} branch db uses branch read policy`,
           "edge",
         );
-        await expectRowIds(
-          seedDb,
-          app.todos.where({ projectId: fixture.project.id }).branch(fixture.branchA.id),
-          expectedBranchA,
-          `${caseName} query-level branch uses branch read policy`,
-          "edge",
-        );
-        await expectRowIds(
-          seedDb.branch(fixture.branchA.id),
-          app.todos.where({ projectId: fixture.project.id }).branch(fixture.branchB.id),
-          expectedBranchB,
-          `${caseName} query-level branch overrides branch db view`,
-          "edge",
-        );
       });
     },
   );
-
-  /*
-   * Include relation path:
-   *
-   *   project P --include todos.branch(A)--> branch A todos
-   *
-   *   projects.allowRead = always
-   *   branch todos allowRead = never
-   *
-   *   Expected: [project P { todosViaProject: [] }]
-   */
-  it("does not leak denied branch rows through included relations", async () => {
-    const caseName = "include-denied-branch-read";
-    const { app, seedDb } = await createSyncedBranchQueryCaseDbs(
-      {
-        normalReadMode: "always",
-        branchReadMode: "never",
-        branchBackingReadMode: "always",
-      },
-      caseName,
-    );
-    const fixture = await seedBranchQueryFixture(app, seedDb, caseName, "edge");
-
-    const projectRows = await withTimeout(
-      seedDb.all(
-        app.projects.where({ id: fixture.project.id }).include({
-          todosViaProject: app.todos.branch(fixture.branchA.id),
-        }),
-        { tier: "edge" },
-      ),
-      15_000,
-      "denied branch include query did not resolve",
-    );
-    expect(projectRows, "project row remains visible when include is empty").toHaveLength(1);
-    expect(projectRows[0]!.todosViaProject).toEqual([]);
-  });
 
   /*
    * Branch DB include inheritance path:
@@ -1547,83 +1476,12 @@ describe("branch query permissions browser integration", () => {
   });
 
   /*
-   * Union relation path:
-   *
-   *   union(
-   *     todos.branch(A),
-   *     todos.branch(B)
-   *   )
-   *
-   *   Branch read policy = never for both arms.
-   *   Expected: no rows from either branch arm.
-   */
-  it("does not leak denied branch rows through union inputs", async () => {
-    const caseName = "union-denied-branch-read";
-    const { app, seedDb, actorDb } = await createSyncedBranchQueryCaseDbs(
-      {
-        normalReadMode: "always",
-        branchReadMode: "never",
-        branchBackingReadMode: "always",
-      },
-      caseName,
-    );
-    const fixture = await seedBranchQueryFixture(app, seedDb, caseName, "edge");
-    const readerDb = await actorDb("alice");
-
-    await expectRowIds(
-      readerDb,
-      app.union([
-        app.todos.where({ projectId: fixture.project.id }).branch(fixture.branchA.id),
-        app.todos.where({ projectId: fixture.project.id }).branch(fixture.branchB.id),
-      ]),
-      [],
-      "denied branch union inputs stay hidden",
-      "edge",
-    );
-  });
-
-  /*
-   * Positive union relation path:
-   *
-   *   union(
-   *     todos.branch(A),
-   *     todos.branch(B)
-   *   )
-   *
-   *   Branch read policy = always for both arms.
-   *   Expected: rows from both branch arms are returned, and main rows stay out.
-   */
-  it("returns allowed rows from unioned branch inputs", async () => {
-    const caseName = "union-allowed-branch-read";
-    const { app, seedDb } = await createSyncedBranchQueryCaseDbs(
-      {
-        normalReadMode: "always",
-        branchReadMode: "always",
-        branchBackingReadMode: "always",
-      },
-      caseName,
-    );
-    const fixture = await seedBranchQueryFixture(app, seedDb, caseName, "edge");
-
-    await expectRowIds(
-      seedDb,
-      app.union([
-        app.todos.where({ projectId: fixture.project.id }).branch(fixture.branchA.id),
-        app.todos.where({ projectId: fixture.project.id }).branch(fixture.branchB.id),
-      ]),
-      [fixture.branchATodo.id, fixture.branchBTodo.id],
-      "allowed branch union inputs return rows from both branches",
-      "edge",
-    );
-  });
-
-  /*
    * Branch-local ordering path:
    *
    *   branch A contains Z and M titles
    *   main contains a lexically larger title
    *
-   *   Query: todos.branch(A).orderBy(title desc).limit(2)
+   *   Query: db.branch(A).all(todos.orderBy(title desc).limit(2))
    *   Expected: branch-local sorted window only.
    */
   it("applies orderBy and limit within the selected branch", async () => {
@@ -1651,71 +1509,10 @@ describe("branch query permissions browser integration", () => {
     await seedBranchQueryBranchTodo(app, seedDb, branch.id, project.id, "alice", "M-mid", "edge");
 
     await expectRowTitlesInOrder(
-      seedDb,
-      app.todos
-        .where({ projectId: project.id })
-        .branch(branch.id)
-        .orderBy("title", "desc")
-        .limit(2),
+      seedDb.branch(branch.id),
+      app.todos.where({ projectId: project.id }).orderBy("title", "desc").limit(2),
       ["Z-top", "M-mid"],
-      "branch query applies descending order and limit",
-      "edge",
-    );
-  });
-
-  /*
-   * Union ordering path:
-   *
-   *   union(todos.branch(A), todos.branch(B))
-   *     .orderBy(title desc)
-   *     .limit(2)
-   *
-   *   Expected: the sorted window is taken across both branch arms.
-   */
-  it("applies orderBy and limit across unioned branch inputs", async () => {
-    const caseName = "branch-union-order-limit";
-    const { app, seedDb } = await createSyncedBranchQueryCaseDbs(
-      {
-        normalReadMode: "always",
-        branchReadMode: "always",
-        branchBackingReadMode: "always",
-      },
-      caseName,
-    );
-    const project = await seedBranchQueryProject(app, seedDb, `Project ${caseName}`, "edge");
-    await seedBranchQueryMainTodo(app, seedDb, project.id, "alice", "ZZZ main leak", "edge");
-    const branchA = await seedBranchQueryBranch(
-      app,
-      seedDb,
-      project.id,
-      "alice",
-      `Draft A ${caseName}`,
-      "edge",
-    );
-    const branchB = await seedBranchQueryBranch(
-      app,
-      seedDb,
-      project.id,
-      "alice",
-      `Draft B ${caseName}`,
-      "edge",
-    );
-    await seedBranchQueryBranchTodo(app, seedDb, branchA.id, project.id, "alice", "A-low", "edge");
-    await seedBranchQueryBranchTodo(app, seedDb, branchA.id, project.id, "alice", "Z-top", "edge");
-    await seedBranchQueryBranchTodo(app, seedDb, branchB.id, project.id, "alice", "M-mid", "edge");
-    await seedBranchQueryBranchTodo(app, seedDb, branchB.id, project.id, "alice", "B-low", "edge");
-
-    await expectRowTitlesInOrder(
-      seedDb,
-      app
-        .union([
-          app.todos.where({ projectId: project.id }).branch(branchA.id),
-          app.todos.where({ projectId: project.id }).branch(branchB.id),
-        ])
-        .orderBy("title", "desc")
-        .limit(2),
-      ["Z-top", "M-mid"],
-      "branch union applies descending order and limit across arms",
+      "branch db query applies descending order and limit",
       "edge",
     );
   });
@@ -1838,7 +1635,7 @@ describe("branch query permissions browser integration", () => {
      *                         `-> published permissions head
      *
      *   normal read = always, branch read = never/missing.
-     *   Expected: edge branch query and include both return no todo rows.
+     *   Expected: edge branch query returns no todo rows.
      */
     it("uses published branch read permissions for edge branch queries", async () => {
       const { app, testingServer } = await publishBranchQueryPermissions(`synced-${name}`, {
@@ -1878,19 +1675,6 @@ describe("branch query permissions browser integration", () => {
         `synced ${name} edge branch read`,
         "edge",
       );
-
-      const projectRows = await withTimeout(
-        db.all(
-          app.projects.where({ id: project.id }).include({
-            todosViaProject: app.todos.branch(branch.id),
-          }),
-          { tier: "edge" },
-        ),
-        15_000,
-        `synced ${name} include query did not resolve`,
-      );
-      expect(projectRows, `synced ${name} project row visible for include`).toHaveLength(1);
-      expect(projectRows[0]!.todosViaProject).toEqual([]);
     });
   });
 });

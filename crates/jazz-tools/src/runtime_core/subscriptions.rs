@@ -34,11 +34,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     fn subscribe_query(
         &mut self,
-        query: Query,
+        mut query: Query,
         session: Option<Session>,
         durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, RuntimeError> {
+        query
+            .validate_public_branch_scope()
+            .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
+        query.compose_logical_branches_for_context(
+            self.schema_manager.query_manager().schema_context(),
+        );
+
         self.schema_manager
             .query_manager_mut()
             .subscribe_with_sync_and_propagation_with_local_updates(
@@ -362,6 +369,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         )
         .entered();
         let (sender, receiver) = oneshot::channel();
+        if let Err(err) = query.validate_public_branch_scope() {
+            let _ = sender.send(Err(RuntimeError::QueryError(err.to_string())));
+            return QueryFuture::new(receiver);
+        }
         query.compose_logical_branches_for_context(
             self.schema_manager.query_manager().schema_context(),
         );

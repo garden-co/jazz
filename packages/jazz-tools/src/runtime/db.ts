@@ -207,6 +207,16 @@ type DbRuntimeOperationContext = {
   attribution?: string;
 };
 
+const DB_BRANCH_SCOPE = Symbol("Db.branchScope");
+
+type BranchScopedDb = Db & {
+  [DB_BRANCH_SCOPE]?: string;
+};
+
+function scopedBranchId(db: Db): string | null {
+  return (db as BranchScopedDb)[DB_BRANCH_SCOPE] ?? null;
+}
+
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
   return { localUpdates: "deferred", ...options };
 }
@@ -226,14 +236,6 @@ function withDefaultQueryBranch(queryJson: string, defaultBranchId: string | nul
   try {
     parsed = JSON.parse(queryJson) as Record<string, unknown>;
   } catch {
-    return queryJson;
-  }
-
-  const branches = parsed.branches;
-  if (
-    Array.isArray(branches) &&
-    branches.some((branch): branch is string => typeof branch === "string")
-  ) {
     return queryJson;
   }
 
@@ -1097,27 +1099,13 @@ export class Db {
     return null;
   }
 
-  /** @internal */
-  getClientForBranchView(schema: WasmSchema): JazzClient {
-    return this.getClient(schema);
-  }
-
-  /** @internal */
-  getRuntimeOperationContextForBranchView(): DbRuntimeOperationContext | null {
-    return this.getRuntimeOperationContext();
-  }
-
-  /** @internal */
-  async ensureBranchViewQueryReady(options?: QueryOptions): Promise<void> {
-    await this.ensureQueryReady(options);
-  }
-
-  protected resolveDefaultRuntimeBranch(_client: JazzClient): string | null {
-    return null;
+  protected resolveDefaultRuntimeBranch(client: JazzClient): string | null {
+    const branchId = scopedBranchId(this);
+    return branchId ? client.branchNameForUserBranch(branchId) : null;
   }
 
   protected resolveDefaultQueryBranch(): string | null {
-    return null;
+    return scopedBranchId(this);
   }
 
   /**
@@ -1691,7 +1679,16 @@ export class Db {
   }
 
   branch(branchId: string): Db {
-    return new BranchDb(this, branchId);
+    return Object.create(this, {
+      [DB_BRANCH_SCOPE]: {
+        value: branchId,
+        enumerable: false,
+      },
+      shutdown: {
+        value: async () => {},
+        enumerable: false,
+      },
+    }) as Db;
   }
 
   setDevMode(enabled: boolean): void {
@@ -2352,43 +2349,6 @@ export class Db {
         branches: [this.config.userBranch ?? "main"],
       };
     }
-  }
-}
-
-class BranchDb extends Db {
-  constructor(
-    private readonly parentDb: Db,
-    private readonly branchId: string,
-  ) {
-    super(parentDb.getConfig(), null);
-  }
-
-  protected override getClient(schema: WasmSchema): JazzClient {
-    return this.parentDb.getClientForBranchView(schema);
-  }
-
-  protected override getRuntimeOperationContext(): DbRuntimeOperationContext | null {
-    return this.parentDb.getRuntimeOperationContextForBranchView();
-  }
-
-  override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
-    return this.parentDb.onMutationError(listener);
-  }
-
-  protected override async ensureQueryReady(options?: QueryOptions): Promise<void> {
-    await this.parentDb.ensureBranchViewQueryReady(options);
-  }
-
-  override async shutdown(): Promise<void> {
-    // The parent Db owns the runtime.
-  }
-
-  protected override resolveDefaultRuntimeBranch(client: JazzClient): string | null {
-    return client.branchNameForUserBranch(this.branchId);
-  }
-
-  protected override resolveDefaultQueryBranch(): string | null {
-    return this.branchId;
   }
 }
 

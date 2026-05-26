@@ -11,6 +11,7 @@ import {
   toLegacyPolicyExprWithRelForTest,
   toLegacyRelExprForTest,
 } from "../testing/relation-ir-test-helpers.js";
+import { createPolicyTestApp } from "../testing/index.js";
 import { defineApp, defineTable } from "../typed-app.js";
 
 const app = defineApp({
@@ -210,6 +211,29 @@ describe("permissions DSL", () => {
     expect(commentRead.value.column).toBe("projectId");
   });
 
+  it("exposes only table policy builders in branchPolicy enumeration", () => {
+    const compiled = definePermissions(app, ({ policy }) => {
+      policy.forBranch(policy.branches, ({ branchPolicy }) => {
+        for (const tablePolicy of Object.values(branchPolicy)) {
+          tablePolicy.allowRead.never();
+        }
+      });
+    });
+
+    expect(compiled.union).toBeUndefined();
+    expect(Object.keys(compiled).sort()).toEqual([
+      "branches",
+      "comments",
+      "projects",
+      "resource_access_edges",
+      "team_team_edges",
+      "teams",
+      "todoShares",
+      "todos",
+      "user_team_edges",
+    ]);
+  });
+
   it("lowers branch refs inside branch-scoped relation filters", () => {
     const compiled = definePermissions(app, ({ policy }) => {
       policy.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
@@ -245,6 +269,99 @@ describe("permissions DSL", () => {
 
     expect(Object.keys(compiled.todos?.for_branch ?? {}).sort()).toEqual(["branches", "projects"]);
   });
+
+  it("evaluates branch reads through the backing table that owns each branch id", async () => {
+    const collisionApp = defineApp({
+      projects: defineTable({
+        name: col.string(),
+      }),
+      branches: defineTable({
+        projectId: col.ref("projects"),
+        name: col.string(),
+      }),
+      todos: defineTable({
+        projectId: col.ref("projects"),
+        title: col.string(),
+      }),
+    });
+    const permissions = definePermissions(collisionApp, ({ policy }) => {
+      policy.projects.allowRead.always();
+      policy.projects.allowInsert.always();
+      policy.branches.allowRead.always();
+      policy.branches.allowInsert.always();
+      policy.todos.allowRead.never();
+      policy.todos.allowInsert.always();
+
+      policy.forBranch(policy.projects, ({ $branch, branchPolicy }) => {
+        branchPolicy.todos.allowRead.where({ projectId: $branch.id });
+        branchPolicy.todos.allowInsert.where({ projectId: $branch.id });
+      });
+      policy.forBranch(policy.branches, ({ $branch, branchPolicy }) => {
+        branchPolicy.todos.allowRead.where({ projectId: $branch.projectId });
+        branchPolicy.todos.allowInsert.where({ projectId: $branch.projectId });
+      });
+    });
+    const policyTestApp = await createPolicyTestApp(collisionApp, permissions, expect);
+
+    try {
+      const projectBranchId = "11111111-1111-4111-8111-111111111111";
+      const branchRowId = "33333333-3333-4333-8333-333333333333";
+      const branchProjectId = "22222222-2222-4222-8222-222222222222";
+      const seeded = await policyTestApp.seed(async (db) => {
+        const projectBacking = await db
+          .insert(collisionApp.projects, { name: "Project backing" }, { id: projectBranchId })
+          .wait({ tier: "edge" });
+        const branchProject = await db
+          .insert(
+            collisionApp.projects,
+            { name: "Branch backing project" },
+            { id: branchProjectId },
+          )
+          .wait({ tier: "edge" });
+        const branchBacking = await db
+          .insert(
+            collisionApp.branches,
+            {
+              projectId: branchProject.id,
+              name: "Branch backing",
+            },
+            { id: branchRowId },
+          )
+          .wait({ tier: "edge" });
+        const projectBackedTodo = await db
+          .branch(projectBranchId)
+          .insert(collisionApp.todos, {
+            projectId: projectBacking.id,
+            title: "Project-backed branch todo",
+          })
+          .wait({ tier: "edge" });
+        const branchBackedTodo = await db
+          .branch(branchBacking.id)
+          .insert(collisionApp.todos, {
+            projectId: branchProject.id,
+            title: "Branch-backed branch todo",
+          })
+          .wait({ tier: "edge" });
+
+        return { projectBackedTodo, branchBackedTodo };
+      });
+      const reader = policyTestApp.as({
+        user_id: "alice",
+        claims: {},
+        authMode: "local-first",
+      });
+
+      const projectRows = await reader
+        .branch(projectBranchId)
+        .all(collisionApp.todos, { tier: "edge" });
+      const branchRows = await reader.branch(branchRowId).all(collisionApp.todos, { tier: "edge" });
+
+      expect(projectRows.map((row) => row.id)).toEqual([seeded.projectBackedTodo.id]);
+      expect(branchRows.map((row) => row.id)).toEqual([seeded.branchBackedTodo.id]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 15_000);
 
   it("compiles provenance magic column policies", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [

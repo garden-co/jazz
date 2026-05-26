@@ -319,27 +319,27 @@ fn union_query_with_branch_arms_applies_order_by_and_limit() {
 }
 
 #[test]
-fn query_multi_branch_requires_explicit_branch() {
-    // Verify Query.branches field exists and works
+fn internal_resolved_branch_carrier_requires_explicit_branches() {
+    // Query.branches is an internal runtime/schema-manager carrier, not public query API.
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (qm, _storage) = create_query_manager(sync_manager, schema);
     let main_branch = get_branch(&qm);
     let draft_branch = get_branch_for_user_branch(&qm, "draft");
 
-    // Multi-branch query with explicit branches
+    // Internal carrier query with explicit resolved branches.
     let query = qm
         .query("users")
         .branches(&[main_branch.as_str(), draft_branch.as_str()])
         .build();
     assert_eq!(query.branches.len(), 2);
-    assert!(query.is_multi_branch());
+    assert!(query.branches.len() > 1);
 
     // Query without explicit branch has empty branches field.
     // The actual branches are resolved at execution time from schema context.
     let query = qm.query("users").build();
     assert!(query.branches.is_empty());
-    assert!(!query.is_multi_branch());
+    assert!(query.branches.len() <= 1);
 }
 
 #[test]

@@ -741,24 +741,12 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         graph: &crate::query_manager::graph::QueryGraph,
     ) -> Vec<String> {
-        fn push_unique(branches: &mut Vec<String>, branch: String) {
-            if !branches.iter().any(|existing| existing == &branch) {
-                branches.push(branch);
-            }
-        }
-
         let scan_branches = graph.scan_branches();
-        let mut branches = if !scan_branches.is_empty() {
+        if !scan_branches.is_empty() {
             scan_branches
         } else {
             Self::resolved_server_query_branches(query, schema_context)
-        };
-
-        for branch in query.explicit_array_subquery_branches() {
-            push_unique(&mut branches, branch);
         }
-
-        branches
     }
 
     pub(super) fn query_for_server_compile(

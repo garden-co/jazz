@@ -106,13 +106,16 @@ These tests run against the current Sort+LimitOffset path and define the expecte
 - [ ] Planner recognition: detect multi-column ORDER BY where first column is indexed, activate prefix-scan + group-sort
 - [ ] Tests: `ORDER BY dept ASC, score DESC LIMIT 10` — high-cardinality first column (small groups), low-cardinality first column (large groups), single-column fallback still works
 
-## Multi-branch — k-way merge of per-branch ordered scans
+## Internal resolved branches — k-way merge of per-branch ordered scans
 
 **Depends on: Planner, Streaming Protocol**
 
+This scope is for schema/runtime branch fan-out inside one logical branch, not public query-builder
+support for querying multiple logical user branches.
+
 - [ ] k-way merge node: accept multiple ordered streams (one per branch), interleave by order column value
 - [ ] Deduplication of same ObjectId across branches (match existing UnionNode semantics)
-- [ ] Planner recognition: detect multi-branch query with ordered top-k, wire up per-branch OrderedIndexScans → merge → streaming pipeline
+- [ ] Planner recognition: detect internal resolved-branch fan-out with ordered top-k, wire up per-branch OrderedIndexScans → merge → streaming pipeline
 - [ ] Tests: same table on 2 branches with different/overlapping data, `ORDER BY created_at DESC LIMIT 10`, assert correct merge ordering and dedup
 
 ## JOINs with ordered top-k — order-preserving index nested-loop join
@@ -138,10 +141,10 @@ These tests run against the current Sort+LimitOffset path and define the expecte
 - [ ] Planner wires cursor through the pipeline when provided by the caller
 - [ ] Handle cursor invalidation: if cursor row was deleted, scan resumes from the next position (best-effort semantics)
 - [ ] Handle cursor with JOINs: cursor is on the driver table's order column, inner table probes resume correctly
-- [ ] Handle cursor with multi-branch: cursor applies per-branch, k-way merge resumes from the right position in each branch
+- [ ] Handle cursor with internal resolved branches: cursor applies per-branch, k-way merge resumes from the right position in each branch
 - [ ] Tests: fetch page 1 with LIMIT 20, use returned cursor to fetch page 2, assert no duplicates/gaps
 - [ ] Tests: cursor after row deletion (gap behavior), cursor after row insertion at boundary
-- [ ] Tests: cursor-based pagination through JOINed and multi-branch queries
+- [ ] Tests: cursor-based pagination through JOINed and internally fanned-out branch queries
 
 ## Incremental Reactivity — bounded window maintenance for live subscriptions
 

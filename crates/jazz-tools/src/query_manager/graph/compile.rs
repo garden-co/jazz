@@ -1147,15 +1147,10 @@ impl QueryGraph {
             None => return None,
         };
 
-        // Build base query for subgraph, using explicit subquery branches or inheriting outer branches.
+        // Build base query for subgraph, inheriting outer query branches.
         let mut base_builder = QueryBuilder::new(spec.table);
-        let effective_branches = if spec.branches.is_empty() {
-            branches
-        } else {
-            &spec.branches
-        };
-        if !effective_branches.is_empty() {
-            let branch_refs: Vec<&str> = effective_branches.iter().map(String::as_str).collect();
+        if !branches.is_empty() {
+            let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
             base_builder = base_builder.branches(&branch_refs);
         }
         for join_spec in &spec.joins {

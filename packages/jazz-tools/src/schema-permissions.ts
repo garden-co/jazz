@@ -445,7 +445,7 @@ function validatePermissionTables(
   }
 }
 
-function hasExplicitPolicy(
+function hasDirectExplicitPolicy(
   tablePolicies: TablePolicies | undefined,
   operation: ExplicitPolicyOperation,
 ): boolean {
@@ -463,6 +463,22 @@ function hasExplicitPolicy(
     case "delete":
       return Boolean(tablePolicies.delete?.using);
   }
+}
+
+function hasExplicitPolicy(
+  tablePolicies: TablePolicies | undefined,
+  operation: ExplicitPolicyOperation,
+): boolean {
+  if (!tablePolicies) {
+    return false;
+  }
+
+  return (
+    hasDirectExplicitPolicy(tablePolicies, operation) ||
+    Object.values(tablePolicies.for_branch ?? {}).some((branchPolicies) =>
+      hasExplicitPolicy(branchPolicies, operation),
+    )
+  );
 }
 
 function missingExplicitPolicyMessage(

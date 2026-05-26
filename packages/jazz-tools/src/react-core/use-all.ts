@@ -1,9 +1,12 @@
 import * as React from "react";
 import { type Usable, use } from "react";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import type { QueryBuilder } from "../runtime/db.js";
+import type { QuerySubscriptionOptions } from "../subscriptions-orchestrator.js";
 import { useJazzClient } from "./provider.js";
 
-type UseAllOptions = {
+export type UseAllOptions = QuerySubscriptionOptions;
+
+type UseAllBaseOptions = {
   suspense?: boolean;
 };
 
@@ -11,8 +14,8 @@ const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
 
 function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,
-  queryOptions?: QueryOptions,
-  options?: UseAllOptions,
+  queryOptions?: UseAllOptions,
+  options?: UseAllBaseOptions,
 ): T[] | undefined {
   const { suspense = false } = options ?? {};
   const { manager } = useJazzClient();
@@ -74,7 +77,7 @@ function useAllBase<T extends { id: string }>(
  */
 export function useAll<T extends { id: string }>(
   query?: QueryBuilder<T>,
-  options?: QueryOptions,
+  options?: UseAllOptions,
 ): T[] | undefined {
   return useAllBase(query, options, { suspense: false });
 }
@@ -89,7 +92,7 @@ export function useAll<T extends { id: string }>(
  */
 export function useAllSuspense<T extends { id: string }>(
   query?: QueryBuilder<T>,
-  options?: QueryOptions,
+  options?: UseAllOptions,
 ): T[] {
   return useAllBase(query, options, { suspense: true }) as T[];
 }

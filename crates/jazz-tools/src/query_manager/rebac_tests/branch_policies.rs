@@ -169,6 +169,59 @@ fn branch_schema_with_backing_project_dependency() -> Schema {
         .build()
 }
 
+fn branch_schema_with_parent_branch_policy_dependency() -> Schema {
+    let project_matches_branch_owner = PolicyExpr::Cmp {
+        column: "ownerId".into(),
+        op: CmpOp::Eq,
+        value: PolicyValue::BranchRef("ownerId".into()),
+    };
+
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("branches")
+                .column("ownerId", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("projects")
+                .column("ownerId", ColumnType::Text)
+                .policies({
+                    let mut project_policies = TablePolicies::new().with_select(PolicyExpr::False);
+                    project_policies.for_branch = HashMap::from([(
+                        TableName::new("branches"),
+                        TablePolicies::new()
+                            .with_select(project_matches_branch_owner)
+                            .with_insert(PolicyExpr::True),
+                    )]);
+                    project_policies
+                }),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .fk_column("projectId", "projects")
+                .column("title", ColumnType::Text)
+                .policies({
+                    let mut todo_policies = TablePolicies::new().with_insert(PolicyExpr::True);
+                    todo_policies.for_branch = HashMap::from([(
+                        TableName::new("branches"),
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::Inherits {
+                                operation: Operation::Select,
+                                via_column: "projectId".into(),
+                                max_depth: None,
+                            })
+                            .with_insert(PolicyExpr::True),
+                    )]);
+                    todo_policies
+                }),
+        )
+        .build()
+}
+
 fn branch_schema(include_todo_branch_policy: bool) -> Schema {
     let mut todo_policies = TablePolicies::default();
     if include_todo_branch_policy {
@@ -179,6 +232,28 @@ fn branch_schema(include_todo_branch_policy: bool) -> Schema {
                 .with_insert(project_matches_branch_policy()),
         )]);
     }
+
+    branch_schema_with_todo_policies(todo_policies)
+}
+
+fn branch_schema_with_todo_branch_read_write_policies() -> Schema {
+    let matches_branch_for_select = project_matches_branch_policy();
+    let matches_branch_for_insert = project_matches_branch_policy();
+    let matches_branch_for_update_using = project_matches_branch_policy();
+    let matches_branch_for_update_check = project_matches_branch_policy();
+    let matches_branch_for_delete = project_matches_branch_policy();
+    let mut todo_policies = TablePolicies::default();
+    todo_policies.for_branch = HashMap::from([(
+        TableName::new("branches"),
+        TablePolicies::new()
+            .with_select(matches_branch_for_select)
+            .with_insert(matches_branch_for_insert)
+            .with_update(
+                Some(matches_branch_for_update_using),
+                matches_branch_for_update_check,
+            )
+            .with_delete(matches_branch_for_delete),
+    )]);
 
     branch_schema_with_todo_policies(todo_policies)
 }
@@ -267,7 +342,7 @@ fn seed_branch_and_todo(
 //
 //   Query                         Expected
 //   ----------------------------  --------
-//   todos.branch(branch_id)       0 rows
+//   internal branch-scoped todos  0 rows
 fn branch_read_denies_when_for_branch_block_is_missing() {
     let (mut qm, mut storage, schema) = manager_with_branch_schema(false);
     let project_id = ObjectId::new();
@@ -694,6 +769,98 @@ fn multi_branch_read_uses_each_rows_branch_for_branch_ref_policy() {
 }
 
 #[test]
+fn multi_branch_read_uses_each_rows_branch_for_magic_permission_columns() {
+    let schema = branch_schema_with_todo_branch_read_write_policies();
+    let mut qm = create_query_manager_with_policy_mode(
+        SyncManager::new(),
+        schema.clone(),
+        RowPolicyMode::Enforcing,
+    );
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let project_a = ObjectId::new();
+    let project_b = ObjectId::new();
+    let branch_a = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_a), Value::Text("alice".into())],
+        )
+        .expect("insert branch A")
+        .row_id;
+    let branch_b = qm
+        .insert(
+            &mut storage,
+            "branches",
+            &[Value::Uuid(project_b), Value::Text("alice".into())],
+        )
+        .expect("insert branch B")
+        .row_id;
+    let branch_a_name = branch_name_for(&schema, branch_a);
+    let branch_b_name = branch_name_for(&schema, branch_b);
+    let allowed_a = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_a_name,
+            &[Value::Uuid(project_a), Value::Text("allowed A".into())],
+            None,
+        )
+        .expect("insert branch A todo")
+        .row_id;
+    let allowed_b = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_b_name,
+            &[Value::Uuid(project_b), Value::Text("allowed B".into())],
+            None,
+        )
+        .expect("insert branch B todo")
+        .row_id;
+    let denied_b = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_b_name,
+            &[Value::Uuid(project_a), Value::Text("denied B".into())],
+            None,
+        )
+        .expect("insert branch B todo with branch A project")
+        .row_id;
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("todos")
+            .branches(&[branch_a_name.as_str(), branch_b_name.as_str()])
+            .select(&["title", "$canRead", "$canEdit", "$canDelete"])
+            .build(),
+        Some(Session::new("alice")),
+    );
+    let values_by_id: HashMap<_, _> = rows.into_iter().collect();
+
+    assert_eq!(
+        values_by_id.get(&allowed_a),
+        Some(&vec![
+            Value::Text("allowed A".into()),
+            Value::Boolean(true),
+            Value::Boolean(true),
+            Value::Boolean(true),
+        ])
+    );
+    assert_eq!(
+        values_by_id.get(&allowed_b),
+        Some(&vec![
+            Value::Text("allowed B".into()),
+            Value::Boolean(true),
+            Value::Boolean(true),
+            Value::Boolean(true),
+        ])
+    );
+    assert!(!values_by_id.contains_key(&denied_b));
+}
+
+#[test]
 fn explicit_auth_drops_same_id_tuple_when_any_content_branch_is_denied() {
     let auth_schema = branch_schema(true);
     let structural_schema = strip_test_policies(&auth_schema);
@@ -972,6 +1139,72 @@ fn branch_select_reacts_when_backing_row_policy_dependency_changes() {
 }
 
 #[test]
+// Branch-policy inheritance:
+//
+//   todos.for_branch.select inherits projects.select via projectId
+//   projects.for_branch.select compares project.ownerId to $branch.ownerId
+//   projects.select on the normal table is false
+//
+//   Expected: a branch todo can inherit through the parent table's branch
+//   policy instead of falling back to the parent's normal select policy.
+fn branch_select_inherits_parent_branch_policy() {
+    let schema = branch_schema_with_parent_branch_policy_dependency();
+    let mut qm = create_query_manager_with_policy_mode(
+        SyncManager::new(),
+        schema.clone(),
+        RowPolicyMode::Enforcing,
+    );
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let branch_id = qm
+        .insert(&mut storage, "branches", &[Value::Text("alice".into())])
+        .expect("insert branch backing row")
+        .row_id;
+    let branch_name = branch_name_for(&schema, branch_id);
+    let project_id = qm
+        .insert_on_branch(
+            &mut storage,
+            "projects",
+            &branch_name,
+            &[Value::Text("alice".into())],
+            None,
+        )
+        .expect("insert branch project")
+        .row_id;
+    let todo_id = qm
+        .insert_on_branch(
+            &mut storage,
+            "todos",
+            &branch_name,
+            &[
+                Value::Uuid(project_id),
+                Value::Text("Inherited branch todo".into()),
+            ],
+            None,
+        )
+        .expect("insert branch todo")
+        .row_id;
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("todos").branch(branch_name).build(),
+        Some(Session::new("alice")),
+    );
+
+    assert_eq!(
+        rows,
+        vec![(
+            todo_id,
+            vec![
+                Value::Uuid(project_id),
+                Value::Text("Inherited branch todo".into()),
+            ],
+        )],
+        "branch inherit should evaluate the parent table's branch policy"
+    );
+}
+
+#[test]
 // BranchRef inside EXISTS:
 //
 //   branch row projectId = P
@@ -1024,7 +1257,7 @@ fn branch_read_with_exists_branch_policy_can_match_branch_ref() {
 //   projects[P] on main
 //          |
 //          v
-//   include todos.branch(B) where branch todo read = false
+//   include todos inheriting branch B where branch todo read = false
 //
 //   Expected query result
 //   ---------------------
@@ -1097,9 +1330,7 @@ fn branch_include_keeps_outer_row_when_inner_branch_read_denies() {
         &mut storage,
         QueryBuilder::new("projects")
             .with_array("todosViaProject", |sub| {
-                sub.from("todos")
-                    .branch(&branch_name)
-                    .correlate("projectId", "projects.id")
+                sub.from("todos").correlate("projectId", "projects.id")
             })
             .build(),
         Some(Session::new("alice")),
@@ -1113,7 +1344,7 @@ fn branch_include_keeps_outer_row_when_inner_branch_read_denies() {
 // Server subscription include path:
 //
 //   structural schema compiles:
-//     projects[P] --include todos.branch(B)--> todos on branch B
+//     projects[P] --include todos--> todos on the inherited query branch
 //
 //   authorization schema applies:
 //     projects.select = true
@@ -1199,9 +1430,7 @@ fn synced_branch_include_keeps_outer_row_when_inner_branch_read_denies() {
             query: Box::new(
                 QueryBuilder::new("projects")
                     .with_array("todosViaProject", |sub| {
-                        sub.from("todos")
-                            .branch(branch_name)
-                            .correlate("projectId", "projects.id")
+                        sub.from("todos").correlate("projectId", "projects.id")
                     })
                     .build(),
             ),

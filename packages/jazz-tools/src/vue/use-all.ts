@@ -1,9 +1,15 @@
 import { ref, toValue, watchEffect, type MaybeRefOrGetter, type Ref } from "vue";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import type { QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { applyDelta } from "../reconcile-array.js";
-import type { CacheEntryHandle, UseAllState } from "../subscriptions-orchestrator.js";
+import type {
+  CacheEntryHandle,
+  QuerySubscriptionOptions,
+  UseAllState,
+} from "../subscriptions-orchestrator.js";
 import { useJazzClient } from "./provider.js";
+
+export type UseAllOptions = QuerySubscriptionOptions;
 
 function applyEntryState<T extends { id: string }>(
   state: UseAllState<T>,
@@ -48,7 +54,7 @@ function subscribeToEntry<T extends { id: string }>(
  */
 export function useAll<T extends { id: string }>(
   query: MaybeRefOrGetter<QueryBuilder<T> | undefined>,
-  options?: MaybeRefOrGetter<QueryOptions | undefined>,
+  options?: MaybeRefOrGetter<UseAllOptions | undefined>,
 ): Ref<T[] | undefined> {
   const { manager } = useJazzClient();
   const data = ref<T[] | undefined>(undefined) as Ref<T[] | undefined>;

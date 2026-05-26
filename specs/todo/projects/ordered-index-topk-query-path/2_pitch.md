@@ -47,7 +47,7 @@ The key change: **Sort is removed** (the index provides order) and each node ope
 └──────────────────────────────────────────────────────┘
 ```
 
-Each node remains a separate graph node with its own logic — the streaming protocol is a new execution mode that existing node types opt into when the planner activates the ordered top-k path. The protocol extends to support JOINs (order-preserving nested-loop), multi-branch (k-way merge), and multi-column ORDER BY (prefix-scan + group-sort).
+Each node remains a separate graph node with its own logic — the streaming protocol is a new execution mode that existing node types opt into when the planner activates the ordered top-k path. The protocol extends to support JOINs (order-preserving nested-loop), internal resolved-branch scans (k-way merge), and multi-column ORDER BY (prefix-scan + group-sort).
 
 Key property: the pipeline keeps pulling rows from the index until k rows have passed all filters and policies. If filters/policies reject some rows, the scan naturally continues past k index entries — no explicit batching or over-fetch logic needed.
 
@@ -103,7 +103,7 @@ if plan.order_by first column has an index
 then:
    1. Choose scan source:
       - single branch → one OrderedIndexScan
-      - multi-branch  → k-way merge of per-branch OrderedIndexScans
+      - internal resolved branches → k-way merge of per-branch OrderedIndexScans
 
    2. Choose join strategy (if JOINs present):
       - ORDER BY column from any joined table → that table drives the ordered index nested-loop join
@@ -113,7 +113,7 @@ then:
       - single-column ORDER BY → index provides full order (no sort needed)
       - multi-column ORDER BY  → prefix-scan + group-sort on first column
 
-   These compose: multi-branch + JOIN + multi-column ORDER BY can all
+   These compose: internal resolved branch fan-out + JOIN + multi-column ORDER BY can all
    be active simultaneously. Each is an independent pipeline stage.
 
    If any component can't be satisfied → fall back to traditional Sort+LimitOffset
@@ -195,9 +195,11 @@ This mirrors the current SortNode's incremental behavior but operates on a bound
 
 Policies are evaluated by the existing PolicyFilterNode, which participates in the streaming protocol. No changes to policy evaluation logic — the node just needs to support the pull-based mode alongside its existing batch mode. It uses the same PolicyContextEvaluator it uses today.
 
-### Multi-branch handling
+### Internal resolved-branch handling
 
-When a query spans multiple branches, run one ordered index scan per branch and **k-way merge** the streams:
+When runtime planning expands one logical branch into multiple resolved schema/runtime branches, run
+one ordered index scan per resolved branch and **k-way merge** the streams. This is not public
+query-builder support for querying multiple logical user branches:
 
 ```
 Branch 1: OrderedIndexScan → stream of (value, row_id) in order
@@ -266,7 +268,7 @@ This is an order-preserving nested-loop join: the outer loop scans the driver's 
 
 8. **Order-preserving join complexity**: The index nested-loop join needs to probe the right table's index for each left row. If the join is unselective (many matches per left row), we emit many tuples per pull, complicating the streaming flow. The streaming protocol must handle "one pull yields multiple tuples" from the join node.
 
-9. **JOIN + multi-branch interaction**: A join across multi-branch data means the k-way merge happens before the join, and the join must probe per-branch indexes on the right side. The right-side probe needs to union results across branches for each left row — essentially a mini multi-branch lookup per join probe. This is supported (the components compose) but the implementation complexity is real.
+9. **JOIN + internal resolved-branch interaction**: A join across internally fanned-out branch data means the k-way merge happens before the join, and the join must probe per-branch indexes on the right side. The right-side probe needs to union results across resolved branches for each left row — essentially a mini internal branch lookup per join probe. This is supported (the components compose) but the implementation complexity is real.
 
 10. **Incremental reactivity with JOINs**: When a row changes in the joined table (B), the window may need to re-evaluate. Unlike simple queries where a single row maps to one result, a JOIN can amplify — one B row change affects multiple joined tuples. The window maintenance logic must handle this fan-out.
 

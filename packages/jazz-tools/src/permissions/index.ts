@@ -18,6 +18,7 @@ import type {
 } from "../ir.js";
 
 type QueryBuilderLike = {
+  _table: string;
   _rowType: unknown;
   where(input: unknown): unknown;
 };
@@ -673,7 +674,7 @@ export function definePermissions<TApp extends AppLike>(
 ): CompiledPermissions {
   const fkReferencesByTable = collectFkReferencesByTable(app);
   const relationsByTable = collectRelationsByTable(app);
-  const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
+  const tableNames = Object.keys(app).filter((key) => isQueryBuilderLike(app[key as keyof TApp]));
   const rules: RuleLike[] = [];
   const seenRules = new Set<RuleLike>();
   const collectRule = (ruleLike: RuleLike): void => {
@@ -693,6 +694,17 @@ export function definePermissions<TApp extends AppLike>(
   } as unknown as PolicyContext<TApp>;
   factory(ctx);
   return compileRules(rules, fkReferencesByTable, relationsByTable);
+}
+
+function isQueryBuilderLike(value: unknown): value is QueryBuilderLike {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "_table" in value &&
+    typeof (value as { _table?: unknown })._table === "string" &&
+    "where" in value &&
+    typeof (value as { where?: unknown }).where === "function"
+  );
 }
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
