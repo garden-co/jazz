@@ -1889,3 +1889,19 @@ recursive result; fully recursive deleted subtrees remain a future sharpening.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 recursive_query_scope_sync_exports_deleted_descendant_tombstone` passes, and
 full `cargo test -p mini-jazz-sqlite` passes with 101 whole-system tests.
+
+## 2026-05-25 20:14 PDT
+
+Starting explicit delete prior-row read-set coverage. The implementation records
+reason `2` reads for transaction deletes; adding a focused test so this does not
+remain only indirectly covered.
+
+## 2026-05-25 20:14 PDT
+
+Delete prior-row read-set coverage is green. Transaction deletes now have
+explicit test coverage showing the deleted row is recorded as a reason `2`
+read-set entry.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+generic_transaction_delete_records_previous_row_read_set` passes, and full
+`cargo test -p mini-jazz-sqlite` passes with 102 whole-system tests.

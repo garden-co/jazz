@@ -293,6 +293,34 @@ fn authority_acceptance_enriches_existing_transaction() {
 }
 
 #[test]
+fn generic_transaction_delete_records_previous_row_read_set() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-delete",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Before delete")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx = alice
+        .transaction()
+        .delete_row("notes", "note-delete")
+        .commit()
+        .unwrap();
+
+    assert_eq!(
+        alice.transaction_previous_read_rows(&tx).unwrap(),
+        vec![("notes".to_owned(), "note-delete".to_owned())]
+    );
+}
+
+#[test]
 fn generic_transaction_delete_shadows_pinned_base_row() {
     let schema = support::tasks_schema();
     let mut alice =
