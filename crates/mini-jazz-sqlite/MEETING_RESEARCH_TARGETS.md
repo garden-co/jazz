@@ -386,9 +386,11 @@ Research targets:
 
 Notes from meeting:
 
-- A public Discord user reported success with real-time cursors and asked about
-  libSQL, Turso, and SurrealDB. This was taken as a useful signal that the
-  ecosystem is moving toward similar local-first database questions.
+- A public Discord user had a terrible time implementing real-time cursors on
+  current Jazz because of performance problems, which prompted them to ask
+  about libSQL, Turso, and SurrealDB. This is a useful external signal that
+  current query/sync performance pain is visible to adopters and that people
+  naturally compare Jazz to embedded/database-engine approaches.
 - LocalFirst conference coordination happened but is not relevant to the spec
   except as team logistics.
 
