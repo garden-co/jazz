@@ -276,6 +276,73 @@ fn id_in_query_matches_and_syncs_selected_rows() {
 }
 
 #[test]
+fn schema_field_in_query_matches_and_syncs_selected_rows() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    for (id, pinned) in [
+        ("note-a", true),
+        ("note-b", false),
+        ("note-c", true),
+        ("note-d", false),
+    ] {
+        alice
+            .insert_row(
+                "notes",
+                id,
+                BTreeMap::from([
+                    ("body".to_owned(), json!(id)),
+                    ("pinned".to_owned(), json!(pinned)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let local_rows = alice
+        .read_rows_where_in("notes", "body", vec![json!("note-a"), json!("note-c")])
+        .unwrap();
+    assert_eq!(local_rows.len(), 2);
+
+    peer.apply_bundle(
+        &alice
+            .export_query_where_in("notes", "body", vec![json!("note-a"), json!("note-c")])
+            .unwrap(),
+    )
+    .unwrap();
+    let mut peer_ids = peer
+        .read_rows("notes")
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    peer_ids.sort();
+    assert_eq!(peer_ids, vec!["note-a", "note-c"]);
+
+    alice
+        .update_row(
+            "notes",
+            "note-a",
+            BTreeMap::from([("body".to_owned(), json!("note-a-left"))]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_in("notes", "body", vec![json!("note-a"), json!("note-c")])
+            .unwrap(),
+    )
+    .unwrap();
+
+    let rows = peer
+        .read_rows_where_in("notes", "body", vec![json!("note-a"), json!("note-c")])
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-c");
+}
+
+#[test]
 fn created_by_magic_field_query_matches_creator_principal() {
     let schema = support::notes_schema();
     let mut alice =

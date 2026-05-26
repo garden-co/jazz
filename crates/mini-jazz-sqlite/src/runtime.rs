@@ -603,6 +603,23 @@ impl Runtime {
         db: &Connection,
         query_read: &QueryReadRecord,
     ) -> Result<()> {
+        if query_read.op == "in" && query_read.field != "id" {
+            for value in query_read
+                .value
+                .as_array()
+                .ok_or_else(|| crate::Error::new("in predicate expects an array value"))?
+            {
+                let eq_read = QueryReadRecord {
+                    branch_id: query_read.branch_id.clone(),
+                    table: query_read.table.clone(),
+                    field: query_read.field.clone(),
+                    op: "eq".to_owned(),
+                    value: value.clone(),
+                };
+                Self::apply_query_scope_repair(schema, db, &eq_read)?;
+            }
+            return Ok(());
+        }
         if query_read.field == "id" {
             let branch_num = branch::checkout(db, &query_read.branch_id)?;
             let row_ids = id_predicate_values(&query_read.op, &query_read.value)?;
@@ -3242,6 +3259,20 @@ fn query_scope_repair_row_nums(
         .iter()
         .find(|candidate| candidate.name == field_name)
         .ok_or_else(|| crate::Error::new(format!("unknown query field {field_name}")))?;
+    if op == "in" {
+        let mut row_nums = Vec::new();
+        for value in value
+            .as_array()
+            .ok_or_else(|| crate::Error::new("in predicate expects an array value"))?
+        {
+            row_nums.extend(query_scope_repair_row_nums(
+                conn, table, field_name, "eq", value,
+            )?);
+        }
+        row_nums.sort();
+        row_nums.dedup();
+        return Ok(row_nums);
+    }
     let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let predicate_sql = query_predicate::sql(field, &format!("h.{predicate_column}"), op)?;
     let predicate_value = query_predicate::value(field, op, value, conn)?;

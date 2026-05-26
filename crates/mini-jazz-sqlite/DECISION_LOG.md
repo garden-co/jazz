@@ -455,3 +455,18 @@ tests.
 Design lesson: the current storage-name/semantic-name split is doing useful
 work. Lens reads are not just presentation: once a new-schema runtime patches a
 row, the exported history payload follows the current semantic schema shape.
+
+## 2026-05-26 00:59 PDT
+
+Extended `IN` predicates from `id` to ordinary schema fields. Local reads filter
+semantic row values, query-scope export records an array-valued `in` predicate,
+and repair currently decomposes schema-field `IN` into repeated equality repair.
+Full mini crate suite is green with 161 tests.
+
+Discovery: when a row leaves a predicate by update, our refreshed bundle can
+carry the newer out-of-scope row version as repair history. Query result
+visibility is correct, but table-wide contraction semantics are still blurry:
+should a scope-limited peer remove that row entirely, or retain it as a known
+fact outside this particular query? Existing equality tests mostly assert query
+results, not full table contraction. This needs a spec decision before making
+repair more aggressive.

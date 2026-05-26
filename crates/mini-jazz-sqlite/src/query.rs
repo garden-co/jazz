@@ -4,7 +4,7 @@ use crate::types::RowView;
 use crate::{branch, policy, tx, Result};
 use rusqlite::{params, params_from_iter, Connection};
 use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub(crate) struct QueryContext<'a> {
     pub(crate) conn: &'a Connection,
@@ -81,24 +81,20 @@ impl QueryContext<'_> {
         field_name: &str,
         values: Vec<JsonValue>,
     ) -> Result<Vec<RowView>> {
-        if field_name != "id" {
-            return Err(crate::Error::new(format!(
-                "in predicate currently only supports id, got {table_name}.{field_name}"
-            )));
-        }
-        let ids = values
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| crate::Error::new("id in expects string values"))
-            })
-            .collect::<Result<BTreeSet<_>>>()?;
         Ok(self
             .read_rows(table_name)?
             .into_iter()
-            .filter(|row| ids.contains(&row.id))
+            .filter(|row| {
+                if field_name == "id" {
+                    values.contains(&JsonValue::String(row.id.clone()))
+                } else if field_name == "$createdBy" {
+                    values.contains(&JsonValue::String(row.created_by.clone()))
+                } else {
+                    row.values
+                        .get(field_name)
+                        .is_some_and(|value| values.contains(value))
+                }
+            })
             .collect())
     }
 
