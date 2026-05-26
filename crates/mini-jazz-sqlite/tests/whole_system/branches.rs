@@ -1197,6 +1197,68 @@ fn branch_source_metadata_survives_sync() {
 }
 
 #[test]
+fn branch_conflict_resolution_survives_sync() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+    alice
+        .resolve_row_conflict(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Resolved title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    bob.apply_bundle(&alice.export_table_history("tasks").unwrap())
+        .unwrap();
+    bob.checkout_branch("merge").unwrap();
+
+    let rows = bob.read_rows_with_conflict_meta("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Resolved title"));
+    assert_eq!(rows[0].conflict_count, 0);
+    assert_eq!(bob.read_row_candidates("tasks", "task-1").unwrap().len(), 2);
+}
+
+#[test]
 fn branch_conflict_candidates_respect_effective_row_policy() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

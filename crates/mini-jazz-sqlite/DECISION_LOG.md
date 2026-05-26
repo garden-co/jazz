@@ -646,3 +646,9 @@ Design lesson: pure multi-base conflicts currently do not appear in plain `read_
 Added a first explicit conflict-resolution transaction. A merge branch can now write a chosen row value over conflicting branch-source candidates, expose the resolved row with `conflict_count = 0`, and preserve that result after rebuilding the current projection. Full mini crate suite is green with 183 tests.
 
 Design lesson: branch conflict resolution can be modeled as an ordinary row write on the merge branch. The source candidates remain as provenance/history, while the current-branch value suppresses conflict metadata in the semantic read surface. This keeps resolution replayable, but it leaves richer conflict metadata and explicit "resolved from candidates X/Y" provenance for a later slice.
+
+## 2026-05-26 02:21 PDT
+
+Covered conflict resolution through sync. A receiving peer can import branch source provenance, the merge-branch resolution write, and then read the resolved row with no active conflict while still being able to inspect the original candidates. Full mini crate suite is green with 184 tests.
+
+Design lesson: preserving branch sources and writing the resolution on the merge branch composes with the existing bundle protocol. We did not need a special conflict-resolution sync record for the first version, but we still need explicit candidate provenance if product UX wants to say exactly which alternatives a resolution settled.
