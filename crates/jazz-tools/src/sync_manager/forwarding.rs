@@ -47,7 +47,7 @@ impl SyncManager {
         table: &str,
         server_id: ServerId,
         object_id: ObjectId,
-        metadata: HashMap<String, String>,
+        metadata: &HashMap<String, String>,
         row: StoredRowBatch,
     ) {
         let branch_name = BranchName::new(&row.branch);
@@ -204,7 +204,7 @@ impl SyncManager {
                 storage,
                 table,
                 server_id,
-                metadata.clone(),
+                &metadata,
                 row.clone(),
                 &mut visited,
             );
@@ -216,7 +216,7 @@ impl SyncManager {
         storage: &H,
         table: &str,
         server_id: ServerId,
-        metadata: HashMap<String, String>,
+        metadata: &HashMap<String, String>,
         row: StoredRowBatch,
         visited: &mut HashSet<BatchId>,
     ) {
@@ -287,7 +287,7 @@ impl SyncManager {
                 table,
                 server_id,
                 object_id,
-                metadata.clone(),
+                metadata,
                 current,
             );
         }
@@ -340,7 +340,7 @@ impl SyncManager {
             self.queue_row_to_server_with_metadata(
                 server_id,
                 object_id,
-                metadata.clone(),
+                &metadata,
                 row.clone(),
                 include_metadata,
             );
@@ -372,7 +372,7 @@ impl SyncManager {
             self.queue_row_to_server_with_metadata(
                 server_id,
                 object_id,
-                metadata.clone(),
+                &metadata,
                 row.clone(),
                 true,
             );
