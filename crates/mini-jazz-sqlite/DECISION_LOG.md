@@ -742,3 +742,9 @@ Design lesson: absent reads fit better as transaction read-set facts than as dur
 Extended ordinary branch reads over source branches. A merge branch now reads current rows from its explicit source branches, while a branch-local resolution row shadows source candidates for the same logical row. Full mini crate suite is green with 198 tests.
 
 Design lesson: multi-source branch visibility is not just a conflict side API; it belongs in the normal query lowering. The precedence rule is now branch-local overlay first, then source branches, with pinned main-base handling still layered separately. This is close to the product branch-view model, but branch backing rows and branch-row permissions remain unimplemented.
+
+## 2026-05-26 03:04 PDT
+
+Added a first branch backing-row mirror. `jazz_branch_backing` stores branch id, base epoch, source branch ids, and created time as durable data mirrored from engine branch metadata; local create and synced branch records now keep the mirror aligned. Full mini crate suite is green with 198 tests.
+
+Design lesson: branch-as-data can start as a mirror/read surface without replacing the execution tables. This avoids derailing branch visibility and sync while making the product shape concrete. The next hard part is policy: checkout/use should eventually be gated by the backing row's ordinary row permissions.

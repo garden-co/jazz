@@ -1410,6 +1410,33 @@ impl Runtime {
         Ok(branches)
     }
 
+    pub fn branch_backing_rows(&self) -> Result<Vec<BranchInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT branch_id, base_global_epoch, source_branch_ids_json
+             FROM jazz_branch_backing
+             ORDER BY branch_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut branches = Vec::new();
+        for row in rows {
+            let (id, base_global_epoch, source_branch_ids_json) = row?;
+            let source_branch_ids = serde_json::from_str::<Vec<String>>(&source_branch_ids_json)
+                .map_err(|err| crate::Error::new(err.to_string()))?;
+            branches.push(BranchInfo {
+                id,
+                base_global_epoch,
+                source_branch_ids,
+            });
+        }
+        Ok(branches)
+    }
+
     pub fn principal_for_test(&mut self, principal: &str) {
         self.principal = principal.to_owned();
     }

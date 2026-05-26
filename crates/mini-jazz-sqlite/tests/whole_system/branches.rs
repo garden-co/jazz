@@ -1337,6 +1337,10 @@ fn branch_metadata_lists_and_syncs_base_and_sources() {
         .unwrap();
     assert_eq!(local_merge.base_global_epoch, Some(5));
     assert_eq!(local_merge.source_branch_ids, vec!["left", "right"]);
+    assert_eq!(
+        alice.branch_backing_rows().unwrap(),
+        alice.branches().unwrap()
+    );
 
     bob.apply_bundle(&alice.export_table_history("tasks").unwrap())
         .unwrap();
@@ -1348,6 +1352,7 @@ fn branch_metadata_lists_and_syncs_base_and_sources() {
         .unwrap();
     assert_eq!(remote_merge.base_global_epoch, Some(5));
     assert_eq!(remote_merge.source_branch_ids, vec!["left", "right"]);
+    assert_eq!(bob.branch_backing_rows().unwrap(), bob.branches().unwrap());
 }
 
 #[test]

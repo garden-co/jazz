@@ -12,11 +12,13 @@ pub(crate) fn ensure(
          VALUES (?, ?, ?)",
         params![branch_id, base_global_epoch, now],
     )?;
-    Ok(conn.query_row(
+    let branch_num = conn.query_row(
         "SELECT branch_num FROM jazz_branch WHERE branch_id = ?",
         params![branch_id],
         |row| row.get(0),
-    )?)
+    )?;
+    sync_backing_row(conn, branch_num)?;
+    Ok(branch_num)
 }
 
 pub(crate) fn checkout(conn: &Connection, branch_id: &str) -> Result<i64> {
@@ -42,6 +44,7 @@ pub(crate) fn add_source(conn: &Connection, branch_num: i64, source_branch_id: &
          VALUES (?, ?)",
         params![branch_num, source_branch_num],
     )?;
+    sync_backing_row(conn, branch_num)?;
     Ok(())
 }
 
@@ -60,4 +63,41 @@ pub(crate) fn scope_nums(conn: &Connection, branch_num: i64) -> Result<Vec<i64>>
     nums.sort();
     nums.dedup();
     Ok(nums)
+}
+
+fn sync_backing_row(conn: &Connection, branch_num: i64) -> Result<()> {
+    let (branch_id, base_global_epoch, created_at): (String, Option<i64>, i64) = conn.query_row(
+        "SELECT branch_id, base_global_epoch, created_at
+         FROM jazz_branch
+         WHERE branch_num = ?",
+        params![branch_num],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT source.branch_id
+         FROM jazz_branch_source branch_source
+         JOIN jazz_branch source ON source.branch_num = branch_source.source_branch_num
+         WHERE branch_source.branch_num = ?
+         ORDER BY source.branch_id",
+    )?;
+    let source_branch_ids = stmt
+        .query_map(params![branch_num], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    conn.execute(
+        "INSERT INTO jazz_branch_backing
+         (branch_id, base_global_epoch, source_branch_ids_json, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(branch_id) DO UPDATE SET
+           base_global_epoch = excluded.base_global_epoch,
+           source_branch_ids_json = excluded.source_branch_ids_json,
+           created_at = excluded.created_at",
+        params![
+            branch_id,
+            base_global_epoch,
+            serde_json::to_string(&source_branch_ids)
+                .map_err(|err| crate::Error::new(err.to_string()))?,
+            created_at
+        ],
+    )?;
+    Ok(())
 }
