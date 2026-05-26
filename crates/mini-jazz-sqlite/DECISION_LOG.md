@@ -718,3 +718,9 @@ Design lesson: undoing a delete can stay append-only: restore is not removal of 
 Covered restore through sync. A peer that imports insert, delete, and restore history sees the restored row as current. Full mini crate suite is green with 195 tests.
 
 Design lesson: restore-as-new-history composes with the existing bundle protocol without a special operation kind. This reinforces treating undo/restore as semantic writes over preserved history, while leaving product-level authorization and UX naming open.
+
+## 2026-05-26 02:52 PDT
+
+Covered restarted ordered-page subscriptions. A durable worker can persist an `eq + top createdAt desc` query, restart, reconstruct a subscription from the observed descriptor, apply a refresh where a newer row displaced the old boundary, and emit added/removed semantic diffs. Full mini crate suite is green with 196 tests.
+
+Design lesson: the same durable descriptor now supports current-row repair and listener recovery for paginated views. The descriptor still encodes only the current page shape, not all possible future page boundaries, which matches the current scope but should remain explicit in the spec.
