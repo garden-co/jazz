@@ -727,6 +727,7 @@ impl Runtime {
         }
         match read.op.as_str() {
             "eq" => self.export_query_where_eq(&read.table, &read.field, read.value.clone()),
+            "ne" => self.export_query_where_ne(&read.table, &read.field, read.value.clone()),
             "contains" => {
                 let Some(needle) = read.value.as_str() else {
                     return Err(crate::Error::new("contains expects a string value"));
@@ -1836,6 +1837,21 @@ impl Runtime {
         )
     }
 
+    pub fn export_query_where_ne(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+    ) -> Result<Bundle> {
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "ne",
+            value.clone(),
+            self.read_rows_where_ne(table_name, field_name, value)?,
+        )
+    }
+
     pub fn export_query_where_eq_top_created_at_desc(
         &self,
         table_name: &str,
@@ -2005,6 +2021,20 @@ impl Runtime {
         ))
     }
 
+    pub fn subscribe_rows_where_ne(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+    ) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::where_ne(
+            table_name,
+            field_name,
+            value.clone(),
+            self.read_rows_where_ne(table_name, field_name, value)?,
+        ))
+    }
+
     pub fn subscribe_rows_where_eq_top_created_at_desc(
         &self,
         table_name: &str,
@@ -2029,6 +2059,7 @@ impl Runtime {
         }
         match read.op.as_str() {
             "eq" => self.subscribe_rows_where_eq(&read.table, &read.field, read.value.clone()),
+            "ne" => self.subscribe_rows_where_ne(&read.table, &read.field, read.value.clone()),
             "contains" => {
                 let Some(needle) = read.value.as_str() else {
                     return Err(crate::Error::new("contains expects a string value"));
@@ -2162,6 +2193,9 @@ impl Runtime {
             RowsSubscriptionQuery::Table { table } => self.read_rows(table)?,
             RowsSubscriptionQuery::Predicate(query) if query.op == "eq" => {
                 self.read_rows_where_eq(&query.table, &query.field, query.value.clone())?
+            }
+            RowsSubscriptionQuery::Predicate(query) if query.op == "ne" => {
+                self.read_rows_where_ne(&query.table, &query.field, query.value.clone())?
             }
             RowsSubscriptionQuery::Predicate(query) if query.op == "contains" => {
                 let Some(needle) = query.value.as_str() else {

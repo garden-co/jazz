@@ -107,6 +107,63 @@ fn predicate_subscription_diffs_when_row_enters_and_leaves_query() {
 }
 
 #[test]
+fn not_equal_subscription_diffs_when_optional_value_appears_and_clears() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.optional_text("tag");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-tagged",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Tagged")),
+                ("tag".to_owned(), json!("work")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-untagged",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Untagged")),
+                ("tag".to_owned(), json!(null)),
+            ]),
+        )
+        .unwrap();
+
+    let mut subscription = alice
+        .subscribe_rows_where_ne("notes", "tag", json!(null))
+        .unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+    assert_eq!(subscription.initial_rows()[0].id, "note-tagged");
+
+    alice
+        .update_row(
+            "notes",
+            "note-untagged",
+            BTreeMap::from([("tag".to_owned(), json!("personal"))]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Added(row)] if row.id == "note-untagged"));
+
+    alice
+        .update_row(
+            "notes",
+            "note-tagged",
+            BTreeMap::from([("tag".to_owned(), json!(null))]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "note-tagged"));
+}
+
+#[test]
 fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");

@@ -810,3 +810,19 @@ a `projects` bundle should not fail because `todos` has a newer write policy,
 and fate-only bundles have no policy surface at all.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 206 whole-system tests.
+
+## 2026-05-26 03:26 PDT
+
+Promoted `ne` from local-only filtering to a distributed/query predicate.
+`export_query_where_ne` now records durable query reads, refreshes can deliver
+rows that later enter a not-equal scope, subscriptions diff rows that enter or
+leave the scope, and SQLite lowering uses `IS NOT ?` so optional/null fields
+behave like the local semantic filter.
+
+Discovery: `ne null` is a compact way to express "present optional value" and
+is worth supporting in the same machinery as equality/contains/in. The refresh
+test also clarified the query-read topology again: the observing peer persists
+the desired query descriptor, and the upstream peer exports refreshes against
+that descriptor during reconnect.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 208 whole-system tests.

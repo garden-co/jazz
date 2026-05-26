@@ -68,6 +68,15 @@ impl RowsSubscription {
         }
     }
 
+    pub(crate) fn where_ne(table: &str, field: &str, value: JsonValue, rows: Vec<RowView>) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+                table, field, "ne", value,
+            )),
+            last_rows: rows,
+        }
+    }
+
     pub(crate) fn where_eq_top_created_at_desc(
         table: &str,
         field: &str,

@@ -914,6 +914,68 @@ fn not_equal_null_filters_to_present_optional_values() {
 }
 
 #[test]
+fn not_equal_query_scope_syncs_and_refreshes_present_optional_values() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.optional_text("tag");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-tagged",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Tagged")),
+                ("tag".to_owned(), json!("work")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-untagged",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Untagged")),
+                ("tag".to_owned(), json!(null)),
+            ]),
+        )
+        .unwrap();
+
+    bob.apply_bundle(
+        &alice
+            .export_query_where_ne("notes", "tag", json!(null))
+            .unwrap(),
+    )
+    .unwrap();
+
+    let rows = bob.read_rows_where_ne("notes", "tag", json!(null)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-tagged");
+    assert_eq!(bob.read_rows("notes").unwrap().len(), 1);
+
+    alice
+        .update_row(
+            "notes",
+            "note-untagged",
+            BTreeMap::from([("tag".to_owned(), json!("personal"))]),
+        )
+        .unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&bob.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        bob.apply_bundle(&refresh).unwrap();
+    }
+
+    let refreshed = bob.read_rows_where_ne("notes", "tag", json!(null)).unwrap();
+    assert_eq!(refreshed.len(), 2);
+    assert!(refreshed.iter().any(|row| row.id == "note-untagged"));
+}
+
+#[test]
 fn insert_applies_declared_defaults_for_omitted_fields() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");
