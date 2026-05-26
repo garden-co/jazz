@@ -104,3 +104,23 @@ Design lesson: fate monotonicity and global ordering are doing useful work
 across reconnects. The next stress area is less "which accepted tx wins" and
 more "which facts must be present for an edge/global authority to safely decide
 acceptance or rejection after a disconnect."
+
+## 2026-05-26 00:15 PDT
+
+Policy-dependency validation slice found and fixed a real gap. A red test
+showed that an untrusted bundle containing a child write and its required
+parent fact was still rejected by the edge. Root cause: table-history export
+included dependencies needed to read the exported rows, but not dependencies
+needed to validate their write policies.
+
+Implemented write-policy dependency export for `RefReadable` policies. The
+paired tests now cover both sides:
+
+- if the bundle includes the parent policy fact, the edge can validate the
+  incoming write without prior state;
+- if the bundle is deliberately stripped of the parent, the edge rejects
+  permanently, and later syncing the parent does not reopen the rejected tx.
+
+Design lesson: sync scopes need two dependency lanes: result/read visibility
+dependencies and authority-validation dependencies. They can share mechanics,
+but the caller's intent matters.

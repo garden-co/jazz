@@ -421,6 +421,100 @@ fn trusted_edge_authoritatively_rejects_untrusted_policy_violation_on_apply() {
 }
 
 #[test]
+fn trusted_edge_rejects_untrusted_write_when_policy_dependency_is_missing() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut bob =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "bob-node", "bob", schema.clone())
+            .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+    )
+    .unwrap();
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Missing dependency")),
+                ("project".to_owned(), json!("project-bob")),
+            ]),
+        )
+        .unwrap();
+
+    let mut incomplete_bundle = bob.export_table_history("todos").unwrap();
+    incomplete_bundle
+        .history
+        .retain(|record| record.table != "projects");
+
+    edge.apply_untrusted_bundle(&incomplete_bundle).unwrap();
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        edge.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+
+    edge.apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+}
+
+#[test]
+fn trusted_edge_accepts_untrusted_write_when_bundle_contains_policy_dependency() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut bob =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "bob-node", "bob", schema.clone())
+            .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+    )
+    .unwrap();
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Dependency included")),
+                ("project".to_owned(), json!("project-bob")),
+            ]),
+        )
+        .unwrap();
+
+    edge.apply_untrusted_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let rows = edge.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+    assert_eq!(edge.transaction_info(&tx).unwrap().rejection_code, None);
+}
+
+#[test]
 fn trusted_edge_rejects_untrusted_transaction_atomically() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

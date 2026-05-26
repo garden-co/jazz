@@ -357,11 +357,14 @@ impl Runtime {
         history.extend(export_policy_dependency_history(
             &self.conn,
             &self.schema,
-            table_name,
-            &self.principal,
-            self.trusted,
-            &branch_nums,
-            Some(&row_nums),
+            PolicyDependencyExport {
+                table_name,
+                policy: &self.schema.table_def(table_name)?.read_policy,
+                principal: &self.principal,
+                trusted: self.trusted,
+                branch_nums: &branch_nums,
+                child_row_nums: Some(&row_nums),
+            },
         )?);
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
@@ -1083,11 +1086,14 @@ impl Runtime {
         history.extend(export_policy_dependency_history(
             &self.conn,
             &self.schema,
-            table_name,
-            &self.principal,
-            self.trusted,
-            &branch_nums,
-            Some(&row_nums),
+            PolicyDependencyExport {
+                table_name,
+                policy: &self.schema.table_def(table_name)?.read_policy,
+                principal: &self.principal,
+                trusted: self.trusted,
+                branch_nums: &branch_nums,
+                child_row_nums: Some(&row_nums),
+            },
         )?);
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
@@ -2379,11 +2385,26 @@ fn export_table_history(
     records.extend(export_policy_dependency_history(
         conn,
         schema,
-        table_name,
-        principal,
-        trusted,
-        &branch_nums,
-        None,
+        PolicyDependencyExport {
+            table_name,
+            policy: &schema.table_def(table_name)?.read_policy,
+            principal,
+            trusted,
+            branch_nums: &branch_nums,
+            child_row_nums: None,
+        },
+    )?);
+    records.extend(export_policy_dependency_history(
+        conn,
+        schema,
+        PolicyDependencyExport {
+            table_name,
+            policy: &schema.table_def(table_name)?.write_policy,
+            principal,
+            trusted,
+            branch_nums: &branch_nums,
+            child_row_nums: None,
+        },
     )?);
     if branch_num != 1 {
         if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
@@ -2548,17 +2569,22 @@ fn export_snapshot_policy_dependency_history(
     Ok(records)
 }
 
+struct PolicyDependencyExport<'a> {
+    table_name: &'a str,
+    policy: &'a PolicyDef,
+    principal: &'a str,
+    trusted: bool,
+    branch_nums: &'a [i64],
+    child_row_nums: Option<&'a [i64]>,
+}
+
 fn export_policy_dependency_history(
     conn: &Connection,
     schema: &SchemaDef,
-    table_name: &str,
-    principal: &str,
-    trusted: bool,
-    branch_nums: &[i64],
-    child_row_nums: Option<&[i64]>,
+    args: PolicyDependencyExport<'_>,
 ) -> Result<Vec<HistoryRecord>> {
-    let table = schema.table_def(table_name)?;
-    let PolicyDef::RefReadable { field } = &table.read_policy else {
+    let table = schema.table_def(args.table_name)?;
+    let PolicyDef::RefReadable { field } = args.policy else {
         return Ok(Vec::new());
     };
     let field = table
@@ -2575,7 +2601,7 @@ fn export_policy_dependency_history(
             field.name
         )));
     };
-    let policy_sql = export_read_policy_sql(schema, table, principal, trusted)?;
+    let policy_sql = export_read_policy_sql(schema, table, args.principal, args.trusted)?;
     let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let sql = format!(
         "SELECT DISTINCT current.{ref_column}
@@ -2586,10 +2612,10 @@ fn export_policy_dependency_history(
            AND {}
            AND current_tx.outcome != {}
            AND {policy_sql}",
-        crate::schema::current_table(table_name),
-        branch_filter_sql("current", branch_nums),
+        crate::schema::current_table(args.table_name),
+        branch_filter_sql("current", args.branch_nums),
         tx::OUTCOME_REJECTED,
-        row_filter = current_row_filter_sql("current", child_row_nums),
+        row_filter = current_row_filter_sql("current", args.child_row_nums),
     );
     let mut stmt = conn.prepare(&sql)?;
     let row_nums = stmt
@@ -2599,19 +2625,22 @@ fn export_policy_dependency_history(
         conn,
         schema,
         parent_table,
-        principal,
-        trusted,
-        branch_nums,
+        args.principal,
+        args.trusted,
+        args.branch_nums,
         Some(&row_nums),
     )?;
     records.extend(export_policy_dependency_history(
         conn,
         schema,
-        parent_table,
-        principal,
-        trusted,
-        branch_nums,
-        Some(&row_nums),
+        PolicyDependencyExport {
+            table_name: parent_table,
+            policy: &schema.table_def(parent_table)?.read_policy,
+            principal: args.principal,
+            trusted: args.trusted,
+            branch_nums: args.branch_nums,
+            child_row_nums: Some(&row_nums),
+        },
     )?);
     Ok(records)
 }
