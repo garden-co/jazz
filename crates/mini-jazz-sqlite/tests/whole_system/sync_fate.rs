@@ -1059,10 +1059,17 @@ fn stale_pending_bundle_does_not_resurrect_rejected_fate_after_reconnect() {
     worker.apply_bundle(&pending_bundle).unwrap();
 
     worker.reject_transaction(&tx, "policy_denied").unwrap();
+    worker
+        .reject_transaction_with_detail(&tx, "policy_denied", json!({"reason": "authority"}))
+        .unwrap();
     assert!(worker.open_todos().unwrap().is_empty());
 
     drop(worker);
     let mut worker = Runtime::open(Storage::File(worker_path), "alice-worker", "alice").unwrap();
+    assert_eq!(
+        worker.transaction_info(&tx).unwrap().rejection_detail,
+        Some(json!({"reason": "authority"}))
+    );
 
     worker.apply_bundle(&pending_bundle).unwrap();
     worker
@@ -1073,6 +1080,10 @@ fn stale_pending_bundle_does_not_resurrect_rejected_fate_after_reconnect() {
     assert_eq!(
         worker.transaction_info(&tx).unwrap().rejection_code,
         Some("policy_denied".to_owned())
+    );
+    assert_eq!(
+        worker.transaction_info(&tx).unwrap().rejection_detail,
+        Some(json!({"reason": "authority"}))
     );
 }
 

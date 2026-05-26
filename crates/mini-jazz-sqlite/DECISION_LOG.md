@@ -1209,6 +1209,20 @@ missing dependency that actually made validation impossible.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 232 whole-system tests.
 
+## 2026-05-26 04:31 PDT
+
+Pinned rejection detail durability through reconnect. The stale-pending replay
+test now rejects with structured detail, reopens the durable worker, then
+applies stale pending history from two peers; the row stays hidden and the
+original detail survives.
+
+Discovery: rejection detail is already monotone with rejected fate across
+durable reopen and stale replay. This is the right substrate for promise
+rejections and global error callbacks because the structured reason remains
+queryable after reconnect.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 232 whole-system tests.
+
 ## 2026-05-26 04:23 PDT
 
 Narrowed one todo-specific query descriptor wart. The legacy
