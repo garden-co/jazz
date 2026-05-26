@@ -367,3 +367,13 @@ ambient connection/session state.
 Limitation: branch base provenance is still not included in bundle metadata.
 The receiver can recreate the branch id, but not yet its precise source/base
 snapshot or multi-base provenance.
+
+## 2026-05-25 17:28 PDT
+
+Durable branch replay/reconnect slice is green. A file-backed worker can apply a
+draft branch bundle twice, persist it, reopen, keep the row invisible on main,
+and show it after checkout with only one history row.
+
+Decision: the distributed-system harness should keep mixing in-memory SQLite
+nodes with durable SQLite nodes. Even these tiny tests catch whether sync facts
+are semantic/idempotent rather than process-local.

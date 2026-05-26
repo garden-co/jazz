@@ -604,3 +604,44 @@ fn branch_sync_preserves_branch_provenance() {
     bob.checkout_branch("draft").unwrap();
     assert_eq!(bob.read_rows("tasks").unwrap()[0].id, "task-draft");
 }
+
+#[test]
+fn durable_reopen_preserves_branch_sync_and_dedupes_replay() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("worker.sqlite");
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    let mut task = BTreeMap::new();
+    task.insert("title".to_owned(), json!("Durable draft"));
+    task.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-draft", task).unwrap();
+    let bundle = alice.export_table_history("tasks").unwrap();
+
+    {
+        let mut worker = Runtime::open_with_schema(
+            Storage::File(path.clone()),
+            "worker-node",
+            "alice",
+            schema.clone(),
+        )
+        .unwrap();
+        worker.apply_bundle(&bundle).unwrap();
+        worker.apply_bundle(&bundle).unwrap();
+        worker.checkout_branch("draft").unwrap();
+        assert_eq!(worker.read_rows("tasks").unwrap().len(), 1);
+    }
+
+    let mut reopened =
+        Runtime::open_with_schema(Storage::File(path), "worker-node", "alice", schema).unwrap();
+    assert!(reopened.read_rows("tasks").unwrap().is_empty());
+    reopened.checkout_branch("draft").unwrap();
+    assert_eq!(reopened.read_rows("tasks").unwrap()[0].id, "task-draft");
+    assert_eq!(reopened.storage_stats().unwrap().history_rows, 1);
+}
