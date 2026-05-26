@@ -939,3 +939,25 @@ transactions now remain exclusive after sync.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 49 tests.
+
+## 2026-05-25 18:32 PDT
+
+Starting monotonic transaction fate merge. Current suspicion: after a peer sees
+an accepted/rejected tx, applying an older pending bundle for the same `tx_id`
+can overwrite `outcome` and clear `global_epoch`. Fate updates should be
+monotonic under reordering.
+
+## 2026-05-25 18:33 PDT
+
+Monotonic fate merge is green for accepted-vs-stale-pending. Applying an older
+pending bundle after a global acceptance no longer clears `global_epoch` or
+downgrades outcome. The tx upsert now uses max outcome/conflict mode and
+preserves an existing global epoch when the incoming record has none.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+50 tests.
+
+Open semantic question for the spec: numeric max works for this prototype
+because `pending < accepted < rejected` and `mergeable < exclusive`, but real
+transaction fate may need an explicit partial-order merge function if accepted
+vs rejected can ever race.

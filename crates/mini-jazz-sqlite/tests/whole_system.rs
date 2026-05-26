@@ -469,6 +469,31 @@ fn accepted_global_fate_update_reaches_peer_transaction_info() {
 }
 
 #[test]
+fn stale_pending_bundle_does_not_downgrade_accepted_fate() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Out of order fate", false, "project-1")
+        .unwrap();
+    let pending_bundle = alice.export_table_history("todos").unwrap();
+    peer.apply_bundle(&pending_bundle).unwrap();
+
+    alice.accept_transaction_at_global(&tx, 7).unwrap();
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    assert_eq!(peer.transaction_info(&tx).unwrap().global_epoch, Some(7));
+
+    peer.apply_bundle(&pending_bundle).unwrap();
+    assert_eq!(peer.transaction_info(&tx).unwrap().global_epoch, Some(7));
+    assert_eq!(
+        peer.transaction_info(&tx).unwrap().conflict_mode,
+        "mergeable"
+    );
+}
+
+#[test]
 fn runtime_can_install_and_write_a_non_todo_schema() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");

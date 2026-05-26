@@ -314,9 +314,9 @@ impl Runtime {
                  (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
                  ON CONFLICT(tx_id) DO UPDATE SET
-                   outcome = excluded.outcome,
-                   global_epoch = excluded.global_epoch,
-                   conflict_mode = excluded.conflict_mode",
+                   outcome = MAX(jazz_tx.outcome, excluded.outcome),
+                   global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
+                   conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode)",
                 params![
                     tx_record.tx_id,
                     node_num,
