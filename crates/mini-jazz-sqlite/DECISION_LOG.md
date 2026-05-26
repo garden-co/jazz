@@ -443,3 +443,15 @@ before and after history apply.
 Design lesson: top-k subscriptions need explicit page-boundary semantics, not
 just row membership. This slice is fixture-specific, but the invariant is broad:
 scope repair depends on the post-apply result set.
+
+## 2026-05-26 00:56 PDT
+
+Locked in copy-on-write lens update semantics. A row created under an old schema
+with `title` can be imported through a new schema lens exposing `name`, patched
+as `name`, exported as semantic `name`, and applied to another new-schema peer
+without leaking the old field name. Full mini crate suite is green with 160
+tests.
+
+Design lesson: the current storage-name/semantic-name split is doing useful
+work. Lens reads are not just presentation: once a new-schema runtime patches a
+row, the exported history payload follows the current semantic schema shape.

@@ -55,6 +55,62 @@ fn rename_lens_writes_export_current_semantic_field_name() {
 }
 
 #[test]
+fn rename_lens_updates_old_row_as_current_semantic_history() {
+    let old_schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let new_schema = SchemaDef::new().table("tasks", |table| {
+        table.text_lens("name", "title");
+        table.bool("done");
+    });
+    let mut old_writer =
+        Runtime::open_with_schema(Storage::Memory, "old-node", "alice", old_schema).unwrap();
+    let mut new_writer =
+        Runtime::open_with_schema(Storage::Memory, "new-node", "alice", new_schema.clone())
+            .unwrap();
+    let mut new_peer =
+        Runtime::open_with_schema(Storage::Memory, "new-peer", "alice", new_schema).unwrap();
+
+    old_writer
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Old title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    new_writer
+        .apply_bundle(&old_writer.export_table_history("tasks").unwrap())
+        .unwrap();
+
+    new_writer
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("name".to_owned(), json!("New name"))]),
+        )
+        .unwrap();
+    let bundle = new_writer.export_table_history("tasks").unwrap();
+    let latest = bundle
+        .history
+        .iter()
+        .find(|record| record.values.get("name") == Some(&json!("New name")))
+        .unwrap();
+
+    assert_eq!(latest.values["name"], json!("New name"));
+    assert!(!latest.values.contains_key("title"));
+
+    new_peer.apply_bundle(&bundle).unwrap();
+    let rows = new_peer.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["name"], json!("New name"));
+    assert!(!rows[0].values.contains_key("title"));
+}
+
+#[test]
 fn renamed_ref_lens_participates_in_read_policy() {
     let old_schema = SchemaDef::new()
         .table("projects", |table| {
