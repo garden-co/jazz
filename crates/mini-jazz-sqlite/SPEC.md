@@ -162,7 +162,7 @@ This spec does not specify:
 - production schema-lens completeness
 - networking transports
 - custom SQLite VFS behavior
-- page compression
+- page/range compression
 - garbage collection of history
 - final UI behavior for conflict resolution
 
@@ -481,11 +481,35 @@ Application-visible rows keep ordinary `id` plus selected semantic system
 fields. The physical layout must not leak generated table names, physical ids,
 integer enum values, visibility temp tables, or generated SQL.
 
+### 8.1 Product Operation Semantics
+
+Each simple write call creates one sealed mergeable transaction unless wrapped
+in an explicit transaction. Product APIs should not expose batch terminology.
+
+Mergeable transactions are locally visible immediately and reconcile through
+merge/conflict semantics. Exclusive transactions are not visible in ordinary
+reads until the global authority accepts them. Local previews of exclusive
+writes are an advanced UI feature, not default database state; if introduced,
+they must be opt-in, marked unsettled/preview in subscriptions, removed on
+rejection, and never synced as visible current rows.
+
+Delete, restore, conflict resolution, and branch-source edits are semantic
+operations, not storage shortcuts:
+
+- delete checks delete policy, or update fallback only where the schema/policy
+  explicitly allows it
+- restore/undelete appends a new visible version derived from preserved history
+  and reuses insert semantics for authorization
+- conflict resolution is an ordinary transaction and may require explicit
+  conflict-resolution permission where a product schema declares it
+- branch creation, source edits, and merge metadata edits are backing-row or
+  branch-metadata writes governed by branch backing-row permissions
+
 Open issues:
 
 - exact v2 syntax for `indexOnly(...)`
-- exact selected semantic system fields beyond `id`
 - how much transaction/durability state is exposed on typed handles
+- whether/how to expose opt-in local exclusive previews
 
 ## 9. Schemas, Catalogue, Migrations, And Lenses
 
@@ -522,6 +546,14 @@ schema versions differ only by index declarations or merge strategy
 declarations, the system should derive automatic lens compatibility because row
 value shape did not change.
 
+Physical storage layouts are not created for every catalogue/schema version.
+The engine should create a new physical layout only when structural storage
+shape changes. Permission-only, index-only, merge-strategy-only, and compatible
+lens-only revisions may share storage while changing catalogue interpretation,
+policy, indexes, or merge behavior. Pure rename migrations should be tried as
+catalogue/lens changes over stable physical storage names before creating new
+tables.
+
 Catalogue publication is admin/core controlled. Edge runtimes learn catalogue
 state from the global authority through a separate catalogue sync lane.
 Catalogue sync is not ordinary query-scoped row sync.
@@ -543,12 +575,17 @@ schema and permission heads.
 Lenses must be SQL-lowerable in v0. An implementation may initially support
 only narrow rename/project lenses.
 
-Writes through an old schema view are copy-on-write into the current schema
-version:
+Writes through an old schema view are copy-on-write into the current structural
+layout when translation is needed:
 
-1. read old data through lenses into the current schema view
-2. apply the write in the current schema
-3. append a new history row in the current schema layout
+1. read old data through lenses into the writer/current semantic view
+2. apply the write in that semantic view
+3. append a new history row in the selected structural layout
+
+When the structural storage layout is unchanged, the write may append into the
+same physical layout while exporting the writer's current semantic field names.
+Background migration/copy-forward may optimize old layouts into newer layouts,
+but correctness must not depend on eager migration.
 
 Nullability and defaults are semantic schema features, not incidental SQLite
 behavior. Omitted insert fields receive declared defaults before policy checks,
@@ -598,6 +635,7 @@ Policy operations:
   context
 - delete policies prefer explicit delete rules, but may fall back to update
   policy semantics
+- restore/undelete reuses insert policy semantics over the restored visible row
 - branch policies are ordinary row policies on branch backing rows that
   influence downstream row visibility in that branch view
 - catalogue publication is admin/core-controlled rather than ordinary row policy
@@ -746,8 +784,9 @@ Open issues:
 
 ## 12. Row History And Current Projection
 
-For each structural schema version of each application table, the engine creates
-an append-only history table.
+For each structural storage layout of each application table, the engine creates
+append-only history storage. A structural layout may serve multiple
+catalogue/schema versions when their physical storage shape is compatible.
 
 History rows contain enough data to rebuild current projection:
 
@@ -755,17 +794,25 @@ History rows contain enough data to rebuild current projection:
 - transaction id
 - branch/view context or source metadata
 - operation: insert, update, delete
-- application column values
+- application values
 - immutable creation metadata
 - update metadata
 - conflict metadata or explicit empty conflict state
 - engine edit metadata needed for sync and API semantics
 
+The selected baseline is columnar current projection plus JSONB-style history
+payloads as the first experiment. System columns and hot keys remain relational
+so history can be scanned by row, branch, transaction, global epoch, operation,
+and schema/layout. User values in cold history may be stored as an inspectable
+JSON payload, with generated/side indexes added only for proven hot historical
+queries. Current projection remains columnar because ordinary reads, policies,
+subscriptions, and indexes are hot.
+
 Deletes are ordinary append-only history rows. Restore/undelete is also
 append-only: restoring a deleted row writes a new transaction/version derived
 from preserved deleted-row values rather than erasing or mutating the delete
-tombstone. Product API naming and authorization rules for restore are specified
-by higher-level APIs, but the storage semantics remain append-only.
+tombstone. Restore reuses insert authorization semantics over the restored
+visible row.
 
 Delete is a history row version, not physical removal.
 
@@ -1115,6 +1162,47 @@ Open issues:
 - efficient repair candidate discovery for rows that leave predicate/range
   scopes
 
+### 15.1 Aggregates
+
+Aggregates are queries, not a separate data model. They must lower through the
+same semantic query pipeline as row queries:
+
+- schema-version and lens compatibility
+- branch/snapshot visibility
+- read policy filtering
+- observed facts and sync scope
+- subscription rerun/diff behavior
+
+The first aggregate primitive to prove should be `COUNT`. The important
+question is not whether SQLite can execute `COUNT`, but whether Jazz can use
+SQLite's native aggregation while preserving versioned table layouts, lenses,
+policy filters, and query-scoped sync.
+
+The conservative correctness baseline is local recomputation from synced
+contributing facts. An aggregate scope may therefore need to sync the
+contributing row facts needed to recompute the aggregate under the receiver's
+policy and branch context. Aggregate result previews in sync metadata may be
+explored later as an optimization, but they are not a correctness substitute
+until their staleness, policy, and reconciliation semantics are specified.
+
+A good proof example is an account-aggregator-shaped query over several tables,
+policies, and schema versions. It should validate:
+
+- native SQLite aggregate lowering
+- policy-filtered contributing rows
+- schema-version/lens unions
+- aggregate query descriptors
+- aggregate subscription refresh and diffs
+- sync scope size and repair behavior when contributors enter or leave scope
+
+Open issues:
+
+- compact aggregate observed-fact representation
+- whether aggregate-only queries can ever avoid syncing all contributing facts
+- aggregate result preview semantics
+- efficient subscription diffs for large aggregate scopes
+- performance of aggregates over multi-version/lensed table unions
+
 ## 16. Sync Bundles
 
 Sync is query-scoped. It is not table replication.
@@ -1132,7 +1220,7 @@ Bundles contain:
 - catalogue entries when needed
 - file/blob metadata and bytes when in scope and authorized
 
-The Attempt 3 bundle shape is:
+The current prototype bundle shape is:
 
 ```text
 branches: branch id, base global epoch, source branch ids
@@ -1171,6 +1259,11 @@ to keep.
 Bundle assembly must dedupe concrete history rows and transaction records even
 when the same row is included for multiple reasons: result, dependency, policy,
 repair, snapshot base, and branch provenance.
+
+Transport compression should operate over the connection or stream, not over
+individual bundles, rows, or payload cells. The sync layer should preserve
+self-describing bundle frames while allowing the transport to compress across a
+larger redundancy window.
 
 Table-scope and query-scope exports have different obligations. Table-scope
 exports include table tombstones needed to converge table replicas. Query-scope
@@ -1324,6 +1417,18 @@ Authority-visible history is the history visible to the authority in the
 transaction's branch view and catalogue/policy context, excluding unaccepted
 proposals that are not valid inputs to the validation decision.
 
+Authority validation uses the authority's current trusted policy catalogue.
+This is a security invariant: old locally observed policy facts do not authorize
+an exclusive transaction if current authority policy no longer allows it.
+
+Stale read-set comparison, however, must use the same effective policy-filtered
+view as the writer principal whose transaction is being validated. Hidden rows
+must not make a row, absence, predicate, or range read look stale merely because
+they exist in authority storage. This avoids false conflicts and avoids leaking
+the existence of rows the writer could not see. The validation read context is
+therefore parameterized by writer principal, branch/source view, current
+catalogue/policy, and current authority-trusted history.
+
 Validation checks:
 
 - row reads still observe the same visible version
@@ -1335,6 +1440,14 @@ Validation checks:
 The authority conflict item for exclusive writes is the logical row. Two
 exclusive transactions that write different columns of the same row are not
 automatically safe merely because column masks are disjoint.
+
+For cross-schema exclusive validation, the authority should normalize
+read/write facts into the authority's current catalogue context when possible,
+then compare through the lens/structural-layout graph. The original writer
+catalogue metadata must still be retained for policy-filtered validation,
+diagnostics, and redaction. Mergeable cross-schema writes merge with
+translation; exclusive cross-schema writes are accepted only if translated
+read/write facts remain valid under current authority policy and visibility.
 
 Column masks are auxiliary metadata for:
 
@@ -1372,6 +1485,9 @@ history; slow merge walks are acceptable initially.
 Open issues:
 
 - predicate/range read-set encoding
+- efficient policy-filtered stale-read validation for predicate/range facts
+- exact rejection redaction when a current-policy failure and a stale-read
+  failure both apply
 - validation indexing strategy
 - side tables vs inline metadata for hot validation
 
@@ -1381,6 +1497,13 @@ Current projection rows expose:
 
 - resolved value
 - conflict metadata, empty when no conflict is visible
+
+SQLite is responsible for durable storage and efficient candidate retrieval.
+The engine should be able to find visible candidates for a logical row by table,
+row id, branch/source context, transaction ordering/vector metadata,
+schema/layout/catalogue context, operation kind, and policy-filtered
+visibility. Complex merge algorithms do not live in SQL; SQL gathers the
+candidate facts, then deterministic merge code interprets semantic values.
 
 Conflict metadata may contain:
 
@@ -1398,31 +1521,61 @@ conflict state so rebuild does not resurrect old metadata.
 Mergeable transactions may use per-column or per-field metadata to merge
 automatically. Exclusive transactions remain row-granular for correctness.
 
+Merge strategies are deterministic semantic reducers over normalized candidate
+values. Built-in reducers may handle simple LWW/counter/set-like cases. Rich
+text should be a blessed/built-in merge strategy early, not arbitrary app code
+by default. Arbitrary application-defined merge functions are deferred until
+catalogue versioning, code distribution, determinism, and unavailable-merge-code
+semantics are specified.
+
+Automatic deterministic merge may derive a resolved current value without
+appending a new resolution transaction. Eager explicit resolution transactions
+may be useful to shorten future history traversals, but they carry semantic
+intent: "this conflict was acknowledged and this resolution was recorded." They
+must therefore be used carefully rather than treated as invisible cache entries.
+
 Conflict resolution is an ordinary transaction that reads the conflicted row,
 writes the chosen value, records resolved candidates, and clears/updates
 conflict metadata.
+
+For v0, resolved-from provenance records candidate transaction ids. Additional
+strategy, hash, source-branch, and user-intent metadata may be added later when
+product conflict UX needs it.
+
+User-facing conflict candidate APIs are policy-filtered. A user must not see
+candidate values or infer hidden candidates they are not allowed to read.
+Trusted peers and authorities may retrieve broader candidate sets internally
+for merge, validation, and diagnostics, subject to redaction at user-facing
+boundaries.
 
 Open issues:
 
 - candidate ordering
 - multi-base branch conflict shape
 - per-column UI/conflict metadata shape
+- rich-text merge representation and determinism tests
+- when to materialize deterministic automatic merges as explicit resolution
+  transactions
+- catalogue/versioning story for non-built-in merge code
 
 ## 21. Semantic System Fields
 
 Semantic system fields may be exposed with `$` names:
 
 ```text
-$rowId
-$txId
+id
 $createdAt
 $updatedAt
 $createdBy
 $updatedBy
 ```
 
-`$createdAt` and `$updatedAt` are system fields. Queries must be able to filter
-and sort over both user columns and semantic system fields.
+`id` is the ordinary public row id field. `$createdAt`, `$updatedAt`,
+`$createdBy`, and `$updatedBy` are the selected baseline semantic system fields.
+Queries must be able to filter and sort over both user columns and semantic
+system fields, including `$createdAt` and `$updatedAt`. Transaction/version
+metadata such as public transaction ids may be exposed later through explicit
+metadata APIs rather than as ordinary row fields by default.
 
 Physical application row tables use `j_` engine columns. Pure system tables do
 not need the `j_` prefix because all their columns are engine-owned.
@@ -1432,7 +1585,6 @@ by the layout codec.
 
 Open issues:
 
-- which semantic system fields are required vs optional
 - which fields are queryable, synced, or policy-protected by default
 
 ## 22. Product Runtime And Topology
@@ -1453,8 +1605,17 @@ Browser durable mode may use:
 - SharedWorker or tab broker
 
 The main thread may run queries directly against an in-memory core. In durable
-browser topology, it talks to the worker/tab broker as a trusted upstream peer.
-The worker owns durable storage and upstream sync.
+browser topology, each tab may have its own in-memory SQLite node connected to a
+shared durable worker/tab-broker node as a trusted upstream peer. The
+worker/broker owns durable storage and upstream sync.
+
+The baseline mirroring strategy is active-scope mirroring: main-thread tabs
+mirror only the query scopes needed for immediate synchronous UI. The durable
+worker/broker owns the broader durable cache, retained history, reconnect
+state, and upstream sync. Larger or less latency-sensitive queries may execute
+directly against the worker asynchronously and deliver results/events to the UI.
+Async worker-backed subscriptions are an implementation recommendation, not a
+separate semantic subscription model.
 
 Memory-only runtimes are first-class for tests, demos, and the full distributed
 system harness. The important property is controllable topology and
@@ -1477,7 +1638,9 @@ does not implement a second query engine.
 
 Reconnect should use replay-window recovery first and full scope/frontier
 snapshot fallback when the replay window is insufficient. Active subscriptions
-are desired state and should be replayed on reconnect.
+are desired state and should be replayed on reconnect. Query descriptors are
+not durable disk state: after a tab or worker restart, downstream live
+subscriptions replay to the worker/broker, then trickle upstream from there.
 
 Open issues:
 
@@ -1561,6 +1724,15 @@ Likely machine-code families:
 Transaction rejection details are durable side data keyed by transaction id.
 They are not a wide field on the hot transaction row.
 
+Write promises, explicit transaction waits, transaction-info APIs, and global
+rejection/error subscriptions are all views over durable transaction outcome and
+rejection records. A write promise may reject immediately when the local runtime
+or waited tier observes rejection. A global callback/subscription surfaces
+rejected transactions discovered later, including unawaited writes and
+sync-delivered outcome changes. If safe rejection detail is later enriched for
+the same public transaction id, rejection subscriptions should be able to emit
+that update without changing the transaction id.
+
 Policy denial and validation explanations should be as detailed as safe without
 leaking privileged information. Ordinary clients must not distinguish hidden
 rows from nonexistent rows through error detail. Trusted-peer and authority logs
@@ -1628,6 +1800,9 @@ Physical storage baseline:
 - composite primary keys with `WITHOUT ROWID` where useful
 - generated covering and partial indexes
 - current projection for hot main reads
+- columnar current projection tables
+- JSONB-style user payloads for append-only history as the first storage
+  experiment
 - query-time visibility for historical and branch correctness baselines
 
 ### 26.1 Transaction Tables
@@ -1682,10 +1857,9 @@ CREATE TABLE todos_v1_history (
   branch_num INTEGER NOT NULL,
   tx_num INTEGER NOT NULL,
   op INTEGER NOT NULL,
+  layout_num INTEGER NOT NULL,
 
-  title TEXT,
-  done INTEGER,
-  project_row_num INTEGER,
+  values_jsonb BLOB NOT NULL,
 
   j_created_at INTEGER NOT NULL,
   j_updated_at INTEGER NOT NULL,
@@ -1713,6 +1887,29 @@ CREATE TABLE todos_v1_current (
   PRIMARY KEY (row_num, branch_num)
 ) WITHOUT ROWID;
 ```
+
+History keeps system columns, identity columns, branch/transaction keys, and
+ordering keys relational. User values are shown as `values_jsonb` to reflect the
+first layout experiment: store cold history payloads as inspectable JSONB-style
+data while keeping current projection columnar. SQLite may represent this as
+JSON text, JSONB when available, or an equivalent binary payload; the product
+contract is that history is append-only and semantically decodable through the
+catalogue/lens graph.
+
+Current projection tables keep user fields as real SQLite columns because they
+serve hot reads, policy filters, subscriptions, explicit indexes, and common
+query plans. Generated or side indexes over history payloads should be added
+only when measurements show a hot historical query, conflict lookup, or
+authority-validation path needs them.
+
+Storage compression should target whole SQLite pages or larger ordered ranges,
+not individual row payloads. Per-row history payload compression has too little
+compression window for the expected complexity. History table ordering and
+primary keys should therefore be chosen with compression locality in mind:
+nearby pages should tend to contain related table/layout/row/history data so
+redundant append-only history can compress well. Custom VFS/page compression is
+a serious storage research target despite portability cost across browser,
+native, and server runtimes.
 
 ### 26.3 Branch View Tables
 
@@ -1779,7 +1976,8 @@ The planner should generate:
 
 - point lookup indexes for row identity
 - covering indexes for current queries
-- covering history indexes for snapshot and branch reads
+- history indexes for system keys needed by rebuild, sync, snapshots, branches,
+  and conflict candidate lookup
 - partial indexes for selective predicates
 - authority-validation indexes when read sets become hot
 
@@ -1794,6 +1992,15 @@ Performance tests should retain `EXPLAIN QUERY PLAN` output for risky lowerings.
 
 Generated indexes must remain compatible with lenses. A covering index generated
 for one structural schema may not directly serve another schema view.
+
+Automatic user-field indexes should target current projection first. History
+payloads are not the default query/index surface. If a historical field becomes
+hot, the engine may add a generated SQLite expression index, maintained side
+table, materialized historical projection, or copy-forward layout. Such derived
+history indexes must be maintained in the same embedded-database transaction as
+the history append or incoming-sync apply, and should be driven by explicit
+schema/query intent or measured hot paths rather than generated for every
+JSONB payload field.
 
 Performance risks:
 
@@ -1855,7 +2062,7 @@ Open issues:
 - policy compiler diagnostics
 - encrypted file digest strategy
 
-## 28. Data Export And External Sync
+## 28. Data Export, Backup, And External Sync
 
 Export, ingest, and external connectors are userland patterns, not core
 database semantics.
@@ -1863,9 +2070,10 @@ database semantics.
 Ordinary user export should be expressible as normal policy-filtered queries,
 optionally with userland expansion for includes, files, or history.
 
-Restore is admin-only and likely expressed through embedded database
-snapshotting/restoring plus blob storage backup. Non-admin restore is out of
-scope.
+Operational backup and disaster recovery are admin-only and likely expressed
+through embedded database snapshotting/restoring plus blob storage backup. This
+is distinct from product-level row restore/undelete, which is an append-only
+write that reuses insert authorization semantics.
 
 External connectors should be built above the core as application or service
 code. They may write Jazz transactions using service/admin sessions, source
@@ -1944,15 +2152,119 @@ The following areas remain intentionally underspecified:
 - hot branch projection heuristics
 - audit-grade append-only receipt history
 - garbage collection and compaction
+- benchmark thresholds for launch readiness
+- representative adopter-shaped benchmark datasets
 
-## Appendix A: Attempt 3 Implementation Status And Strategy
+## 31. Performance Research Discipline
 
-Attempt 3 is no longer throwaway. It should remain the working prototype until
-we learn a reason to restart. Future work may still freely reshape internals,
-but the current code has proved enough whole-system composition to be worth
-evolving.
+The embedded-database direction is justified only if it improves realistic Jazz
+workloads while preserving local-first, policy, history, branch, lens, and sync
+semantics. Performance work should therefore be scenario-shaped and tied to
+specific design choices. Microbenchmarks are useful when they falsify or support
+a concrete lowering decision, not as isolated numbers.
 
-All Attempt 3 stores should use SQLite, including memory-only stores. In-memory
+Initial performance results should be comparative rather than hard-coded target
+thresholds. Compare candidate designs against each other and, where possible,
+against current Jazz behavior on realistic app-shaped data.
+
+Required benchmark families:
+
+- **Current app reads**
+  - equality and ref filters
+  - ordered pages by `$createdAt` / `$updatedAt`
+  - includes
+  - policy filters
+  - recursive queries
+  - aggregate `COUNT`
+- **Writes and projection maintenance**
+  - mergeable insert/update/delete
+  - multi-row transactions
+  - patch updates preserving omitted fields
+  - writes with policy dependencies
+  - conflict-producing concurrent writes
+- **Sync export/apply**
+  - query-scoped export
+  - refresh after rows leave scope
+  - recursive query export
+  - policy dependency export
+  - branch-scoped export
+  - duplicate/reordered bundle apply
+- **Authority validation**
+  - exclusive row reads
+  - absence reads
+  - predicate/range reads
+  - policy-dependent writes
+  - branch-source reads
+  - cross-schema read/write-set translation
+- **Branch/history**
+  - pinned branch reads
+  - transitive source graph reads
+  - conflict candidate retrieval
+  - historical snapshot by global epoch
+  - historical "as of wall-clock time" queries
+- **Browser topology**
+  - cold open
+  - worker startup
+  - main-thread active-scope rehydration
+  - reconnect after offline
+  - multiple tabs through one broker
+
+Measurements should include:
+
+- p50/p95 latency where applicable
+- query plan and `EXPLAIN QUERY PLAN`
+- rows scanned and rows returned
+- history/current/index bytes written
+- transaction, read/write-set, query-fact, branch, and catalogue metadata bytes
+- raw user payload bytes versus total SQLite bytes
+- SQLite page count and page-size configuration
+- compression savings for page/range compression experiments
+- bundle bytes before transport stream compression
+- memory high-water mark where available
+- write amplification from generated indexes
+- projection rebuild and repair time
+- authority validation scanned rows/facts
+- startup and time-to-first-usable-query for browser topology
+
+Each benchmark record should include:
+
+- SQLite version and build flags
+- storage backend and platform
+- schema/catalogue revision
+- row count, version count, branch/source graph shape, and policy shape
+- indexes present
+- data generator seed
+- topology and message schedule seed for distributed scenarios
+
+Comparative success criteria:
+
+- common one-shot reads should beat or clearly match current Jazz under
+  realistic data
+- query-scoped reconnect should avoid whole-table sync for ordinary screens
+- write throughput should remain acceptable with automatic indexes enabled
+- current projection disk overhead should be explainable and bounded
+- history overhead should benefit from page/range compression and locality
+- authority validation should scale with read/write-set size and indexed facts,
+  not whole-table scans
+- multi-tab browser topology should not multiply durable cache memory per tab
+
+Open issues:
+
+- representative adopter-shaped benchmark datasets
+- exact current-Jazz baseline scenarios
+- memory measurement APIs across native, WASM, and browser storage
+- benchmark thresholds for launch readiness
+- how to retain query-plan regressions in CI without excessive noise
+
+## Appendix A: Working Prototype Status And Strategy
+
+The SQLite core spike is no longer throwaway. It should remain the working
+prototype while the design evolves through collaborative improvements,
+clarifications, review comments, and focused experiments. There is no single
+planned "next attempt"; the prototype and spec should move together as hard
+questions get answered.
+
+All prototype stores should use SQLite, including memory-only stores. In-memory
 means in-memory SQLite, not a parallel fake implementation. This keeps storage
 boundaries honest across local tests, browser-like topologies, edge replicas,
 and global authority replicas.
@@ -2037,10 +2349,10 @@ in-memory SQLite so tests can run several local/edge/global runtimes without
 browser-specific APIs. It should also support durable SQLite-file nodes in the
 same topology so crash safety and reconciliation can be tested.
 
-Performance tests should measure layout overhead, id representation, enum
-representation, read/write-set storage, query plans, and memory representation.
+Performance tests should follow Section 31: scenario-shaped, comparative, and
+tied to falsifying concrete layout, lowering, sync, and topology choices.
 
-Attempt 3 should bias toward whole-system tests over narrow helper tests. The
+Ongoing work should bias toward whole-system tests over narrow helper tests. The
 goal is to learn whether the semantic model composes under realistic distributed
 conditions, not only whether individual SQL statements work.
 
@@ -2048,11 +2360,15 @@ Recommended harness shape:
 
 - create several SQLite-backed runtimes in one process
 - mix in-memory SQLite nodes and durable SQLite-file nodes
+- model multiple in-memory browser-tab nodes connected to one durable
+  worker/tab-broker node
 - assign each runtime a node id, principal/session, catalogue revision, and
   optional upstream peer
 - support local, edge, and global roles
 - allow explicit message passing rather than hidden synchronous replication
 - allow dropped, delayed, duplicated, and reordered bundles
+- simulate asynchronous systems deterministically by making node progress,
+  network progress, and disk progress explicit scheduler choices
 - expose query/subscription observations as testable events
 - expose transaction outcomes, receipts, observed facts, and projection diffs
 - provide deterministic clocks/epochs for repeatable tests
@@ -2060,24 +2376,26 @@ Recommended harness shape:
 - support disconnect/reconnect and replay-window/full-snapshot recovery
 
 The first harness should be boring and explicit. It does not need production
-transport, threads, async scheduling, or browser APIs. It does need SQLite from
-the start, clean boundaries between runtime, storage, sync, policy, and query
-planning, and enough topology to prove that local replicas, trusted peers/edges,
-and the global authority keep the same invariants when messages move in
-uncomfortable orders.
+transport, threads, or browser APIs. It does need SQLite from the start, clean
+boundaries between runtime, storage, sync, policy, and query planning, and
+enough topology to prove that local replicas, trusted peers/edges, and the
+global authority keep the same invariants when messages move in uncomfortable
+orders. Property-style tests should randomize the next progress step among
+specific node progress, network delivery, and disk/reopen progress while keeping
+the run deterministic and reproducible from a seed.
 
 The harness should mirror browser-plus-cloud product topology early:
 
-- browser main-thread-like in-memory SQLite runtime
-- browser worker/tab-broker-like durable SQLite runtime
+- multiple browser main-thread-like in-memory SQLite tab runtimes
+- one shared browser worker/tab-broker-like durable SQLite runtime
 - optional edge SQLite runtime
 - global authority SQLite runtime
 
-Attempt 3 should include policies and lenses, even if the first slices are
-narrow. The goal is to prove that the whole system composes, not to defer the two
-features most likely to change scope, query planning, validation, and sync.
+The working prototype should keep policies and lenses in scope. The goal is to
+prove that the whole system composes, not to defer the two features most likely
+to change scope, query planning, validation, and sync.
 
-Implementation lessons from Attempt 3:
+Implementation lessons from the prototype:
 
 - The useful architecture is verb-shaped: write, validate, apply, export,
   repair, read, subscribe. Thin data artifacts are useful, but manager-style
@@ -2117,9 +2435,17 @@ Known implementation tensions:
   There is no schema-versioned catalogue, inverse lens graph, compatibility
   graph, or copy-forward storage yet; physical table names are still
   `schema_v1`.
+- The spec now prefers physical layouts keyed by structural storage shape rather
+  than one table set per catalogue/schema version. The prototype still uses
+  per-version column-history tables and should be used to compare that baseline
+  against JSONB-style history payloads.
 - Conflict candidates are exposed through side APIs and conflict-aware row
   reads; product conflict metadata shape and resolved-from-candidates
   provenance remain incomplete.
+- Conflict merge execution should live in deterministic semantic merge code,
+  with SQLite doing candidate retrieval. Rich text should be treated as an early
+  blessed merge strategy rather than waiting for arbitrary app-defined merge
+  code.
 - Predicate facts now cover equality, contains, IN, not-equal, null-present,
   selected system fields, ordered pages, absence, and recursive refs in the
   prototype. Range predicates and a final compact predicate model remain open.
@@ -2132,6 +2458,25 @@ Known implementation tensions:
   open.
 - Trusted/admin policy bypass exists in the harness, but audit/provenance
   semantics for bypassed writes are thin.
+
+High-value things to try next:
+
+- add a small `COUNT` aggregate primitive over versioned/lensed tables
+- build an account-aggregator-shaped example that stresses aggregation, joins,
+  policies, schema versions, sync scope, and subscriptions
+- validate exclusive predicate/range read sets under writer-principal policy
+  context
+- compare column-history with JSON/BLOB-history layouts
+- test SQLite VFS/page or range compression for deep histories, including
+  physical ordering that co-locates redundant history
+- test transport stream compression over long-lived sync connections
+- stress recursive queries and recursive policies beyond toy examples
+- prove the blessed rich-text conflict-resolution path across sync/rebuild
+- benchmark multi-version schema/lens union queries
+- benchmark browser topology startup, memory, reconnect, and worker/main-thread
+  mirroring costs
+- replace remaining fixture-shaped APIs with generic process-shaped verbs when
+  they block understanding or tests
 
 ## Appendix B: Rationale
 
@@ -2162,7 +2507,10 @@ Future work may revisit:
 - append-only audit receipts
 - hot branch projections
 - indexed read/write-set side tables
-- custom SQLite VFS/page compression
+- columnar history tables if JSONB-style payloads make policy, lenses,
+  conflicts, or historical queries too slow or complex
+- payload compression for special large metadata/blob cases
+- custom SQLite VFS/page or range compression
 - opaque policy proofs
 - compact encrypted indexes
 - query-scope repair via durable observed-fact indexes rather than broad
@@ -2172,7 +2520,7 @@ Future work may revisit:
 
 ## Appendix D: Invariants To Test
 
-Attempt 3 should turn as many of these as practical into integration tests. A
+Ongoing work should turn as many of these as practical into integration tests. A
 few may remain assertion-level checks or design review items until the relevant
 feature exists.
 
@@ -2202,6 +2550,8 @@ feature exists.
 - Waiting on an exclusive transaction at local or edge tier is a runtime error.
 - Waiting on an exclusive transaction at global tier resolves on acceptance and
   rejects on rejection.
+- Local exclusive previews, if implemented, are opt-in unsettled UI state rather
+  than ordinary visible current rows.
 - Edge-accepted mergeable transactions produce replayable receipt state.
 - Edge-accepted mergeable transactions are accepted and visible without a
   global epoch.
@@ -2370,7 +2720,11 @@ feature exists.
 - Edge policy may be stale for mergeable transactions only within the accepted
   product tradeoff.
 - Exclusive transactions are validated by global authority against
-  authority-visible history and policy facts.
+  authority-visible history and the authority's current trusted policy
+  catalogue.
+- Exclusive stale-read validation uses the writer principal's current
+  policy-filtered view; rows hidden from that writer do not invalidate row,
+  absence, predicate, or range reads.
 - Recursive policies over acyclic ref chains are SQL-lowerable.
 - Direct and indirect recursive policy cycles are rejected.
 - Write policies record transitive policy read facts, not only direct parent
@@ -2396,11 +2750,21 @@ feature exists.
 - Lenses live in `migrations/`.
 - Lenses used by v0 are SQL-lowerable.
 - Writes through an old schema view append current-schema history.
+- Product-level restore/undelete reuses insert authorization semantics.
+- Conflict resolution may require explicit conflict-resolution permission where
+  the schema declares it.
+- Branch source/provenance edits are governed by branch backing-row
+  permissions.
 
 ### D.11 Authority Validation Invariants
 
 - Authority validation uses authority-visible history, not optimistic current
   projections polluted by proposals.
+- Authority validation uses current authority policy, not stale locally observed
+  policy, for security.
+- Stale-read comparison is parameterized by the writer principal's
+  policy-filtered read context so hidden rows do not cause false conflicts or
+  leak existence.
 - Row reads still observe the same visible version at validation time.
 - Absence reads remain absent at validation time.
 - Range reads remain valid at validation time.
@@ -2419,10 +2783,17 @@ feature exists.
 - Current projection exposes a resolved value plus conflict metadata.
 - Empty conflict metadata is represented explicitly enough for rebuild.
 - Non-empty conflict metadata identifies candidate transactions.
+- Conflict candidate retrieval is policy-filtered for user-facing APIs.
 - Conflict resolution is an ordinary transaction.
-- Conflict resolution records resolved candidates and clears/updates conflict
-  metadata.
+- Conflict resolution records resolved candidate transaction ids and
+  clears/updates conflict metadata.
+- Automatic deterministic merge may derive current values without appending a
+  resolution transaction.
+- Explicit resolution transactions carry semantic acknowledgement/choice and
+  are not invisible cache entries.
 - Mergeable transactions may use per-column merge metadata.
+- Merge strategies are deterministic reducers over normalized semantic values.
+- Rich text is a blessed built-in merge strategy target.
 - Exclusive transactions remain row-granular for correctness.
 - Encrypted conflicting values are represented as opaque conflicting blobs, not
   plaintext candidate values.
@@ -2431,6 +2802,10 @@ feature exists.
 
 - Write promise rejection and global rejection callback use the same error shape
   for the same transaction outcome.
+- Promise rejection, waits, transaction-info APIs, and rejection subscriptions
+  are derived from durable transaction outcome/rejection records.
+- Rejection subscriptions can emit safe detail enrichment for the same public
+  transaction id.
 - Errors carry stable machine codes plus human-readable messages.
 - Transport/quota/upload capacity failures are transport/API errors.
 - Semantic database failures are transaction/query errors or rejections.
@@ -2482,8 +2857,13 @@ feature exists.
   in-memory SQLite rather than a fake store.
 - Multi-runtime tests can mix in-memory SQLite nodes and durable SQLite-file
   nodes.
+- Multi-runtime tests can model several in-memory browser-tab nodes connected
+  to one durable worker/tab-broker node.
 - Tests can model local, edge, and global roles.
 - Tests can delay, duplicate, drop, and reorder messages.
+- Tests can simulate asynchronous scheduling by randomly choosing explicit node
+  progress, network progress, or disk progress steps while remaining
+  deterministic from a seed.
 - Tests can inspect public events without relying on physical ids.
 - Tests can rebuild projections and compare semantic state.
 - Tests can assert query settled vs row-received distinctions.
@@ -2497,6 +2877,13 @@ feature exists.
   worker/tab-broker node after restart.
 - Durable worker/tab-broker nodes can reconcile with edge/global after
   disconnect.
+- Query descriptors are not durable disk state; after tab, worker, edge, or
+  upstream restart, downstream active subscriptions replay desired state and
+  that interest trickles upstream.
+- Main-thread tab nodes mirror active query scopes by default, not the whole
+  durable worker cache.
+- Multiple tabs connected to one broker converge through the broker without
+  sharing in-memory state directly.
 - Edge nodes can reconcile with global after disconnect and preserve replayable
   mergeable transaction receipts.
 - Global authority restart preserves global epochs, transaction outcomes,
@@ -2518,7 +2905,7 @@ feature exists.
 - Policy and lens state survive durable restart through catalogue state, not
   ambient process memory.
 
-## Appendix E: Attempt 3 Test Traceability
+## Appendix E: Prototype Test Traceability
 
 This appendix maps the current `crates/mini-jazz-sqlite/tests/whole_system`
 suite to the invariant groups in Appendix D. It is intentionally coarser than a
@@ -2530,7 +2917,7 @@ Coverage labels:
 - **covered**: at least one whole-system test directly exercises the invariant
 - **partial**: tests exercise a narrow prototype shape, but not the full product
   invariant
-- **untested**: no obvious Attempt 3 test covers it yet
+- **untested**: no obvious prototype test covers it yet
 
 ### E.1 Coverage Summary By Invariant Group
 
@@ -2550,8 +2937,8 @@ Coverage labels:
 | D.12 Conflicts             | partial               | Side APIs expose multi-base and pinned-base conflict candidates and policy-filtered candidates; conflict-aware row reads and resolution transactions are tested. Product metadata shape is not.                                                    |
 | D.13 Errors/diagnostics    | partial               | Rejection codes, transaction info, rejection lists, rejection subscriptions, and detail enrichment are tested. Public error object shape, redaction, and diagnostics are not.                                                                      |
 | D.14 Storage/lowering      | partial               | SQLite current/history tables, physical ids, system prefix escaping, integer-like enum behavior, and rebuild are exercised. `WITHOUT ROWID`, generated indexes, and query plans are not asserted.                                                  |
-| D.15 Files/blobs           | untested              | No file/blob implementation in Attempt 3.                                                                                                                                                                                                          |
-| D.16 Privacy/encryption    | untested              | No E2EE/encrypted-index implementation in Attempt 3.                                                                                                                                                                                               |
+| D.15 Files/blobs           | untested              | No file/blob implementation in the prototype.                                                                                                                                                                                                      |
+| D.16 Privacy/encryption    | untested              | No E2EE/encrypted-index implementation in the prototype.                                                                                                                                                                                           |
 | D.17 Harness               | partial               | In-memory SQLite, file-backed durable nodes, multi-runtime local/edge/global tests, duplicate/reordered bundles, and durable reopen are tested. Drop/delay/reconnect protocol and deterministic clock APIs are not.                                |
 
 ### E.2 Test Module Mapping
@@ -2752,7 +3139,7 @@ them concrete:
 
 ### E.4 Largest Untested Gaps
 
-The largest gaps between Appendix D and Attempt 3 tests are:
+The largest gaps between Appendix D and the current prototype tests are:
 
 - full vector snapshots and compact dotted-vector encoding
 - exact one-simple-write transaction count, sealed transaction immutability, and
@@ -2778,6 +3165,6 @@ The largest gaps between Appendix D and Attempt 3 tests are:
 - public error object shape, global rejection callback, and redaction policy
 - deterministic clock/message harness for drop/delay/reconnect scenarios
 
-This v2 spec is serious but still pre-implementation. The next attempt should
-be allowed to falsify parts of it. When it does, the result should be a sharper
-spec, not just another patch to a prototype.
+This spec is serious but still evolving. New implementation results, review
+comments, and experiments should be allowed to falsify parts of it. When they
+do, the result should be a sharper spec and prototype, not hidden divergence.
