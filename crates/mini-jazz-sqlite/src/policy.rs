@@ -4,33 +4,37 @@ use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
-pub(crate) fn write_allowed(
-    db: &Connection,
-    schema: &SchemaDef,
-    table: &TableDef,
-    policy: &PolicyDef,
-    row_num: i64,
-    values: &BTreeMap<String, JsonValue>,
-    principal: &str,
-) -> Result<bool> {
-    match policy {
+pub(crate) struct WriteCheck<'a> {
+    pub(crate) db: &'a Connection,
+    pub(crate) schema: &'a SchemaDef,
+    pub(crate) table: &'a TableDef,
+    pub(crate) row_num: i64,
+    pub(crate) branch_num: i64,
+    pub(crate) values: &'a BTreeMap<String, JsonValue>,
+    pub(crate) principal: &'a str,
+}
+
+pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
+    match &check.table.write_policy {
         PolicyDef::AllowAll => Ok(true),
         PolicyDef::CreatedByPrincipal => {
-            let count: i64 = db.query_row(
+            let count: i64 = check.db.query_row(
                 &format!(
                     "SELECT COUNT(*)
                      FROM {} current
                      WHERE current.row_num = ?
+                       AND current.j_branch_num = ?
                        AND current.j_created_by = ?",
-                    crate::schema::current_table(&table.name)
+                    crate::schema::current_table(&check.table.name)
                 ),
-                params![row_num, principal],
+                params![check.row_num, check.branch_num, check.principal],
                 |row| row.get(0),
             )?;
             Ok(count > 0)
         }
         PolicyDef::RefReadable { field } => {
-            let field_def = table
+            let field_def = check
+                .table
                 .fields
                 .iter()
                 .find(|candidate| candidate.name == *field)
@@ -44,35 +48,37 @@ pub(crate) fn write_allowed(
                     field_def.name
                 )));
             };
-            let ref_id = values
+            let ref_id = check
+                .values
                 .get(field)
-                .or_else(|| values.get(&field_def.storage_name))
+                .or_else(|| check.values.get(&field_def.storage_name))
                 .and_then(JsonValue::as_str)
                 .ok_or_else(|| crate::Error::new(format!("expected ref id for {field}")))?;
-            let ref_row_num = crate::rows::row_num(db, ref_id)?;
-            let ref_table = schema.table_def(ref_table_name)?;
+            let ref_row_num = crate::rows::row_num(check.db, ref_id)?;
+            let ref_table = check.schema.table_def(ref_table_name)?;
             let policy_sql = lower_policy(
-                schema,
+                check.schema,
                 ref_table,
                 "current",
                 &ref_table.read_policy,
-                principal,
-                None,
+                check.principal,
+                Some(check.branch_num),
                 0,
             )?;
-            let count: i64 = db.query_row(
+            let count: i64 = check.db.query_row(
                 &format!(
                     "SELECT COUNT(*)
                      FROM {} current
                      JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
                      WHERE current.row_num = ?
+                       AND current.j_branch_num = ?
                        AND current.is_deleted = 0
                        AND tx.outcome != {}
                        AND {policy_sql}",
                     crate::schema::current_table(ref_table_name),
                     tx::OUTCOME_REJECTED,
                 ),
-                params![ref_row_num],
+                params![ref_row_num, check.branch_num],
                 |row| row.get(0),
             )?;
             Ok(count > 0)

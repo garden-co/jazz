@@ -1807,3 +1807,20 @@ as a whole, leaving no todo rows visible at the trusted edge.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 trusted_edge_rejects_untrusted_transaction_atomically` passes.
+
+## 2026-05-25 20:03 PDT
+
+Starting branch-aware write-policy validation. `write_if_ref_readable` appears
+to evaluate parent readability against any current row with the referenced row
+id, not the transaction's branch view. A parent visible only in one branch should
+not authorize a child write in a different branch.
+
+## 2026-05-25 20:04 PDT
+
+Branch-aware write-policy validation is green. The failing test showed a parent
+visible in branch `other` could authorize a child write in branch `draft`.
+`write_if_ref_readable` validation now receives the transaction branch and
+constrains the referenced parent current row to that branch.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+branch_write_policy_does_not_use_parent_from_different_branch` passes.

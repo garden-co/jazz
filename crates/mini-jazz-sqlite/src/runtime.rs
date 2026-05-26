@@ -200,15 +200,16 @@ impl Runtime {
         })?;
         let row_num = row_num(&db, id)?;
         let allowed = self.trusted
-            || local_write_allowed(
-                &db,
-                &self.schema,
-                &table,
+            || local_write_allowed(LocalWriteCheck {
+                db: &db,
+                schema: &self.schema,
+                table: &table,
                 row_num,
-                &values,
-                &self.principal,
+                branch_num: self.branch_num,
+                values: &values,
+                principal: &self.principal,
                 op,
-            )?;
+            })?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
             db.execute(
@@ -1094,15 +1095,16 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
         args.tx_num,
     )?;
     let allowed = args.trusted
-        || local_write_allowed(
-            args.db,
-            args.schema,
+        || local_write_allowed(LocalWriteCheck {
+            db: args.db,
+            schema: args.schema,
             table,
             row_num,
-            args.values,
-            args.principal,
-            args.op,
-        )?;
+            branch_num: args.branch_num,
+            values: args.values,
+            principal: args.principal,
+            op: args.op,
+        })?;
 
     let mut columns = vec![
         "row_num".to_owned(),
@@ -1182,27 +1184,30 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
     Ok(())
 }
 
-fn local_write_allowed(
-    db: &Connection,
-    schema: &SchemaDef,
-    table: &crate::schema::TableDef,
+struct LocalWriteCheck<'a> {
+    db: &'a Connection,
+    schema: &'a SchemaDef,
+    table: &'a crate::schema::TableDef,
     row_num: i64,
-    values: &BTreeMap<String, JsonValue>,
-    principal: &str,
+    branch_num: i64,
+    values: &'a BTreeMap<String, JsonValue>,
+    principal: &'a str,
     op: i64,
-) -> Result<bool> {
-    if op == 1 && matches!(table.write_policy, PolicyDef::CreatedByPrincipal) {
+}
+
+fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
+    if check.op == 1 && matches!(check.table.write_policy, PolicyDef::CreatedByPrincipal) {
         return Ok(true);
     }
-    policy::write_allowed(
-        db,
-        schema,
-        table,
-        &table.write_policy,
-        row_num,
-        values,
-        principal,
-    )
+    policy::write_allowed(policy::WriteCheck {
+        db: check.db,
+        schema: check.schema,
+        table: check.table,
+        row_num: check.row_num,
+        branch_num: check.branch_num,
+        values: check.values,
+        principal: check.principal,
+    })
 }
 
 fn current_creation_metadata(
@@ -1633,18 +1638,19 @@ fn write_allowed_for_history_record(
     } else {
         &record.updated_by
     };
+    let branch_num = branch::ensure(conn, &record.branch_id, None, now_ms())?;
     if record.op == 3 && matches!(table.write_policy, PolicyDef::CreatedByPrincipal) {
         return Ok(record.created_by == *principal);
     }
-    policy::write_allowed(
-        conn,
+    policy::write_allowed(policy::WriteCheck {
+        db: conn,
         schema,
         table,
-        &table.write_policy,
         row_num,
-        &record.values,
+        branch_num,
+        values: &record.values,
         principal,
-    )
+    })
 }
 
 fn is_newest_version_for_current(

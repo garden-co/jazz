@@ -491,6 +491,57 @@ fn trusted_edge_rejects_untrusted_transaction_atomically() {
 }
 
 #[test]
+fn branch_write_policy_does_not_use_parent_from_different_branch() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    bob.create_branch("other", None).unwrap();
+    bob.checkout_branch("other").unwrap();
+    bob.insert_row(
+        "projects",
+        "project-other",
+        BTreeMap::from([("title".to_owned(), json!("Other branch project"))]),
+    )
+    .unwrap();
+    edge.apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+
+    bob.create_branch("draft", None).unwrap();
+    bob.checkout_branch("draft").unwrap();
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-cross-branch",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Should not be authorized")),
+                ("project".to_owned(), json!("project-other")),
+            ]),
+        )
+        .unwrap();
+
+    edge.apply_untrusted_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+    edge.checkout_branch("draft").unwrap();
+
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        edge.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn trusted_edge_rejects_untrusted_delete_policy_violation() {
     let schema = SchemaDef::new().table("docs", |table| {
         table.text("title");
