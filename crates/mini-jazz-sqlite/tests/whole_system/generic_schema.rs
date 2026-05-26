@@ -149,3 +149,59 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
     assert_eq!(peer_rows.len(), 1);
     assert_eq!(peer_rows[0].id, "task-open");
 }
+
+#[test]
+fn generic_equality_query_lowers_public_ref_ids_to_physical_row_ids() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Project 1"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-2",
+            BTreeMap::from([("title".to_owned(), json!("Project 2"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("First")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-2",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Second")),
+                ("project".to_owned(), json!("project-2")),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice
+        .read_rows_where_eq("tasks", "project", json!("project-2"))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "task-2");
+    assert_eq!(rows[0].values["project"], json!("project-2"));
+}

@@ -769,12 +769,8 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
     ) -> Result<Vec<RowView>> {
-        self.schema.table_def(table_name)?;
-        Ok(self
-            .read_rows(table_name)?
-            .into_iter()
-            .filter(|row| row.values.get(field_name) == Some(&value))
-            .collect())
+        self.query_context()
+            .read_rows_where_eq(table_name, field_name, value)
     }
 
     pub fn export_query_where_eq(

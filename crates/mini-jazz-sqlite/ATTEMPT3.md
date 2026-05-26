@@ -1316,3 +1316,25 @@ should lower predicates into SQL and record predicate/range read sets.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 generic_equality_query_scope_exports_matching_rows_and_policy_dependencies`
 passes.
+
+## 2026-05-25 19:12 PDT
+
+Starting SQL-lowered generic equality reads. The previous generic predicate
+slice intentionally filtered semantic rows in memory. Next step: lower simple
+field equality into SQLite for the current projection while preserving branch
+overlay and policy semantics.
+
+## 2026-05-25 19:13 PDT
+
+SQL-lowered generic equality reads are green for current projections. Added a
+`QueryContext::read_rows_where_eq` path that lowers user fields to physical
+SQLite columns and converts public ref IDs to local row nums before querying.
+Covered both boolean equality and ref equality.
+
+Design note: pinned branch base snapshots still use `read_main_snapshot_rows`
+followed by semantic filtering for the base portion. That is correct enough for
+the attempt, but the real query planner should lower equality predicates across
+snapshot reads too.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+generic_equality_query` passes.
