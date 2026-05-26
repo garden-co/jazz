@@ -66,3 +66,10 @@ historically participated in the recursive scope so the receiver can learn the
 edge moved. This is likely over-broad for large trees, but it gives a correct
 baseline and identifies a future optimization target: durable recursive
 predicate/read-set state rather than ad hoc historical-tree export.
+
+Architecture cleanup started: extracted effective row value lookup into
+`effective.rs`. This gives a name and boundary to the logic that chooses between
+checked-out branch current rows, sparse-overlay inherited current rows, and
+pinned historical snapshots. It is still small, but it is the right direction:
+write lowering can ask for an effective base row instead of rediscovering branch
+snapshot semantics inside the mutation path.
