@@ -1843,3 +1843,21 @@ remote pending before durable versions and local pending after durable versions.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 remote_pending_update_does_not_override_global_current_on_peer` passes, and full
 `cargo test -p mini-jazz-sqlite` passes with 98 whole-system tests.
+
+## 2026-05-25 20:09 PDT
+
+Starting branch-base write-policy coverage. The previous branch-scope fix
+prevents cross-branch parent leakage, but a branch write should still be
+authorized by a parent row visible through the branch's pinned main-base
+snapshot.
+
+## 2026-05-25 20:10 PDT
+
+Branch-base write-policy validation is green. `write_if_ref_readable` now uses
+an effective branch relation: branch-local rows win, otherwise main rows are
+visible if the branch has no shadow for that row. This keeps the cross-branch
+leak closed while allowing pinned-base parents to authorize branch writes.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+branch_write_policy` passes, and full `cargo test -p mini-jazz-sqlite` passes
+with 99 whole-system tests.

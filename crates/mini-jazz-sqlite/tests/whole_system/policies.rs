@@ -542,6 +542,48 @@ fn branch_write_policy_does_not_use_parent_from_different_branch() {
 }
 
 #[test]
+fn branch_write_policy_uses_parent_visible_from_pinned_base() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let project_tx = alice
+        .insert_row(
+            "projects",
+            "project-main",
+            BTreeMap::from([("title".to_owned(), json!("Main project"))]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&project_tx, 1).unwrap();
+
+    alice.create_branch("draft", Some(1)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-draft",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft todo")),
+                ("project".to_owned(), json!("project-main")),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-draft");
+}
+
+#[test]
 fn trusted_edge_rejects_untrusted_delete_policy_violation() {
     let schema = SchemaDef::new().table("docs", |table| {
         table.text("title");

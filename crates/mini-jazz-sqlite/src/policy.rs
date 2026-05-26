@@ -71,19 +71,39 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
                      FROM {} current
                      JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
                      WHERE current.row_num = ?
-                       AND current.j_branch_num = ?
+                       AND {}
                        AND current.is_deleted = 0
                        AND tx.outcome != {}
                        AND {policy_sql}",
                     crate::schema::current_table(ref_table_name),
+                    effective_branch_sql("current", ref_table_name, check.branch_num),
                     tx::OUTCOME_REJECTED,
                 ),
-                params![ref_row_num, check.branch_num],
+                params![ref_row_num],
                 |row| row.get(0),
             )?;
             Ok(count > 0)
         }
     }
+}
+
+fn effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> String {
+    if branch_num == 1 {
+        return format!("{alias}.j_branch_num = 1");
+    }
+    format!(
+        "({alias}.j_branch_num = {branch_num}
+          OR (
+            {alias}.j_branch_num = 1
+            AND NOT EXISTS (
+              SELECT 1
+              FROM {} branch_shadow
+              WHERE branch_shadow.row_num = {alias}.row_num
+                AND branch_shadow.j_branch_num = {branch_num}
+            )
+          ))",
+        crate::schema::current_table(table_name)
+    )
 }
 
 pub(crate) fn read_policy_sql(
@@ -184,7 +204,12 @@ fn lower_policy(
                 depth + 1,
             )?;
             let branch_filter = branch_num
-                .map(|branch_num| format!("AND {parent_alias}.j_branch_num = {branch_num}"))
+                .map(|branch_num| {
+                    format!(
+                        "AND {}",
+                        effective_branch_sql(&parent_alias, &ref_table.name, branch_num)
+                    )
+                })
                 .unwrap_or_default();
             Ok(format!(
                 "EXISTS (
