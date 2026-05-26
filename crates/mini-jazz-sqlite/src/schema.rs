@@ -1,5 +1,6 @@
 use crate::Result;
 use rusqlite::Connection;
+use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
@@ -98,6 +99,7 @@ pub(crate) struct FieldDef {
     pub(crate) storage_name: String,
     pub(crate) kind: FieldKind,
     pub(crate) nullable: bool,
+    pub(crate) default_value: Option<JsonValue>,
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +176,17 @@ impl TableBuilder {
             storage_name: user_storage_name(name),
             kind: FieldKind::Text,
             nullable: false,
+            default_value: None,
+        });
+    }
+
+    pub fn text_default(&mut self, name: &str, value: &str) {
+        self.table.fields.push(FieldDef {
+            name: name.to_owned(),
+            storage_name: user_storage_name(name),
+            kind: FieldKind::Text,
+            nullable: false,
+            default_value: Some(JsonValue::String(value.to_owned())),
         });
     }
 
@@ -183,6 +196,7 @@ impl TableBuilder {
             storage_name: user_storage_name(name),
             kind: FieldKind::Text,
             nullable: true,
+            default_value: None,
         });
     }
 
@@ -192,6 +206,7 @@ impl TableBuilder {
             storage_name: user_storage_name(stored_as),
             kind: FieldKind::Text,
             nullable: false,
+            default_value: None,
         });
     }
 
@@ -201,6 +216,17 @@ impl TableBuilder {
             storage_name: user_storage_name(name),
             kind: FieldKind::Bool,
             nullable: false,
+            default_value: None,
+        });
+    }
+
+    pub fn bool_default(&mut self, name: &str, value: bool) {
+        self.table.fields.push(FieldDef {
+            name: name.to_owned(),
+            storage_name: user_storage_name(name),
+            kind: FieldKind::Bool,
+            nullable: false,
+            default_value: Some(JsonValue::Bool(value)),
         });
     }
 
@@ -212,6 +238,7 @@ impl TableBuilder {
                 table: table.to_owned(),
             },
             nullable: false,
+            default_value: None,
         });
     }
 
@@ -223,6 +250,7 @@ impl TableBuilder {
                 table: table.to_owned(),
             },
             nullable: true,
+            default_value: None,
         });
     }
 
@@ -234,6 +262,7 @@ impl TableBuilder {
                 table: table.to_owned(),
             },
             nullable: false,
+            default_value: None,
         });
     }
 

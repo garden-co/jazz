@@ -2222,8 +2222,17 @@ struct EffectiveWriteValues<'a> {
 }
 
 fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<String, JsonValue>> {
+    let table = args.schema.table_def(args.table_name)?;
     if args.op == 1 {
-        return Ok(args.patch_values.clone());
+        let mut values = args.patch_values.clone();
+        for field in &table.fields {
+            if !values.contains_key(&field.name) {
+                if let Some(default_value) = &field.default_value {
+                    values.insert(field.name.clone(), default_value.clone());
+                }
+            }
+        }
+        return Ok(values);
     }
     let mut current = effective::row_values(
         args.db,

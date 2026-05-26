@@ -772,3 +772,9 @@ Design lesson: once nullability is carried on `FieldDef`, refs compose cleanly w
 Added a first `ne` predicate API. `read_rows_where_ne` now supports local semantic filtering over ordinary fields and magic fields, and `ne null` behaves as status quo expects: it returns rows with present optional values. Full mini crate suite is green with 202 tests.
 
 Design lesson: the product semantics are easy to state, but this slice is intentionally not yet SQL-lowered or sync-scoped. Before making `ne` part of `QueryReadRecord`, we should decide the operator contract for null, refs, and index/range read-set capture together.
+
+## 2026-05-26 03:13 PDT
+
+Added declared scalar defaults for inserts. Schemas can declare `text_default` and `bool_default`; omitted insert fields are filled before policy checks, history writes, current projection writes, sync export, and rebuild. Full mini crate suite is green with 203 tests.
+
+Design lesson: defaults belong in the effective write-value phase rather than at SQLite DDL level for now. That keeps defaults semantic and replayable across history, but default metadata should probably participate in schema/catalogue compatibility once the schema version story is less skeletal.

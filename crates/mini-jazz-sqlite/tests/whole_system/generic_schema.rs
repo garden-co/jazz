@@ -914,6 +914,30 @@ fn not_equal_null_filters_to_present_optional_values() {
 }
 
 #[test]
+fn insert_applies_declared_defaults_for_omitted_fields() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.text_default("status", "draft");
+        table.bool_default("pinned", false);
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-defaults",
+            BTreeMap::from([("body".to_owned(), json!("Needs defaults"))]),
+        )
+        .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["status"], json!("draft"));
+    assert_eq!(rows[0].values["pinned"], json!(false));
+}
+
+#[test]
 fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_deleted_match() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
