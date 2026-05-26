@@ -527,3 +527,14 @@ rows entering and leaving both query shapes. Full mini crate suite is green with
 Design lesson: the subscription object is turning into a query descriptor. That
 is good pressure toward unifying local subscriptions and sync query scopes
 around one semantic query representation instead of parallel ad-hoc APIs.
+
+## 2026-05-26 01:37 PDT
+
+Added lens-backed query-scope coverage. A new-schema runtime can query an
+old-schema row through the renamed semantic field, sync that query scope to a
+peer, and later repair the peer when the row leaves scope through a semantic
+field update. Full mini crate suite is green with 167 tests.
+
+Design lesson: lens support is now covered across reads, writes, policies,
+subscriptions indirectly through reads, and query-scoped sync. The storage-name
+mapping is holding up better than expected.
