@@ -1354,3 +1354,20 @@ from the same runtime harness.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 memory_runtime_writes_through_sqlite_current_projection` passes.
+
+## 2026-05-25 19:16 PDT
+
+Starting edge-accepted transaction fate. The current prototype can represent
+global acceptance with a global epoch, but trusted edge acceptance should also
+be representable as durable-enough visibility without pretending the tx has
+entered global epoch history.
+
+## 2026-05-25 19:17 PDT
+
+Edge-accepted transaction fate is green. Added an edge receipt tier and
+`accept_transaction_at_edge`, plus synced receipt tiers through `TxRecord`.
+Peers now can see an edge-accepted transaction as accepted/visible while
+`global_epoch` remains `None`.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+trusted_edge_acceptance_syncs_without_global_epoch` passes.

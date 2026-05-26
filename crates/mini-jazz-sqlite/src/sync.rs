@@ -27,6 +27,7 @@ pub struct TxRecord {
     pub conflict_mode: i64,
     pub outcome: i64,
     pub rejection_code: Option<String>,
+    pub receipt_tiers: Vec<i64>,
     pub created_at: i64,
 }
 

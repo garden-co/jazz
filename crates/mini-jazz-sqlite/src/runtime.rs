@@ -391,6 +391,20 @@ impl Runtime {
                     params![tx_num, tx::TIER_GLOBAL, global_epoch],
                 )?;
             }
+            for tier in &tx_record.receipt_tiers {
+                let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
+                let observed_at = if *tier == tx::TIER_GLOBAL {
+                    tx_record.global_epoch.unwrap_or(tx_record.created_at)
+                } else {
+                    tx_record.created_at
+                };
+                db.execute(
+                    "INSERT OR REPLACE INTO jazz_tx_receipt
+                     (tx_num, tier, observed_at, receipt_json)
+                     VALUES (?, ?, ?, '{}')",
+                    params![tx_num, tier, observed_at],
+                )?;
+            }
         }
         for read_record in &bundle.reads {
             let tx_num = tx::tx_num(&db, &read_record.tx_id)?;
@@ -551,6 +565,11 @@ impl Runtime {
 
     pub fn accept_transaction_at_global(&mut self, tx_id: &str, global_epoch: i64) -> Result<()> {
         tx::accept_global(&self.conn, tx_id, global_epoch)?;
+        Ok(())
+    }
+
+    pub fn accept_transaction_at_edge(&mut self, tx_id: &str) -> Result<()> {
+        tx::accept_edge(&self.conn, tx_id, now_ms())?;
         Ok(())
     }
 
@@ -1238,14 +1257,26 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
          ORDER BY tx.tx_num",
     )?;
     let records = stmt.query_map([], |row| {
+        let tx_id = row.get::<_, String>(0)?;
+        let mut receipt_stmt = conn.prepare(
+            "SELECT receipt.tier
+             FROM jazz_tx_receipt receipt
+             JOIN jazz_tx tx ON tx.tx_num = receipt.tx_num
+             WHERE tx.tx_id = ?
+             ORDER BY receipt.tier",
+        )?;
+        let receipt_tiers = receipt_stmt
+            .query_map(params![tx_id], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(TxRecord {
-            tx_id: row.get(0)?,
+            tx_id,
             node_id: row.get(1)?,
             local_epoch: row.get(2)?,
             global_epoch: row.get(3)?,
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
             rejection_code: row.get(6)?,
+            receipt_tiers,
             created_at: row.get(7)?,
         })
     })?;
@@ -2050,6 +2081,7 @@ fn now_ms() -> i64 {
 
 fn tier_name(tier: i64) -> rusqlite::Result<String> {
     Ok(match tier {
+        tx::TIER_EDGE => "edge",
         tx::TIER_GLOBAL => "global",
         _ => "unknown",
     }

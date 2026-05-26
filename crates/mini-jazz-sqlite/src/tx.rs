@@ -7,6 +7,7 @@ pub(crate) const MODE_EXCLUSIVE: i64 = 2;
 pub(crate) const OUTCOME_PENDING: i64 = 1;
 pub(crate) const OUTCOME_ACCEPTED: i64 = 2;
 pub(crate) const OUTCOME_REJECTED: i64 = 3;
+pub(crate) const TIER_EDGE: i64 = 2;
 pub(crate) const TIER_GLOBAL: i64 = 3;
 
 pub(crate) fn ensure_node(conn: &Connection, node_id: &str) -> Result<i64> {
@@ -117,6 +118,21 @@ pub(crate) fn accept_global(conn: &Connection, tx_id: &str, global_epoch: i64) -
          (tx_num, tier, observed_at, receipt_json)
          VALUES (?, ?, ?, '{}')",
         params![tx_num, TIER_GLOBAL, global_epoch],
+    )?;
+    Ok(tx_num)
+}
+
+pub(crate) fn accept_edge(conn: &Connection, tx_id: &str, observed_at: i64) -> Result<i64> {
+    let tx_num = tx_num(conn, tx_id)?;
+    conn.execute(
+        "UPDATE jazz_tx SET outcome = ? WHERE tx_num = ?",
+        params![OUTCOME_ACCEPTED, tx_num],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO jazz_tx_receipt
+         (tx_num, tier, observed_at, receipt_json)
+         VALUES (?, ?, ?, '{}')",
+        params![tx_num, TIER_EDGE, observed_at],
     )?;
     Ok(tx_num)
 }
