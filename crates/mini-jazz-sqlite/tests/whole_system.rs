@@ -362,6 +362,26 @@ fn delete_is_history_not_removal() {
 }
 
 #[test]
+fn table_scope_sync_exports_delete_so_peer_removes_row() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Delete through sync", false, "project-1")
+        .unwrap();
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    assert_eq!(peer.open_todos().unwrap().len(), 1);
+
+    alice.delete_todo("todo-1").unwrap();
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(peer.open_todos().unwrap().is_empty());
+}
+
+#[test]
 fn same_bundle_twice_is_idempotent() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();

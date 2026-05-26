@@ -414,7 +414,16 @@ impl Runtime {
         )?;
         record_tx_write(db, tx_num, &record.table, row_num, record.op)?;
 
-        if tx_outcome(db, tx_num)? != tx::OUTCOME_REJECTED && record.op != 3 {
+        let outcome = tx_outcome(db, tx_num)?;
+        if outcome != tx::OUTCOME_REJECTED && record.op == 3 {
+            db.execute(
+                &format!(
+                    "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
+                    crate::schema::current_table(&record.table)
+                ),
+                params![row_num, branch_num],
+            )?;
+        } else if outcome != tx::OUTCOME_REJECTED {
             let mut current_columns = vec![
                 "row_num".to_owned(),
                 "j_branch_num".to_owned(),
@@ -1194,6 +1203,12 @@ fn export_table_history(
         &branch_nums,
         None,
     )?;
+    records.extend(export_deleted_table_history(
+        conn,
+        schema,
+        table_name,
+        &branch_nums,
+    )?);
     records.extend(export_policy_dependency_history(
         conn,
         schema,
@@ -1432,6 +1447,41 @@ fn export_policy_dependency_history(
         Some(&row_nums),
     )?);
     Ok(records)
+}
+
+fn export_deleted_table_history(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    branch_nums: &[i64],
+) -> Result<Vec<HistoryRecord>> {
+    let sql = format!(
+        "SELECT h.row_num
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.op = 3
+           AND {}
+           AND tx.outcome != {}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM {history_table} newer
+             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+             WHERE newer.row_num = h.row_num
+               AND newer.j_branch_num = h.j_branch_num
+               AND newer_tx.outcome != {}
+               AND newer.tx_num > h.tx_num
+           )",
+        crate::schema::history_table(table_name),
+        branch_filter_sql("h", branch_nums),
+        tx::OUTCOME_REJECTED,
+        tx::OUTCOME_REJECTED,
+        history_table = crate::schema::history_table(table_name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_nums = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), None)
 }
 
 fn export_visible_table_history(

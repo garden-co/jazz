@@ -991,3 +991,23 @@ keeps room for an epoch to represent an authority step containing multiple txs.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 51 tests.
+
+## 2026-05-25 18:37 PDT
+
+Starting deletion-through-sync test. Concern from sidecar: export paths that use
+current visibility to choose history rows can omit deletion history, so a peer
+that previously synced a row may never learn to remove it.
+
+## 2026-05-25 18:39 PDT
+
+Deletion through table-scope sync is green. `apply_history_record` now actively
+removes current rows for delete history records, and table export includes rows
+whose latest branch version is a delete so peers can converge from visible to
+removed state.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+52 tests.
+
+Open issue: deleted-row export currently exports all history for rows whose
+latest version is deleted. That is useful for replay but may be broader than
+minimal "remove this row" sync payloads.
