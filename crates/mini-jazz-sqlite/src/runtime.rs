@@ -1,7 +1,10 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::RowsSubscription;
-use crate::sync::{BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord};
+use crate::sync::{
+    BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
+    BUNDLE_PROTOCOL_VERSION,
+};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{
     branch, effective, policy, projection, query, query_predicate, schema, stats, storage, tx,
@@ -292,6 +295,7 @@ impl Runtime {
         let reads = export_reads_for_history(&self.conn, &history)?;
         let branches = export_branch_records_for_history(&self.conn, &history)?;
         Ok(Bundle {
+            protocol_version: BUNDLE_PROTOCOL_VERSION,
             branches,
             txs,
             reads,
@@ -321,6 +325,7 @@ impl Runtime {
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {
+            protocol_version: BUNDLE_PROTOCOL_VERSION,
             branches,
             txs,
             reads,
@@ -405,6 +410,7 @@ impl Runtime {
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {
+            protocol_version: BUNDLE_PROTOCOL_VERSION,
             branches,
             txs,
             reads,
@@ -414,6 +420,12 @@ impl Runtime {
     }
 
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
+        if bundle.protocol_version != BUNDLE_PROTOCOL_VERSION {
+            return Err(crate::Error::new(format!(
+                "unsupported bundle protocol version {}",
+                bundle.protocol_version
+            )));
+        }
         let schema = self.schema.clone();
         let db = self.conn.transaction()?;
         for branch_record in &bundle.branches {
@@ -1242,6 +1254,7 @@ impl Runtime {
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(Bundle {
+            protocol_version: BUNDLE_PROTOCOL_VERSION,
             branches,
             txs,
             reads,

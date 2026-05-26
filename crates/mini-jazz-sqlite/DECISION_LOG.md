@@ -356,3 +356,15 @@ with 150 tests.
 Design lesson: predicate metadata is part of the sync contract, not just a local
 planner concern. Backward-compatible defaults are useful, but only if tests make
 the default precise.
+
+## 2026-05-26 00:42 PDT
+
+Added the first protocol-version tag to sync bundles. Exported bundles now carry
+version `1`, older untagged bundle JSON decodes as version `1`, and future
+bundle versions fail closed before any partial apply. Full mini crate suite is
+green with 153 tests.
+
+Design lesson: version tags are cheap to add at the boundary and valuable
+because the bundle apply path already has strong atomicity expectations. This
+only tags `Bundle`; storage/catalogue/worker protocol versioning still needs
+separate treatment.

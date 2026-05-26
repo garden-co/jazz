@@ -306,6 +306,56 @@ fn bundle_with_unknown_query_scope_fails_closed_without_partial_apply() {
 }
 
 #[test]
+fn exported_bundles_carry_protocol_version() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Versioned bundle", false, "project-1")
+        .unwrap();
+
+    let bundle = alice.export_query_scope_open_todos().unwrap();
+
+    assert_eq!(bundle.protocol_version, 1);
+}
+
+#[test]
+fn older_untagged_bundles_decode_as_protocol_version_one() {
+    let encoded = r#"{
+        "branches": [],
+        "txs": [],
+        "reads": [],
+        "query_reads": [],
+        "history": []
+    }"#;
+
+    let bundle: mini_jazz_sqlite::sync::Bundle = serde_json::from_str(encoded).unwrap();
+
+    assert_eq!(bundle.protocol_version, 1);
+}
+
+#[test]
+fn future_bundle_protocol_versions_fail_closed_without_partial_apply() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Future bundle", false, "project-1")
+        .unwrap();
+    let mut bundle = alice.export_query_scope_open_todos().unwrap();
+    bundle.protocol_version = 2;
+
+    let err = peer.apply_bundle(&bundle).unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("unsupported bundle protocol version"));
+    assert_eq!(peer.storage_stats().unwrap().history_rows, 0);
+    assert!(peer.open_todos().unwrap().is_empty());
+}
+
+#[test]
 fn replicas_may_use_different_physical_ids_for_same_public_ids() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();

@@ -3,14 +3,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
+pub const BUNDLE_PROTOCOL_VERSION: i64 = 1;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bundle {
+    #[serde(default = "default_bundle_protocol_version")]
+    pub protocol_version: i64,
     pub branches: Vec<BranchRecord>,
     pub txs: Vec<TxRecord>,
     pub reads: Vec<ReadRecord>,
     #[serde(default)]
     pub query_reads: Vec<QueryReadRecord>,
     pub history: Vec<HistoryRecord>,
+}
+
+fn default_bundle_protocol_version() -> i64 {
+    BUNDLE_PROTOCOL_VERSION
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
