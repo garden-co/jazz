@@ -8,7 +8,7 @@ mod runtime;
 mod schema;
 mod storage;
 mod subscription;
-mod sync;
+pub mod sync;
 mod tx;
 mod types;
 

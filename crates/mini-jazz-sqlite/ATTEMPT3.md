@@ -2042,3 +2042,18 @@ pinned-base branch query.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 branch_equality_query_scope_records_branch_predicate_read` passes, and full
 `cargo test -p mini-jazz-sqlite` passes with 109 whole-system tests.
+
+## 2026-05-25 20:27 PDT
+
+Starting query predicate serialization coverage. Since `QueryReadRecord` is now
+part of the sync bundle payload, it should round-trip through serde with the
+rest of the bundle.
+
+## 2026-05-25 20:28 PDT
+
+Query predicate serialization is green. Made the sync module public for the
+prototype API and verified `QueryReadRecord` survives bundle JSON round-trip.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+query_predicate_reads_survive_bundle_serialization` passes, and full
+`cargo test -p mini-jazz-sqlite` passes with 110 whole-system tests.

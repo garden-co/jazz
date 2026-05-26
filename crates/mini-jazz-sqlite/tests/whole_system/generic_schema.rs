@@ -190,6 +190,34 @@ fn branch_equality_query_scope_records_branch_predicate_read() {
 }
 
 #[test]
+fn query_predicate_reads_survive_bundle_serialization() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Open")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    let encoded = serde_json::to_string(&bundle).unwrap();
+    let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_str(&encoded).unwrap();
+
+    assert_eq!(decoded.query_reads, bundle.query_reads);
+}
+
+#[test]
 fn generic_equality_query_lowers_public_ref_ids_to_physical_row_ids() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
