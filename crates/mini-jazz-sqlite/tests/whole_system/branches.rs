@@ -158,6 +158,35 @@ fn branch_reads_main_base_with_sparse_overlay() {
 }
 
 #[test]
+fn fixture_open_todos_reads_pinned_base_with_sparse_overlay() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    let project_tx = alice.create_project("project-1", "Base project").unwrap();
+    alice.accept_transaction_at_global(&project_tx, 1).unwrap();
+    let todo_tx = alice
+        .create_todo("todo-1", "Base todo", false, "project-1")
+        .unwrap();
+    alice.accept_transaction_at_global(&todo_tx, 2).unwrap();
+
+    alice.create_branch("draft", Some(2)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let todos = alice.open_todos().unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].title, "Base todo");
+    assert_eq!(todos[0].project_title.as_deref(), Some("Base project"));
+
+    let branch_tx = alice
+        .create_todo("todo-1", "Draft todo", false, "project-1")
+        .unwrap();
+    alice.accept_transaction_at_global(&branch_tx, 3).unwrap();
+
+    let todos = alice.open_todos().unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].title, "Draft todo");
+}
+
+#[test]
 fn branch_base_is_pinned_to_global_epoch() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

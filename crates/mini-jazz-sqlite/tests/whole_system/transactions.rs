@@ -321,6 +321,47 @@ fn generic_transaction_delete_records_previous_row_read_set() {
 }
 
 #[test]
+fn exclusive_transaction_rejects_same_row_conflict() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .transaction()
+        .exclusive_at_global(1)
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("First exclusive")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let err = alice
+        .transaction()
+        .exclusive_at_global(2)
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Second exclusive")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .commit()
+        .unwrap_err();
+
+    assert!(err.to_string().contains("exclusive conflict"));
+    assert_eq!(
+        alice.read_rows("notes").unwrap()[0].values["body"],
+        json!("First exclusive")
+    );
+}
+
+#[test]
 fn generic_transaction_delete_shadows_pinned_base_row() {
     let schema = support::tasks_schema();
     let mut alice =

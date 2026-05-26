@@ -1923,3 +1923,47 @@ becomes globally accepted.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 accepted_remote_pending_update_repairs_peer_current_projection` passes, and full
 `cargo test -p mini-jazz-sqlite` passes with 103 whole-system tests.
+
+## 2026-05-25 20:16 PDT
+
+Starting exclusive same-row conflict coverage. The prototype currently proves
+exclusive transactions require global acceptance, but not that exclusive writes
+to the same row actually force an authority decision.
+
+## 2026-05-25 20:19 PDT
+
+Exclusive same-row conflict coverage is green. Added a prototype authority-side
+check that rejects an exclusive transaction if it tries to write a row already
+written by an accepted exclusive transaction. While running the full suite, an
+uncommitted fixture test also exposed that `open_todos` needed to use the
+generic row reader to honor pinned-base branch overlays; that path is now green
+too.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+exclusive_transaction_rejects_same_row_conflict` passes, targeted
+`fixture_open_todos_reads_pinned_base_with_sparse_overlay` passes, and full
+`cargo test -p mini-jazz-sqlite` passes with 105 whole-system tests.
+
+## 2026-05-25 20:16 PDT
+
+Starting conflict-candidate policy coverage. `read_row_candidates` is the visible-conflict surface, so it must not leak candidate rows from source branches that the reader cannot read by policy. This is a small but product-shaped invariant: conflicts can be multiple visible candidates, not privileged hidden candidates.
+
+## 2026-05-25 20:17 PDT
+
+Candidate policy leakage was already covered in `branch_conflict_candidates_respect_effective_row_policy`, so I am pivoting to exclusive transaction conflicts. The API enforces exclusive transactions at global tier, but the prototype should also prove same-row exclusive writes get a deterministic accepted/rejected fate instead of both silently winning by last projection order.
+
+## 2026-05-25 20:17 PDT
+
+Exclusive conflict coverage also already exists. Next slice: remove divergence between fixture todo queries and generic branch semantics. The hardcoded `open_todos` path should see pinned-base rows plus sparse branch overlay just like `read_rows`, because otherwise examples can accidentally pass while the real generic runtime behaves differently.
+
+## 2026-05-25 20:18 PDT
+
+Fixture todo branch semantics are green. `open_todos` now reconstructs fixture views through the generic query path, so it inherits sparse branch base and overlay behavior instead of querying only branch-local current rows. This intentionally sacrifices the fixture-specific hand-written SQL path for semantic alignment with the generic runtime.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system fixture_open_todos_reads_pinned_base_with_sparse_overlay` passes, and full `cargo test -p mini-jazz-sqlite` passes with 105 whole-system tests.
+
+## 2026-05-25 20:19 PDT
+
+Found the exclusive-conflict slice already present in the working tree rather than committed. The full suite confirms it: same-row exclusive transactions now reject the second accepted global write with `exclusive conflict`, while the earlier accepted value remains current. I am keeping the log honest and committing this together with the fixture query alignment.
+
+Test status: full `cargo test -p mini-jazz-sqlite` passes with 105 whole-system tests.

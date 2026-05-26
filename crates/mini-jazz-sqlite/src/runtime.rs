@@ -225,39 +225,52 @@ impl Runtime {
     }
 
     pub fn open_todos(&self) -> Result<Vec<TodoView>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT todo_ids.row_id,
-                    t.title,
-                    t.done,
-                    project_ids.row_id,
-                    p.title,
-                    t.j_created_by,
-                    tx.tx_id
-             FROM todos__schema_v1_current t
-             JOIN jazz_row_id todo_ids ON todo_ids.row_num = t.row_num
-             JOIN jazz_row_id project_ids ON project_ids.row_num = t.project_row_num
-             LEFT JOIN projects__schema_v1_current p
-               ON p.row_num = t.project_row_num AND p.is_deleted = 0
-             JOIN jazz_tx tx ON tx.tx_num = t.visible_tx_num
-	             WHERE t.is_deleted = 0
-	               AND t.done = 0
-	               AND t.j_branch_num = ?
-	               AND tx.outcome != ?
-             ORDER BY t.j_created_at DESC, t.row_num",
-        )?;
-        let rows = stmt.query_map(params![self.branch_num, tx::OUTCOME_REJECTED], |row| {
-            Ok(TodoView {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                done: row.get::<_, i64>(2)? != 0,
-                project_id: row.get(3)?,
-                project_title: row.get(4)?,
-                created_by: row.get(5)?,
-                tx_id: row.get(6)?,
+        let projects = self
+            .query_context()
+            .read_rows("projects")?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.id,
+                    row.values
+                        .get("title")
+                        .and_then(JsonValue::as_str)
+                        .map(str::to_owned),
+                )
             })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .collect::<BTreeMap<_, _>>();
+        let mut todos = self
+            .query_context()
+            .read_rows("todos")?
+            .into_iter()
+            .filter(|row| row.values.get("done") == Some(&JsonValue::Bool(false)))
+            .map(|row| {
+                let title = row
+                    .values
+                    .get("title")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("todo missing title"))?
+                    .to_owned();
+                let project_id = row
+                    .values
+                    .get("project")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("todo missing project"))?
+                    .to_owned();
+                let project_title = projects.get(&project_id).cloned().flatten();
+                Ok(TodoView {
+                    id: row.id,
+                    title,
+                    done: false,
+                    project_id,
+                    project_title,
+                    created_by: row.created_by,
+                    tx_id: row.tx_id,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        todos.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(todos)
     }
 
     pub fn export_query_scope_open_todos(&self) -> Result<Bundle> {
@@ -1259,6 +1272,30 @@ fn current_creation_metadata(
     .map_err(Into::into)
 }
 
+fn exclusive_write_conflict_exists(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM jazz_tx_write writes
+         JOIN jazz_tx tx ON tx.tx_num = writes.tx_num
+         WHERE writes.table_name = ?
+           AND writes.row_num = ?
+           AND tx.conflict_mode = ?
+           AND tx.outcome = ?",
+        params![
+            table_name,
+            row_num,
+            tx::MODE_EXCLUSIVE,
+            tx::OUTCOME_ACCEPTED
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 fn record_policy_read_set_for_write(
     conn: &Connection,
     table: &crate::schema::TableDef,
@@ -1443,6 +1480,21 @@ impl<'a> TransactionBuilder<'a> {
                 ));
             }
         };
+        if conflict_mode == tx::MODE_EXCLUSIVE {
+            for mutation in &mutations {
+                let (table, id): (&str, &str) = match mutation {
+                    Mutation::Row { table, id, .. } | Mutation::DeleteRow { table, id } => {
+                        (table.as_str(), id.as_str())
+                    }
+                    Mutation::Project { id, .. } => ("projects", id.as_str()),
+                    Mutation::Todo { id, .. } => ("todos", id.as_str()),
+                };
+                let row_num = ensure_row_id(&self.runtime.conn, table, id)?;
+                if exclusive_write_conflict_exists(&self.runtime.conn, table, row_num)? {
+                    return Err(crate::Error::new("exclusive conflict"));
+                }
+            }
+        }
         let db = self.runtime.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx_with_options(
