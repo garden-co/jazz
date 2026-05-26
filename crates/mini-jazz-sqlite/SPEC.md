@@ -550,6 +550,12 @@ version:
 2. apply the write in the current schema
 3. append a new history row in the current schema layout
 
+Nullability and defaults are semantic schema features, not incidental SQLite
+behavior. Omitted insert fields receive declared defaults before policy checks,
+history writes, sync export, and projection rebuild. Explicit `null` on an
+optional field is row content and must not be treated as omission. A not-equal
+null predicate means "present optional value."
+
 Open issues:
 
 - exact catalogue revision/head representation
@@ -667,6 +673,7 @@ Outcome values are:
 
 ```text
 pending
+awaiting_deps
 accepted
 rejected
 ```
@@ -694,11 +701,23 @@ The local write path:
 7. commits the embedded database transaction
 8. publishes local subscription diffs
 
+Patch updates preserve omitted fields from the effective visible row. The
+effective base may be a current branch row, a row inherited from branch sources,
+or a pinned historical base snapshot. Unknown user fields fail closed before
+history/projection writes; they are not silently dropped.
+
 Authority acceptance enriches the existing transaction. It must not create a new
 public transaction id.
 
 Authority rejection keeps the transaction and history rows. Visibility and
 projection repair make rejected versions disappear from ordinary reads.
+
+An edge that cannot validate a transaction because required policy-influencing
+facts are missing should mark it `awaiting_deps`, request or subscribe to the
+missing facts, and re-evaluate after they arrive. `awaiting_deps` is not
+acceptance and must not make an authority-accepted version visible. Globally
+consistent exclusive transactions must always receive final `accepted` or
+`rejected` fate from the global authority.
 
 Edge acceptance of mergeable transactions sets the transaction outcome to
 accepted and records an edge receipt without a global epoch. Global acceptance
@@ -722,6 +741,7 @@ Open issues:
 
 - exact durability receipt layout
 - explicit fate partial order and merge rules for all incoming-sync cases
+- timeout/retry behavior for transactions that remain `awaiting_deps`
 - audit-grade append-only fate/receipt history
 
 ## 12. Row History And Current Projection
@@ -740,6 +760,12 @@ History rows contain enough data to rebuild current projection:
 - update metadata
 - conflict metadata or explicit empty conflict state
 - engine edit metadata needed for sync and API semantics
+
+Deletes are ordinary append-only history rows. Restore/undelete is also
+append-only: restoring a deleted row writes a new transaction/version derived
+from preserved deleted-row values rather than erasing or mutating the delete
+tombstone. Product API naming and authorization rules for restore are specified
+by higher-level APIs, but the storage semantics remain append-only.
 
 Delete is a history row version, not physical removal.
 
@@ -891,6 +917,11 @@ Applications declare branch-backing tables explicitly in schema. A branch has:
 - exact provenance metadata
 - policy context
 
+A branch source list is the ordered/provenanced list of other branches whose
+visible contents participate in this branch view. Source lists are executable
+branch state: they affect reads, writes, sync scope, conflict candidates, and
+read-set validation. They are not only explanatory UI metadata.
+
 Branch creation uses a dedicated API that creates the backing row and engine
 branch metadata. `db.branch(branchId)` returns a branch-scoped handle and should
 fail early if the backing row is not visible under policy.
@@ -907,6 +938,7 @@ The v0 branch view shape is:
 
 ```text
 branch id
+source version
 sources: [
   { source branch, source snapshot/epoch/vector, precedence }
 ]
@@ -934,6 +966,12 @@ visible, ordinary update/delete must fail as ambiguous; explicit conflict
 resolution creates a branch-local row, after which ordinary writes use that
 local row as their base.
 
+Branch source lists are mutable authoritative snapshots, not grow-only sets.
+Incoming branch records must be replay-ordered, for example by a monotone source
+version, so stale sync cannot re-add removed sources. Even a query refresh with
+no row history may need to carry branch metadata if the checked-out branch's
+source list changed while disconnected.
+
 Baseline branch features:
 
 - branch-backing table declaration
@@ -944,6 +982,7 @@ Baseline branch features:
 - branch sync including branch-local rows and base-only rows
 - branch policy/write validation against branch overlay plus pinned base
 - branch query-scope repair scoped by branch id
+- replay-ordered branch source-list mutation
 
 Deferred branch features:
 
@@ -959,8 +998,8 @@ Open issues:
 
 - exact provenance encoding
 - user-facing multi-base conflict metadata and resolution workflow
-- branch source table layout
-- whether branch-local query repair should use durable query-read state,
+- branch source table layout and source-version encoding
+- whether branch-local query repair should use active query-descriptor state,
   predicate history indexes, or both
 
 ## 15. Queries And Observed Facts
@@ -988,7 +1027,12 @@ If an optional include is missing or unauthorized, the parent row remains and
 the include is null.
 
 Optional missing includes must produce absence facts. A receiver cannot
-reproduce an optional-null result from row locators alone.
+reproduce an optional-null result from row locators alone. Absence facts are
+standing query descriptors while the corresponding subscription/sync session is
+active: if the absent row later materializes in the same branch/view context,
+refresh should deliver it; if a previously delivered optional include is later
+deleted or hidden, refresh should repair the semantic include back to null
+without removing the parent row.
 
 Observed fact kinds include:
 
@@ -1017,6 +1061,10 @@ rows/transactions later.
 Predicate/range/absence facts must compare by normalized expression, normalized
 bound values, table/schema identity, and branch/source context. The exact normal
 form is open; until then only planner-supported predicate forms are stable.
+Planner-supported predicate forms currently include equality, text contains,
+`IN`, `!=`, `!= null` as present optional value, selected semantic system-field
+predicates, ordered page descriptors, absence descriptors, and recursive ref
+descriptors.
 
 Query-scoped sync must include enough repair information for a receiver that
 previously synced the same scope to remove stale rows. Exporting only the
@@ -1034,9 +1082,18 @@ The v0 prototype repair strategy for equality predicates is:
 5. dedupe concrete history records before encoding the bundle
 
 This strategy is correct enough for the prototype, but may over-export. A
-production implementation should persist subscription/query-read state or
-predicate indexes so repair candidates can be bounded by actual prior delivery,
-not only by local "ever matched" history.
+production implementation should use active downstream query descriptors,
+predicate indexes, or both so repair candidates can be bounded by actual active
+interest, not only by local "ever matched" history.
+
+Query descriptors are the sync/resubscribe unit. They are active session state
+owned by the downstream runtime and replayed to upstream peers after reconnect
+or upstream restart. Queries should not be persisted to disk as durable user
+data; ordinary app clients resubscribe after app restart, and durable cache
+tiers/edges learn active interest by downstream replay. Data received for a
+query may remain cached after it leaves that query's active result set. Evicting
+uninteresting cached data is an asynchronous cache-management concern, not
+eager query-scope contraction.
 
 Example: querying open todos includes:
 
@@ -1052,7 +1109,9 @@ Open issues:
 - relation inference from schema metadata
 - compact predicate/range closure
 - page-boundary fact shape
-- durable query-read/subscription state for scope contraction
+- active query-descriptor replay protocol across reconnects and upstream
+  restarts
+- cache eviction policy for data no longer covered by active query descriptors
 - efficient repair candidate discovery for rows that leave predicate/range
   scopes
 
@@ -1080,7 +1139,8 @@ branches: branch id, base global epoch, source branch ids
 txs: tx id, node id, local epoch, global epoch, conflict mode, outcome,
      rejection code, receipt tiers, creation time
 reads: transaction row-read facts, currently scoped to exported transaction ids
-query_reads: equality predicate facts with branch/table/field/value
+query_reads: active query descriptors with branch/table/operator/field/value
+             plus ordering/window/absence/recursive-ref metadata when needed
 history: row versions with branch id, tx id, op, values, and system metadata
 ```
 
@@ -1100,6 +1160,13 @@ longer contains a row that the receiver may currently show for that scope, the
 bundle must carry enough facts/history to make a local rerun remove it. This can
 happen because of updates, deletes, transaction outcome changes, branch source
 changes, policy dependency changes, or catalogue/lens changes.
+
+Scope contraction removes the row from that query's semantic result. It does not
+require eager deletion of the row from the receiver's local store if another
+future local query may use it. Local devices and edges are local-first caches:
+they may retain previously learned rows outside active scopes until an
+asynchronous eviction policy decides the data is no longer useful or permitted
+to keep.
 
 Bundle assembly must dedupe concrete history rows and transaction records even
 when the same row is included for multiple reasons: result, dependency, policy,
@@ -1128,8 +1195,10 @@ Open issues:
 - whether future policy dependencies can use opaque proofs
 - how much negative/repair information should be represented explicitly versus
   as ordinary history for repair rows
-- durable read-set sync for predicate/range/absence facts; current row read-set
-  sync is scoped to transactions whose history is exported
+- read-set sync for predicate/range/absence facts; current row read-set sync is
+  scoped to transactions whose history is exported
+- cache eviction policy and authorization revalidation for retained
+  out-of-scope data
 
 ## 17. Subscriptions
 
@@ -1231,11 +1300,17 @@ rerun the query locally. Predicate observed facts may be used to repair stale
 scope-local projection rows, but correctness still comes from local query
 execution.
 
+Downstream runtimes replay active query descriptors to upstream peers after
+disconnects and upstream restarts. This replay should trickle upward through
+workers, edges, and global services. Queries are not durable disk state; app
+restart normally recreates them by resubscribing from application code.
+
 Open issues:
 
 - affected-row discovery should become narrower than broad projection repair,
   but broad repair is acceptable as a correctness baseline
-- exact receiver-side storage for query-read facts and scope contraction
+- in-memory receiver-side storage for active query descriptors and scope
+  contraction
 - whether incoming predicate facts should directly mutate current projection or
   only schedule rerun/repair work
 - staged apply/validate/publish pipeline for untrusted authority intake
@@ -1491,6 +1566,13 @@ leaking privileged information. Ordinary clients must not distinguish hidden
 rows from nonexistent rows through error detail. Trusted-peer and authority logs
 should preserve richer details.
 
+For ordinary untrusted clients, policy and validation rejection detail should be
+minimal: a stable code such as `permission_denied` and the attempted write that
+failed, identified by table, row id, and operation within the transaction.
+Details such as hidden dependency row ids, recursive policy paths, and whether a
+particular hidden row exists are privileged diagnostics and belong only on
+trusted-peer or authority-side surfaces.
+
 Developer diagnostics may be richer and less stable than application errors.
 Useful diagnostics include SQL lowering traces, policy lowering traces, missing
 index advice, recursive policy unsupported-shape reports, schema/lens graph
@@ -1640,7 +1722,8 @@ Sketch:
 CREATE TABLE jazz_branch (
   branch_num INTEGER PRIMARY KEY,
   branch_id TEXT NOT NULL UNIQUE,
-  current_head_tx_num INTEGER
+  current_head_tx_num INTEGER,
+  source_version INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE jazz_branch_history (
@@ -1848,7 +1931,8 @@ The following areas remain intentionally underspecified:
 - local-to-global vector upgrade broadcast
 - predicate/range scope closure
 - query-scope repair candidate bounding
-- durable storage for query-read/subscription observed facts
+- active query-descriptor replay across reconnects and upstream restarts
+- retained-data cache eviction for rows no longer covered by active queries
 - authority validation over large read sets
 - multi-base branch conflict semantics
 - branch provenance encoding
@@ -1856,7 +1940,7 @@ The following areas remain intentionally underspecified:
 - recursive policy lowering performance and diagnostics
 - full schema lens semantics
 - reconnect summaries
-- durable subscription resume
+- subscription settlement and reconnection protocol
 - hot branch projection heuristics
 - audit-grade append-only receipt history
 - garbage collection and compaction
@@ -2019,19 +2103,26 @@ Known implementation tensions:
 - Projection repair is intentionally broad in several incoming-sync paths.
 - Recursive policy/query lowering works for narrow acyclic cases, but helper
   SQL is duplicated and needs consolidation.
-- Exclusive transaction conflict handling is still row-coarse and not a full
-  read/write-set validation model.
-- Branch source/provenance is still much simpler than the product design.
-- Current query-read facts are carried in bundles but not yet durable
-  subscription state.
+- Exclusive transaction conflict handling is row-coarse for write conflicts, but
+  versioned read/write-set validation now covers several row, absence, policy,
+  branch-source, update, and delete cases. Predicate/range validation remains
+  incomplete.
+- Branch source/provenance now has executable transitive source graphs,
+  source-depth precedence, source-list replay ordering, and conflict behavior,
+  but product branch backing-row permissions and merge APIs remain incomplete.
+- Active query descriptors now drive reconnect refresh and subscription
+  recovery in the prototype. They should be replayed by downstream clients
+  rather than persisted as durable query state.
 - Lenses are currently field-level storage-name mappings for text/ref renames.
   There is no schema-versioned catalogue, inverse lens graph, compatibility
   graph, or copy-forward storage yet; physical table names are still
   `schema_v1`.
-- Conflict candidates are exposed through side APIs and tests, not as ordinary
-  current-row conflict blobs or query result metadata.
-- Predicate facts are equality-only in the generic path. There is no durable
-  range/absence predicate model yet.
+- Conflict candidates are exposed through side APIs and conflict-aware row
+  reads; product conflict metadata shape and resolved-from-candidates
+  provenance remain incomplete.
+- Predicate facts now cover equality, contains, IN, not-equal, null-present,
+  selected system fields, ordered pages, absence, and recursive refs in the
+  prototype. Range predicates and a final compact predicate model remain open.
 - Recursive query reads use two strategies: current projection can use recursive
   CTEs, while pinned branch snapshot reads may fall back to in-memory traversal
   over already visible rows. This is a correctness-first shortcut, not the final
@@ -2443,25 +2534,25 @@ Coverage labels:
 
 ### E.1 Coverage Summary By Invariant Group
 
-| Group                      | Current status        | Notes                                                                                                                                                                                                                           |
-| -------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D.1 Identity               | partial               | Public row ids, physical id locality, and replica-local physical ids are tested. Node/principal identity breadth is only indirectly tested.                                                                                     |
-| D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting semantics and audit-grade receipt history are not.                              |
-| D.3 History/projection     | covered for prototype | Append-only deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Full merge/conflict projection semantics remain partial.                                              |
-| D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                   |
-| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.  |
-| D.6 Queries/observed facts | partial               | Equality predicates, policy dependencies, query-scope repair, recursive query scopes, and predicate serialization are tested. Range, absence, page boundary, ordering, and catalogue facts are not.                             |
-| D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, and scope contraction are tested. Reconnect summaries and durable query-read resume are not.                                         |
-| D.8 Subscriptions          | partial               | Rerun-and-diff, policy dependency diffs, branch checkout diffs, and pinned branch stability are tested. Tier gating, settled state, pagination, reconnect, and durable subscription state are not.                              |
-| D.9 Policies               | covered for prototype | Read/write policies, ref-readable policies, recursive acyclic policies, cycle rejection, branch/pinned-base contexts, trusted bypass, and transitive policy read sets are tested. Full policy language and diagnostics are not. |
-| D.10 Catalogue/lenses      | partial               | Narrow storage-name rename lenses, ref lenses, system prefix escaping, and index-only compatibility are tested. Catalogue revision graph, migrations directory semantics, inverse lenses, and copy-forward are not.             |
-| D.11 Authority validation  | partial               | Untrusted bundle rejection, atomic rejection, delete/update validation, branch-context validation, exclusive same-row conflict, and repair are tested. Full read/write-set validation is not.                                   |
-| D.12 Conflicts             | partial               | Side APIs expose multi-base and pinned-base conflict candidates and policy-filtered candidates. Current-row conflict metadata and resolution transactions are not tested.                                                       |
-| D.13 Errors/diagnostics    | partial               | Rejection codes and transaction info are tested. Public error object shape, global callbacks, redaction, and diagnostics are not.                                                                                               |
-| D.14 Storage/lowering      | partial               | SQLite current/history tables, physical ids, system prefix escaping, integer-like enum behavior, and rebuild are exercised. `WITHOUT ROWID`, generated indexes, and query plans are not asserted.                               |
-| D.15 Files/blobs           | untested              | No file/blob implementation in Attempt 3.                                                                                                                                                                                       |
-| D.16 Privacy/encryption    | untested              | No E2EE/encrypted-index implementation in Attempt 3.                                                                                                                                                                            |
-| D.17 Harness               | partial               | In-memory SQLite, file-backed durable nodes, multi-runtime local/edge/global tests, duplicate/reordered bundles, and durable reopen are tested. Drop/delay/reconnect protocol and deterministic clock APIs are not.             |
+| Group                      | Current status        | Notes                                                                                                                                                                                                                                              |
+| -------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D.1 Identity               | covered for prototype | Public row ids, physical id locality, replica-local physical ids, and one principal writing from multiple nodes are tested.                                                                                                                        |
+| D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                    |
+| D.3 History/projection     | covered for prototype | Append-only deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Full merge/conflict projection semantics remain partial.                                                                 |
+| D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                      |
+| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                     |
+| D.6 Queries/observed facts | partial               | Equality, contains, IN, not-equal, null-present, selected system fields, ordered pages, absence facts, recursive query scopes, policy dependencies, query-scope repair, and predicate serialization are tested. Range and catalogue facts are not. |
+| D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, scope contraction, active query refresh, and reconnect-shaped repair are tested. Compact reconnect summaries are not.                                   |
+| D.8 Subscriptions          | partial               | Rerun-and-diff, policy dependency diffs, branch checkout diffs, pinned branch stability, pagination, and reconnect-shaped observed subscription recovery are tested. Tier gating and settled state are not.                                        |
+| D.9 Policies               | covered for prototype | Read/write policies, ref-readable policies, recursive acyclic policies, cycle rejection, branch/pinned-base contexts, trusted bypass, and transitive policy read sets are tested. Full policy language and diagnostics are not.                    |
+| D.10 Catalogue/lenses      | partial               | Narrow storage-name rename lenses, ref lenses, system prefix escaping, and index-only compatibility are tested. Catalogue revision graph, migrations directory semantics, inverse lenses, and copy-forward are not.                                |
+| D.11 Authority validation  | partial               | Untrusted bundle rejection, atomic rejection, delete/update validation, branch-context validation, stale row/absence/policy/source read-set checks, exclusive same-row conflict, and repair are tested. Predicate/range validation is not.         |
+| D.12 Conflicts             | partial               | Side APIs expose multi-base and pinned-base conflict candidates and policy-filtered candidates; conflict-aware row reads and resolution transactions are tested. Product metadata shape is not.                                                    |
+| D.13 Errors/diagnostics    | partial               | Rejection codes, transaction info, rejection lists, rejection subscriptions, and detail enrichment are tested. Public error object shape, redaction, and diagnostics are not.                                                                      |
+| D.14 Storage/lowering      | partial               | SQLite current/history tables, physical ids, system prefix escaping, integer-like enum behavior, and rebuild are exercised. `WITHOUT ROWID`, generated indexes, and query plans are not asserted.                                                  |
+| D.15 Files/blobs           | untested              | No file/blob implementation in Attempt 3.                                                                                                                                                                                                          |
+| D.16 Privacy/encryption    | untested              | No E2EE/encrypted-index implementation in Attempt 3.                                                                                                                                                                                               |
+| D.17 Harness               | partial               | In-memory SQLite, file-backed durable nodes, multi-runtime local/edge/global tests, duplicate/reordered bundles, and durable reopen are tested. Drop/delay/reconnect protocol and deterministic clock APIs are not.                                |
 
 ### E.2 Test Module Mapping
 
@@ -2664,22 +2755,21 @@ them concrete:
 The largest gaps between Appendix D and Attempt 3 tests are:
 
 - full vector snapshots and compact dotted-vector encoding
-- logical row-id global uniqueness, node ids distinct from authorization
-  principals, and one principal writing from several nodes
 - exact one-simple-write transaction count, sealed transaction immutability, and
   rejection detail storage outside the hot transaction row
 - explicit wait behavior for exclusive transactions at local, edge, and global
   tiers
-- durable subscription/query-read storage and reconnect resume
-- range, absence, page-boundary, ordered pagination, and catalogue observed
-  facts
-- required/optional include semantics and absence facts
+- awaiting-dependencies state for edges that need missing policy facts before
+  deciding or forwarding transactions
+- compact reconnect summaries and active query-descriptor replay protocol
+- range and catalogue observed facts
+- cache eviction policy for retained out-of-scope rows
 - tier-gated query/subscription settlement semantics
 - missing catalogue and missing permission fail-closed behavior
 - admin-controlled catalogue publication and separate catalogue sync lane
-- full authority read/write-set validation beyond row-level exclusive conflicts
-- conflict metadata in ordinary query/current rows and conflict resolution
-  transactions
+- full authority predicate/range read-set validation beyond current row,
+  absence, policy, and branch-source cases
+- final product conflict metadata shape and resolved-candidate provenance
 - production catalogue revision graph, migration files, inverse/cross-schema
   lenses, and copy-forward writes
 - files/blobs, encryption/privacy, and encrypted indexes

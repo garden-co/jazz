@@ -24,6 +24,13 @@ derived projection for fast ordinary reads, not a separate source of truth.
 What is a separate persisted current-state area of the raw storage arenas today
 becomes a close-to-covering derived index.
 
+Current Jazz also has mechanisms for actual history truncation / hard deletion
+when data must be physically removed rather than merely hidden by a delete
+marker. The SQLite-core spec currently treats ordinary deletes and restores as
+append-only history operations. Physical truncation, hard delete, retention
+policy, and privacy/erasure semantics need a separate migration/product
+decision rather than being assumed from ordinary delete behavior.
+
 ## Distributed transactions and branching
 
 > Current Jazz has two write lifecycles. Direct writes are treated as
