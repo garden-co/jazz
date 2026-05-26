@@ -1629,3 +1629,9 @@ shape should validate in a staging transaction before publishing current rows.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 untrusted_validation_error_does_not_leave_invalid_current_row_visible` passes.
+
+## 2026-05-25 19:41 PDT
+
+Verification checkpoint: `cargo test -p mini-jazz-sqlite` passes. This covers
+the crate target, doc tests, and the full whole-system integration suite at 86
+tests.
