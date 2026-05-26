@@ -1,5 +1,16 @@
 use std::collections::BTreeMap;
 
+use serde_json::Value as JsonValue;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowView {
+    pub table: String,
+    pub id: String,
+    pub values: BTreeMap<String, JsonValue>,
+    pub created_by: String,
+    pub tx_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TodoView {
     pub id: String,

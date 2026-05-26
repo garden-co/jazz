@@ -1,7 +1,7 @@
-use crate::rows::{ensure_row_id, insert_project, insert_todo, row_num, NewTodo};
-use crate::schema::SchemaDef;
+use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
+use crate::schema::{FieldDef, FieldKind, SchemaDef};
 use crate::sync::{Bundle, HistoryRecord, TxRecord};
-use crate::types::{StorageStats, TodoView, TransactionInfo};
+use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{projection, schema, storage, tx, Result, Storage};
 use rusqlite::{params, params_from_iter, Connection};
 use serde_json::Value as JsonValue;
@@ -232,6 +232,13 @@ impl Runtime {
         Ok(Bundle { txs, history })
     }
 
+    pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
+        self.schema.table_def(table_name)?;
+        let txs = export_txs(&self.conn)?;
+        let history = export_table_history(&self.conn, &self.schema, table_name)?;
+        Ok(Bundle { txs, history })
+    }
+
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
         let schema = self.schema.clone();
         let db = self.conn.transaction()?;
@@ -414,6 +421,61 @@ impl Runtime {
 
     pub fn physical_row_num_for(&self, row_id: &str) -> Result<i64> {
         row_num(&self.conn, row_id)
+    }
+
+    pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
+        let table = self.schema.table_def(table_name)?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        select_columns.extend(
+            field_columns
+                .iter()
+                .map(|column| format!("current.{column}")),
+        );
+        select_columns.push("current.j_created_by".to_owned());
+        let sql = format!(
+            "SELECT {}
+             FROM {} current
+             JOIN jazz_row_id ids ON ids.row_num = current.row_num
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             WHERE current.is_deleted = 0
+               AND tx.outcome != ?
+             ORDER BY current.j_created_at DESC, current.row_num",
+            select_columns.join(", "),
+            crate::schema::current_table(table_name),
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 2 + table.fields.len() + 1;
+        let rows = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
+            let raw_values = (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(raw_values)
+        })?;
+
+        let mut views = Vec::new();
+        for raw in rows {
+            let raw = raw?;
+            let mut values = BTreeMap::new();
+            for (idx, field) in table.fields.iter().enumerate() {
+                values.insert(
+                    field.name.clone(),
+                    sql_value_to_json(&self.conn, field, &raw[idx + 2])?,
+                );
+            }
+            views.push(RowView {
+                table: table_name.to_owned(),
+                id: text_value(&raw[0], "row_id")?,
+                tx_id: text_value(&raw[1], "tx_id")?,
+                values,
+                created_by: text_value(&raw[2 + table.fields.len()], "j_created_by")?,
+            });
+        }
+        Ok(views)
     }
 
     pub fn storage_stats(&self) -> Result<StorageStats> {
@@ -642,6 +704,108 @@ fn export_open_todos(conn: &Connection) -> Result<Vec<HistoryRecord>> {
     records
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn export_table_history(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+) -> Result<Vec<HistoryRecord>> {
+    let table = schema.table_def(table_name)?;
+    let field_columns = table
+        .fields
+        .iter()
+        .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+        .collect::<Vec<_>>();
+    let mut select_columns = vec![
+        "ids.row_id".to_owned(),
+        "tx.tx_id".to_owned(),
+        "h.op".to_owned(),
+    ];
+    select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+    select_columns.extend([
+        "h.j_created_at".to_owned(),
+        "h.j_updated_at".to_owned(),
+        "h.j_created_by".to_owned(),
+        "h.j_updated_by".to_owned(),
+    ]);
+    let sql = format!(
+        "SELECT {}
+         FROM {} h
+         JOIN jazz_row_id ids ON ids.row_num = h.row_num
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         ORDER BY h.row_num, h.tx_num",
+        select_columns.join(", "),
+        crate::schema::history_table(table_name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_width = 3 + table.fields.len() + 4;
+    let rows = stmt.query_map([], |row| {
+        (0..row_width)
+            .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+            .collect::<rusqlite::Result<Vec<_>>>()
+    })?;
+
+    let mut records = Vec::new();
+    for row in rows {
+        let row = row?;
+        let mut values = BTreeMap::new();
+        for (idx, field) in table.fields.iter().enumerate() {
+            values.insert(
+                field.name.clone(),
+                sql_value_to_json(conn, field, &row[idx + 3])?,
+            );
+        }
+        let sys = 3 + table.fields.len();
+        records.push(HistoryRecord {
+            table: table_name.to_owned(),
+            row_id: text_value(&row[0], "row_id")?,
+            tx_id: text_value(&row[1], "tx_id")?,
+            op: integer_value(&row[2], "op")?,
+            values,
+            created_at: integer_value(&row[sys], "j_created_at")?,
+            updated_at: integer_value(&row[sys + 1], "j_updated_at")?,
+            created_by: text_value(&row[sys + 2], "j_created_by")?,
+            updated_by: text_value(&row[sys + 3], "j_updated_by")?,
+        });
+    }
+    Ok(records)
+}
+
+fn sql_value_to_json(
+    conn: &Connection,
+    field: &FieldDef,
+    value: &rusqlite::types::Value,
+) -> Result<JsonValue> {
+    match (&field.kind, value) {
+        (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
+            Ok(JsonValue::String(value.clone()))
+        }
+        (FieldKind::Bool, rusqlite::types::Value::Integer(value)) => {
+            Ok(JsonValue::Bool(*value != 0))
+        }
+        (FieldKind::Ref { .. }, rusqlite::types::Value::Integer(row_num)) => {
+            Ok(JsonValue::String(public_row_id(conn, *row_num)?))
+        }
+        _ => Err(crate::Error::new(format!(
+            "unexpected SQL value for field {}",
+            field.name
+        ))),
+    }
+}
+
+fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<String> {
+    match value {
+        rusqlite::types::Value::Text(value) => Ok(value.clone()),
+        _ => Err(crate::Error::new(format!("expected text {name}"))),
+    }
+}
+
+fn integer_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
+    match value {
+        rusqlite::types::Value::Integer(value) => Ok(*value),
+        _ => Err(crate::Error::new(format!("expected integer {name}"))),
+    }
 }
 
 fn now_ms() -> i64 {

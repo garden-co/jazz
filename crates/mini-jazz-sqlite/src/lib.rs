@@ -12,4 +12,4 @@ pub use error::{Error, Result};
 pub use runtime::Runtime;
 pub use schema::SchemaDef;
 pub use storage::Storage;
-pub use types::{StorageStats, TodoView, TransactionInfo};
+pub use types::{RowView, StorageStats, TodoView, TransactionInfo};

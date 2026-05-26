@@ -32,6 +32,16 @@ pub(crate) fn row_num(conn: &Connection, row_id: &str) -> Result<i64> {
     .ok_or_else(|| crate::Error::new(format!("unknown row {row_id}")))
 }
 
+pub(crate) fn public_row_id(conn: &Connection, row_num: i64) -> Result<String> {
+    conn.query_row(
+        "SELECT row_id FROM jazz_row_id WHERE row_num = ?",
+        params![row_num],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| crate::Error::new(format!("unknown physical row {row_num}")))
+}
+
 pub(crate) fn insert_project(
     conn: &Connection,
     tx_num: i64,

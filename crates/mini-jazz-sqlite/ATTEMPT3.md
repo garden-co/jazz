@@ -202,3 +202,15 @@ path is not just DDL/write-only.
 Decision: keep `Runtime::open()` as a fixture convenience, but require core
 maintenance behavior such as projection rebuild to operate from `SchemaDef`.
 The next remaining fixture gravity is query/read/export helpers.
+
+## 2026-05-25 17:10 PDT
+
+Generic row read/export is now green in a real ref-shaped schema: docs and
+comments are written, comments are exported as table history, applied on another
+replica, projection is rebuilt, and refs read back as public row ids despite
+different physical row nums.
+
+Decision: add a generic `read_rows(table)` and `export_table_history(table)` as
+the lowest useful semantic surface for upcoming policy/lens tests. Fixture
+queries can stay as specialized query examples, but the runtime core now has a
+schema-shaped path for whole-system tests.
