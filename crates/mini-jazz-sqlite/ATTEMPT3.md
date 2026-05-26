@@ -2160,3 +2160,15 @@ implementation changes. This pins down that generic branch deletes, branch
 base export, and recursive tree reads already compose for this case.
 
 Full `cargo test -p mini-jazz-sqlite` passes with 117 whole-system tests.
+
+## 2026-05-25 20:43 PDT
+
+Checking the same query-scope "row left predicate" repair on a branch. The
+`QueryReadRecord` carries a `branch_id`, so branch query resync should repair
+only the branch-scoped current projection, not accidentally depend on main.
+
+Result: the branch query-scope repair test passed with the existing fix. This
+pins down that query repair is at least respecting branch-scoped current rows
+for sparse branch overlays.
+
+Full `cargo test -p mini-jazz-sqlite` passes with 118 whole-system tests.

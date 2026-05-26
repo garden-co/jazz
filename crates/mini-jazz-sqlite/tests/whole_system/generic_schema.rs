@@ -247,6 +247,66 @@ fn branch_equality_query_scope_records_branch_predicate_read() {
 }
 
 #[test]
+fn branch_equality_query_scope_resync_repairs_row_that_left_predicate() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft open")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+    peer.checkout_branch("draft").unwrap();
+    assert_eq!(
+        peer.read_rows_where_eq("tasks", "done", json!(false))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    alice
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft done")),
+                ("done".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq("tasks", "done", json!(false))
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert!(peer
+        .read_rows_where_eq("tasks", "done", json!(false))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn query_predicate_reads_survive_bundle_serialization() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
