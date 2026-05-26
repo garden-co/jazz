@@ -1529,3 +1529,16 @@ boundary. This supports using row-id cursors and explicit id filters at the API
 level without inventing a separate reconnect path for identity-shaped queries.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 253 whole-system tests.
+
+## 2026-05-26 05:25 PDT
+
+Added exclusive-delete validation coverage for source-branch rows. A writer
+deletes a row inherited from a source branch, the source branch updates before
+authority admission, and the authority rejects the stale exclusive delete.
+
+Discovery: source-aware read-set validation composes across insert absence,
+update, and delete write shapes. This is a stronger signal that effective branch
+visibility is now the right shared concept for optimistic writes and authority
+validation.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 254 whole-system tests.

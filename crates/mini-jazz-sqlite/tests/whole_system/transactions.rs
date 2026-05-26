@@ -760,6 +760,68 @@ fn untrusted_exclusive_transaction_rejects_stale_source_branch_row_read_set() {
 }
 
 #[test]
+fn untrusted_exclusive_delete_rejects_stale_source_branch_row_read_set() {
+    let schema = support::notes_schema();
+    let mut authority =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
+    let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
+
+    authority.create_branch("left", None).unwrap();
+    authority.checkout_branch("left").unwrap();
+    authority
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Source version 1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    authority
+        .create_branch_from_branches("merge", &["left"])
+        .unwrap();
+    authority.checkout_branch("merge").unwrap();
+    writer
+        .apply_bundle(&authority.export_table_history("notes").unwrap())
+        .unwrap();
+
+    writer.checkout_branch("merge").unwrap();
+    let delete_tx = writer
+        .transaction()
+        .delete_row("notes", "note-1")
+        .commit()
+        .unwrap();
+    let mut stale_bundle = writer.export_table_history("notes").unwrap();
+    stale_bundle
+        .txs
+        .iter_mut()
+        .find(|tx| tx.tx_id == delete_tx)
+        .unwrap()
+        .conflict_mode = 2;
+
+    authority.checkout_branch("left").unwrap();
+    authority
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("Source version 2"))]),
+        )
+        .unwrap();
+    authority.checkout_branch("merge").unwrap();
+
+    authority.apply_untrusted_bundle(&stale_bundle).unwrap();
+
+    let info = authority.transaction_info(&delete_tx).unwrap();
+    assert_eq!(info.conflict_mode, "exclusive");
+    assert_eq!(info.rejection_code, Some("stale_read_set".to_owned()));
+    let rows = authority.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("Source version 2"));
+}
+
+#[test]
 fn branch_exclusive_transaction_observes_inherited_base_read_version() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
