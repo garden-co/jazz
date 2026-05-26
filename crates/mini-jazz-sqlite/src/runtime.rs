@@ -1756,6 +1756,49 @@ impl Runtime {
         self.query_context().read_row_candidates(table_name, id)
     }
 
+    pub fn read_rows_with_conflict_meta(&self, table_name: &str) -> Result<Vec<RowView>> {
+        let mut rows = self.read_rows(table_name)?;
+        if rows.is_empty() {
+            let mut candidate_ids = self.conflict_candidate_row_ids(table_name)?;
+            candidate_ids.sort();
+            candidate_ids.dedup();
+            for row_id in candidate_ids {
+                let candidates = self.read_row_candidates(table_name, &row_id)?;
+                if candidates.len() > 1 {
+                    rows.extend(candidates);
+                }
+            }
+        }
+        for row in &mut rows {
+            let candidate_count = self.read_row_candidates(table_name, &row.id)?.len();
+            if candidate_count > 1 {
+                row.conflict_count = candidate_count;
+            }
+        }
+        Ok(rows)
+    }
+
+    fn conflict_candidate_row_ids(&self, table_name: &str) -> Result<Vec<String>> {
+        self.schema.table_def(table_name)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT ids.row_id
+             FROM jazz_branch_source source
+             JOIN {} current ON current.j_branch_num = source.source_branch_num
+             JOIN jazz_row_id ids ON ids.row_num = current.row_num
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             WHERE source.branch_num = ?
+               AND current.is_deleted = 0
+               AND tx.outcome != ?
+             ORDER BY ids.row_id",
+            crate::schema::current_table(table_name)
+        ))?;
+        let rows = stmt.query_map(params![self.branch_num, tx::OUTCOME_REJECTED], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn poll_subscription(
         &self,
         subscription: &mut RowsSubscription,

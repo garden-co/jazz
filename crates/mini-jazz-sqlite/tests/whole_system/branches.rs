@@ -978,6 +978,10 @@ fn branch_multi_base_conflicts_expose_multiple_candidates() {
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[0].values["title"], json!("Left title"));
     assert_eq!(candidates[1].values["title"], json!("Right title"));
+
+    let rows = alice.read_rows_with_conflict_meta("tasks").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.conflict_count == 2));
 }
 
 #[test]

@@ -790,6 +790,7 @@ fn row_to_view(
         tx_id: text_value(&raw[1], "tx_id")?,
         values,
         created_by: text_value(&raw[2 + table.fields.len()], "j_created_by")?,
+        conflict_count: 0,
     })
 }
 

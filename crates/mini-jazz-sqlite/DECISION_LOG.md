@@ -634,3 +634,9 @@ Design lesson: required includes are query semantics, not permission semantics. 
 Extended required includes through query-scoped sync. A peer can receive a parent row whose required ref target is missing, keep it out of the required-include result, and then include it once the target row arrives later. Full mini crate suite is green with 182 tests.
 
 Design lesson: query-scoped sync can safely deliver parent rows before required include dependencies arrive, as long as result materialization reruns include visibility. Required include semantics need not block storage of the parent history.
+
+## 2026-05-26 02:16 PDT
+
+Added a first ordinary conflict-meta read surface. Multi-base branch conflicts can now be surfaced as ordinary `RowView`s with `conflict_count`, instead of only through the side-channel candidate API. Full mini crate suite is green with 182 tests.
+
+Design lesson: pure multi-base conflicts currently do not appear in plain `read_rows`; they only exist as branch-source candidates. A conflict-aware query surface can bridge that, but the current implementation is intentionally narrow. The real design likely needs conflict metadata in the normal semantic row shape, plus explicit resolution transactions.

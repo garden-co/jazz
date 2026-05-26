@@ -9,6 +9,7 @@ pub struct RowView {
     pub values: BTreeMap<String, JsonValue>,
     pub created_by: String,
     pub tx_id: String,
+    pub conflict_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
