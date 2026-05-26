@@ -273,6 +273,45 @@ fn trusted_edge_acceptance_syncs_without_global_epoch() {
 }
 
 #[test]
+fn edge_accepted_transaction_can_upgrade_to_global_epoch() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-tab", "alice", schema.clone()).unwrap();
+    let mut edge =
+        Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema.clone()).unwrap();
+    let mut phone =
+        Runtime::open_with_schema(Storage::Memory, "alice-phone", "alice", schema).unwrap();
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Edge then global")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    edge.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    edge.accept_transaction_at_edge(&tx).unwrap();
+    phone
+        .apply_bundle(&edge.export_table_history("notes").unwrap())
+        .unwrap();
+    assert_eq!(phone.transaction_info(&tx).unwrap().global_epoch, None);
+
+    edge.accept_transaction_at_global(&tx, 42).unwrap();
+    phone
+        .apply_bundle(&edge.export_table_history("notes").unwrap())
+        .unwrap();
+
+    let info = phone.transaction_info(&tx).unwrap();
+    assert_eq!(info.global_epoch, Some(42));
+    assert!(info.receipt_tiers.contains(&"edge".to_owned()));
+    assert!(info.receipt_tiers.contains(&"global".to_owned()));
+}
+
+#[test]
 fn trusted_edge_rejects_policy_violating_tx_and_syncs_reason() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

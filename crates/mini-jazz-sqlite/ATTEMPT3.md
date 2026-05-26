@@ -1371,3 +1371,18 @@ Peers now can see an edge-accepted transaction as accepted/visible while
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 trusted_edge_acceptance_syncs_without_global_epoch` passes.
+
+## 2026-05-25 19:18 PDT
+
+Starting edge-to-global fate upgrade coverage. Need to prove a tx can become
+edge-accepted first, then later receive a global epoch under the same public
+transaction ID without losing the edge receipt.
+
+## 2026-05-25 19:18 PDT
+
+Edge-to-global fate upgrade coverage is green. A tx can sync as edge-accepted
+with no global epoch, later receive `global_epoch = 42`, and peers preserve both
+`edge` and `global` receipts for the same tx ID.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+edge_accepted_transaction_can_upgrade_to_global_epoch` passes.
