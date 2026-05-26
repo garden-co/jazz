@@ -67,6 +67,30 @@ fn rebuild_table(conn: &Connection, table: &crate::schema::TableDef) -> Result<(
                 ),
                 params![row_num, branch_num],
             )?;
+            if branch_num != 1 {
+                let mut columns = vec![
+                    "row_num".to_owned(),
+                    "j_branch_num".to_owned(),
+                    "visible_tx_num".to_owned(),
+                    "is_deleted".to_owned(),
+                ];
+                columns.extend(field_columns.iter().cloned());
+                columns.extend([
+                    "j_created_at".to_owned(),
+                    "j_updated_at".to_owned(),
+                    "j_created_by".to_owned(),
+                    "j_updated_by".to_owned(),
+                ]);
+
+                let mut current_values = vec![
+                    rusqlite::types::Value::Integer(row_num),
+                    rusqlite::types::Value::Integer(branch_num),
+                    rusqlite::types::Value::Integer(tx_num),
+                    rusqlite::types::Value::Integer(1),
+                ];
+                current_values.extend(values.into_iter().skip(4));
+                insert_dynamic(conn, &current_table(&table.name), &columns, &current_values)?;
+            }
             continue;
         }
 

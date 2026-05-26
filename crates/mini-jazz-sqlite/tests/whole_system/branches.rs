@@ -154,6 +154,46 @@ fn branch_base_is_pinned_to_global_epoch() {
 }
 
 #[test]
+fn branch_delete_shadows_pinned_base_row() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base task")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    assert_eq!(alice.read_rows("tasks").unwrap().len(), 1);
+
+    alice.delete_row("tasks", "task-1").unwrap();
+
+    assert!(alice.read_rows("tasks").unwrap().is_empty());
+
+    peer.apply_bundle(&alice.export_table_history("tasks").unwrap())
+        .unwrap();
+    peer.checkout_branch("draft").unwrap();
+    assert!(peer.read_rows("tasks").unwrap().is_empty());
+
+    peer.clear_current_projection_for_test().unwrap();
+    peer.rebuild_current_projection().unwrap();
+    assert!(peer.read_rows("tasks").unwrap().is_empty());
+}
+
+#[test]
 fn branch_export_includes_pinned_main_base_rows_for_receiver_view() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

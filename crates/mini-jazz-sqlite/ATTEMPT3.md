@@ -1417,3 +1417,23 @@ self cycles and three-table cycles fail at schema install time.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 schema_rejects_` passes.
+
+## 2026-05-25 19:22 PDT
+
+Starting branch delete-over-base coverage. Hypothesis: deleting a row on a
+branch with a pinned main base may fail to shadow the base snapshot because the
+current projection currently removes the branch row entirely instead of keeping
+a branch tombstone.
+
+## 2026-05-25 19:24 PDT
+
+Branch delete-over-base is green and found a real bug. Deleting a pinned-base
+row on a branch did not shadow the base snapshot because there was no branch
+current row to copy/delete. `delete_row` now creates delete history from the
+visible semantic row when needed, and branch deletes keep an `is_deleted = 1`
+current tombstone so base snapshot reads are shadowed. Apply/rebuild preserve
+branch tombstones too.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+branch_delete_shadows_pinned_base_row` passes, including sync and projection
+rebuild.

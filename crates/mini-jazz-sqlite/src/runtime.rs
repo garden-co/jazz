@@ -522,6 +522,28 @@ impl Runtime {
                 ),
                 params![row_num, branch_num],
             )?;
+            if branch_num != 1 {
+                let mut current_columns = vec![
+                    "row_num".to_owned(),
+                    "j_branch_num".to_owned(),
+                    "visible_tx_num".to_owned(),
+                    "is_deleted".to_owned(),
+                ];
+                let mut current_values = vec![
+                    rusqlite::types::Value::Integer(row_num),
+                    rusqlite::types::Value::Integer(branch_num),
+                    rusqlite::types::Value::Integer(tx_num),
+                    rusqlite::types::Value::Integer(1),
+                ];
+                current_columns.extend(columns.iter().skip(4).cloned());
+                current_values.extend(values.iter().skip(4).cloned());
+                insert_dynamic(
+                    db,
+                    &crate::schema::current_table(&record.table),
+                    &current_columns,
+                    &current_values,
+                )?;
+            }
         } else if outcome != tx::OUTCOME_REJECTED {
             let mut current_columns = vec![
                 "row_num".to_owned(),
@@ -705,6 +727,11 @@ impl Runtime {
 
     pub fn delete_row(&mut self, table_name: &str, id: &str) -> Result<String> {
         let table = self.schema.table_def(table_name)?.clone();
+        let visible_row = self
+            .read_rows(table_name)?
+            .into_iter()
+            .find(|row| row.id == id)
+            .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?;
         let db = self.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
@@ -741,7 +768,7 @@ impl Runtime {
             "j_created_by".to_owned(),
             "?".to_owned(),
         ]);
-        db.execute(
+        let inserted = db.execute(
             &format!(
                 "INSERT OR IGNORE INTO {} ({})
                  SELECT {}
@@ -754,6 +781,37 @@ impl Runtime {
             ),
             params![tx_num, now, self.principal, row_num, self.branch_num],
         )?;
+        if inserted == 0 {
+            let mut values = vec![
+                rusqlite::types::Value::Integer(row_num),
+                rusqlite::types::Value::Integer(tx_num),
+                rusqlite::types::Value::Integer(self.branch_num),
+                rusqlite::types::Value::Integer(3),
+            ];
+            for field in &table.fields {
+                let value = visible_row
+                    .values
+                    .get(&field.name)
+                    .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
+                values.push(crate::schema::field_sql_value(
+                    field,
+                    value,
+                    |ref_table, row_id| ensure_row_id(&db, ref_table, row_id),
+                )?);
+            }
+            values.extend([
+                rusqlite::types::Value::Integer(now),
+                rusqlite::types::Value::Integer(now),
+                rusqlite::types::Value::Text(self.principal.clone()),
+                rusqlite::types::Value::Text(self.principal.clone()),
+            ]);
+            insert_dynamic(
+                &db,
+                &crate::schema::history_table(&table.name),
+                &insert_columns,
+                &values,
+            )?;
+        }
         db.execute(
             &format!(
                 "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
@@ -761,6 +819,50 @@ impl Runtime {
             ),
             params![row_num, self.branch_num],
         )?;
+        if self.branch_num != 1 {
+            let mut current_columns = vec![
+                "row_num".to_owned(),
+                "j_branch_num".to_owned(),
+                "visible_tx_num".to_owned(),
+                "is_deleted".to_owned(),
+            ];
+            current_columns.extend(field_columns.iter().cloned());
+            current_columns.extend([
+                "j_created_at".to_owned(),
+                "j_updated_at".to_owned(),
+                "j_created_by".to_owned(),
+                "j_updated_by".to_owned(),
+            ]);
+            let mut current_values = vec![
+                rusqlite::types::Value::Integer(row_num),
+                rusqlite::types::Value::Integer(self.branch_num),
+                rusqlite::types::Value::Integer(tx_num),
+                rusqlite::types::Value::Integer(1),
+            ];
+            for field in &table.fields {
+                let value = visible_row
+                    .values
+                    .get(&field.name)
+                    .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
+                current_values.push(crate::schema::field_sql_value(
+                    field,
+                    value,
+                    |ref_table, row_id| ensure_row_id(&db, ref_table, row_id),
+                )?);
+            }
+            current_values.extend([
+                rusqlite::types::Value::Integer(now),
+                rusqlite::types::Value::Integer(now),
+                rusqlite::types::Value::Text(self.principal.clone()),
+                rusqlite::types::Value::Text(self.principal.clone()),
+            ]);
+            insert_dynamic(
+                &db,
+                &crate::schema::current_table(&table.name),
+                &current_columns,
+                &current_values,
+            )?;
+        }
         record_tx_write(&db, tx_num, &table.name, row_num, 3)?;
         db.commit()?;
         Ok(tx_id)
