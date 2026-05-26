@@ -25,6 +25,40 @@ fn query_scoped_sync_converges_memory_and_durable_nodes() {
 }
 
 #[test]
+fn durable_worker_rehydrates_fresh_memory_tab_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+
+    let mut tab = Runtime::open(Storage::Memory, "alice-tab", "alice").unwrap();
+    tab.create_project("project-1", "Spec work").unwrap();
+    tab.create_todo("todo-1", "Survives tab restart", false, "project-1")
+        .unwrap();
+
+    {
+        let mut worker =
+            Runtime::open(Storage::File(worker_path.clone()), "alice-worker", "alice").unwrap();
+        worker
+            .apply_bundle(&tab.export_query_scope_open_todos().unwrap())
+            .unwrap();
+        assert_eq!(worker.open_todos().unwrap(), tab.open_todos().unwrap());
+    }
+
+    let worker = Runtime::open(Storage::File(worker_path), "alice-worker", "alice").unwrap();
+    let mut fresh_tab = Runtime::open(Storage::Memory, "alice-tab-restarted", "alice").unwrap();
+    assert!(fresh_tab.open_todos().unwrap().is_empty());
+
+    fresh_tab
+        .apply_bundle(&worker.export_query_scope_open_todos().unwrap())
+        .unwrap();
+
+    assert_eq!(
+        fresh_tab.open_todos().unwrap(),
+        worker.open_todos().unwrap()
+    );
+    assert_eq!(fresh_tab.storage_stats().unwrap().history_rows, 2);
+}
+
+#[test]
 fn rejected_transaction_remains_history_but_is_hidden_from_current() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

@@ -73,3 +73,16 @@ checked-out branch current rows, sparse-overlay inherited current rows, and
 pinned historical snapshots. It is still small, but it is the right direction:
 write lowering can ask for an effective base row instead of rediscovering branch
 snapshot semantics inside the mutation path.
+
+## 2026-05-26 00:11 PDT
+
+Durable-worker/browser-tab topology slice is green as part of the full mini
+crate suite: 125 tests pass. Added a test where an in-memory tab writes data,
+syncs a query scope into a durable file-backed worker, the worker process is
+reopened, and a fresh empty in-memory tab rehydrates from that worker.
+
+Design lesson: the worker/tab topology does not require a special in-memory
+runtime path. A memory node can start empty, and a durable SQLite node can be
+the trusted upstream that replays the current query scope. This directly
+supports the spec direction that all nodes use SQLite, with durability/topology
+as configuration rather than a different semantic engine.
