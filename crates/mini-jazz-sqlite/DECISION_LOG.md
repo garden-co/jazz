@@ -1641,3 +1641,19 @@ the desired branch model better: siblings at the same depth can conflict, but a
 branch-local resolution shadows its own bases.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 261 whole-system tests.
+
+## 2026-05-26 05:40 PDT
+
+Pinned mutation semantics for unresolved transitive branch conflicts. Updating
+a row visible through two same-depth transitive source candidates now fails with
+`ambiguous branch row source candidates` instead of silently choosing one base.
+The implementation makes effective-row lookup recurse over direct sources:
+source branches may shadow their own deeper bases, but sibling candidates at
+the same merge point stay ambiguous until resolved explicitly.
+
+Discovery: read-time conflict visibility and write-time base selection need
+different operations over the same source graph. Reads keep same-depth
+candidates; writes require exactly one effective base row unless the branch has
+already written a local resolution.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 262 whole-system tests.

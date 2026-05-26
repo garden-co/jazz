@@ -132,6 +132,19 @@ pub(crate) fn source_version(conn: &Connection, branch_num: i64) -> Result<i64> 
     )?)
 }
 
+pub(crate) fn direct_source_nums(conn: &Connection, branch_num: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT source_branch_num
+         FROM jazz_branch_source
+         WHERE branch_num = ?
+         ORDER BY source_branch_num",
+    )?;
+    let sources = stmt
+        .query_map(params![branch_num], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(sources)
+}
+
 pub(crate) fn set_sources_from_sync(
     conn: &Connection,
     branch_num: i64,

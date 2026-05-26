@@ -16,14 +16,18 @@ pub(crate) fn row_values(
         if let Some(values) = current_row_values_exact(conn, table, row_num, branch_num)? {
             return Ok(Some(values));
         }
-        for source_branch_num in branch::scope_nums(conn, branch_num)?
-            .into_iter()
-            .filter(|source_branch_num| *source_branch_num != branch_num)
-        {
+        let mut source_candidates = Vec::new();
+        for source_branch_num in branch::direct_source_nums(conn, branch_num)? {
             if let Some(values) = row_values(conn, schema, table_name, row_num, source_branch_num)?
             {
-                return Ok(Some(values));
+                source_candidates.push(values);
             }
+        }
+        if source_candidates.len() > 1 {
+            return Err(crate::Error::new("ambiguous branch row source candidates"));
+        }
+        if let Some(values) = source_candidates.into_iter().next() {
+            return Ok(Some(values));
         }
         if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
             if !current_row_exists_on_branch(conn, table_name, row_num, branch_num)? {
