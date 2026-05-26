@@ -1657,3 +1657,15 @@ candidates; writes require exactly one effective base row unless the branch has
 already written a local resolution.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 262 whole-system tests.
+
+## 2026-05-26 05:41 PDT
+
+Added the positive path after ambiguous transitive conflict rejection. Explicit
+conflict resolution creates a branch-local row; a later ordinary update uses
+that local row as its unambiguous base and keeps conflict metadata clear.
+
+Discovery: this gives the intended workflow shape: implicit writes cannot pick
+between unresolved source candidates, but explicit resolution turns the branch
+back into normal single-row update semantics.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 263 whole-system tests.
