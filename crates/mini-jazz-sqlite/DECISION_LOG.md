@@ -1697,3 +1697,9 @@ local row makes the branch record present, but recursive source metadata is
 still required to reconstruct conflict provenance and future branch reads.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 264 whole-system tests.
+
+## 2026-05-26 05:47 PDT
+
+Updated the spec invariant/test mapping to include
+`branch_transitive_conflict_resolution_survives_sync` under branch invariants,
+sync/scoping invariants, and conflict invariants.

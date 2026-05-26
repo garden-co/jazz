@@ -2540,6 +2540,7 @@ Coverage labels:
 - `branch_conflict_candidates_survive_durable_sync_and_rejected_fate`: D.5,
   D.12, D.17
 - `branch_sync_preserves_branch_provenance`: D.5, D.7
+- `branch_transitive_conflict_resolution_survives_sync`: D.5, D.7, D.12
 - `durable_reopen_preserves_branch_sync_and_dedupes_replay`: D.5, D.7, D.17
 
 #### `generic_schema.rs`
