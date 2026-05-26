@@ -192,6 +192,38 @@ fn query_scope_rejection_refresh_removes_previously_delivered_row() {
 }
 
 #[test]
+fn missing_optional_ref_include_round_trips_as_null_then_updates_when_dependency_arrives() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+
+    alice
+        .create_todo("todo-1", "Project may arrive later", false, "project-late")
+        .unwrap();
+    let alice_todos = alice.open_todos().unwrap();
+    assert_eq!(alice_todos.len(), 1);
+    assert_eq!(alice_todos[0].project_title, None);
+
+    peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
+        .unwrap();
+    let peer_todos = peer.open_todos().unwrap();
+    assert_eq!(peer_todos.len(), 1);
+    assert_eq!(peer_todos[0].project_title, None);
+
+    alice
+        .create_project("project-late", "Late arriving project")
+        .unwrap();
+    peer.apply_bundle(&alice.export_table_history("projects").unwrap())
+        .unwrap();
+
+    let peer_todos = peer.open_todos().unwrap();
+    assert_eq!(peer_todos.len(), 1);
+    assert_eq!(
+        peer_todos[0].project_title.as_deref(),
+        Some("Late arriving project")
+    );
+}
+
+#[test]
 fn table_scope_sync_exports_delete_so_peer_removes_row() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();

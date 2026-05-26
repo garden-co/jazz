@@ -312,6 +312,63 @@ fn edge_accepted_transaction_can_upgrade_to_global_epoch() {
 }
 
 #[test]
+fn edge_core_peer_edge_round_trip_preserves_policy_and_receipts() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+        table.read_if_created_by_principal();
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-tab", "alice", schema.clone()).unwrap();
+    let mut edge_a =
+        Runtime::open_trusted_with_schema(Storage::Memory, "edge-a", schema.clone()).unwrap();
+    let mut core =
+        Runtime::open_trusted_with_schema(Storage::Memory, "core", schema.clone()).unwrap();
+    let mut edge_b =
+        Runtime::open_trusted_with_schema(Storage::Memory, "edge-b", schema.clone()).unwrap();
+    let mut alice_laptop =
+        Runtime::open_with_schema(Storage::Memory, "alice-laptop", "alice", schema.clone())
+            .unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-tab", "bob", schema).unwrap();
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Through edge and core")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    edge_a
+        .apply_untrusted_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    edge_a.accept_transaction_at_edge(&tx).unwrap();
+    core.apply_bundle(&edge_a.export_table_history("notes").unwrap())
+        .unwrap();
+    core.accept_transaction_at_global(&tx, 99).unwrap();
+    edge_b
+        .apply_bundle(&core.export_table_history("notes").unwrap())
+        .unwrap();
+
+    let global_bundle = edge_b.export_table_history("notes").unwrap();
+    alice_laptop.apply_bundle(&global_bundle).unwrap();
+    bob.apply_bundle(&global_bundle).unwrap();
+
+    let alice_rows = alice_laptop.read_rows("notes").unwrap();
+    assert_eq!(alice_rows.len(), 1);
+    assert_eq!(alice_rows[0].id, "note-1");
+    assert!(bob.read_rows("notes").unwrap().is_empty());
+
+    let info = alice_laptop.transaction_info(&tx).unwrap();
+    assert_eq!(info.global_epoch, Some(99));
+    assert!(info.receipt_tiers.contains(&"edge".to_owned()));
+    assert!(info.receipt_tiers.contains(&"global".to_owned()));
+}
+
+#[test]
 fn trusted_edge_rejects_policy_violating_tx_and_syncs_reason() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

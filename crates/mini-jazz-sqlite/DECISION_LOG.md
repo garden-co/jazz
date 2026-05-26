@@ -175,3 +175,20 @@ Design lesson: current projection rebuild is proving a good oracle. When a
 test asserts both online apply and clear/rebuild, it quickly catches whether
 we encoded the semantics in durable history/metadata or only in incidental
 current-table mutation order.
+
+## 2026-05-26 00:23 PDT
+
+Added two more status-quo/product-shape tests; full mini crate suite is green
+with 138 tests.
+
+- Optional scalar include absence in the fixture query round-trips as `None`
+  through query-scope sync, then becomes `Some(title)` after the referenced
+  project arrives.
+- Edge/core/edge topology works in miniature: client -> trusted edge with edge
+  receipt -> trusted core global acceptance -> second edge -> authorized and
+  unauthorized clients. The public tx id is preserved, both edge/global
+  receipts survive, and policy still hides the row from Bob.
+
+Design lesson: the current fact model already supports a credible browser edge
+plus cloud-core topology. The missing pieces are transport/protocol shape and
+catalogue negotiation, not a different storage/runtime semantic path.
