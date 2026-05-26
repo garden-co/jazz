@@ -1452,3 +1452,18 @@ write-set materialization.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 generic_update_records_update_op_and_syncs_current_value` passes.
+
+## 2026-05-25 19:26 PDT
+
+Starting generic update support inside sealed transactions. The standalone
+`update_row` path works, but the single parametrized transaction constructor
+should be able to seal updates alongside other mutations too.
+
+## 2026-05-25 19:26 PDT
+
+Generic update support inside sealed transactions is green. `TransactionBuilder`
+now has `update_row`, and generic transaction mutations carry the intended op
+code so updates and creates can share one sealed tx.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+generic_transaction_can_seal_updates_atomically` passes.

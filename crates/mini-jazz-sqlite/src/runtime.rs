@@ -1238,6 +1238,7 @@ enum Mutation {
         table: String,
         id: String,
         values: BTreeMap<String, JsonValue>,
+        op: i64,
     },
     Project {
         id: String,
@@ -1274,6 +1275,22 @@ impl<'a> TransactionBuilder<'a> {
             table: table.to_owned(),
             id: id.to_owned(),
             values,
+            op: 1,
+        });
+        self
+    }
+
+    pub fn update_row(
+        mut self,
+        table: &str,
+        id: &str,
+        values: BTreeMap<String, JsonValue>,
+    ) -> Self {
+        self.mutations.push(Mutation::Row {
+            table: table.to_owned(),
+            id: id.to_owned(),
+            values,
+            op: 2,
         });
         self
     }
@@ -1321,7 +1338,12 @@ impl<'a> TransactionBuilder<'a> {
         )?;
         for mutation in self.mutations {
             match mutation {
-                Mutation::Row { table, id, values } => insert_row_in_tx(InsertRowInTx {
+                Mutation::Row {
+                    table,
+                    id,
+                    values,
+                    op,
+                } => insert_row_in_tx(InsertRowInTx {
                     db: &db,
                     schema: &self.runtime.schema,
                     table_name: &table,
@@ -1332,7 +1354,7 @@ impl<'a> TransactionBuilder<'a> {
                     now,
                     principal: &self.runtime.principal,
                     trusted: self.runtime.trusted,
-                    op: 1,
+                    op,
                 })?,
                 Mutation::Project { id, title } => {
                     insert_project(&db, tx_num, &id, &title, now, &self.runtime.principal)?;

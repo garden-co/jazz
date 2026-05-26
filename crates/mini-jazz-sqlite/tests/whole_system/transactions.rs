@@ -64,6 +64,58 @@ fn generic_transaction_seals_multiple_rows_atomically() {
 }
 
 #[test]
+fn generic_transaction_can_seal_updates_atomically() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Original")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx = alice
+        .transaction()
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Updated in tx")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Created in tx")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.tx_id == tx));
+    assert_eq!(
+        alice.transaction_write_rows(&tx).unwrap(),
+        vec![
+            ("notes".to_owned(), "note-1".to_owned()),
+            ("notes".to_owned(), "note-2".to_owned())
+        ]
+    );
+    assert!(rows
+        .iter()
+        .any(|row| row.values["body"] == json!("Updated in tx")));
+}
+
+#[test]
 fn exclusive_transaction_requires_global_epoch_and_commits_accepted() {
     let schema = support::notes_schema();
     let mut alice =
