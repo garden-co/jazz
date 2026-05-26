@@ -397,6 +397,43 @@ fn exclusive_transaction_rejects_same_row_conflict() {
 }
 
 #[test]
+fn exclusive_transaction_conflicts_are_row_based_not_column_based() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .transaction()
+        .exclusive_at_global(1)
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("First exclusive")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let err = alice
+        .transaction()
+        .exclusive_at_global(2)
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("pinned".to_owned(), json!(true))]),
+        )
+        .commit()
+        .unwrap_err();
+
+    assert!(err.to_string().contains("exclusive conflict"));
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows[0].values["body"], json!("First exclusive"));
+    assert_eq!(rows[0].values["pinned"], json!(false));
+}
+
+#[test]
 fn generic_transaction_delete_shadows_pinned_base_row() {
     let schema = support::tasks_schema();
     let mut alice =

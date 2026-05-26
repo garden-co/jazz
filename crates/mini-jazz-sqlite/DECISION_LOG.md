@@ -580,3 +580,9 @@ Design lesson: the right abstraction is not a "subscription" object or a "sync q
 Added schema compatibility fingerprints to bundles. Receivers fail closed before applying structurally incompatible bundles, older untagged bundles remain legacy-compatible, and index-only plus rename-lens differences still apply because the fingerprint is based on lowered storage shape rather than semantic names or policies. Full mini crate suite is green with 172 tests.
 
 Design lesson: catalogue compatibility should be split by lane. Structural storage/lens compatibility can be checked at the sync boundary; policy heads should remain separate because peers may evaluate stricter or newer permissions over compatible row storage.
+
+## 2026-05-26 01:52 PDT
+
+Pinned an exclusive-conflict invariant: exclusive transactions conflict at whole-row granularity, even when the later write only touches a different column. Full mini crate suite is green with 173 tests.
+
+Design lesson: per-column metadata is useful for mergeable conflict resolution, but exclusive/global consistency should reason over row items unless we deliberately design a narrower serializability model. This matches the recent spec clarification.
