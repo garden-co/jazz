@@ -604,3 +604,9 @@ Design lesson: the resubscribe loop is not limited to simple predicates. Ordered
 Covered branch-scoped reconnect refresh from persisted query reads. A durable worker can persist a branch query, restart on that branch, send the descriptor upstream, and repair the branch view after an overlay shadows the base row out of scope. Full mini crate suite is green with 176 tests.
 
 Design lesson: persisted query descriptors need branch context, but they do not need a separate branch-specific protocol. The same reconnect refresh loop works as long as branch provenance and checkout context are explicit.
+
+## 2026-05-26 02:03 PDT
+
+Added explicit forgetting for persisted query reads. A durable peer can remove an observed query descriptor, the removal survives restart, and reconnect refresh generation no longer produces work for that forgotten scope. Full mini crate suite is green with 177 tests.
+
+Design lesson: durable query state needs lifecycle, not just persistence. This is the beginning of unsubscribe semantics: desired scopes should be durable, inspectable, refreshable, and intentionally removable.

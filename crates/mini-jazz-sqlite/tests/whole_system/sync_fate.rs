@@ -487,6 +487,37 @@ fn durable_peer_remembers_query_scope_after_restart() {
 }
 
 #[test]
+fn forgotten_query_read_does_not_refresh_after_restart() {
+    let dir = tempdir().unwrap();
+    let peer_path = dir.path().join("forgotten-query.sqlite");
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Forget this query", false, "project-1")
+        .unwrap();
+    let bundle = alice.export_query_scope_open_todos().unwrap();
+
+    {
+        let mut peer =
+            Runtime::open(Storage::File(peer_path.clone()), "peer-node", "alice").unwrap();
+        peer.apply_bundle(&bundle).unwrap();
+        let observed = peer.observed_query_reads().unwrap();
+        assert_eq!(observed, bundle.query_reads);
+
+        peer.forget_observed_query_read(&observed[0]).unwrap();
+        assert!(peer.observed_query_reads().unwrap().is_empty());
+    }
+
+    let reopened = Runtime::open(Storage::File(peer_path), "peer-node", "alice").unwrap();
+    assert!(reopened.observed_query_reads().unwrap().is_empty());
+    assert!(alice
+        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn exported_bundles_carry_protocol_version() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

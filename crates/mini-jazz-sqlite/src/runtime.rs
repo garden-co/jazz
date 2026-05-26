@@ -638,6 +638,26 @@ impl Runtime {
             .collect()
     }
 
+    pub fn forget_observed_query_read(&mut self, read: &QueryReadRecord) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM jazz_query_read
+             WHERE branch_id = ?
+               AND table_name = ?
+               AND field_name = ?
+               AND op = ?
+               AND value_json = ?",
+            params![
+                read.branch_id,
+                read.table,
+                read.field,
+                read.op,
+                serde_json::to_string(&read.value)
+                    .map_err(|err| crate::Error::new(err.to_string()))?
+            ],
+        )?;
+        Ok(())
+    }
+
     fn export_query_read_refresh(&self, read: &QueryReadRecord) -> Result<Bundle> {
         if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
             return Err(crate::Error::new("query refresh branch is not checked out"));
