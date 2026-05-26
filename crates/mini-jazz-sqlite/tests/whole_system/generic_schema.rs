@@ -821,6 +821,62 @@ fn nullable_text_round_trips_and_filters_with_is_null_semantics() {
 }
 
 #[test]
+fn nullable_ref_round_trips_filters_and_is_skipped_by_require_ref() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.optional_ref("project", "projects");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-linked",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Linked")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-floating",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Floating")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!(null)),
+            ]),
+        )
+        .unwrap();
+
+    let floating = alice
+        .read_rows_where_eq("todos", "project", json!(null))
+        .unwrap();
+    assert_eq!(floating.len(), 1);
+    assert_eq!(floating[0].id, "todo-floating");
+    assert_eq!(floating[0].values["project"], json!(null));
+
+    let required = alice.read_rows_require_ref("todos", "project").unwrap();
+    assert_eq!(required.len(), 1);
+    assert_eq!(required[0].id, "todo-linked");
+}
+
+#[test]
 fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_deleted_match() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

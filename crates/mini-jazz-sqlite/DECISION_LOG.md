@@ -760,3 +760,9 @@ Design lesson: branch provenance needs fail-loud invariants early. Silent `INSER
 Added a first nullable-field slice. Schemas can declare `optional_text`, explicit JSON null values round-trip through history/current/query materialization, and equality filters over null lower to `IS NULL` instead of SQL's `= NULL` trap. Full mini crate suite is green with 200 tests.
 
 Design lesson: nullability needs to be a schema property, not a loose value convention. This small slice preserves required-field failures while proving the storage/query codec can represent SQL nulls semantically. Optional refs, defaults, `ne null`, and query-scope sync for null predicates remain open.
+
+## 2026-05-26 03:10 PDT
+
+Added optional references. Schemas can declare `optional_ref`, rows can store an explicit null ref, null ref equality uses the existing `IS NULL` lowering, and `read_rows_require_ref` skips null refs while keeping linked rows. Full mini crate suite is green with 201 tests.
+
+Design lesson: once nullability is carried on `FieldDef`, refs compose cleanly with the existing storage and semantic row codec. The harder remaining ref work is not basic null storage; it is include/query-scope behavior for null and missing refs, plus policy decisions around nullable ref-readable policies.

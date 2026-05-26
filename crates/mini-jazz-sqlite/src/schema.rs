@@ -215,6 +215,17 @@ impl TableBuilder {
         });
     }
 
+    pub fn optional_ref(&mut self, name: &str, table: &str) {
+        self.table.fields.push(FieldDef {
+            name: name.to_owned(),
+            storage_name: user_storage_name(name),
+            kind: FieldKind::Ref {
+                table: table.to_owned(),
+            },
+            nullable: true,
+        });
+    }
+
     pub fn ref_lens(&mut self, name: &str, stored_as: &str, table: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
