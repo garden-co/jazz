@@ -1382,3 +1382,16 @@ otherwise history for the same public row id on another branch can leak into the
 receiver's local recomputation.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 241 whole-system tests.
+
+## 2026-05-26 05:06 PDT
+
+Made rejection subscriptions emit safe detail enrichment. A worker can first
+receive a rejected transaction with only `policy_denied`, notify once, then
+receive a later rejection detail update for the same public tx id and notify
+again with the enriched structured detail.
+
+Discovery: rejection subscriptions should diff full rejection records, not only
+tx ids. The transaction fate identity is stable, but the user-facing error
+payload can become more informative as authority/edge processing catches up.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 242 whole-system tests.

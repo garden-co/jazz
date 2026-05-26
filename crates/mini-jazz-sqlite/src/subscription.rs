@@ -169,11 +169,15 @@ impl RejectionSubscription {
         let before = self
             .last_rejections
             .iter()
-            .map(|rejection| rejection.tx_id.as_str())
-            .collect::<std::collections::BTreeSet<_>>();
+            .map(|rejection| (rejection.tx_id.as_str(), rejection))
+            .collect::<BTreeMap<_, _>>();
         let events = next_rejections
             .iter()
-            .filter(|rejection| !before.contains(rejection.tx_id.as_str()))
+            .filter(|rejection| {
+                before
+                    .get(rejection.tx_id.as_str())
+                    .is_none_or(|previous| *previous != *rejection)
+            })
             .cloned()
             .collect();
         self.last_rejections = next_rejections;

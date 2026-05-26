@@ -120,6 +120,52 @@ fn restarted_rejection_subscription_baselines_old_rejections_and_reports_later_o
 }
 
 #[test]
+fn rejection_subscription_reports_later_detail_enrichment() {
+    let schema = support::tasks_schema();
+    let mut authority =
+        Runtime::open_with_schema(Storage::Memory, "authority", "alice", schema.clone()).unwrap();
+    let mut worker = Runtime::open_with_schema(Storage::Memory, "worker", "alice", schema).unwrap();
+    let mut subscription = worker.subscribe_rejections().unwrap();
+
+    let tx = authority
+        .insert_row(
+            "tasks",
+            "task-rejected",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Rejection gets detail later")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    worker
+        .apply_bundle(&authority.export_table_history("tasks").unwrap())
+        .unwrap();
+    authority.reject_transaction(&tx, "policy_denied").unwrap();
+    worker
+        .apply_bundle(&authority.export_table_history("tasks").unwrap())
+        .unwrap();
+    let first_events = worker.poll_rejections(&mut subscription).unwrap();
+    assert_eq!(first_events.len(), 1);
+    assert_eq!(first_events[0].tx_id, tx);
+    assert_eq!(first_events[0].detail, None);
+
+    authority
+        .reject_transaction_with_detail(&tx, "policy_denied", json!({"reason": "late detail"}))
+        .unwrap();
+    worker
+        .apply_bundle(&authority.export_table_history("tasks").unwrap())
+        .unwrap();
+
+    let detail_events = worker.poll_rejections(&mut subscription).unwrap();
+    assert_eq!(detail_events.len(), 1);
+    assert_eq!(detail_events[0].tx_id, tx);
+    assert_eq!(
+        detail_events[0].detail,
+        Some(json!({"reason": "late detail"}))
+    );
+}
+
+#[test]
 fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
