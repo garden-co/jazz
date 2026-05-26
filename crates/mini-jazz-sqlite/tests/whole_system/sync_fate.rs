@@ -328,6 +328,40 @@ fn replicas_may_use_different_physical_ids_for_same_public_ids() {
 }
 
 #[test]
+fn replicas_may_use_different_physical_tx_nums_for_same_public_tx_id() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+
+    bob.create_project("bob-local-project", "Bob local")
+        .unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo(
+            "todo-1",
+            "Same public tx different physical nums",
+            false,
+            "project-1",
+        )
+        .unwrap();
+    bob.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
+        .unwrap();
+
+    assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
+    assert_ne!(
+        alice
+            .storage_stats()
+            .unwrap()
+            .physical_tx_num_for(&tx)
+            .unwrap(),
+        bob.storage_stats()
+            .unwrap()
+            .physical_tx_num_for(&tx)
+            .unwrap()
+    );
+}
+
+#[test]
 fn query_scope_is_not_table_replication() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();

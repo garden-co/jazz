@@ -324,3 +324,13 @@ Design lesson: `id` and `$createdBy` are enough to prove the shape, but the
 ad-hoc branches in query repair are accumulating. Next architecture pass should
 extract a query predicate planner/evaluator that can produce local SQL,
 repair SQL, and history-row expansion from one predicate description.
+
+## 2026-05-26 00:37 PDT
+
+Added a transaction identity interning invariant. Replicas may assign different
+physical SQLite `tx_num`s to the same public `tx_id` after local writes happen
+in different orders, and sync still converges by public identity. Full mini
+crate suite is green with 149 tests.
+
+Design lesson: physical ids are purely local cache keys. The public contract
+has to stay on row ids, tx ids, branch ids, and semantic query results.
