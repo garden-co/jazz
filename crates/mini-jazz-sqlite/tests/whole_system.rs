@@ -305,3 +305,56 @@ fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
         bob.physical_row_num_for("doc-1").unwrap()
     );
 }
+
+#[test]
+fn policy_filters_reads_through_required_parent_ref() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let mut alice_project = BTreeMap::new();
+    alice_project.insert("title".to_owned(), json!("Alice project"));
+    alice
+        .insert_row("projects", "project-alice", alice_project)
+        .unwrap();
+    let mut alice_todo = BTreeMap::new();
+    alice_todo.insert("title".to_owned(), json!("Visible"));
+    alice_todo.insert("done".to_owned(), json!(false));
+    alice_todo.insert("project".to_owned(), json!("project-alice"));
+    alice
+        .insert_row("todos", "todo-visible", alice_todo)
+        .unwrap();
+
+    let mut bob_project = BTreeMap::new();
+    bob_project.insert("title".to_owned(), json!("Bob project"));
+    bob.insert_row("projects", "project-bob", bob_project)
+        .unwrap();
+    let mut bob_todo = BTreeMap::new();
+    bob_todo.insert("title".to_owned(), json!("Hidden"));
+    bob_todo.insert("done".to_owned(), json!(false));
+    bob_todo.insert("project".to_owned(), json!("project-bob"));
+    bob.insert_row("todos", "todo-hidden", bob_todo).unwrap();
+
+    alice
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let visible = alice.read_rows("todos").unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, "todo-visible");
+    assert_eq!(visible[0].values["project"], json!("project-alice"));
+}

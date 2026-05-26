@@ -56,6 +56,8 @@ pub(crate) struct TableDef {
     pub(crate) name: String,
     pub(crate) fields: Vec<FieldDef>,
     pub(crate) indexes: Vec<IndexDef>,
+    pub(crate) read_policy: PolicyDef,
+    pub(crate) write_policy: PolicyDef,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +79,16 @@ pub(crate) struct IndexDef {
     pub(crate) columns: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) enum PolicyDef {
+    #[default]
+    AllowAll,
+    CreatedByPrincipal,
+    RefReadable {
+        field: String,
+    },
+}
+
 pub struct TableBuilder {
     table: TableDef,
 }
@@ -88,6 +100,8 @@ impl TableBuilder {
                 name: name.to_owned(),
                 fields: Vec::new(),
                 indexes: Vec::new(),
+                read_policy: PolicyDef::AllowAll,
+                write_policy: PolicyDef::AllowAll,
             },
         }
     }
@@ -120,6 +134,20 @@ impl TableBuilder {
             name: name.to_owned(),
             columns: columns.iter().map(|column| (*column).to_owned()).collect(),
         });
+    }
+
+    pub fn read_if_created_by_principal(&mut self) {
+        self.table.read_policy = PolicyDef::CreatedByPrincipal;
+    }
+
+    pub fn write_if_created_by_principal(&mut self) {
+        self.table.write_policy = PolicyDef::CreatedByPrincipal;
+    }
+
+    pub fn read_if_ref_readable(&mut self, field: &str) {
+        self.table.read_policy = PolicyDef::RefReadable {
+            field: field.to_owned(),
+        };
     }
 
     fn finish(self) -> TableDef {

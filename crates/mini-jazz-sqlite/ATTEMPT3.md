@@ -214,3 +214,22 @@ Decision: add a generic `read_rows(table)` and `export_table_history(table)` as
 the lowest useful semantic surface for upcoming policy/lens tests. Fixture
 queries can stay as specialized query examples, but the runtime core now has a
 schema-shaped path for whole-system tests.
+
+## 2026-05-25 17:12 PDT
+
+First policy slice is green: a table can declare `read_if_created_by_principal`,
+and a child table can declare `read_if_ref_readable("parent_ref")`. Generic
+`read_rows(table)` lowers this to SQL with an `EXISTS` against the parent
+current table.
+
+Decisions and limitations:
+
+- Keep policy declarations attached to schema for now; this matches the product
+  shape and forces SQL-lowerable policies.
+- Treat required parent readability as a read filter on the child.
+- Do not invent a separate local structural-schema mode.
+- Recursive ref-readable policies currently error instead of silently doing the
+  wrong thing. This is a major derisking target because recursive permissions
+  are known-hard.
+- Current policy-scoped sync is not solved yet: `export_table_history(table)`
+  still exports table history without session policy filtering.
