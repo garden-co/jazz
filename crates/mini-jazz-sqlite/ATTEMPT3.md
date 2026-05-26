@@ -2026,3 +2026,19 @@ Starting pinned-base conflict candidate coverage. `read_row_candidates` currentl
 Pinned-base conflict candidates are green. Merge branches can now preserve an effective-base candidate alongside explicit source-branch candidates. I added a branch constructor variant that records both `base_global_epoch` and source provenance, and candidate reads now prepend the visible main snapshot row before source candidates.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system branch_conflict_candidates_include_pinned_base_candidate` passes, and full `cargo test -p mini-jazz-sqlite` passes with 108 whole-system tests.
+
+## 2026-05-25 20:26 PDT
+
+Starting branch predicate-read coverage. Equality query exports now carry
+predicate records; verifying that branch-scoped queries preserve the branch id
+in that predicate metadata.
+
+## 2026-05-25 20:27 PDT
+
+Branch predicate-read coverage is green. Equality query bundles now have
+coverage proving predicate metadata carries the active branch id, including a
+pinned-base branch query.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+branch_equality_query_scope_records_branch_predicate_read` passes, and full
+`cargo test -p mini-jazz-sqlite` passes with 109 whole-system tests.

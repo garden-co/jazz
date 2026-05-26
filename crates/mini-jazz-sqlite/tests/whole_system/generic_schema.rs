@@ -156,6 +156,40 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
 }
 
 #[test]
+fn branch_equality_query_scope_records_branch_predicate_read() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base task")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let bundle = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+
+    assert_eq!(bundle.query_reads.len(), 1);
+    assert_eq!(bundle.query_reads[0].branch_id, "draft");
+    assert_eq!(bundle.query_reads[0].table, "tasks");
+    assert_eq!(bundle.query_reads[0].field, "done");
+    assert_eq!(bundle.query_reads[0].value, json!(false));
+}
+
+#[test]
 fn generic_equality_query_lowers_public_ref_ids_to_physical_row_ids() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
