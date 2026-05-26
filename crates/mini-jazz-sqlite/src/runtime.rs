@@ -3,7 +3,7 @@ use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::RowsSubscription;
 use crate::sync::{Bundle, HistoryRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
-use crate::{policy, projection, schema, storage, tx, Result, Storage};
+use crate::{branch, policy, projection, schema, storage, tx, Result, Storage};
 use rusqlite::{params, params_from_iter, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -254,7 +254,7 @@ impl Runtime {
         let table = schema.table_def(&record.table)?;
         let row_num = ensure_row_id(db, &record.table, &record.row_id)?;
         let tx_num = tx::tx_num(db, &record.tx_id)?;
-        let branch_num = ensure_branch(db, &record.branch_id, None)?;
+        let branch_num = branch::ensure(db, &record.branch_id, None, now_ms())?;
 
         let mut columns = vec![
             "row_num".to_owned(),
@@ -374,16 +374,12 @@ impl Runtime {
     }
 
     pub fn create_branch(&mut self, branch_id: &str, base_global_epoch: Option<i64>) -> Result<()> {
-        ensure_branch(&self.conn, branch_id, base_global_epoch)?;
+        branch::ensure(&self.conn, branch_id, base_global_epoch, now_ms())?;
         Ok(())
     }
 
     pub fn checkout_branch(&mut self, branch_id: &str) -> Result<()> {
-        self.branch_num = self.conn.query_row(
-            "SELECT branch_num FROM jazz_branch WHERE branch_id = ?",
-            params![branch_id],
-            |row| row.get(0),
-        )?;
+        self.branch_num = branch::checkout(&self.conn, branch_id)?;
         Ok(())
     }
 
@@ -501,11 +497,7 @@ impl Runtime {
     }
 
     fn active_branch_base_epoch(&self) -> Result<Option<i64>> {
-        Ok(self.conn.query_row(
-            "SELECT base_global_epoch FROM jazz_branch WHERE branch_num = ?",
-            params![self.branch_num],
-            |row| row.get(0),
-        )?)
+        branch::base_global_epoch(&self.conn, self.branch_num)
     }
 
     fn read_rows_from_current(&self, table_name: &str, overlay_main: bool) -> Result<Vec<RowView>> {
@@ -921,24 +913,6 @@ fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT outcome FROM jazz_tx WHERE tx_num = ?",
         params![tx_num],
-        |row| row.get(0),
-    )?)
-}
-
-fn ensure_branch(
-    conn: &Connection,
-    branch_id: &str,
-    base_global_epoch: Option<i64>,
-) -> Result<i64> {
-    let now = now_ms();
-    conn.execute(
-        "INSERT OR IGNORE INTO jazz_branch (branch_id, base_global_epoch, created_at)
-         VALUES (?, ?, ?)",
-        params![branch_id, base_global_epoch, now],
-    )?;
-    Ok(conn.query_row(
-        "SELECT branch_num FROM jazz_branch WHERE branch_id = ?",
-        params![branch_id],
         |row| row.get(0),
     )?)
 }

@@ -435,3 +435,12 @@ show both rows with that tx id.
 Decision: keep fixture transaction helpers for existing tests, but stop treating
 them as the only transaction constructor. Future transaction semantics should be
 implemented against generic row mutations first.
+
+## 2026-05-25 17:38 PDT
+
+Behavior-preserving module split started: branch SQL moved from `runtime.rs` to
+`branch.rs`. Tests remain green.
+
+Learning: small splits are cheap now that whole-system tests are broad. Continue
+peeling runtime responsibilities into branch/query/sync/mutation modules instead
+of letting `runtime.rs` become Attempt 2's `store.rs` again.
