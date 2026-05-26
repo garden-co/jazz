@@ -447,6 +447,31 @@ fn authority_acceptance_enriches_existing_transaction() {
 }
 
 #[test]
+fn global_epoch_can_accept_multiple_transactions() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let first = alice
+        .create_todo("todo-1", "First in epoch", false, "project-1")
+        .unwrap();
+    let second = alice
+        .create_todo("todo-2", "Second in epoch", false, "project-1")
+        .unwrap();
+
+    alice.accept_transaction_at_global(&first, 7).unwrap();
+    alice.accept_transaction_at_global(&second, 7).unwrap();
+
+    assert_eq!(
+        alice.transaction_info(&first).unwrap().global_epoch,
+        Some(7)
+    );
+    assert_eq!(
+        alice.transaction_info(&second).unwrap().global_epoch,
+        Some(7)
+    );
+}
+
+#[test]
 fn accepted_global_fate_update_reaches_peer_transaction_info() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();

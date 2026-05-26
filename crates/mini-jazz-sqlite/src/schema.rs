@@ -202,8 +202,7 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           outcome INTEGER NOT NULL,
           created_at INTEGER NOT NULL,
           metadata_json TEXT NOT NULL,
-          UNIQUE (node_num, local_epoch),
-          UNIQUE (global_epoch)
+          UNIQUE (node_num, local_epoch)
         );
 
         CREATE TABLE IF NOT EXISTS jazz_tx_receipt (

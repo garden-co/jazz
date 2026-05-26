@@ -975,3 +975,19 @@ transaction's write set.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, still
 50 tests.
+
+## 2026-05-25 18:36 PDT
+
+Starting global epoch multiplicity test. The schema currently has
+`UNIQUE(global_epoch)`. Need to clarify by implementation pressure whether a
+global epoch is a single transaction index or can represent an accepted set of
+transactions.
+
+## 2026-05-25 18:37 PDT
+
+Global epochs can now contain multiple accepted transactions. Removed
+`UNIQUE(global_epoch)` from `jazz_tx` and added a test accepting two txs at epoch 7. This aligns better with the "global epoch base as prefix" mental model and
+keeps room for an epoch to represent an authority step containing multiple txs.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+51 tests.
