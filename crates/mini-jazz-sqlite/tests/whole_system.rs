@@ -362,3 +362,40 @@ fn policy_filters_reads_through_required_parent_ref() {
     assert_eq!(scoped_bundle.history.len(), 1);
     assert_eq!(scoped_bundle.history[0].row_id, "todo-visible");
 }
+
+#[test]
+fn policy_denied_write_is_rejected_history_not_current_state() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let mut doc = BTreeMap::new();
+    doc.insert("title".to_owned(), json!("Alice-only doc"));
+    alice.insert_row("docs", "doc-1", doc).unwrap();
+    bob.apply_bundle(&alice.export_table_history("docs").unwrap())
+        .unwrap();
+
+    let mut comment = BTreeMap::new();
+    comment.insert("body".to_owned(), json!("Bob should not write this"));
+    comment.insert("doc".to_owned(), json!("doc-1"));
+    let rejected_tx = bob
+        .insert_row("comments", "comment-denied", comment)
+        .unwrap();
+
+    assert!(bob.read_rows("comments").unwrap().is_empty());
+    let stats = bob.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 2);
+    assert_eq!(stats.current_rows, 1);
+    assert_eq!(stats.rejected_transactions, 1);
+    assert!(stats.physical_tx_num_for(&rejected_tx).is_some());
+}

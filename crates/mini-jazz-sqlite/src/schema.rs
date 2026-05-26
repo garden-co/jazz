@@ -144,6 +144,12 @@ impl TableBuilder {
         self.table.write_policy = PolicyDef::CreatedByPrincipal;
     }
 
+    pub fn write_if_ref_readable(&mut self, field: &str) {
+        self.table.write_policy = PolicyDef::RefReadable {
+            field: field.to_owned(),
+        };
+    }
+
     pub fn read_if_ref_readable(&mut self, field: &str) {
         self.table.read_policy = PolicyDef::RefReadable {
             field: field.to_owned(),

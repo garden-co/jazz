@@ -130,8 +130,15 @@ impl Runtime {
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
         let row_num = ensure_row_id(&db, table_name, id)?;
-        let allowed =
-            policy::write_allowed(&db, &table.name, &write_policy, row_num, &self.principal)?;
+        let allowed = policy::write_allowed(
+            &db,
+            &self.schema,
+            &table,
+            &write_policy,
+            row_num,
+            &values,
+            &self.principal,
+        )?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
         }

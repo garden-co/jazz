@@ -254,3 +254,18 @@ current policy-filtered projection, include that row's full history." This is
 simple and aligns with the current spec direction of syncing full row history
 for result rows, but it will need later scrutiny for pagination and for policy
 changes that make only some historical versions sensitive.
+
+## 2026-05-25 17:15 PDT
+
+Write-policy slice is green. A table can declare `write_if_ref_readable("doc")`;
+if Bob attempts to create a child row pointing at Alice's unreadable doc, the
+write creates a transaction and history row, marks the transaction rejected with
+`policy_denied`, and skips current projection.
+
+Decision: keep denied writes replayable by storing the attempted history under a
+mutable rejected tx fate. This matches the user's preferred model and so far
+seems enough for projection rebuild and sync reasoning.
+
+Open issue: creation policies based on `CreatedByPrincipal` are awkward because
+a brand-new row has no prior current version. We will need separate create vs
+update policy semantics or a more expressive policy language.
