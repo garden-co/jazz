@@ -1131,3 +1131,23 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
 
 Open issue: read-set export/sync and predicate/range read sets are still absent.
 This only records direct row dependencies for write-policy checks.
+
+## 2026-05-25 18:52 PDT
+
+Starting policy read-set sync. Local read-set materialization is not enough:
+receivers need the read set too if it will inform validation, causality, or
+debugging after sync.
+
+## 2026-05-25 18:55 PDT
+
+Policy read-set sync is green. `Bundle` now carries `reads`, export includes
+`jazz_tx_read`, and apply recreates read-set rows on the receiver. A tx whose
+write policy depended on a parent project now preserves that dependency after
+sync.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, now
+59 tests.
+
+Design note: read-set export is currently broad: all local read-set rows are
+included in every bundle. That is acceptable for the attempt but too coarse for
+real sync scopes.

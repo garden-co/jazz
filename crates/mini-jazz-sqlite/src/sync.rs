@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 pub struct Bundle {
     pub branches: Vec<BranchRecord>,
     pub txs: Vec<TxRecord>,
+    pub reads: Vec<ReadRecord>,
     pub history: Vec<HistoryRecord>,
 }
 
@@ -26,6 +27,14 @@ pub struct TxRecord {
     pub conflict_mode: i64,
     pub outcome: i64,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReadRecord {
+    pub tx_id: String,
+    pub table: String,
+    pub row_id: String,
+    pub reason: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1419,6 +1419,49 @@ fn write_policy_parent_check_records_policy_read_set() {
 }
 
 #[test]
+fn policy_read_set_survives_sync() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Allowed by parent")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    assert_eq!(
+        peer.transaction_policy_read_rows(&tx).unwrap(),
+        vec![("projects".to_owned(), "project-1".to_owned())]
+    );
+}
+
+#[test]
 fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

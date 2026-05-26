@@ -1,7 +1,7 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::RowsSubscription;
-use crate::sync::{BranchRecord, Bundle, HistoryRecord, TxRecord};
+use crate::sync::{BranchRecord, Bundle, HistoryRecord, ReadRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{branch, policy, projection, query, schema, storage, tx, Result, Storage};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -232,11 +232,13 @@ impl Runtime {
 
     pub fn export_query_scope_open_todos(&self) -> Result<Bundle> {
         let txs = export_txs(&self.conn)?;
+        let reads = export_reads(&self.conn)?;
         let history = export_open_todo_scope_history(&self.conn)?;
         let branches = export_branch_records_for_history(&self.conn, &history)?;
         Ok(Bundle {
             branches,
             txs,
+            reads,
             history,
         })
     }
@@ -244,6 +246,7 @@ impl Runtime {
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
         let txs = export_txs(&self.conn)?;
+        let reads = export_reads(&self.conn)?;
         let history = export_table_history(
             &self.conn,
             &self.schema,
@@ -257,6 +260,7 @@ impl Runtime {
         Ok(Bundle {
             branches,
             txs,
+            reads,
             history,
         })
     }
@@ -275,6 +279,7 @@ impl Runtime {
             .collect::<Result<Vec<_>>>()?;
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
         let txs = export_txs(&self.conn)?;
+        let reads = export_reads(&self.conn)?;
         let mut history = export_visible_table_history(
             &self.conn,
             &self.schema,
@@ -300,6 +305,7 @@ impl Runtime {
         Ok(Bundle {
             branches,
             txs,
+            reads,
             history,
         })
     }
@@ -348,6 +354,11 @@ impl Runtime {
                     params![tx_num, tx::TIER_GLOBAL, global_epoch],
                 )?;
             }
+        }
+        for read_record in &bundle.reads {
+            let tx_num = tx::tx_num(&db, &read_record.tx_id)?;
+            let row_num = ensure_row_id(&db, &read_record.table, &read_record.row_id)?;
+            record_tx_read(&db, tx_num, &read_record.table, row_num, read_record.reason)?;
         }
         for table in schema.tables() {
             db.execute(
@@ -1090,6 +1101,27 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
             created_at: row.get(6)?,
+        })
+    })?;
+    records
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn export_reads(conn: &Connection) -> Result<Vec<ReadRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT tx.tx_id, reads.table_name, ids.row_id, reads.reason
+         FROM jazz_tx_read reads
+         JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+         JOIN jazz_row_id ids ON ids.row_num = reads.row_num
+         ORDER BY tx.tx_num, reads.table_name, ids.row_id, reads.reason",
+    )?;
+    let records = stmt.query_map([], |row| {
+        Ok(ReadRecord {
+            tx_id: row.get(0)?,
+            table: row.get(1)?,
+            row_id: row.get(2)?,
+            reason: row.get(3)?,
         })
     })?;
     records
