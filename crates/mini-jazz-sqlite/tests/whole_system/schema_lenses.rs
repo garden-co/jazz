@@ -138,6 +138,67 @@ fn renamed_ref_lens_participates_in_read_policy() {
 }
 
 #[test]
+fn renamed_ref_lens_participates_in_untrusted_write_policy_validation() {
+    let old_schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+        });
+    let new_schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_lens("workspace", "project", "projects");
+            table.write_if_ref_readable("workspace");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", old_schema.clone())
+            .unwrap();
+    let mut bob =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "bob-node", "bob", old_schema)
+            .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", new_schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let project_bundle = alice.export_table_history("projects").unwrap();
+    bob.apply_bundle(&project_bundle).unwrap();
+    edge.apply_bundle(&project_bundle).unwrap();
+
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Should be rejected through lens")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    edge.apply_untrusted_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        edge.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn user_columns_with_system_prefix_are_escaped_physically() {
     let schema = SchemaDef::new().table("records", |table| {
         table.text("j_title");

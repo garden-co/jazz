@@ -1556,3 +1556,21 @@ effective-branch parent policy into SQL.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 branch_ref_policy_uses_branch_local_parent_visibility` passes.
+
+## 2026-05-25 19:35 PDT
+
+Starting lens plus write-policy validation coverage from sidecar review. We have
+read-policy lens coverage, but untrusted apply should also validate
+`write_if_ref_readable` correctly when the receiving schema renamed the ref via
+a lens.
+
+## 2026-05-25 19:37 PDT
+
+Lens plus write-policy validation is green and found a compatibility bug.
+Untrusted apply of an old-schema payload failed validation because
+`write_if_ref_readable("workspace")` only looked for the semantic field name,
+not the stored/lensed name `project`. Policy write validation now falls back to
+`field.storage_name`.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+renamed_ref_lens_participates_in_untrusted_write_policy_validation` passes.

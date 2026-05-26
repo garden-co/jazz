@@ -46,6 +46,7 @@ pub(crate) fn write_allowed(
             };
             let ref_id = values
                 .get(field)
+                .or_else(|| values.get(&field_def.storage_name))
                 .and_then(JsonValue::as_str)
                 .ok_or_else(|| crate::Error::new(format!("expected ref id for {field}")))?;
             let ref_row_num = crate::rows::row_num(db, ref_id)?;
