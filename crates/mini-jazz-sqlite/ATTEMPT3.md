@@ -1877,3 +1877,15 @@ now record reason `2` reads for the row version they depend on, alongside reason
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 generic_update_records_previous_row_read_set` passes, and full
 `cargo test -p mini-jazz-sqlite` passes with 100 whole-system tests.
+
+## 2026-05-25 20:13 PDT
+
+Recursive query tombstone export is green. A peer that had previously synced a
+recursive root+child now receives the deleted child tombstone when the child
+drops out of the recursive result, so it can converge to root-only. The
+implementation currently covers deleted direct descendants of the visible
+recursive result; fully recursive deleted subtrees remain a future sharpening.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+recursive_query_scope_sync_exports_deleted_descendant_tombstone` passes, and
+full `cargo test -p mini-jazz-sqlite` passes with 101 whole-system tests.

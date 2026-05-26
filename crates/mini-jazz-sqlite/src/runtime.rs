@@ -318,6 +318,14 @@ impl Runtime {
             &branch_nums,
             Some(&row_nums),
         )?;
+        history.extend(export_deleted_recursive_descendant_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            parent_field,
+            &branch_nums,
+            &row_nums,
+        )?);
         history.extend(export_policy_dependency_history(
             &self.conn,
             &self.schema,
@@ -2285,6 +2293,60 @@ fn export_deleted_table_history(
     let mut stmt = conn.prepare(&sql)?;
     let row_nums = stmt
         .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), None)
+}
+
+fn export_deleted_recursive_descendant_history(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    parent_field: &str,
+    branch_nums: &[i64],
+    parent_row_nums: &[i64],
+) -> Result<Vec<HistoryRecord>> {
+    if parent_row_nums.is_empty() {
+        return Ok(Vec::new());
+    }
+    let table = schema.table_def(table_name)?;
+    let field = table
+        .fields
+        .iter()
+        .find(|field| field.name == parent_field)
+        .ok_or_else(|| crate::Error::new(format!("unknown ref field {parent_field}")))?;
+    let parent_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let sql = format!(
+        "SELECT h.row_num
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.op = 3
+           AND {}
+           AND h.{parent_column} IN ({parent_placeholders})
+           AND tx.outcome != {}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM {history_table} newer
+             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+             WHERE newer.row_num = h.row_num
+               AND newer.j_branch_num = h.j_branch_num
+               AND newer_tx.outcome != {}
+               AND newer.tx_num > h.tx_num
+           )",
+        crate::schema::history_table(table_name),
+        branch_filter_sql("h", branch_nums),
+        tx::OUTCOME_REJECTED,
+        tx::OUTCOME_REJECTED,
+        parent_placeholders = (0..parent_row_nums.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", "),
+        history_table = crate::schema::history_table(table_name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_nums = stmt
+        .query_map(params_from_iter(parent_row_nums.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), None)
 }
