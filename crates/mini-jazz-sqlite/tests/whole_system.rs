@@ -578,3 +578,29 @@ fn rename_lens_reads_old_storage_column_as_new_field_name() {
     assert_eq!(rows[0].values["name"], json!("Old title"));
     assert!(!rows[0].values.contains_key("title"));
 }
+
+#[test]
+fn branch_sync_preserves_branch_provenance() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    let mut task = BTreeMap::new();
+    task.insert("title".to_owned(), json!("Draft sync"));
+    task.insert("done".to_owned(), json!(false));
+    alice.insert_row("tasks", "task-draft", task).unwrap();
+
+    let bundle = alice.export_table_history("tasks").unwrap();
+    assert_eq!(bundle.history[0].branch_id, "draft");
+    bob.apply_bundle(&bundle).unwrap();
+
+    assert!(bob.read_rows("tasks").unwrap().is_empty());
+    bob.checkout_branch("draft").unwrap();
+    assert_eq!(bob.read_rows("tasks").unwrap()[0].id, "task-draft");
+}

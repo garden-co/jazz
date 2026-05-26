@@ -22,6 +22,7 @@ pub struct TxRecord {
 pub struct HistoryRecord {
     pub table: String,
     pub row_id: String,
+    pub branch_id: String,
     pub tx_id: String,
     pub op: i64,
     pub values: BTreeMap<String, JsonValue>,

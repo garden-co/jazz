@@ -353,3 +353,17 @@ Limitations:
 - No lens catalogue, compatibility check, generated inverse lens, or
   copy-on-write-forward mechanism exists yet.
 - Policy/lens composition is untested.
+
+## 2026-05-25 17:27 PDT
+
+Branch sync provenance is green. `HistoryRecord` now carries `branch_id`; apply
+ensures the branch exists locally and stores history/current rows under that
+branch. A draft-row bundle remains invisible on Bob's main branch and appears
+after Bob checks out `draft`.
+
+Decision: branch identity must be part of row-version sync payloads, not merely
+ambient connection/session state.
+
+Limitation: branch base provenance is still not included in bundle metadata.
+The receiver can recreate the branch id, but not yet its precise source/base
+snapshot or multi-base provenance.

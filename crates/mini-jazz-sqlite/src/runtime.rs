@@ -304,6 +304,7 @@ impl Runtime {
         let table = schema.table_def(&record.table)?;
         let row_num = ensure_row_id(db, &record.table, &record.row_id)?;
         let tx_num = tx::tx_num(db, &record.tx_id)?;
+        let branch_num = ensure_branch(db, &record.branch_id, None)?;
 
         let mut columns = vec![
             "row_num".to_owned(),
@@ -314,7 +315,7 @@ impl Runtime {
         let mut values = vec![
             rusqlite::types::Value::Integer(row_num),
             rusqlite::types::Value::Integer(tx_num),
-            rusqlite::types::Value::Integer(1),
+            rusqlite::types::Value::Integer(branch_num),
             rusqlite::types::Value::Integer(record.op),
         ];
         for field in &table.fields {
@@ -360,7 +361,7 @@ impl Runtime {
             ];
             let mut current_values = vec![
                 rusqlite::types::Value::Integer(row_num),
-                rusqlite::types::Value::Integer(1),
+                rusqlite::types::Value::Integer(branch_num),
                 rusqlite::types::Value::Integer(tx_num),
                 rusqlite::types::Value::Integer(0),
             ];
@@ -423,12 +424,7 @@ impl Runtime {
     }
 
     pub fn create_branch(&mut self, branch_id: &str, base_global_epoch: Option<i64>) -> Result<()> {
-        let now = now_ms();
-        self.conn.execute(
-            "INSERT OR IGNORE INTO jazz_branch (branch_id, base_global_epoch, created_at)
-             VALUES (?, ?, ?)",
-            params![branch_id, base_global_epoch, now],
-        )?;
+        ensure_branch(&self.conn, branch_id, base_global_epoch)?;
         Ok(())
     }
 
@@ -853,6 +849,24 @@ fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {
     )?)
 }
 
+fn ensure_branch(
+    conn: &Connection,
+    branch_id: &str,
+    base_global_epoch: Option<i64>,
+) -> Result<i64> {
+    let now = now_ms();
+    conn.execute(
+        "INSERT OR IGNORE INTO jazz_branch (branch_id, base_global_epoch, created_at)
+         VALUES (?, ?, ?)",
+        params![branch_id, base_global_epoch, now],
+    )?;
+    Ok(conn.query_row(
+        "SELECT branch_num FROM jazz_branch WHERE branch_id = ?",
+        params![branch_id],
+        |row| row.get(0),
+    )?)
+}
+
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     let mut stmt = conn.prepare(
         "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.outcome, tx.created_at
@@ -910,6 +924,7 @@ fn export_open_todo_projects(conn: &Connection) -> Result<Vec<HistoryRecord>> {
         Ok(HistoryRecord {
             table: "projects".to_owned(),
             row_id: row.get(0)?,
+            branch_id: "main".to_owned(),
             tx_id: row.get(1)?,
             op: row.get(2)?,
             values,
@@ -953,6 +968,7 @@ fn export_open_todos(conn: &Connection) -> Result<Vec<HistoryRecord>> {
         Ok(HistoryRecord {
             table: "todos".to_owned(),
             row_id: row.get(0)?,
+            branch_id: "main".to_owned(),
             tx_id: row.get(1)?,
             op: row.get(2)?,
             values,
@@ -982,6 +998,7 @@ fn export_table_history(
         .collect::<Vec<_>>();
     let mut select_columns = vec![
         "ids.row_id".to_owned(),
+        "branch.branch_id".to_owned(),
         "tx.tx_id".to_owned(),
         "h.op".to_owned(),
     ];
@@ -997,11 +1014,13 @@ fn export_table_history(
          FROM {} h
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
          WHERE EXISTS (
            SELECT 1
            FROM {} current
            JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
            WHERE current.row_num = h.row_num
+             AND current.j_branch_num = h.j_branch_num
              AND current.is_deleted = 0
              AND current_tx.outcome != {}
              AND {policy_sql}
@@ -1013,7 +1032,7 @@ fn export_table_history(
         tx::OUTCOME_REJECTED,
     );
     let mut stmt = conn.prepare(&sql)?;
-    let row_width = 3 + table.fields.len() + 4;
+    let row_width = 4 + table.fields.len() + 4;
     let rows = stmt.query_map([], |row| {
         (0..row_width)
             .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -1027,15 +1046,16 @@ fn export_table_history(
         for (idx, field) in table.fields.iter().enumerate() {
             values.insert(
                 field.name.clone(),
-                sql_value_to_json(conn, field, &row[idx + 3])?,
+                sql_value_to_json(conn, field, &row[idx + 4])?,
             );
         }
-        let sys = 3 + table.fields.len();
+        let sys = 4 + table.fields.len();
         records.push(HistoryRecord {
             table: table_name.to_owned(),
             row_id: text_value(&row[0], "row_id")?,
-            tx_id: text_value(&row[1], "tx_id")?,
-            op: integer_value(&row[2], "op")?,
+            branch_id: text_value(&row[1], "branch_id")?,
+            tx_id: text_value(&row[2], "tx_id")?,
+            op: integer_value(&row[3], "op")?,
             values,
             created_at: integer_value(&row[sys], "j_created_at")?,
             updated_at: integer_value(&row[sys + 1], "j_updated_at")?,
