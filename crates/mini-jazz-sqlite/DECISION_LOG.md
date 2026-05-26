@@ -712,3 +712,9 @@ Design lesson: adding read-version causality touches three boundaries at once: s
 Added a first restore/undelete operation for generic rows. `restore_deleted_row(table, id)` reads the latest delete tombstone values and writes a new visible history version, surviving current-projection rebuild. Full mini crate suite is green with 194 tests.
 
 Design lesson: undoing a delete can stay append-only: restore is not removal of the tombstone, it is a new transaction derived from the tombstone's stored values. The current API is minimal and needs policy semantics, sync coverage, and branch-base behavior before being considered product-shaped.
+
+## 2026-05-26 02:50 PDT
+
+Covered restore through sync. A peer that imports insert, delete, and restore history sees the restored row as current. Full mini crate suite is green with 195 tests.
+
+Design lesson: restore-as-new-history composes with the existing bundle protocol without a special operation kind. This reinforces treating undo/restore as semantic writes over preserved history, while leaving product-level authorization and UX naming open.

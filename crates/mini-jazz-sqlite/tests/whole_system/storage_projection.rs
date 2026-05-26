@@ -165,3 +165,31 @@ fn deleted_generic_row_can_be_restored_as_new_history_version() {
     alice.rebuild_current_projection().unwrap();
     assert_eq!(alice.read_rows("notes").unwrap().len(), 1);
 }
+
+#[test]
+fn restored_deleted_row_syncs_to_peer() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Sync restore")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.delete_row("notes", "note-1").unwrap();
+    alice.restore_deleted_row("notes", "note-1").unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    let rows = peer.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("Sync restore"));
+}
