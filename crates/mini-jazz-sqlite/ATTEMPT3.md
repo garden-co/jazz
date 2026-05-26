@@ -1272,3 +1272,23 @@ separate integration crates.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, 64
 tests.
+
+## 2026-05-25 19:08 PDT
+
+Starting durable-edge rejection topology coverage. We have local rejection
+repair, durable worker restart repair, and automatic trusted-edge validation,
+but not yet one test that combines memory clients, a durable edge, an optimistic
+invalid transaction, edge restart, and rejection propagation back to the memory
+client.
+
+## 2026-05-25 19:09 PDT
+
+Durable-edge rejection topology is green and found a real metadata gap. The
+current projection repaired from rejected `outcome`, but `TxRecord` did not
+carry the rejection code, so a memory client could lose the user-facing
+`policy_denied` reason after receiving fate from the durable edge. Added
+`rejection_code` to transaction sync records and restored `jazz_tx_rejection`
+on apply.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+durable_edge_rejects_after_restart_and_repairs_memory_client` passes.

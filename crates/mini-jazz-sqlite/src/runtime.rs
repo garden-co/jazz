@@ -372,6 +372,16 @@ impl Runtime {
                     tx_record.created_at
                 ],
             )?;
+            if tx_record.outcome == tx::OUTCOME_REJECTED {
+                if let Some(code) = &tx_record.rejection_code {
+                    let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
+                    db.execute(
+                        "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
+                         VALUES (?, ?, '{}')",
+                        params![tx_num, code],
+                    )?;
+                }
+            }
             if let Some(global_epoch) = tx_record.global_epoch {
                 let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
                 db.execute(
@@ -1140,9 +1150,10 @@ fn tx_outcome(conn: &Connection, tx_num: i64) -> Result<i64> {
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, tx.created_at
+        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, tx.created_at
          FROM jazz_tx tx
          JOIN jazz_node node ON node.node_num = tx.node_num
+         LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
          ORDER BY tx.tx_num",
     )?;
     let records = stmt.query_map([], |row| {
@@ -1153,7 +1164,8 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             global_epoch: row.get(3)?,
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
-            created_at: row.get(6)?,
+            rejection_code: row.get(6)?,
+            created_at: row.get(7)?,
         })
     })?;
     records

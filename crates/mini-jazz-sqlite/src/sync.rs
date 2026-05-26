@@ -26,6 +26,7 @@ pub struct TxRecord {
     pub global_epoch: Option<i64>,
     pub conflict_mode: i64,
     pub outcome: i64,
+    pub rejection_code: Option<String>,
     pub created_at: i64,
 }
 

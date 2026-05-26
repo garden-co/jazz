@@ -345,6 +345,76 @@ fn trusted_edge_authoritatively_rejects_untrusted_policy_violation_on_apply() {
 }
 
 #[test]
+fn durable_edge_rejects_after_restart_and_repairs_memory_client() {
+    let dir = tempdir().unwrap();
+    let edge_path = dir.path().join("edge.sqlite");
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "bob-node", "bob", schema.clone())
+            .unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let project_bundle = alice.export_table_history("projects").unwrap();
+    bob.apply_bundle(&project_bundle).unwrap();
+
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Rejected after edge restart")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    assert_eq!(bob.read_rows("todos").unwrap().len(), 1);
+
+    {
+        let mut edge = Runtime::open_trusted_with_schema(
+            Storage::File(edge_path.clone()),
+            "edge",
+            schema.clone(),
+        )
+        .unwrap();
+        edge.apply_bundle(&project_bundle).unwrap();
+        edge.apply_bundle(&bob.export_table_history("todos").unwrap())
+            .unwrap();
+        assert_eq!(edge.read_rows("todos").unwrap().len(), 1);
+    }
+
+    let mut edge =
+        Runtime::open_trusted_with_schema(Storage::File(edge_path), "edge", schema).unwrap();
+    edge.apply_untrusted_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+
+    bob.apply_bundle(&edge.export_table_history("todos").unwrap())
+        .unwrap();
+    assert!(bob.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        bob.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn policy_denied_write_is_rejected_history_not_current_state() {
     let schema = SchemaDef::new()
         .table("docs", |table| {
