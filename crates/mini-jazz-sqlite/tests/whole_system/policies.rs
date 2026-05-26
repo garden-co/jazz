@@ -272,6 +272,74 @@ fn trusted_peer_can_read_applied_policy_scoped_facts_without_user_principal() {
 }
 
 #[test]
+fn trusted_transport_history_still_filters_untrusted_current_reads() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut edge =
+        Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema.clone()).unwrap();
+    let mut alice_peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-alice",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible to Alice")),
+                ("project".to_owned(), json!("project-alice")),
+            ]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+    )
+    .unwrap();
+    bob.insert_row(
+        "todos",
+        "todo-bob",
+        BTreeMap::from([
+            ("title".to_owned(), json!("Hidden from Alice")),
+            ("project".to_owned(), json!("project-bob")),
+        ]),
+    )
+    .unwrap();
+
+    edge.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    edge.apply_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+    assert_eq!(edge.read_rows("todos").unwrap().len(), 2);
+
+    alice_peer
+        .apply_bundle(&edge.export_table_history("todos").unwrap())
+        .unwrap();
+    let visible = alice_peer.read_rows("todos").unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, "todo-alice");
+}
+
+#[test]
 fn trusted_peer_generic_transaction_bypasses_user_write_policy() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

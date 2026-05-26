@@ -1151,6 +1151,19 @@ new repair mechanism.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
 
+## 2026-05-26 04:24 PDT
+
+Added a trusted-transport/untrusted-visibility invariant. A trusted edge can
+hold and export both Alice and Bob policy-protected rows, but an Alice peer that
+applies that broad history still reads only Alice-visible rows from current
+state.
+
+Discovery: this cleanly separates sync/storage richness from session
+visibility. The current projection may contain history from trusted transport,
+but `read_rows` remains policy-filtered for ordinary principals.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 229 whole-system tests.
+
 ## 2026-05-26 04:23 PDT
 
 Narrowed one todo-specific query descriptor wart. The legacy
