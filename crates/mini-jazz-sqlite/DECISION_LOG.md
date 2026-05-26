@@ -1682,3 +1682,18 @@ Discovery: the spec should now talk about product-grade branch merge APIs as
 the deferred layer, not multi-source reads themselves. The prototype already
 has enough multi-source semantics to test the core visibility and ambiguity
 rules.
+
+## 2026-05-26 05:46 PDT
+
+Added a sync test for resolving a conflict that comes through transitive branch
+sources. The first red run showed that the resolved row arrived on the peer,
+but the intermediate branch provenance did not, so candidate inspection lost
+the leaf source rows. `include_branch_record` now recurses through source
+records even when the branch already has a history row in the bundle.
+
+Discovery: branch metadata export cannot be keyed only by the set of branches
+with row history. A branch may have both a local row and source provenance; the
+local row makes the branch record present, but recursive source metadata is
+still required to reconstruct conflict provenance and future branch reads.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 264 whole-system tests.

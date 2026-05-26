@@ -1566,6 +1566,70 @@ fn branch_update_after_transitive_conflict_resolution_uses_branch_local_base() {
 }
 
 #[test]
+fn branch_transitive_conflict_resolution_survives_sync() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .create_branch_from_branches("middle-left", &["left"])
+        .unwrap();
+    alice
+        .create_branch_from_branches("middle-right", &["right"])
+        .unwrap();
+    alice
+        .create_branch_from_branches("merge", &["middle-left", "middle-right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    alice
+        .resolve_row_conflict(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Resolved title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    bob.apply_bundle(&alice.export_table_history("tasks").unwrap())
+        .unwrap();
+    bob.checkout_branch("merge").unwrap();
+
+    let rows = bob.read_rows_with_conflict_meta("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Resolved title"));
+    assert_eq!(rows[0].conflict_count, 0);
+    assert_eq!(bob.read_row_candidates("tasks", "task-1").unwrap().len(), 2);
+}
+
+#[test]
 fn branch_query_scope_sync_preserves_transitive_source_branch_rows() {
     let schema = support::tasks_schema();
     let mut alice =

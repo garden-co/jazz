@@ -3695,9 +3695,6 @@ fn include_branch_record(
             ))
         },
     )?;
-    if records.iter().any(|record| record.branch_id == branch_id) {
-        return Ok(());
-    }
     let mut stmt = conn.prepare(
         "SELECT source.branch_num, source.branch_id
          FROM jazz_branch_source branch_source
@@ -3714,12 +3711,14 @@ fn include_branch_record(
         .iter()
         .map(|(_, branch_id)| branch_id.clone())
         .collect();
-    records.push(BranchRecord {
-        branch_id,
-        base_global_epoch,
-        source_branch_ids,
-        source_version,
-    });
+    if !records.iter().any(|record| record.branch_id == branch_id) {
+        records.push(BranchRecord {
+            branch_id,
+            base_global_epoch,
+            source_branch_ids,
+            source_version,
+        });
+    }
     for (source_branch_num, _) in source_branches {
         include_branch_record(conn, records, source_branch_num)?;
     }
