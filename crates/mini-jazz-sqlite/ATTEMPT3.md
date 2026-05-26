@@ -142,3 +142,63 @@ Next structural goal:
 
 This is worth doing before policy/branches/lenses so those features attach to
 the real architecture instead of to hardcoded tables.
+
+## 2026-05-25 17:02 PDT
+
+Autonomous stretch begins. Target runtime: at least until 21:00 PDT.
+
+Operating rules for the stretch:
+
+- keep using `date` before log entries
+- prefer whole-system invariant tests over helper tests
+- keep the runtime generic; fixture helpers are allowed only as wrappers
+- make decisions when underspecified and log them
+- commit at larger coherent checkpoints
+- use subagents for review/planning sidecars, but keep implementation direction
+  centralized
+
+Near-term plan:
+
+1. move query-scoped export/apply out of `runtime.rs`
+2. add generic query/read support instead of todo-only reads
+3. add first policy slice
+4. add subscriptions/diffs
+5. add branch view baseline
+6. add narrow lens slice
+7. add crash/reconnect style durable topology tests
+
+## 2026-05-25 17:04 PDT
+
+Subagent feedback confirmed the genericity risk: the crate was halfway migrated
+to generic schemas but sync/projection/runtime still had todo-specific gravity.
+
+Immediate correction:
+
+- make bundle payloads generic `HistoryRecord`s
+- make ref storage column naming uniform as `{field}_row_num`
+- finish compile before adding any more feature behavior
+- next invariant after compile: generic schema sync/rebuild, not another todo
+  fixture test
+
+## 2026-05-25 17:07 PDT
+
+Generic bundle payload migration is repaired and green again: 12 whole-system
+tests pass. Sync payload rows are now `HistoryRecord { table, row_id, tx_id,
+op, values, ... }` instead of fixture-specific project/todo structs.
+
+Decision: keep fixture query exports for now, but make their payload generic.
+This preserves the currently tested product behavior while removing a bad
+architectural dependency before policies/lenses arrive.
+
+Next correction: make projection clear/rebuild schema-driven. A generic runtime
+with a todo-specific projector is still too misleading for Attempt 3.
+
+## 2026-05-25 17:08 PDT
+
+Projection rebuild/clear is now schema-driven and still green. The non-todo
+schema test now clears and rebuilds current state from history, so the generic
+path is not just DDL/write-only.
+
+Decision: keep `Runtime::open()` as a fixture convenience, but require core
+maintenance behavior such as projection rebuild to operate from `SchemaDef`.
+The next remaining fixture gravity is query/read/export helpers.

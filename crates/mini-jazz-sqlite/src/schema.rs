@@ -186,7 +186,7 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
         .map(|field| {
             format!(
                 "{} {}",
-                quote_ident(storage_column(field)),
+                quote_ident(&storage_column(field)),
                 sql_type(&field.kind)
             )
         })
@@ -246,10 +246,10 @@ pub(crate) fn current_table(table: &str) -> String {
     quote_ident(&format!("{table}__schema_v1_current"))
 }
 
-pub(crate) fn storage_column(field: &FieldDef) -> &str {
+pub(crate) fn storage_column(field: &FieldDef) -> String {
     match field.kind {
-        FieldKind::Ref { .. } => ref_storage_column(&field.name),
-        _ => &field.name,
+        FieldKind::Ref { .. } => format!("{}_row_num", field.name),
+        _ => field.name.clone(),
     }
 }
 
@@ -285,13 +285,6 @@ pub(crate) fn storage_column_name(column: &str) -> String {
         "$updatedAt" => "j_updated_at",
         other => other,
     })
-}
-
-fn ref_storage_column(name: &str) -> &str {
-    match name {
-        "project" => "project_row_num",
-        other => other,
-    }
 }
 
 fn sql_type(kind: &FieldKind) -> &'static str {

@@ -253,4 +253,12 @@ fn runtime_can_install_and_write_a_non_todo_schema() {
     assert_eq!(stats.current_rows, 1);
     assert!(stats.physical_tx_num_for(&tx).is_some());
     assert!(runtime.physical_row_num_for("note-1").is_ok());
+
+    runtime.clear_current_projection_for_test().unwrap();
+    assert_eq!(runtime.storage_stats().unwrap().current_rows, 0);
+
+    runtime.rebuild_current_projection().unwrap();
+    let rebuilt = runtime.storage_stats().unwrap();
+    assert_eq!(rebuilt.history_rows, 1);
+    assert_eq!(rebuilt.current_rows, 1);
 }

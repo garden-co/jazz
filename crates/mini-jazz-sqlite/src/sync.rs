@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bundle {
     pub txs: Vec<TxRecord>,
-    pub projects: Vec<ProjectRecord>,
-    pub todos: Vec<TodoRecord>,
+    pub history: Vec<HistoryRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -17,23 +19,12 @@ pub struct TxRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ProjectRecord {
+pub struct HistoryRecord {
+    pub table: String,
     pub row_id: String,
     pub tx_id: String,
-    pub title: String,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub created_by: String,
-    pub updated_by: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TodoRecord {
-    pub row_id: String,
-    pub tx_id: String,
-    pub title: String,
-    pub done: bool,
-    pub project_id: String,
+    pub op: i64,
+    pub values: BTreeMap<String, JsonValue>,
     pub created_at: i64,
     pub updated_at: i64,
     pub created_by: String,

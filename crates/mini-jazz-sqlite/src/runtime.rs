@@ -1,6 +1,6 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, row_num, NewTodo};
 use crate::schema::SchemaDef;
-use crate::sync::{Bundle, ProjectRecord, TodoRecord, TxRecord};
+use crate::sync::{Bundle, HistoryRecord, TxRecord};
 use crate::types::{StorageStats, TodoView, TransactionInfo};
 use crate::{projection, schema, storage, tx, Result, Storage};
 use rusqlite::{params, params_from_iter, Connection};
@@ -141,7 +141,7 @@ impl Runtime {
             let value = values
                 .get(&field.name)
                 .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
-            columns.push(crate::schema::quote_ident(crate::schema::storage_column(
+            columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
                 field,
             )));
             sql_values.push(crate::schema::field_sql_value(
@@ -228,16 +228,12 @@ impl Runtime {
 
     pub fn export_query_scope_open_todos(&self) -> Result<Bundle> {
         let txs = export_txs(&self.conn)?;
-        let projects = export_projects(&self.conn)?;
-        let todos = export_todos(&self.conn)?;
-        Ok(Bundle {
-            txs,
-            projects,
-            todos,
-        })
+        let history = export_open_todo_scope_history(&self.conn)?;
+        Ok(Bundle { txs, history })
     }
 
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
+        let schema = self.schema.clone();
         let db = self.conn.transaction()?;
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
@@ -256,80 +252,81 @@ impl Runtime {
                 ],
             )?;
         }
-        for project in &bundle.projects {
-            let row_num = ensure_row_id(&db, "projects", &project.row_id)?;
-            let tx_num = tx::tx_num(&db, &project.tx_id)?;
-            db.execute(
-                "INSERT OR IGNORE INTO projects__schema_v1_history
-                 (row_num, tx_num, op, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-                 VALUES (?, ?, 1, ?, ?, ?, ?, ?)",
-                params![
-                    row_num,
-                    tx_num,
-                    project.title,
-                    project.created_at,
-                    project.updated_at,
-                    project.created_by,
-                    project.updated_by
-                ],
-            )?;
-            if tx_outcome(&db, tx_num)? != tx::OUTCOME_REJECTED {
-                db.execute(
-                    "INSERT OR REPLACE INTO projects__schema_v1_current
-                     (row_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
-                     VALUES (?, ?, 0, ?, ?, ?, ?, ?)",
-                    params![
-                        row_num,
-                        tx_num,
-                        project.title,
-                        project.created_at,
-                        project.updated_at,
-                        project.created_by,
-                        project.updated_by
-                    ],
-                )?;
-            }
-        }
-        for todo in &bundle.todos {
-            let row_num = ensure_row_id(&db, "todos", &todo.row_id)?;
-            let project_row_num = ensure_row_id(&db, "projects", &todo.project_id)?;
-            let tx_num = tx::tx_num(&db, &todo.tx_id)?;
-            db.execute(
-                "INSERT OR IGNORE INTO todos__schema_v1_history
-                 (row_num, tx_num, op, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-                 VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    row_num,
-                    tx_num,
-                    todo.title,
-                    i64::from(todo.done),
-                    project_row_num,
-                    todo.created_at,
-                    todo.updated_at,
-                    todo.created_by,
-                    todo.updated_by
-                ],
-            )?;
-            if tx_outcome(&db, tx_num)? != tx::OUTCOME_REJECTED {
-                db.execute(
-                    "INSERT OR REPLACE INTO todos__schema_v1_current
-                     (row_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
-                     VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        row_num,
-                        tx_num,
-                        todo.title,
-                        i64::from(todo.done),
-                        project_row_num,
-                        todo.created_at,
-                        todo.updated_at,
-                        todo.created_by,
-                        todo.updated_by
-                    ],
-                )?;
-            }
+        for record in &bundle.history {
+            Self::apply_history_record(&schema, &db, record)?;
         }
         db.commit()?;
+        Ok(())
+    }
+
+    fn apply_history_record(
+        schema: &SchemaDef,
+        db: &Connection,
+        record: &HistoryRecord,
+    ) -> Result<()> {
+        let table = schema.table_def(&record.table)?;
+        let row_num = ensure_row_id(db, &record.table, &record.row_id)?;
+        let tx_num = tx::tx_num(db, &record.tx_id)?;
+
+        let mut columns = vec!["row_num".to_owned(), "tx_num".to_owned(), "op".to_owned()];
+        let mut values = vec![
+            rusqlite::types::Value::Integer(row_num),
+            rusqlite::types::Value::Integer(tx_num),
+            rusqlite::types::Value::Integer(record.op),
+        ];
+        for field in &table.fields {
+            let value = record
+                .values
+                .get(&field.name)
+                .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
+            columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
+                field,
+            )));
+            values.push(crate::schema::field_sql_value(
+                field,
+                value,
+                |ref_table, row_id| ensure_row_id(db, ref_table, row_id),
+            )?);
+        }
+        columns.extend([
+            "j_created_at".to_owned(),
+            "j_updated_at".to_owned(),
+            "j_created_by".to_owned(),
+            "j_updated_by".to_owned(),
+        ]);
+        values.extend([
+            rusqlite::types::Value::Integer(record.created_at),
+            rusqlite::types::Value::Integer(record.updated_at),
+            rusqlite::types::Value::Text(record.created_by.clone()),
+            rusqlite::types::Value::Text(record.updated_by.clone()),
+        ]);
+        insert_dynamic(
+            db,
+            &crate::schema::history_table(&record.table),
+            &columns,
+            &values,
+        )?;
+
+        if tx_outcome(db, tx_num)? != tx::OUTCOME_REJECTED && record.op != 3 {
+            let mut current_columns = vec![
+                "row_num".to_owned(),
+                "visible_tx_num".to_owned(),
+                "is_deleted".to_owned(),
+            ];
+            let mut current_values = vec![
+                rusqlite::types::Value::Integer(row_num),
+                rusqlite::types::Value::Integer(tx_num),
+                rusqlite::types::Value::Integer(0),
+            ];
+            current_columns.extend(columns.iter().skip(3).cloned());
+            current_values.extend(values.iter().skip(3).cloned());
+            insert_dynamic(
+                db,
+                &crate::schema::current_table(&record.table),
+                &current_columns,
+                &current_values,
+            )?;
+        }
         Ok(())
     }
 
@@ -408,11 +405,11 @@ impl Runtime {
     }
 
     pub fn clear_current_projection_for_test(&mut self) -> Result<()> {
-        projection::clear(&self.conn)
+        projection::clear(&self.conn, &self.schema)
     }
 
     pub fn rebuild_current_projection(&mut self) -> Result<()> {
-        projection::rebuild(&self.conn)
+        projection::rebuild(&self.conn, &self.schema)
     }
 
     pub fn physical_row_num_for(&self, row_id: &str) -> Result<i64> {
@@ -554,9 +551,23 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
         .map_err(Into::into)
 }
 
-fn export_projects(conn: &Connection) -> Result<Vec<ProjectRecord>> {
+fn export_open_todo_scope_history(conn: &Connection) -> Result<Vec<HistoryRecord>> {
+    let mut records = Vec::new();
+    records.extend(export_open_todo_projects(conn)?);
+    records.extend(export_open_todos(conn)?);
+    Ok(records)
+}
+
+fn export_open_todo_projects(conn: &Connection) -> Result<Vec<HistoryRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT ids.row_id, tx.tx_id, h.title, h.j_created_at, h.j_updated_at, h.j_created_by, h.j_updated_by
+        "SELECT ids.row_id,
+                tx.tx_id,
+                h.op,
+                h.title,
+                h.j_created_at,
+                h.j_updated_at,
+                h.j_created_by,
+                h.j_updated_by
          FROM projects__schema_v1_history h
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
@@ -571,14 +582,18 @@ fn export_projects(conn: &Connection) -> Result<Vec<ProjectRecord>> {
          ORDER BY h.row_num, h.tx_num",
     )?;
     let records = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
-        Ok(ProjectRecord {
+        let mut values = BTreeMap::new();
+        values.insert("title".to_owned(), JsonValue::String(row.get(3)?));
+        Ok(HistoryRecord {
+            table: "projects".to_owned(),
             row_id: row.get(0)?,
             tx_id: row.get(1)?,
-            title: row.get(2)?,
-            created_at: row.get(3)?,
-            updated_at: row.get(4)?,
-            created_by: row.get(5)?,
-            updated_by: row.get(6)?,
+            op: row.get(2)?,
+            values,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+            created_by: row.get(6)?,
+            updated_by: row.get(7)?,
         })
     })?;
     records
@@ -586,10 +601,11 @@ fn export_projects(conn: &Connection) -> Result<Vec<ProjectRecord>> {
         .map_err(Into::into)
 }
 
-fn export_todos(conn: &Connection) -> Result<Vec<TodoRecord>> {
+fn export_open_todos(conn: &Connection) -> Result<Vec<HistoryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT ids.row_id,
                 tx.tx_id,
+                h.op,
                 h.title,
                 h.done,
                 project_ids.row_id,
@@ -604,16 +620,23 @@ fn export_todos(conn: &Connection) -> Result<Vec<TodoRecord>> {
          ORDER BY h.row_num, h.tx_num",
     )?;
     let records = stmt.query_map([], |row| {
-        Ok(TodoRecord {
+        let mut values = BTreeMap::new();
+        values.insert("title".to_owned(), JsonValue::String(row.get(3)?));
+        values.insert(
+            "done".to_owned(),
+            JsonValue::Bool(row.get::<_, i64>(4)? != 0),
+        );
+        values.insert("project".to_owned(), JsonValue::String(row.get(5)?));
+        Ok(HistoryRecord {
+            table: "todos".to_owned(),
             row_id: row.get(0)?,
             tx_id: row.get(1)?,
-            title: row.get(2)?,
-            done: row.get::<_, i64>(3)? != 0,
-            project_id: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
-            created_by: row.get(7)?,
-            updated_by: row.get(8)?,
+            op: row.get(2)?,
+            values,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            created_by: row.get(8)?,
+            updated_by: row.get(9)?,
         })
     })?;
     records
