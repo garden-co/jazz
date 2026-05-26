@@ -1,7 +1,7 @@
 use crate::rows::{ensure_row_id, insert_project, insert_todo, public_row_id, row_num, NewTodo};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::RowsSubscription;
-use crate::sync::{BranchRecord, Bundle, HistoryRecord, ReadRecord, TxRecord};
+use crate::sync::{BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord};
 use crate::types::{RowView, StorageStats, TodoView, TransactionInfo};
 use crate::{branch, policy, projection, query, schema, storage, tx, Result, Storage};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -282,6 +282,12 @@ impl Runtime {
             branches,
             txs,
             reads,
+            query_reads: vec![QueryReadRecord {
+                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+                table: "todos".to_owned(),
+                field: "done".to_owned(),
+                value: JsonValue::Bool(false),
+            }],
             history,
         })
     }
@@ -304,6 +310,7 @@ impl Runtime {
             branches,
             txs,
             reads,
+            query_reads: Vec::new(),
             history,
         })
     }
@@ -375,6 +382,7 @@ impl Runtime {
             branches,
             txs,
             reads,
+            query_reads: Vec::new(),
             history,
         })
     }
@@ -971,7 +979,7 @@ impl Runtime {
         value: JsonValue,
     ) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
-        let rows = self.read_rows_where_eq(table_name, field_name, value)?;
+        let rows = self.read_rows_where_eq(table_name, field_name, value.clone())?;
         let row_nums = rows
             .iter()
             .map(|row| row_num(&self.conn, &row.id))
@@ -1023,6 +1031,12 @@ impl Runtime {
             branches,
             txs,
             reads,
+            query_reads: vec![QueryReadRecord {
+                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+                table: table_name.to_owned(),
+                field: field_name.to_owned(),
+                value,
+            }],
             history,
         })
     }
@@ -1945,6 +1959,15 @@ fn include_branch_record(
         source_branch_ids,
     });
     Ok(())
+}
+
+fn branch_id_for_num(conn: &Connection, branch_num: i64) -> Result<String> {
+    conn.query_row(
+        "SELECT branch_id FROM jazz_branch WHERE branch_num = ?",
+        params![branch_num],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 fn export_open_todo_scope_history(conn: &Connection) -> Result<Vec<HistoryRecord>> {

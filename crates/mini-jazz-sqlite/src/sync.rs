@@ -8,6 +8,8 @@ pub struct Bundle {
     pub branches: Vec<BranchRecord>,
     pub txs: Vec<TxRecord>,
     pub reads: Vec<ReadRecord>,
+    #[serde(default)]
+    pub query_reads: Vec<QueryReadRecord>,
     pub history: Vec<HistoryRecord>,
 }
 
@@ -37,6 +39,14 @@ pub struct ReadRecord {
     pub table: String,
     pub row_id: String,
     pub reason: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryReadRecord {
+    pub branch_id: String,
+    pub table: String,
+    pub field: String,
+    pub value: JsonValue,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

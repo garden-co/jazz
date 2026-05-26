@@ -133,6 +133,11 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
     let bundle = alice
         .export_query_where_eq("tasks", "done", json!(false))
         .unwrap();
+    assert_eq!(bundle.query_reads.len(), 1);
+    assert_eq!(bundle.query_reads[0].branch_id, "main");
+    assert_eq!(bundle.query_reads[0].table, "tasks");
+    assert_eq!(bundle.query_reads[0].field, "done");
+    assert_eq!(bundle.query_reads[0].value, json!(false));
     let synced = bundle
         .history
         .iter()

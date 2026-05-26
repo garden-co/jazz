@@ -1967,3 +1967,24 @@ Test status: `cargo test -p mini-jazz-sqlite --test whole_system fixture_open_to
 Found the exclusive-conflict slice already present in the working tree rather than committed. The full suite confirms it: same-row exclusive transactions now reject the second accepted global write with `exclusive conflict`, while the earlier accepted value remains current. I am keeping the log honest and committing this together with the fixture query alignment.
 
 Test status: full `cargo test -p mini-jazz-sqlite` passes with 105 whole-system tests.
+
+## 2026-05-25 20:19 PDT
+
+Starting predicate read-set/invalidation coverage. Query-scoped sync currently exports matching rows and policy dependencies, but it does not materialize the predicate fact itself. I want a small red/green test that records an equality predicate read so subscriptions/export scopes can later reason about newly matching rows without pretending the query was table replication.
+
+## 2026-05-25 20:22 PDT
+
+Predicate read-set lane is green at the bundle level. Added `QueryReadRecord`
+to sync bundles and wired equality query export plus the hardcoded open-todos
+scope to emit predicate records. This does not yet implement durable predicate
+subscriptions or invalidation; it gives the wire format and tests a place to
+hang that next behavior.
+
+Test status: full `cargo test -p mini-jazz-sqlite` passes with 105
+whole-system tests.
+
+## 2026-05-25 20:22 PDT
+
+Predicate read-set wire shape is green. Equality query exports now include a bundle-level `query_reads` record with branch, table, field, and value. This is not yet durable invalidation machinery, but it makes the query predicate explicit on the sync artifact and gives the next attempt a concrete place to hang absence/range invalidation semantics.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system generic_equality_query_scope_exports_matching_rows_and_policy_dependencies` passes, and full `cargo test -p mini-jazz-sqlite` passes with 105 whole-system tests.
