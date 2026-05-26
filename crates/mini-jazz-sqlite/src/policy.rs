@@ -56,6 +56,7 @@ pub(crate) fn write_allowed(
                 "current",
                 &ref_table.read_policy,
                 principal,
+                None,
                 0,
             )?;
             let count: i64 = db.query_row(
@@ -83,16 +84,33 @@ pub(crate) fn read_policy_sql(
     table: &TableDef,
     principal: &str,
 ) -> Result<String> {
-    lower_policy(schema, table, "current", &table.read_policy, principal, 0)
+    lower_policy(
+        schema,
+        table,
+        "current",
+        &table.read_policy,
+        principal,
+        None,
+        0,
+    )
 }
 
-pub(crate) fn read_policy_sql_for_alias(
+pub(crate) fn branch_read_policy_sql_for_alias(
     schema: &SchemaDef,
     table: &TableDef,
     alias: &str,
     principal: &str,
+    branch_num: i64,
 ) -> Result<String> {
-    lower_policy(schema, table, alias, &table.read_policy, principal, 0)
+    lower_policy(
+        schema,
+        table,
+        alias,
+        &table.read_policy,
+        principal,
+        Some(branch_num),
+        0,
+    )
 }
 
 pub(crate) fn snapshot_read_policy_sql_for_alias(
@@ -119,6 +137,7 @@ fn lower_policy(
     alias: &str,
     policy: &PolicyDef,
     principal: &str,
+    branch_num: Option<i64>,
     depth: usize,
 ) -> Result<String> {
     if depth > 16 {
@@ -154,8 +173,12 @@ fn lower_policy(
                 &parent_alias,
                 &ref_table.read_policy,
                 principal,
+                branch_num,
                 depth + 1,
             )?;
+            let branch_filter = branch_num
+                .map(|branch_num| format!("AND {parent_alias}.j_branch_num = {branch_num}"))
+                .unwrap_or_default();
             Ok(format!(
                 "EXISTS (
                    SELECT 1
@@ -163,6 +186,7 @@ fn lower_policy(
                    JOIN jazz_tx {parent_tx_alias}
                      ON {parent_tx_alias}.tx_num = {parent_alias}.visible_tx_num
                    WHERE {parent_alias}.row_num = {alias}.{}
+                     {branch_filter}
                      AND {parent_alias}.is_deleted = 0
                      AND {parent_tx_alias}.outcome != {}
                      AND {parent_policy}

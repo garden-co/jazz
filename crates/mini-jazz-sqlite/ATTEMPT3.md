@@ -1534,3 +1534,25 @@ including projection rebuild for the update case.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 rejected_branch_` passes.
+
+## 2026-05-25 19:33 PDT
+
+Starting branch ref-policy visibility coverage from sidecar review. Suspicion:
+`read_if_ref_readable` over current projections does not constrain the parent
+row to the same branch-visible scope, so branch-local parent changes may be
+ignored by policy checks.
+
+## 2026-05-25 19:35 PDT
+
+Branch ref-policy visibility is green and found a semantic hole. Base snapshot
+children were evaluated against base snapshot parents even when the branch had
+a local parent overlay. Added a branch-visible post-filter for pinned-base reads
+so `read_if_ref_readable` sees the effective branch parent view. Current-read
+policy lowering is also branch-constrained for parent refs.
+
+Design note: the post-filter is intentionally semantic and recursive over
+`read_rows`; it is correctness-first. A production lowering should push this
+effective-branch parent policy into SQL.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+branch_ref_policy_uses_branch_local_parent_visibility` passes.

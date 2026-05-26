@@ -1,5 +1,5 @@
 use crate::rows::{public_row_id, row_num};
-use crate::schema::{FieldDef, FieldKind, SchemaDef};
+use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::types::RowView;
 use crate::{branch, policy, tx, Result};
 use rusqlite::{params, params_from_iter, Connection};
@@ -20,7 +20,7 @@ impl QueryContext<'_> {
             if let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? {
                 let mut rows = self.read_rows_from_current(table_name, false)?;
                 rows.extend(self.read_main_snapshot_rows(table_name, base_epoch)?);
-                return Ok(rows);
+                return self.filter_rows_by_effective_branch_policy(table_name, rows);
             }
         }
         self.read_rows_from_current(table_name, true)
@@ -172,8 +172,13 @@ impl QueryContext<'_> {
             current_table = crate::schema::current_table(table_name),
             parent_column = parent_column,
             policy_sql = policy_sql,
-            child_policy_sql =
-                policy::read_policy_sql_for_alias(self.schema, table, "child", self.principal)?,
+            child_policy_sql = policy::branch_read_policy_sql_for_alias(
+                self.schema,
+                table,
+                "child",
+                self.principal,
+                self.branch_num
+            )?,
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
@@ -242,8 +247,53 @@ impl QueryContext<'_> {
         if self.trusted {
             Ok("1 = 1".to_owned())
         } else {
-            policy::read_policy_sql(self.schema, table, self.principal)
+            policy::branch_read_policy_sql_for_alias(
+                self.schema,
+                table,
+                "current",
+                self.principal,
+                self.branch_num,
+            )
         }
+    }
+
+    fn filter_rows_by_effective_branch_policy(
+        &self,
+        table_name: &str,
+        rows: Vec<RowView>,
+    ) -> Result<Vec<RowView>> {
+        if self.trusted {
+            return Ok(rows);
+        }
+        let table = self.schema.table_def(table_name)?;
+        let PolicyDef::RefReadable { field } = &table.read_policy else {
+            return Ok(rows);
+        };
+        let field = table
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == *field)
+            .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+        let FieldKind::Ref {
+            table: parent_table,
+        } = &field.kind
+        else {
+            return Ok(rows);
+        };
+        let visible_parent_ids = self
+            .read_rows(parent_table)?
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok(rows
+            .into_iter()
+            .filter(|row| {
+                row.values
+                    .get(&field.name)
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|parent_id| visible_parent_ids.contains(parent_id))
+            })
+            .collect())
     }
 
     fn read_rows_from_current(&self, table_name: &str, overlay_main: bool) -> Result<Vec<RowView>> {

@@ -716,6 +716,10 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn principal_for_test(&mut self, principal: &str) {
+        self.principal = principal.to_owned();
+    }
+
     pub fn transaction(&mut self) -> TransactionBuilder<'_> {
         TransactionBuilder {
             runtime: self,
