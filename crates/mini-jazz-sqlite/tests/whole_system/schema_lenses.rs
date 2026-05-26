@@ -548,6 +548,90 @@ fn lens_compatible_write_policy_allows_ordinary_peer_sync() {
 }
 
 #[test]
+fn renamed_ref_lens_exports_transitive_write_policy_dependencies_for_untrusted_edge() {
+    let old_schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("projects", |table| {
+            table.text("title");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let new_schema = SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_principal();
+        })
+        .table("projects", |table| {
+            table.text("title");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_lens("workspace", "project", "projects");
+            table.write_if_ref_readable("workspace");
+        });
+    let mut alice =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "alice-node", "alice", old_schema)
+            .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", new_schema).unwrap();
+
+    alice
+        .insert_row(
+            "orgs",
+            "org-1",
+            BTreeMap::from([("name".to_owned(), json!("Alice org"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Alice project")),
+                ("org".to_owned(), json!("org-1")),
+            ]),
+        )
+        .unwrap();
+    let tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Lens recursive dependency")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    let exported = bundle
+        .history
+        .iter()
+        .map(|record| (record.table.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(exported.contains(&("todos", "todo-1")));
+    assert!(exported.contains(&("projects", "project-1")));
+    assert!(exported.contains(&("orgs", "org-1")));
+
+    edge.apply_untrusted_bundle(&bundle).unwrap();
+
+    assert_eq!(edge.transaction_info(&tx).unwrap().rejection_code, None);
+    let rows = edge.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["workspace"], json!("project-1"));
+    assert!(!rows[0].values.contains_key("project"));
+}
+
+#[test]
 fn user_columns_with_system_prefix_are_escaped_physically() {
     let schema = SchemaDef::new().table("records", |table| {
         table.text("j_title");

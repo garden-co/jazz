@@ -1151,6 +1151,35 @@ new repair mechanism.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
 
+## 2026-05-26 04:22 PDT
+
+Pinned missing-policy-dependency rejection as permanent rather than parked. An
+edge rejects an untrusted write whose referenced policy row is missing, later
+receives that policy row, and then replays a complete bundle for the same
+transaction; the transaction stays rejected with the original durable detail.
+
+Discovery: current fate merging already gives us the simple model we wanted:
+authoritative rejection is replayable durable state. If we ever want a parked
+"awaiting dependencies" state, it should be a separate state machine decision,
+not an accidental consequence of late dependency arrival.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
+
+## 2026-05-26 04:23 PDT
+
+Narrowed one todo-specific query descriptor wart. The legacy
+`export_query_scope_newest_open_todos` fixture method now records the generic
+`eq_top_created_at_desc` query-read descriptor instead of the old hardcoded
+`top_created_at_desc` op; the test pins the generic op at the observed-query
+boundary.
+
+Discovery: the todo fixture can keep existing ergonomic APIs while increasingly
+lowering through the same generic query descriptor path as non-demo schemas. The
+old apply-side `top_created_at_desc` repair branch is still present as
+compatibility ballast for bundles emitted before this cleanup.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
+
 ## 2026-05-26 04:24 PDT
 
 Added a trusted-transport/untrusted-visibility invariant. A trusted edge can
@@ -1209,6 +1238,20 @@ missing dependency that actually made validation impossible.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 232 whole-system tests.
 
+## 2026-05-26 04:31 PDT
+
+Pinned rejection detail durability through reconnect. The stale-pending replay
+test now rejects with structured detail, reopens the durable worker, then
+applies stale pending history from two peers; the row stays hidden and the
+original detail survives.
+
+Discovery: rejection detail is already monotone with rejected fate across
+durable reopen and stale replay. This is the right substrate for promise
+rejections and global error callbacks because the structured reason remains
+queryable after reconnect.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 232 whole-system tests.
+
 ## 2026-05-26 04:32 PDT
 
 Added a lens + branch snapshot + durability intersection test. Old-schema
@@ -1224,45 +1267,16 @@ history.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 233 whole-system tests.
 
-## 2026-05-26 04:31 PDT
+## 2026-05-26 04:47 PDT
 
-Pinned rejection detail durability through reconnect. The stale-pending replay
-test now rejects with structured detail, reopens the durable worker, then
-applies stale pending history from two peers; the row stays hidden and the
-original detail survives.
+Added renamed-ref lens coverage for transitive write-policy dependencies. An
+old-schema writer stores `todos.project`; a new-schema trusted edge calls the
+same storage ref `workspace` and validates `write_if_ref_readable("workspace")`
+through `projects.org -> orgs`.
 
-Discovery: rejection detail is already monotone with rejected fate across
-durable reopen and stale replay. This is the right substrate for promise
-rejections and global error callbacks because the structured reason remains
-queryable after reconnect.
+Discovery: ref lenses compose with recursive policy dependency export and
+untrusted edge validation. The bundle exported through the old schema still
+carries todo, project, and org history, and the edge materializes the accepted
+todo semantically as `workspace` without exposing the old `project` field.
 
-Validation: `cargo test -p mini-jazz-sqlite` passes with 232 whole-system tests.
-
-## 2026-05-26 04:23 PDT
-
-Narrowed one todo-specific query descriptor wart. The legacy
-`export_query_scope_newest_open_todos` fixture method now records the generic
-`eq_top_created_at_desc` query-read descriptor instead of the old hardcoded
-`top_created_at_desc` op; the test pins the generic op at the observed-query
-boundary.
-
-Discovery: the todo fixture can keep existing ergonomic APIs while increasingly
-lowering through the same generic query descriptor path as non-demo schemas. The
-old apply-side `top_created_at_desc` repair branch is still present as
-compatibility ballast for bundles emitted before this cleanup.
-
-Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
-
-## 2026-05-26 04:22 PDT
-
-Pinned missing-policy-dependency rejection as permanent rather than parked. An
-edge rejects an untrusted write whose referenced policy row is missing, later
-receives that policy row, and then replays a complete bundle for the same
-transaction; the transaction stays rejected with the original durable detail.
-
-Discovery: current fate merging already gives us the simple model we wanted:
-authoritative rejection is replayable durable state. If we ever want a parked
-"awaiting dependencies" state, it should be a separate state machine decision,
-not an accidental consequence of late dependency arrival.
-
-Validation: `cargo test -p mini-jazz-sqlite` passes with 228 whole-system tests.
+Validation: `cargo test -p mini-jazz-sqlite` passes with 234 whole-system tests.
