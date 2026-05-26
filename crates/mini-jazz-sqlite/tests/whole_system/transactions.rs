@@ -517,6 +517,132 @@ fn untrusted_exclusive_transaction_rejects_stale_policy_read_set() {
 }
 
 #[test]
+fn branch_exclusive_transaction_observes_inherited_base_read_version() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut authority =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
+    let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
+
+    let project_tx = authority
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Base project"))]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&project_tx, 1)
+        .unwrap();
+    writer
+        .apply_bundle(&authority.export_table_history("projects").unwrap())
+        .unwrap();
+
+    writer.create_branch("draft", Some(1)).unwrap();
+    writer.checkout_branch("draft").unwrap();
+    let todo_tx = writer
+        .transaction()
+        .insert_row(
+            "todos",
+            "todo-branch",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Reads inherited project")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    assert_eq!(
+        writer.transaction_observed_read_rows(&todo_tx).unwrap(),
+        vec![(
+            "projects".to_owned(),
+            "project-1".to_owned(),
+            Some(project_tx)
+        )]
+    );
+}
+
+#[test]
+fn untrusted_exclusive_validation_handles_new_branch_records() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut authority =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
+    let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
+
+    let project_tx = authority
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Base project"))]),
+        )
+        .unwrap();
+    authority
+        .accept_transaction_at_global(&project_tx, 1)
+        .unwrap();
+    writer
+        .apply_bundle(&authority.export_table_history("projects").unwrap())
+        .unwrap();
+
+    writer.create_branch("draft", Some(1)).unwrap();
+    writer.checkout_branch("draft").unwrap();
+    let todo_tx = writer
+        .transaction()
+        .insert_row(
+            "todos",
+            "todo-branch",
+            BTreeMap::from([
+                ("title".to_owned(), json!("New branch exclusive")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+    let mut bundle = writer.export_table_history("todos").unwrap();
+    bundle
+        .txs
+        .iter_mut()
+        .find(|tx| tx.tx_id == todo_tx)
+        .unwrap()
+        .conflict_mode = 2;
+
+    authority.apply_untrusted_bundle(&bundle).unwrap();
+    authority.checkout_branch("draft").unwrap();
+    assert_eq!(
+        authority.transaction_info(&todo_tx).unwrap().rejection_code,
+        None
+    );
+    assert_eq!(authority.read_rows("todos").unwrap().len(), 1);
+    assert_eq!(
+        authority.read_rows("todos").unwrap()[0].values["title"],
+        json!("New branch exclusive")
+    );
+}
+
+#[test]
 fn generic_transaction_delete_shadows_pinned_base_row() {
     let schema = support::tasks_schema();
     let mut alice =

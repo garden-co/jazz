@@ -700,3 +700,9 @@ Design lesson: row identity read sets were enough for sync scoping, but exclusiv
 Added a small observed-read introspection API. `transaction_observed_read_rows(tx)` exposes the row read set together with the observed transaction id, and the previous-row read-set test now pins that an update observed the earlier version. Full mini crate suite is green with 190 tests.
 
 Design lesson: versioned read sets should be inspectable as semantic data, not only buried in bundles or SQLite columns. The tuple API is deliberately rough, but it gives tests and future spec work a stable way to assert causality/version observations.
+
+## 2026-05-26 02:48 PDT
+
+Tightened the versioned read-set slice after review. Storage format is now version 2 so old v1 files fail fast instead of missing the new `observed_tx_num` column at runtime. Branch transactions that read inherited pinned-base rows now record the observed base transaction. Stale-exclusive prevalidation also preserves branch base metadata when the incoming bundle introduces the branch. Full mini crate suite is green with 193 tests.
+
+Design lesson: adding read-version causality touches three boundaries at once: storage compatibility, effective branch visibility, and sync prevalidation order. The fixes make the first implementation less misleading, but branch source overlays and absent/range reads still need their own version semantics.
