@@ -167,7 +167,7 @@ impl QueryContext<'_> {
             .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
             .collect::<Vec<_>>();
         let mut select_columns = vec![
-            "source.source_branch_num".to_owned(),
+            "current.j_branch_num".to_owned(),
             "ids.row_id".to_owned(),
             "tx.tx_id".to_owned(),
         ];
@@ -177,30 +177,45 @@ impl QueryContext<'_> {
                 .map(|column| format!("current.{column}")),
         );
         select_columns.push("current.j_created_by".to_owned());
-        let sql = format!(
-            "SELECT {}
-             FROM jazz_branch_source source
-             JOIN {} current ON current.j_branch_num = source.source_branch_num
+        let source_branch_nums = branch::scope_nums(self.conn, self.branch_num)?
+            .into_iter()
+            .filter(|branch_num| *branch_num != self.branch_num)
+            .collect::<Vec<_>>();
+        let rows = if source_branch_nums.is_empty() {
+            Vec::new()
+        } else {
+            let source_placeholders = placeholders(source_branch_nums.len());
+            let sql = format!(
+                "SELECT {}
+             FROM {} current
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
-             WHERE source.branch_num = ?
+             WHERE current.j_branch_num IN ({source_placeholders})
                AND current.row_num = ?
                AND current.is_deleted = 0
                AND tx.outcome != ?
-             ORDER BY source.source_branch_num",
-            select_columns.join(", "),
-            crate::schema::current_table(table_name),
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 3 + table.fields.len() + 1;
-        let rows = stmt.query_map(
-            params![self.branch_num, row_num, tx::OUTCOME_REJECTED],
-            |row| {
+             ORDER BY current.j_branch_num",
+                select_columns.join(", "),
+                crate::schema::current_table(table_name),
+            );
+            let mut params = source_branch_nums
+                .iter()
+                .copied()
+                .map(rusqlite::types::Value::Integer)
+                .collect::<Vec<_>>();
+            params.extend([
+                rusqlite::types::Value::Integer(row_num),
+                rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
+            ]);
+            let mut stmt = self.conn.prepare(&sql)?;
+            let row_width = 3 + table.fields.len() + 1;
+            let mapped = stmt.query_map(params_from_iter(params.iter()), |row| {
                 (0..row_width)
                     .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
                     .collect::<rusqlite::Result<Vec<_>>>()
-            },
-        )?;
+            })?;
+            mapped.collect::<std::result::Result<Vec<_>, _>>()?
+        };
         let mut candidates = Vec::new();
         if let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? {
             candidates.extend(
@@ -210,7 +225,7 @@ impl QueryContext<'_> {
             );
         }
         for row in rows {
-            let mut row = row?;
+            let mut row = row;
             let source_branch_num = match row.remove(0) {
                 rusqlite::types::Value::Integer(value) => value,
                 _ => return Err(crate::Error::new("expected source branch num")),

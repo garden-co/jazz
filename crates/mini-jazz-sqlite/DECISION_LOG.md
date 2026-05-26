@@ -1598,3 +1598,16 @@ source graph. The same persisted query read can repair result rows and branch
 metadata when the graph changes below the checked-out branch.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 258 whole-system tests.
+
+## 2026-05-26 05:31 PDT
+
+Found and fixed another direct-source assumption: conflict candidate reads only
+looked at immediate source branches. They now use the same source closure as
+ordinary branch reads, and a new test covers candidates from `merge -> middle
+-> left`.
+
+Discovery: every branch-facing read surface needs the same closure semantics,
+including conflict UI surfaces. Otherwise the ordinary row list and conflict
+candidate APIs can disagree about whether a row exists.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 259 whole-system tests.
