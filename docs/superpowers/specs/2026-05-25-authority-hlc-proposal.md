@@ -73,6 +73,37 @@ into today's merge behavior. The authority HLC can stay simple: it is a durable
 bookmark for globally observed batches, not a new rule for deciding which local
 edit wins.
 
+## Precision And Restarts
+
+The authority stamp should use millisecond physical precision:
+
+```text
+authority_hlc
+  physical_millis
+  logical_counter
+```
+
+Milliseconds are enough for a snapshot bookmark. If the global authority stamps
+multiple batches in the same millisecond, the counter gives them a stable order.
+
+On restart, the authority loads the last recorded `authority_hlc` before
+stamping anything new:
+
+```text
+last recorded stamp:  HLC(2000ms, counter 7)
+local clock on restart: 1998ms
+
+next batch:            HLC(2000ms, counter 8)
+next batch:            HLC(2000ms, counter 9)
+
+when local clock reaches 2001ms:
+next batch:            HLC(2001ms, counter 0)
+```
+
+So restart drift does not move the global sequence backwards. The authority
+keeps increasing the counter until local time catches up with the last recorded
+stamp.
+
 ## What A Row Looks Like
 
 Before:

@@ -103,27 +103,40 @@ Recommended binary layout:
 
 ```text
 AuthorityHlc:
-  physical_micros: u64
+  physical_millis: u64
   logical_counter: u32
   authority_epoch: u32
 ```
 
 The encoded form is 16 bytes. If it is used in ordered keys or raw byte
 comparisons, encode each component in big-endian order so byte ordering matches
-`(physical_micros, logical_counter, authority_epoch)`. Since there is a single
+`(physical_millis, logical_counter, authority_epoch)`. Since there is a single
 global authority, `authority_epoch` can start at zero. It is reserved to make
 future authority key rotation or epoching explicit without changing the row
 format again.
 
+Use millisecond physical precision for the authority HLC. The HLC is a snapshot
+bookmark, not a public event timestamp. Millisecond precision is enough for a
+human-scale global cutoff, and the logical counter orders all batches stamped
+inside the same millisecond.
+
 The global authority clock advances as follows:
 
-- Read current wall-clock microseconds.
+- Read current wall-clock milliseconds.
 - If wall-clock time is greater than the last stamped physical component, stamp
-  `(now_micros, 0, authority_epoch)`.
-- Otherwise stamp `(last_physical_micros, last_logical_counter + 1,
+  `(now_millis, 0, authority_epoch)`.
+- Otherwise stamp `(last_physical_millis, last_logical_counter + 1,
 authority_epoch)`.
-- If the logical counter overflows within one physical microsecond, wait until
+- If the logical counter overflows within one physical millisecond, wait until
   wall-clock time advances or return an explicit authority clock error.
+
+On restart, the authority must load the last recorded `authority_hlc` before
+stamping new batches. If local wall time is behind or equal to the last recorded
+physical component, keep stamping at the recorded physical millisecond and
+increment the logical counter until wall time catches up and exceeds it. Once
+local wall time advances past the recorded physical component, reset the logical
+counter to zero at the new physical millisecond. This preserves monotonic
+authority stamps across restarts without rewriting client-provided timestamps.
 
 Because only the global authority stamps rows, non-authority runtimes never
 merge remote HLCs into their local clocks.
