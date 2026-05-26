@@ -1571,3 +1571,17 @@ became transitive. That is a strong sign that branch provenance and query-scope
 history export are converging on the same closure concept.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 256 whole-system tests.
+
+## 2026-05-26 05:29 PDT
+
+Added observed-query refresh coverage for later rows in transitive source
+branches. A peer observes an empty `merge -> middle -> left` query, `left`
+later receives a matching row, and refresh delivers it through the persisted
+merge-branch query read.
+
+Discovery: reconnect refresh also follows the transitive source closure. That
+keeps branch source semantics consistent across initial sync, durable
+reconnect, later source-row arrival, mutation lowering, and authority
+validation.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 257 whole-system tests.
