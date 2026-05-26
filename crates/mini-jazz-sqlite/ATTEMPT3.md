@@ -1253,3 +1253,22 @@ parent-project export.
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 query_scope_excludes_rows_outside_current_result_set` passes.
+
+## 2026-05-25 19:06 PDT
+
+Starting integration-test module split. The file is now over sixty whole-system
+tests, and continuing to add behavior into one file is slowing navigation. Plan:
+keep `tests/whole_system.rs` as the integration crate root and move tests into
+child modules with `use super::*` so imports and support helpers stay shared.
+
+## 2026-05-25 19:07 PDT
+
+Integration-test module split is green. `tests/whole_system.rs` is now a thin
+crate root with child modules for branches, generic schema, policies, recursive
+queries, schema lenses, storage/projection, subscriptions, sync/fate, and
+transactions. This was a mechanical move plus explicit `#[path = ...]`
+attributes so the files can live under `tests/whole_system/` without becoming
+separate integration crates.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system` passes, 64
+tests.

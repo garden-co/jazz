@@ -1,0 +1,522 @@
+use super::*;
+
+#[test]
+fn policy_filters_reads_through_required_parent_ref() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let mut alice_project = BTreeMap::new();
+    alice_project.insert("title".to_owned(), json!("Alice project"));
+    alice
+        .insert_row("projects", "project-alice", alice_project)
+        .unwrap();
+    let mut alice_todo = BTreeMap::new();
+    alice_todo.insert("title".to_owned(), json!("Visible"));
+    alice_todo.insert("done".to_owned(), json!(false));
+    alice_todo.insert("project".to_owned(), json!("project-alice"));
+    alice
+        .insert_row("todos", "todo-visible", alice_todo)
+        .unwrap();
+
+    let mut bob_project = BTreeMap::new();
+    bob_project.insert("title".to_owned(), json!("Bob project"));
+    bob.insert_row("projects", "project-bob", bob_project)
+        .unwrap();
+    let mut bob_todo = BTreeMap::new();
+    bob_todo.insert("title".to_owned(), json!("Hidden"));
+    bob_todo.insert("done".to_owned(), json!(false));
+    bob_todo.insert("project".to_owned(), json!("project-bob"));
+    bob.insert_row("todos", "todo-hidden", bob_todo).unwrap();
+
+    alice
+        .apply_bundle(&bob.export_table_history("projects").unwrap())
+        .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let visible = alice.read_rows("todos").unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, "todo-visible");
+    assert_eq!(visible[0].values["project"], json!("project-alice"));
+
+    let scoped_bundle = alice.export_table_history("todos").unwrap();
+    assert!(scoped_bundle
+        .history
+        .iter()
+        .any(|record| record.table == "todos" && record.row_id == "todo-visible"));
+    assert!(scoped_bundle
+        .history
+        .iter()
+        .any(|record| record.table == "projects" && record.row_id == "project-alice"));
+}
+
+#[test]
+fn policy_scoped_sync_includes_required_parent_rows_only() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema.clone())
+            .unwrap();
+
+    let mut visible_project = BTreeMap::new();
+    visible_project.insert("title".to_owned(), json!("Visible project"));
+    alice
+        .insert_row("projects", "project-visible", visible_project)
+        .unwrap();
+
+    let mut unrelated_project = BTreeMap::new();
+    unrelated_project.insert("title".to_owned(), json!("Unrelated project"));
+    alice
+        .insert_row("projects", "project-unrelated", unrelated_project)
+        .unwrap();
+
+    let mut visible_todo = BTreeMap::new();
+    visible_todo.insert("title".to_owned(), json!("Visible todo"));
+    visible_todo.insert("project".to_owned(), json!("project-visible"));
+    alice
+        .insert_row("todos", "todo-visible", visible_todo)
+        .unwrap();
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    let synced = bundle
+        .history
+        .iter()
+        .map(|record| (record.table.as_str(), record.row_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(synced.contains(&("todos", "todo-visible")));
+    assert!(synced.contains(&("projects", "project-visible")));
+    assert!(!synced.contains(&("projects", "project-unrelated")));
+
+    bob.apply_bundle(&bundle).unwrap();
+    let rows = bob.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["project"], json!("project-visible"));
+}
+
+#[test]
+fn trusted_peer_can_read_applied_policy_scoped_facts_without_user_principal() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut trusted =
+        Runtime::open_trusted_with_schema(Storage::Memory, "worker-node", schema).unwrap();
+
+    let mut project = BTreeMap::new();
+    project.insert("title".to_owned(), json!("Alice project"));
+    alice.insert_row("projects", "project-1", project).unwrap();
+    let mut todo = BTreeMap::new();
+    todo.insert("title".to_owned(), json!("Policy-scoped fact"));
+    todo.insert("project".to_owned(), json!("project-1"));
+    alice.insert_row("todos", "todo-1", todo).unwrap();
+
+    trusted
+        .apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let rows = trusted.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+}
+
+#[test]
+fn trusted_peer_generic_transaction_bypasses_user_write_policy() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut trusted =
+        Runtime::open_trusted_with_schema(Storage::Memory, "worker-node", schema).unwrap();
+
+    let mut doc = BTreeMap::new();
+    doc.insert("title".to_owned(), json!("Alice doc"));
+    alice.insert_row("docs", "doc-1", doc).unwrap();
+    trusted
+        .apply_bundle(&alice.export_table_history("docs").unwrap())
+        .unwrap();
+
+    trusted
+        .transaction()
+        .insert_row(
+            "comments",
+            "comment-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Trusted write")),
+                ("doc".to_owned(), json!("doc-1")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    assert_eq!(trusted.read_rows("comments").unwrap().len(), 1);
+    assert_eq!(trusted.storage_stats().unwrap().rejected_transactions, 0);
+}
+
+#[test]
+fn trusted_edge_accepts_mergeable_tx_then_untrusted_peers_enforce_policy() {
+    let dir = tempdir().unwrap();
+    let edge_path = dir.path().join("edge.sqlite");
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+        table.read_if_created_by_principal();
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-tab", "alice", schema.clone()).unwrap();
+    let mut edge =
+        Runtime::open_trusted_with_schema(Storage::File(edge_path), "edge", schema.clone())
+            .unwrap();
+    let mut alice_phone =
+        Runtime::open_with_schema(Storage::Memory, "alice-phone", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-tab", "bob", schema).unwrap();
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Accepted at edge")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    edge.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    edge.accept_transaction_at_global(&tx, 11).unwrap();
+
+    let accepted_bundle = edge.export_table_history("notes").unwrap();
+    alice_phone.apply_bundle(&accepted_bundle).unwrap();
+    bob.apply_bundle(&accepted_bundle).unwrap();
+
+    assert_eq!(alice_phone.read_rows("notes").unwrap().len(), 1);
+    assert_eq!(
+        alice_phone.transaction_info(&tx).unwrap().global_epoch,
+        Some(11)
+    );
+    assert!(bob.read_rows("notes").unwrap().is_empty());
+}
+
+#[test]
+fn trusted_edge_rejects_policy_violating_tx_and_syncs_reason() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let project_bundle = alice.export_table_history("projects").unwrap();
+    bob.apply_bundle(&project_bundle).unwrap();
+    edge.apply_bundle(&project_bundle).unwrap();
+
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Should be rejected")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    assert!(bob.read_rows("todos").unwrap().is_empty());
+
+    edge.apply_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+    edge.reject_transaction(&tx, "policy_denied").unwrap();
+    bob.apply_bundle(&edge.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert!(bob.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        bob.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
+fn trusted_edge_authoritatively_rejects_untrusted_policy_violation_on_apply() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_trusted_as_with_schema(Storage::Memory, "bob-node", "bob", schema.clone())
+            .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let project_bundle = alice.export_table_history("projects").unwrap();
+    bob.apply_bundle(&project_bundle).unwrap();
+    edge.apply_bundle(&project_bundle).unwrap();
+
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    json!("Should be rejected automatically"),
+                ),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    edge.apply_untrusted_bundle(&bob.export_table_history("todos").unwrap())
+        .unwrap();
+
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert_eq!(
+        edge.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
+fn policy_denied_write_is_rejected_history_not_current_state() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let mut doc = BTreeMap::new();
+    doc.insert("title".to_owned(), json!("Alice-only doc"));
+    alice.insert_row("docs", "doc-1", doc).unwrap();
+    bob.apply_bundle(&alice.export_table_history("docs").unwrap())
+        .unwrap();
+
+    let mut comment = BTreeMap::new();
+    comment.insert("body".to_owned(), json!("Bob should not write this"));
+    comment.insert("doc".to_owned(), json!("doc-1"));
+    let rejected_tx = bob
+        .insert_row("comments", "comment-denied", comment)
+        .unwrap();
+
+    assert!(bob.read_rows("comments").unwrap().is_empty());
+    let stats = bob.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 2);
+    assert_eq!(stats.current_rows, 1);
+    assert_eq!(stats.rejected_transactions, 1);
+    assert!(stats.physical_tx_num_for(&rejected_tx).is_some());
+}
+
+#[test]
+fn write_policy_parent_check_records_policy_read_set() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Allowed by parent")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        alice.transaction_policy_read_rows(&tx).unwrap(),
+        vec![("projects".to_owned(), "project-1".to_owned())]
+    );
+}
+
+#[test]
+fn policy_read_set_survives_sync() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Allowed by parent")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    assert_eq!(
+        peer.transaction_policy_read_rows(&tx).unwrap(),
+        vec![("projects".to_owned(), "project-1".to_owned())]
+    );
+}
+
+#[test]
+fn bundle_read_sets_are_scoped_to_exported_history_transactions() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_principal();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        })
+        .table("milestones", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    let todo_tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Todo")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    let milestone_tx = alice
+        .insert_row(
+            "milestones",
+            "milestone-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Milestone")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    let read_txs = bundle
+        .reads
+        .iter()
+        .map(|read| read.tx_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(read_txs.contains(&todo_tx.as_str()));
+    assert!(!read_txs.contains(&milestone_tx.as_str()));
+}

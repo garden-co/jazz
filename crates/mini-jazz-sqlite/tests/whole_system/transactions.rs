@@ -1,0 +1,190 @@
+use super::*;
+
+#[test]
+fn explicit_transaction_seals_multiple_mutations_atomically() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    let tx = alice
+        .transaction()
+        .create_project("project-1", "Atomic project")
+        .create_todo("todo-1", "First todo", false, "project-1")
+        .create_todo("todo-2", "Second todo", false, "project-1")
+        .commit()
+        .unwrap();
+
+    let todos = alice.open_todos().unwrap();
+    assert_eq!(todos.len(), 2);
+    assert!(todos.iter().all(|todo| todo.tx_id == tx));
+
+    let stats = alice.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 3);
+    assert_eq!(stats.current_rows, 3);
+}
+
+#[test]
+fn generic_transaction_seals_multiple_rows_atomically() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let tx = alice
+        .transaction()
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("First")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Second")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.tx_id == tx));
+    assert_eq!(
+        alice.transaction_write_rows(&tx).unwrap(),
+        vec![
+            ("notes".to_owned(), "note-1".to_owned()),
+            ("notes".to_owned(), "note-2".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn exclusive_transaction_requires_global_epoch_and_commits_accepted() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let err = alice
+        .transaction()
+        .exclusive()
+        .insert_row(
+            "notes",
+            "note-local-exclusive",
+            BTreeMap::from([
+                ("body".to_owned(), json!("No local exclusive")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .commit()
+        .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("exclusive transactions require global"));
+    assert!(alice.read_rows("notes").unwrap().is_empty());
+
+    let tx = alice
+        .transaction()
+        .exclusive_at_global(7)
+        .insert_row(
+            "notes",
+            "note-global-exclusive",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Global exclusive")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-global-exclusive");
+    assert_eq!(alice.transaction_info(&tx).unwrap().global_epoch, Some(7));
+    assert!(alice
+        .transaction_info(&tx)
+        .unwrap()
+        .receipt_tiers
+        .contains(&"global".to_owned()));
+}
+
+#[test]
+fn exclusive_transaction_mode_survives_sync() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    let tx = alice
+        .transaction()
+        .exclusive_at_global(7)
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Exclusive sync")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+
+    let info = peer.transaction_info(&tx).unwrap();
+    assert_eq!(info.global_epoch, Some(7));
+    assert_eq!(info.conflict_mode, "exclusive");
+}
+
+#[test]
+fn authority_acceptance_enriches_existing_transaction() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let tx = alice
+        .create_todo("todo-1", "Accept me", false, "project-1")
+        .unwrap();
+    let before = alice.transaction_info(&tx).unwrap();
+
+    alice.accept_transaction_at_global(&tx, 7).unwrap();
+
+    let after = alice.transaction_info(&tx).unwrap();
+    assert_eq!(after.tx_id, before.tx_id);
+    assert_eq!(after.global_epoch, Some(7));
+    assert!(after.receipt_tiers.contains(&"global".to_owned()));
+    assert_eq!(
+        alice.storage_stats().unwrap().physical_tx_num_for(&tx),
+        Some(alice.transaction_physical_num_for(&tx).unwrap())
+    );
+}
+
+#[test]
+fn global_epoch_can_accept_multiple_transactions() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    let first = alice
+        .create_todo("todo-1", "First in epoch", false, "project-1")
+        .unwrap();
+    let second = alice
+        .create_todo("todo-2", "Second in epoch", false, "project-1")
+        .unwrap();
+
+    alice.accept_transaction_at_global(&first, 7).unwrap();
+    alice.accept_transaction_at_global(&second, 7).unwrap();
+
+    assert_eq!(
+        alice.transaction_info(&first).unwrap().global_epoch,
+        Some(7)
+    );
+    assert_eq!(
+        alice.transaction_info(&second).unwrap().global_epoch,
+        Some(7)
+    );
+}
