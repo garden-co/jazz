@@ -220,6 +220,71 @@ fn renamed_field_lens_query_scope_syncs_and_repairs_rows() {
 }
 
 #[test]
+fn renamed_field_lens_observed_query_refresh_emits_semantic_removal() {
+    let old_schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let new_schema = SchemaDef::new().table("tasks", |table| {
+        table.text_lens("name", "title");
+        table.bool("done");
+    });
+    let mut old_writer =
+        Runtime::open_with_schema(Storage::Memory, "old-node", "alice", old_schema).unwrap();
+    let mut new_writer =
+        Runtime::open_with_schema(Storage::Memory, "new-node", "alice", new_schema.clone())
+            .unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", new_schema).unwrap();
+
+    old_writer
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Important")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    new_writer
+        .apply_bundle(&old_writer.export_table_history("tasks").unwrap())
+        .unwrap();
+
+    peer.apply_bundle(
+        &new_writer
+            .export_query_where_eq("tasks", "name", json!("Important"))
+            .unwrap(),
+    )
+    .unwrap();
+    let observed = peer.observed_query_reads().unwrap();
+    assert_eq!(observed[0].field, "name");
+    let mut subscription = peer.subscribe_observed_query(&observed[0]).unwrap();
+    assert_eq!(
+        subscription.initial_rows()[0].values["name"],
+        json!("Important")
+    );
+
+    new_writer
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("name".to_owned(), json!("Renamed"))]),
+        )
+        .unwrap();
+    for refresh in new_writer.export_query_read_refreshes(&observed).unwrap() {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let diffs = peer.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "task-1"));
+    assert!(peer
+        .read_rows_where_eq("tasks", "name", json!("Important"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn renamed_ref_lens_participates_in_read_policy() {
     let old_schema = SchemaDef::new()
         .table("projects", |table| {

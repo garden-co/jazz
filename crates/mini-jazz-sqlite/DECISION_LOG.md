@@ -1164,6 +1164,19 @@ but `read_rows` remains policy-filtered for ordinary principals.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 229 whole-system tests.
 
+## 2026-05-26 04:26 PDT
+
+Added observed-query subscription coverage for renamed-field lenses. A peer
+stores a `name == "Important"` query-read against a schema where `name` is a
+lens over old storage column `title`; after the writer updates the semantic
+`name`, refresh removes the row and the subscription emits a semantic removal.
+
+Discovery: query-read descriptors stay semantic across lens-compatible schema
+versions. The stored descriptor names the new-schema field, while export and
+repair correctly lower through the lens to the old physical storage column.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 230 whole-system tests.
+
 ## 2026-05-26 04:23 PDT
 
 Narrowed one todo-specific query descriptor wart. The legacy
