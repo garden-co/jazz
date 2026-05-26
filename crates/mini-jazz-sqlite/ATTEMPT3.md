@@ -1861,3 +1861,19 @@ leak closed while allowing pinned-base parents to authorize branch writes.
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 branch_write_policy` passes, and full `cargo test -p mini-jazz-sqlite` passes
 with 99 whole-system tests.
+
+## 2026-05-25 20:10 PDT
+
+Starting prior-row read-set coverage. Policy reads are recorded, but updates and
+deletes also depend on the previously visible row version for validation and
+causality. I want that represented explicitly in `jazz_tx_read`.
+
+## 2026-05-25 20:12 PDT
+
+Prior-row read-set coverage is green. Generic updates and transaction deletes
+now record reason `2` reads for the row version they depend on, alongside reason
+`1` policy reads. Added an inspection helper for previous-row reads.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+generic_update_records_previous_row_read_set` passes, and full
+`cargo test -p mini-jazz-sqlite` passes with 100 whole-system tests.

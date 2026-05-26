@@ -116,6 +116,39 @@ fn generic_transaction_can_seal_updates_atomically() {
 }
 
 #[test]
+fn generic_update_records_previous_row_read_set() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Before")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx = alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("After")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        alice.transaction_previous_read_rows(&tx).unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned())]
+    );
+}
+
+#[test]
 fn generic_transaction_can_seal_delete_with_other_mutations() {
     let schema = support::notes_schema();
     let mut alice =

@@ -690,16 +690,28 @@ impl Runtime {
     }
 
     pub fn transaction_policy_read_rows(&self, tx_id: &str) -> Result<Vec<(String, String)>> {
+        self.transaction_read_rows_for_reason(tx_id, 1)
+    }
+
+    pub fn transaction_previous_read_rows(&self, tx_id: &str) -> Result<Vec<(String, String)>> {
+        self.transaction_read_rows_for_reason(tx_id, 2)
+    }
+
+    fn transaction_read_rows_for_reason(
+        &self,
+        tx_id: &str,
+        reason: i64,
+    ) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT reads.table_name, ids.row_id
              FROM jazz_tx_read reads
              JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
              JOIN jazz_row_id ids ON ids.row_num = reads.row_num
              WHERE tx.tx_id = ?
-               AND reads.reason = 1
+               AND reads.reason = ?
              ORDER BY reads.table_name, ids.row_id",
         )?;
-        let rows = stmt.query_map(params![tx_id], |row| {
+        let rows = stmt.query_map(params![tx_id, reason], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1093,6 +1105,9 @@ struct InsertRowInTx<'a> {
 fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<()> {
     let table = args.schema.table_def(args.table_name)?;
     let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
+    if args.op != 1 {
+        record_tx_read(args.db, args.tx_num, args.table_name, row_num, 2)?;
+    }
     record_policy_read_set_for_write(
         args.db,
         table,
@@ -1454,6 +1469,7 @@ impl<'a> TransactionBuilder<'a> {
                 Mutation::DeleteRow { table, id } => {
                     let table_def = self.runtime.schema.table_def(&table)?;
                     let row_num = row_num(&db, &id)?;
+                    record_tx_read(&db, tx_num, &table, row_num, 2)?;
                     let visible_row = delete_snapshots
                         .get(&(table.clone(), id.clone()))
                         .ok_or_else(|| {
