@@ -136,3 +136,39 @@ fn renamed_ref_lens_participates_in_read_policy() {
     assert_eq!(rows[0].values["workspace"], json!("project-alice"));
     assert!(!rows[0].values.contains_key("project"));
 }
+
+#[test]
+fn user_columns_with_system_prefix_are_escaped_physically() {
+    let schema = SchemaDef::new().table("records", |table| {
+        table.text("j_title");
+        table.bool("j_pinned");
+        table.index("by_j_title", ["j_title"]);
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "records",
+            "record-1",
+            BTreeMap::from([
+                ("j_title".to_owned(), json!("Looks like system")),
+                ("j_pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice
+        .read_rows_where_eq("records", "j_title", json!("Looks like system"))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["j_pinned"], json!(true));
+
+    peer.apply_bundle(&alice.export_table_history("records").unwrap())
+        .unwrap();
+    let peer_rows = peer.read_rows("records").unwrap();
+    assert_eq!(peer_rows.len(), 1);
+    assert_eq!(peer_rows[0].values["j_title"], json!("Looks like system"));
+}

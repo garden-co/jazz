@@ -1386,3 +1386,19 @@ with no global epoch, later receive `global_epoch = 42`, and peers preserve both
 
 Test status: `cargo test -p mini-jazz-sqlite --test whole_system
 edge_accepted_transaction_can_upgrade_to_global_epoch` passes.
+
+## 2026-05-25 19:19 PDT
+
+Starting `j_` user-column escaping. We decided row system columns use `j_`, so
+user columns with that prefix need a deterministic physical escape rather than
+colliding with system columns.
+
+## 2026-05-25 19:20 PDT
+
+`j_` user-column escaping is green. Schema fields and lens storage names that
+start with `j_` now store physically as `u_j_*`, while semantic reads, writes,
+sync payloads, equality queries, and indexes still use the user-facing field
+name.
+
+Test status: `cargo test -p mini-jazz-sqlite --test whole_system
+user_columns_with_system_prefix_are_escaped_physically` passes.

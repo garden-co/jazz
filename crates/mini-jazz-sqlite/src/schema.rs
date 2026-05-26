@@ -110,7 +110,7 @@ impl TableBuilder {
     pub fn text(&mut self, name: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
-            storage_name: name.to_owned(),
+            storage_name: user_storage_name(name),
             kind: FieldKind::Text,
         });
     }
@@ -118,7 +118,7 @@ impl TableBuilder {
     pub fn text_lens(&mut self, name: &str, stored_as: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
-            storage_name: stored_as.to_owned(),
+            storage_name: user_storage_name(stored_as),
             kind: FieldKind::Text,
         });
     }
@@ -126,7 +126,7 @@ impl TableBuilder {
     pub fn bool(&mut self, name: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
-            storage_name: name.to_owned(),
+            storage_name: user_storage_name(name),
             kind: FieldKind::Bool,
         });
     }
@@ -134,7 +134,7 @@ impl TableBuilder {
     pub fn ref_(&mut self, name: &str, table: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
-            storage_name: name.to_owned(),
+            storage_name: user_storage_name(name),
             kind: FieldKind::Ref {
                 table: table.to_owned(),
             },
@@ -144,7 +144,7 @@ impl TableBuilder {
     pub fn ref_lens(&mut self, name: &str, stored_as: &str, table: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
-            storage_name: stored_as.to_owned(),
+            storage_name: user_storage_name(stored_as),
             kind: FieldKind::Ref {
                 table: table.to_owned(),
             },
@@ -424,11 +424,20 @@ pub(crate) fn field_sql_value(
 }
 
 pub(crate) fn storage_column_name(column: &str) -> String {
-    quote_ident(match column {
-        "$createdAt" => "j_created_at",
-        "$updatedAt" => "j_updated_at",
-        other => other,
-    })
+    let storage = match column {
+        "$createdAt" => "j_created_at".to_owned(),
+        "$updatedAt" => "j_updated_at".to_owned(),
+        other => user_storage_name(other),
+    };
+    quote_ident(&storage)
+}
+
+fn user_storage_name(name: &str) -> String {
+    if name.starts_with("j_") {
+        format!("u_{name}")
+    } else {
+        name.to_owned()
+    }
 }
 
 fn sql_type(kind: &FieldKind) -> &'static str {
