@@ -682,3 +682,9 @@ Design lesson: the structural compatibility fingerprint is already doing useful 
 Added a first branch metadata read surface. Runtimes can list branch ids, base global epochs, and source branch ids; the metadata survives table-history sync for a merge branch. Full mini crate suite is green with 188 tests.
 
 Design lesson: branch provenance is already durable and syncable as system metadata, but it is not yet a user-visible backing row with ordinary permissions. The new read surface makes that gap explicit: product branch permissions should probably wrap or replace this system-only table with a policy-controlled branch catalogue.
+
+## 2026-05-26 02:29 PDT
+
+Extended conflict metadata through a filtered equality read. Multi-base branch candidates now keep `conflict_count` when queried through a field predicate, not only through the full-table conflict-meta read. Full mini crate suite is green with 189 tests.
+
+Design lesson: conflict metadata needs to be part of semantic row materialization before query filtering, otherwise query APIs will accidentally hide conflict state. The current implementation is intentionally simple and reruns a full conflict-meta read before filtering; a real lowering should push predicates into SQL while preserving candidate expansion.

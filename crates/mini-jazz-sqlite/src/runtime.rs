@@ -1915,6 +1915,30 @@ impl Runtime {
         Ok(rows)
     }
 
+    pub fn read_rows_where_eq_with_conflict_meta(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+    ) -> Result<Vec<RowView>> {
+        if field_name == "id" {
+            let Some(id) = value.as_str() else {
+                return Err(crate::Error::new("id equality expects a string"));
+            };
+            return Ok(self
+                .read_rows_with_conflict_meta(table_name)?
+                .into_iter()
+                .filter(|row| row.id == id)
+                .collect());
+        }
+        self.schema.table_def(table_name)?;
+        Ok(self
+            .read_rows_with_conflict_meta(table_name)?
+            .into_iter()
+            .filter(|row| row.values.get(field_name) == Some(&value))
+            .collect())
+    }
+
     fn row_has_current_branch_value(&self, table_name: &str, id: &str) -> Result<bool> {
         self.schema.table_def(table_name)?;
         let row_num = row_num(&self.conn, id)?;
