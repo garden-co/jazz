@@ -1111,3 +1111,15 @@ lower `eq` and `ne` separately, so rows created by other principals can leave a
 broad magic-field scope after deletion.
 
 Validation: `cargo test -p mini-jazz-sqlite` passes with 225 whole-system tests.
+
+## 2026-05-26 04:19 PDT
+
+Added subscription coverage for an observed `$createdBy != ...` query scope
+whose matching remote row is later deleted upstream and refreshed into a worker.
+
+Discovery: after the repair-path fix, subscription polling needed no special
+case. The listener layer compares semantic row snapshots returned by the query
+facade, so broad magic-field predicates inherit correct remove diffs once scoped
+sync converges the worker projection.
+
+Validation: `cargo test -p mini-jazz-sqlite` passes with 226 whole-system tests.

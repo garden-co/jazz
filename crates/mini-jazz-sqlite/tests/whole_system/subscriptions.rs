@@ -164,6 +164,53 @@ fn not_equal_subscription_diffs_when_optional_value_appears_and_clears() {
 }
 
 #[test]
+fn observed_created_by_not_equal_subscription_removes_deleted_remote_row() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut worker =
+        Runtime::open_with_schema(Storage::Memory, "worker-node", "alice", schema).unwrap();
+
+    bob.insert_row(
+        "notes",
+        "note-bob",
+        BTreeMap::from([
+            ("body".to_owned(), json!("Bob")),
+            ("pinned".to_owned(), json!(false)),
+        ]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("notes").unwrap())
+        .unwrap();
+    worker
+        .apply_bundle(
+            &alice
+                .export_query_where_ne("notes", "$createdBy", json!("alice"))
+                .unwrap(),
+        )
+        .unwrap();
+
+    let observed = worker.observed_query_reads().unwrap();
+    let mut subscription = worker.subscribe_observed_query(&observed[0]).unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+    assert_eq!(subscription.initial_rows()[0].id, "note-bob");
+
+    alice.delete_row("notes", "note-bob").unwrap();
+    for refresh in alice.export_query_read_refreshes(&observed).unwrap() {
+        worker.apply_bundle(&refresh).unwrap();
+    }
+
+    let diffs = worker.poll_subscription(&mut subscription).unwrap();
+    assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "note-bob"));
+}
+
+#[test]
 fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");
