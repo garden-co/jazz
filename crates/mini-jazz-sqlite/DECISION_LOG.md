@@ -586,3 +586,9 @@ Design lesson: catalogue compatibility should be split by lane. Structural stora
 Pinned an exclusive-conflict invariant: exclusive transactions conflict at whole-row granularity, even when the later write only touches a different column. Full mini crate suite is green with 173 tests.
 
 Design lesson: per-column metadata is useful for mergeable conflict resolution, but exclusive/global consistency should reason over row items unless we deliberately design a narrower serializability model. This matches the recent spec clarification.
+
+## 2026-05-26 01:58 PDT
+
+Used persisted query reads to drive reconnect refresh. A durable worker can receive a query scope, restart, send its observed descriptors to an upstream, and apply returned refresh bundles that remove rows which left scope while offline. Full mini crate suite is green with 174 tests.
+
+Design lesson: durable query-read storage is not just introspection. It can be the seed of a real resubscribe protocol: receiver remembers desired/observed scopes, upstream reruns descriptors, receiver applies repairs. The current API is manual and single-hop, but the core loop is now executable.

@@ -25,6 +25,55 @@ fn query_scoped_sync_converges_memory_and_durable_nodes() {
 }
 
 #[test]
+fn durable_query_reads_drive_reconnect_refresh_after_restart() {
+    let dir = tempdir().unwrap();
+    let worker_path = dir.path().join("worker.sqlite");
+
+    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
+    upstream.create_project("project-1", "Spec work").unwrap();
+    upstream
+        .create_todo("todo-1", "Initially open", false, "project-1")
+        .unwrap();
+
+    {
+        let mut worker =
+            Runtime::open(Storage::File(worker_path.clone()), "worker", "alice").unwrap();
+        worker
+            .apply_bundle(&upstream.export_query_scope_open_todos().unwrap())
+            .unwrap();
+        assert_eq!(worker.open_todos().unwrap().len(), 1);
+        assert_eq!(worker.observed_query_reads().unwrap().len(), 1);
+    }
+
+    upstream
+        .update_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Closed while offline")),
+                ("done".to_owned(), json!(true)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    let mut reopened =
+        Runtime::open(Storage::File(worker_path), "worker-reopened", "alice").unwrap();
+    assert_eq!(reopened.open_todos().unwrap().len(), 1);
+
+    let desired_queries = reopened.observed_query_reads().unwrap();
+    for refresh in upstream
+        .export_query_read_refreshes(&desired_queries)
+        .unwrap()
+    {
+        reopened.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(reopened.open_todos().unwrap().is_empty());
+    assert_eq!(reopened.observed_query_reads().unwrap().len(), 1);
+}
+
+#[test]
 fn durable_worker_rehydrates_fresh_memory_tab_after_restart() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");

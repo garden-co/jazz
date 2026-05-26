@@ -626,6 +626,68 @@ impl Runtime {
             .map_err(Into::into)
     }
 
+    pub fn export_observed_query_refreshes(&self) -> Result<Vec<Bundle>> {
+        let reads = self.observed_query_reads()?;
+        self.export_query_read_refreshes(&reads)
+    }
+
+    pub fn export_query_read_refreshes(&self, reads: &[QueryReadRecord]) -> Result<Vec<Bundle>> {
+        reads
+            .iter()
+            .map(|read| self.export_query_read_refresh(read))
+            .collect()
+    }
+
+    fn export_query_read_refresh(&self, read: &QueryReadRecord) -> Result<Bundle> {
+        if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
+            return Err(crate::Error::new("query refresh branch is not checked out"));
+        }
+        match read.op.as_str() {
+            "eq" => self.export_query_where_eq(&read.table, &read.field, read.value.clone()),
+            "contains" => {
+                let Some(needle) = read.value.as_str() else {
+                    return Err(crate::Error::new("contains expects a string value"));
+                };
+                self.export_query_where_contains(&read.table, &read.field, needle)
+            }
+            "in" => {
+                let Some(values) = read.value.as_array() else {
+                    return Err(crate::Error::new("in predicate expects an array value"));
+                };
+                self.export_query_where_in(&read.table, &read.field, values.clone())
+            }
+            "eq_top_created_at_desc" => {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
+                self.export_query_where_eq_top_created_at_desc(
+                    &read.table,
+                    &read.field,
+                    value.clone(),
+                    limit as usize,
+                )
+            }
+            "absent" => Ok(Bundle {
+                protocol_version: BUNDLE_PROTOCOL_VERSION,
+                schema_fingerprint: self.schema.compatibility_fingerprint(),
+                branches: Vec::new(),
+                txs: export_txs(&self.conn)?,
+                reads: Vec::new(),
+                query_reads: vec![read.clone()],
+                history: Vec::new(),
+            }),
+            op => Err(crate::Error::new(format!(
+                "unsupported observed query refresh {op}"
+            ))),
+        }
+    }
+
     fn record_query_read(db: &Connection, query_read: &QueryReadRecord) -> Result<()> {
         db.execute(
             "INSERT OR REPLACE INTO jazz_query_read
