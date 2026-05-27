@@ -23,6 +23,7 @@ fn main() -> BenchResult<()> {
         wide_schema_apply_probe: run_wide_schema_apply_probe()?,
         storage_topology_probe: run_storage_topology_probe()?,
         multi_query_refresh_probe: run_multi_query_refresh_probe()?,
+        subscription_storm_probe: run_subscription_storm_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -62,6 +63,7 @@ struct BenchmarkReport {
     wide_schema_apply_probe: WideSchemaApplyProbe,
     storage_topology_probe: StorageTopologyProbe,
     multi_query_refresh_probe: MultiQueryRefreshProbe,
+    subscription_storm_probe: SubscriptionStormProbe,
 }
 
 #[derive(Serialize)]
@@ -246,6 +248,21 @@ struct MultiQueryRefreshProbe {
     separate_transaction_rows: usize,
     merged_transaction_rows: usize,
     merged_observed_facts: usize,
+}
+
+#[derive(Serialize)]
+struct SubscriptionStormProbe {
+    subscription_count: usize,
+    total_rows: usize,
+    page_size: usize,
+    inserted_per_subscription: usize,
+    merged_bundle_bytes: usize,
+    apply_ms: f64,
+    total_poll_ms: f64,
+    average_poll_ms: f64,
+    total_added: usize,
+    total_updated: usize,
+    total_removed: usize,
 }
 
 #[derive(Serialize)]
@@ -898,6 +915,80 @@ fn run_multi_query_refresh_probe() -> BenchResult<MultiQueryRefreshProbe> {
     })
 }
 
+fn run_subscription_storm_probe() -> BenchResult<SubscriptionStormProbe> {
+    let owner_count = 50;
+    let rows_per_owner = 200;
+    let total_rows = owner_count * rows_per_owner;
+    let subscription_count = 20;
+    let page_size = 10;
+    let inserted_per_subscription = 5;
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema.clone())?;
+
+    seed_shared_readable_owner_documents(&mut core, owner_count, rows_per_owner, 100)?;
+    let owners = (0..subscription_count)
+        .map(|index| format!("user-{index}"))
+        .collect::<Vec<_>>();
+    let mut subscriptions = Vec::new();
+    for owner in &owners {
+        let bundle = export_top_owner_page_for(&mut core, OWNER, owner, page_size)?;
+        tab.apply_bundle(&bundle)?;
+        subscriptions.push(tab.subscribe_rows_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!(owner),
+            "updated_at",
+            page_size,
+        )?);
+    }
+    insert_new_top_documents_for_shared_readable_owners(
+        &mut core,
+        total_rows,
+        &owners,
+        inserted_per_subscription,
+    )?;
+    let refresh_bundles = core.run_as_user(OWNER, |core| {
+        core.export_query_read_refreshes(&tab.observed_query_reads()?)
+    })?;
+    let merged_bundle = merge_bundles(&refresh_bundles)?;
+    let merged_summary = BundleSummary::from(&merged_bundle)?;
+    let apply_elapsed = timed(|| tab.apply_bundle(&merged_bundle))?;
+
+    let poll_started = Instant::now();
+    let mut total_counts = DiffCounts {
+        added: 0,
+        updated: 0,
+        removed: 0,
+    };
+    for subscription in &mut subscriptions {
+        let counts = DiffCounts::from(&tab.poll_subscription(subscription)?);
+        total_counts.added += counts.added;
+        total_counts.updated += counts.updated;
+        total_counts.removed += counts.removed;
+    }
+    let poll_elapsed = poll_started.elapsed();
+
+    Ok(SubscriptionStormProbe {
+        subscription_count,
+        total_rows,
+        page_size,
+        inserted_per_subscription,
+        merged_bundle_bytes: merged_summary.bytes,
+        apply_ms: ms(apply_elapsed),
+        total_poll_ms: ms(poll_elapsed),
+        average_poll_ms: ms(poll_elapsed) / subscription_count as f64,
+        total_added: total_counts.added,
+        total_updated: total_counts.updated,
+        total_removed: total_counts.removed,
+    })
+}
+
 fn run_edge_warm_worker_cold(
     config: &Config,
     dir: &tempfile::TempDir,
@@ -1254,6 +1345,39 @@ fn seed_many_user_documents(
     Ok(())
 }
 
+fn seed_shared_readable_owner_documents(
+    runtime: &mut Runtime,
+    owner_count: usize,
+    rows_per_owner: usize,
+    seed_batch_size: usize,
+) -> Result<()> {
+    seed_orgs(runtime)?;
+    let total_rows = owner_count * rows_per_owner;
+    let seed_batch_size = seed_batch_size.max(1);
+    for chunk_start in (0..total_rows).step_by(seed_batch_size) {
+        let chunk_end = (chunk_start + seed_batch_size).min(total_rows);
+        let mut tx = runtime.transaction();
+        for row_index in chunk_start..chunk_end {
+            let owner_index = row_index / rows_per_owner;
+            tx = tx.insert_row(
+                "documents",
+                &format!("shared-readable-doc-{row_index}"),
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!(format!("user-{owner_index}"))),
+                    ("org".to_owned(), json!(format!("org-{}", row_index % 100))),
+                    ("updated_at".to_owned(), json!(format!("{:020}", row_index))),
+                    (
+                        "title".to_owned(),
+                        json!(format!("Shared readable document {row_index}")),
+                    ),
+                ]),
+            );
+        }
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 fn export_top_owner_page(runtime: &mut Runtime, page_size: usize) -> Result<Bundle> {
     export_top_owner_page_for(runtime, OWNER, OWNER, page_size)
 }
@@ -1333,6 +1457,37 @@ fn insert_new_top_documents_for_owners(
                 "documents",
                 &format!("doc-multi-query-new-{owner_index}-{index}"),
                 values,
+            );
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn insert_new_top_documents_for_shared_readable_owners(
+    runtime: &mut Runtime,
+    total_rows: usize,
+    owners: &[String],
+    count_per_owner: usize,
+) -> Result<()> {
+    let mut tx = runtime.transaction();
+    for (owner_index, owner) in owners.iter().enumerate() {
+        for index in 0..count_per_owner {
+            let row_index = total_rows + owner_index * count_per_owner + index;
+            tx = tx.insert_row(
+                "documents",
+                &format!("doc-shared-readable-new-{owner_index}-{index}"),
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!(owner)),
+                    ("org".to_owned(), json!(format!("org-{}", row_index % 100))),
+                    ("updated_at".to_owned(), json!(format!("{:020}", row_index))),
+                    (
+                        "title".to_owned(),
+                        json!(format!(
+                            "Shared readable new document {owner_index}-{index}"
+                        )),
+                    ),
+                ]),
             );
         }
     }

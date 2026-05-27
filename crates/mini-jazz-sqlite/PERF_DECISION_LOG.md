@@ -429,3 +429,19 @@ to about 19 ms, refresh after 50 new top rows drops from about 175-178 ms to
 about 150 ms, and mixed refresh apply drops from about 32 ms to about 24 ms.
 Multi-tab fanout average tab apply falls from roughly 18.5-19 ms to about
 13.3 ms. The plateau was substantially repeated identity lookup during apply.
+
+## 2026-05-26 22:35 PDT
+
+Added a subscription storm probe for one user with 20 live owner-filtered
+top-page subscriptions over data they are allowed to read. The refresh inserts 5
+new top rows per subscription, merges all refresh bundles, applies once, then
+polls all subscriptions.
+
+Result: merged refresh bundle is about 381 KB, apply takes about 82 ms, and
+polling all 20 subscriptions takes about 5 ms total / 0.25 ms each. Diffs are
+correct: 100 added and 100 removed. The important learning is that subscription
+diffing itself is cheap; the expensive part remains applying the merged refresh
+history. I initially modeled this as 20 different users in one runtime, which
+correctly produced no diffs because query reads are bound to the runtime's user
+context rather than storing per-query auth. That is a useful semantic reminder:
+multi-user fanout belongs at the broker/edge layer, not inside one app runtime.
