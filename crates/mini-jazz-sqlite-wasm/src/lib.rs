@@ -15,11 +15,21 @@ pub struct MiniJazzRuntime {
     runtime: Runtime,
     subscriptions: BTreeMap<u32, WasmRowsSubscription>,
     next_subscription_id: u32,
+    notifying_subscriptions: bool,
+    notify_subscriptions_again: bool,
 }
 
 struct WasmRowsSubscription {
     subscription: RowsSubscription,
     callback: js_sys::Function,
+}
+
+struct PendingNotification {
+    id: u32,
+    previous_subscription: RowsSubscription,
+    next_subscription: RowsSubscription,
+    callback: js_sys::Function,
+    value: JsValue,
 }
 
 #[wasm_bindgen]
@@ -166,23 +176,76 @@ impl MiniJazzRuntime {
             runtime,
             subscriptions: BTreeMap::new(),
             next_subscription_id: 0,
+            notifying_subscriptions: false,
+            notify_subscriptions_again: false,
         }
     }
 
     fn notify_subscriptions(&mut self) -> Result<(), JsValue> {
-        let runtime = &self.runtime;
+        if self.notifying_subscriptions {
+            self.notify_subscriptions_again = true;
+            return Ok(());
+        }
 
-        for entry in self.subscriptions.values_mut() {
+        self.notifying_subscriptions = true;
+        loop {
+            self.notify_subscriptions_again = false;
+            if let Err(error) = self.notify_subscriptions_once() {
+                self.notifying_subscriptions = false;
+                self.notify_subscriptions_again = false;
+                return Err(error);
+            }
+            if !self.notify_subscriptions_again {
+                break;
+            }
+        }
+        self.notifying_subscriptions = false;
+        Ok(())
+    }
+
+    fn notify_subscriptions_once(&mut self) -> Result<(), JsValue> {
+        let runtime = &self.runtime;
+        let ids = self.subscriptions.keys().copied().collect::<Vec<_>>();
+        let mut pending = Vec::new();
+
+        for id in ids {
+            let Some(entry) = self.subscriptions.get(&id) else {
+                continue;
+            };
+            let previous_subscription = entry.subscription.clone();
             let mut next_subscription = entry.subscription.clone();
             let delta = runtime
                 .subscription_delta(&mut next_subscription)
                 .map_err(to_js_error)?;
             if !delta.delta.is_empty() {
-                let value = to_js_value(delta)?;
-                entry.callback.call1(&JsValue::UNDEFINED, &value)?;
+                pending.push(PendingNotification {
+                    id,
+                    previous_subscription,
+                    next_subscription,
+                    callback: entry.callback.clone(),
+                    value: to_js_value(delta)?,
+                });
+            } else if let Some(entry) = self.subscriptions.get_mut(&id) {
+                entry.subscription = next_subscription;
+            }
+        }
+
+        for notification in pending {
+            if let Some(entry) = self.subscriptions.get_mut(&notification.id) {
+                entry.subscription = notification.next_subscription.clone();
+            } else {
+                continue;
             }
 
-            entry.subscription = next_subscription;
+            if let Err(error) = notification
+                .callback
+                .call1(&JsValue::UNDEFINED, &notification.value)
+            {
+                if let Some(entry) = self.subscriptions.get_mut(&notification.id) {
+                    entry.subscription = notification.previous_subscription;
+                }
+                return Err(error);
+            }
         }
 
         Ok(())
@@ -220,7 +283,9 @@ fn to_js_error(error: mini_jazz_sqlite::Error) -> JsValue {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::cell::Cell;
     use std::collections::BTreeMap;
+    use std::rc::Rc;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_test::*;
 
@@ -312,6 +377,88 @@ mod tests {
 
         assert_eq!(kinds.get(0).as_f64(), Some(0.0));
         assert_eq!(titles.get(0).as_string().as_deref(), Some("Retried"));
+    }
+
+    #[wasm_bindgen_test]
+    fn subscription_callback_can_unsubscribe_current_handle() {
+        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let handle = Rc::new(Cell::new(None::<u32>));
+        let seen_initial = Rc::new(Cell::new(false));
+        let callback_count = Rc::new(Cell::new(0));
+        let runtime_ptr = &mut runtime as *mut MiniJazzRuntime;
+        let callback_closure = Closure::<dyn FnMut(JsValue)>::new({
+            let handle = Rc::clone(&handle);
+            let seen_initial = Rc::clone(&seen_initial);
+            let callback_count = Rc::clone(&callback_count);
+            move |_| {
+                callback_count.set(callback_count.get() + 1);
+                if seen_initial.replace(true) {
+                    unsafe {
+                        (*runtime_ptr).unsubscribe(handle.get().expect("handle is set"));
+                    }
+                }
+            }
+        });
+        let callback = callback_closure
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone();
+
+        let subscription_handle = runtime
+            .subscribe(JsValue::from_str(r#"{"table":"projects"}"#), callback)
+            .unwrap();
+        handle.set(Some(subscription_handle));
+        assert_eq!(callback_count.get(), 1);
+
+        runtime
+            .insert_row("projects", "project-1", project_values("First"))
+            .unwrap();
+        assert_eq!(callback_count.get(), 2);
+
+        runtime
+            .update_row("projects", "project-1", project_values("Second"))
+            .unwrap();
+        assert_eq!(callback_count.get(), 2);
+    }
+
+    #[wasm_bindgen_test]
+    fn subscription_callback_can_write_another_row() {
+        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let seen_initial = Rc::new(Cell::new(false));
+        let wrote_nested_row = Rc::new(Cell::new(false));
+        let callback_count = Rc::new(Cell::new(0));
+        let runtime_ptr = &mut runtime as *mut MiniJazzRuntime;
+        let callback_closure = Closure::<dyn FnMut(JsValue)>::new({
+            let seen_initial = Rc::clone(&seen_initial);
+            let wrote_nested_row = Rc::clone(&wrote_nested_row);
+            let callback_count = Rc::clone(&callback_count);
+            move |_| {
+                callback_count.set(callback_count.get() + 1);
+                if seen_initial.replace(true) && !wrote_nested_row.replace(true) {
+                    unsafe {
+                        (*runtime_ptr)
+                            .insert_row("projects", "project-2", project_values("Nested"))
+                            .unwrap();
+                    }
+                }
+            }
+        });
+        let callback = callback_closure
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone();
+
+        runtime
+            .subscribe(JsValue::from_str(r#"{"table":"projects"}"#), callback)
+            .unwrap();
+        assert_eq!(callback_count.get(), 1);
+
+        runtime
+            .insert_row("projects", "project-1", project_values("First"))
+            .unwrap();
+        assert_eq!(callback_count.get(), 3);
+        let rows: js_sys::Array = runtime.read_rows("projects").unwrap().dyn_into().unwrap();
+        assert_eq!(rows.length(), 2);
     }
 }
 
