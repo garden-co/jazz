@@ -2235,3 +2235,33 @@ Learning: the benchmark harness is useful enough that its measurement semantics
 need the same rigor as product code. The review also caught an important product
 semantics gap: ordered subscriptions need explicit order-change events, not just
 row add/update/remove events.
+
+## 2026-05-27 03:30 PDT
+
+Reran corrected focused measurements after the review fixes.
+
+Focused 10k recursive-only:
+
+- direct subscription initial apply ~150.3 ms
+- mutation refresh apply ~48.3 ms
+- first no-op refresh apply ~46.8 ms
+- three repeated no-op applies ~140.9 ms
+- three repeated no-op polls ~92.2 ms
+- topology initial exports: core ~124.0 ms, edge ~128.0 ms, worker ~115.1 ms
+- topology refresh exports: core ~126.0 ms, edge ~130.9 ms, worker ~117.8 ms
+- topology initial applies per tier ~145-162 ms
+- topology refresh applies per tier ~47.8-69.9 ms
+
+Corrected dashboard scaling with fresh core per query-count case:
+
+- 1 query: initial export ~12.6 ms, refresh ~13.6 ms, refresh apply ~0.4 ms
+- 4 queries: initial export ~17.5 ms, refresh ~17.7 ms, refresh apply ~0.6 ms
+- 12 queries: initial export ~18.5 ms, refresh ~18.9 ms, refresh apply ~1.2 ms
+- 24 queries: initial export ~17.9 ms, refresh ~18.6 ms, refresh apply ~2.1 ms
+- 48 queries: initial export ~21.5 ms, refresh ~22.5 ms, refresh apply ~3.7 ms
+
+Learning: the dashboard scaling story survived the stricter harness and is a bit
+cleaner now: export time grows slowly with query count while apply scales more
+linearly with delivered rows. The recursive topology story is sharper too:
+per-hop export is as expensive as apply and must be included in perceived
+latency discussions.
