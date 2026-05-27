@@ -550,6 +550,11 @@ impl Runtime {
                 branch_record.source_version,
             )?;
         }
+        let mut branch_nums_by_id = BTreeMap::new();
+        for branch_record in &bundle.branches {
+            let branch_num = branch::checkout(&db, &branch_record.branch_id)?;
+            branch_nums_by_id.insert(branch_record.branch_id.clone(), branch_num);
+        }
         let mut tx_nums_by_id = BTreeMap::new();
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
@@ -579,7 +584,7 @@ impl Runtime {
                 ],
             )?;
             let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
-            tx_nums_by_id.insert(tx_record.tx_id.as_str(), tx_num);
+            tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
             if tx_record.outcome == tx::OUTCOME_REJECTED {
                 if let Some(code) = &tx_record.rejection_code {
                     let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
@@ -612,12 +617,18 @@ impl Runtime {
                 )?;
             }
         }
+        let mut row_nums_by_id = BTreeMap::new();
         for read_record in &bundle.reads {
             let tx_num = tx_nums_by_id
-                .get(read_record.tx_id.as_str())
+                .get(&read_record.tx_id)
                 .copied()
                 .ok_or_else(|| crate::Error::new("bundle read references missing tx"))?;
-            let row_num = ensure_row_id(&db, &read_record.table, &read_record.row_id)?;
+            let row_num = cached_ensure_row_id(
+                &db,
+                &mut row_nums_by_id,
+                &read_record.table,
+                &read_record.row_id,
+            )?;
             let observed_tx_num = read_record
                 .observed_tx_id
                 .as_deref()
@@ -653,7 +664,15 @@ impl Runtime {
             Self::record_query_read(&db, query_read)?;
         }
         for record in &bundle.history {
-            Self::apply_history_record(&schema, &db, self.node_num, record)?;
+            Self::apply_history_record(
+                &schema,
+                &db,
+                self.node_num,
+                record,
+                &tx_nums_by_id,
+                &branch_nums_by_id,
+                &mut row_nums_by_id,
+            )?;
         }
         for query_read in &bundle.query_reads {
             Self::apply_query_scope_repair(&schema, &db, query_read)?;
@@ -1471,11 +1490,22 @@ impl Runtime {
         db: &Connection,
         local_node_num: i64,
         record: &HistoryRecord,
+        tx_nums_by_id: &BTreeMap<String, i64>,
+        branch_nums_by_id: &BTreeMap<String, i64>,
+        row_nums_by_id: &mut BTreeMap<(String, String), i64>,
     ) -> Result<()> {
         let table = schema.table_def(&record.table)?;
-        let row_num = ensure_row_id(db, &record.table, &record.row_id)?;
-        let tx_num = tx::tx_num(db, &record.tx_id)?;
-        let branch_num = branch::ensure(db, &record.branch_id, None, now_ms())?;
+        let row_num = cached_ensure_row_id(db, row_nums_by_id, &record.table, &record.row_id)?;
+        let tx_num = tx_nums_by_id
+            .get(&record.tx_id)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| tx::tx_num(db, &record.tx_id))?;
+        let branch_num = branch_nums_by_id
+            .get(&record.branch_id)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| branch::ensure(db, &record.branch_id, None, now_ms()))?;
 
         let mut columns = vec![
             "row_num".to_owned(),
@@ -1501,7 +1531,7 @@ impl Runtime {
             values.push(crate::schema::field_sql_value(
                 field,
                 value,
-                |ref_table, row_id| ensure_row_id(db, ref_table, row_id),
+                |ref_table, row_id| cached_ensure_row_id(db, row_nums_by_id, ref_table, row_id),
             )?);
         }
         columns.extend([
@@ -5647,6 +5677,21 @@ fn cached_public_row_id(
     let row_id = public_row_id(conn, row_num)?;
     cache.insert(row_num, row_id.clone());
     Ok(row_id)
+}
+
+fn cached_ensure_row_id(
+    conn: &Connection,
+    cache: &mut BTreeMap<(String, String), i64>,
+    table: &str,
+    row_id: &str,
+) -> Result<i64> {
+    let key = (table.to_owned(), row_id.to_owned());
+    if let Some(row_num) = cache.get(&key) {
+        return Ok(*row_num);
+    }
+    let row_num = ensure_row_id(conn, table, row_id)?;
+    cache.insert(key, row_num);
+    Ok(row_num)
 }
 
 fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<String> {

@@ -417,3 +417,15 @@ bundle is about 79 KB and applies in about 27 ms. Deduping collapses tx rows fro
 signal: brokers/edges/workers should batch refreshes for a downstream peer into
 one deduped apply unit whenever possible, especially for dashboards with several
 live queries sharing policy dependencies and transaction metadata.
+
+## 2026-05-26 22:30 PDT
+
+Added apply-local caches for tx ids, branch ids, row ids, and ref row ids while
+applying history records. The query-scope test suite passes.
+
+Result: this is the largest direct runtime win so far. Cold first-result drops
+from about 130-132 ms to about 116 ms, warm worker-to-tab drops from about 23 ms
+to about 19 ms, refresh after 50 new top rows drops from about 175-178 ms to
+about 150 ms, and mixed refresh apply drops from about 32 ms to about 24 ms.
+Multi-tab fanout average tab apply falls from roughly 18.5-19 ms to about
+13.3 ms. The plateau was substantially repeated identity lookup during apply.
