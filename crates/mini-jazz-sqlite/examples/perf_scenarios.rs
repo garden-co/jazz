@@ -345,6 +345,7 @@ struct ProjectBoardProbe {
     merged_history_rows: usize,
     merged_transaction_rows: usize,
     tab_apply_ms: f64,
+    tab_apply_profile: ApplyBundleProfile,
     tab_query_ms: f64,
     visible_rows_returned: usize,
     core_database_bytes: i64,
@@ -1304,7 +1305,7 @@ fn run_project_board_probe() -> BenchResult<ProjectBoardProbe> {
     })?;
     let export_elapsed = export_started.elapsed();
     let merged_summary = BundleSummary::from(&merged_bundle)?;
-    let tab_apply_elapsed = timed(|| tab.apply_bundle(&merged_bundle))?;
+    let tab_apply_profile = tab.profile_apply_bundle(&merged_bundle)?;
     let query_started = Instant::now();
     let mut visible_rows = 0;
     for user in &users {
@@ -1332,7 +1333,8 @@ fn run_project_board_probe() -> BenchResult<ProjectBoardProbe> {
         merged_bundle_bytes: merged_summary.bytes,
         merged_history_rows: merged_bundle.history.len(),
         merged_transaction_rows: merged_bundle.txs.len(),
-        tab_apply_ms: ms(tab_apply_elapsed),
+        tab_apply_ms: tab_apply_profile.total_ms,
+        tab_apply_profile,
         tab_query_ms: ms(query_elapsed),
         visible_rows_returned: visible_rows,
         core_database_bytes: core.storage_stats()?.database_bytes,

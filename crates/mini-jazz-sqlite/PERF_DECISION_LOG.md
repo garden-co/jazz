@@ -1213,3 +1213,21 @@ Release sample for the refreshed probe:
 
 Learning: page-boundary churn is the right thing to measure for subscriptions;
 explicit deletes are only one cause of removals.
+
+## 2026-05-27 01:19 PDT
+
+Added apply-profile output to the project-board probe. Release sample for the
+~188 KB / 421-history-row board bundle:
+
+- total tab apply: ~14.5 ms
+- history insertion/current maintenance: ~10.8 ms
+- query-scope repair: ~2.1 ms
+- read-set writes: ~1.2 ms
+- tx insertion: ~0.27 ms
+- validation/branches/query-read bookkeeping/commit/revalidate are all tiny
+
+Learning: for medium page bundles, apply cost is dominated by applying history
+records and maintaining current state. Query-scope repair is visible but
+secondary. This points future apply optimization toward prepared dynamic inserts,
+current maintenance batching, and avoiding unnecessary current probes rather than
+transaction metadata work.
