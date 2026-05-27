@@ -1077,3 +1077,25 @@ Learning: larger SQLite page cache does not materially improve the current
 benchmarks, and the 32 MB setting just spends memory. Default/small cache is a
 reasonable posture for now; our bottlenecks are query/export shape, not page
 cache starvation.
+
+## 2026-05-27 01:08 PDT
+
+Sampled journal/synchronous modes on the 50k-row release profile.
+
+With `synchronous=OFF`:
+
+- DELETE: seed ~1.64 s, first ~12.7 ms, refresh ~17.6 ms, core files ~14.6 MB
+- WAL: seed ~1.12 s, first ~10.9 ms, refresh ~15.7 ms, core files ~18.2 MB
+- MEMORY: seed ~1.04 s, first ~11.2 ms, refresh ~16.4 ms, core files ~14.6 MB
+- OFF: seed ~1.02 s, first ~11.1 ms, refresh ~16.7 ms, core files ~14.6 MB
+
+With `synchronous=NORMAL`:
+
+- DELETE: seed ~1.74 s, first ~12.7 ms, refresh ~17.6 ms
+- WAL: seed ~1.19 s, first ~11.3 ms, refresh ~16.2 ms
+
+Learning: WAL is a real speed win for file-backed durable nodes even with
+`NORMAL`, at the cost of WAL file footprint. MEMORY/OFF are useful only as
+unsafe benchmark lower bounds. We should likely default durable worker/edge/core
+SQLite connections toward WAL+NORMAL once the prototype stops needing exact file
+size comparability on every run.
