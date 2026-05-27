@@ -777,7 +777,7 @@ impl Runtime {
     fn apply_untrusted_bundle_with_auth_user(
         &mut self,
         bundle: &Bundle,
-        bundle_auth_user: Option<&str>,
+        connection_auth_user: Option<&str>,
     ) -> Result<()> {
         let stale_exclusive_tx_ids =
             read_set::stale_exclusive_tx_ids_in_bundle(&self.conn, bundle)?;
@@ -841,7 +841,7 @@ impl Runtime {
             let auth_user = if conflict_mode == tx::MODE_EXCLUSIVE {
                 forwarded_auth_users.get(record.tx_id.as_str()).copied()
             } else {
-                bundle_auth_user
+                connection_auth_user
             };
             if auth_user.is_none() {
                 self.reject_transaction_with_detail(
