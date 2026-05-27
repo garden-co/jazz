@@ -1,9 +1,11 @@
-use crate::query_api::{BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection};
+use crate::query_api::{
+    BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection, QueryOrderBy,
+};
 use crate::rows::{public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::types::RowView;
 use crate::{branch, policy, tx, users, Result};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
@@ -54,6 +56,19 @@ pub(crate) fn query_scope_predicate(query: &BuiltQuery) -> Result<Option<&QueryC
     }
 
     Ok(query.conditions.first())
+}
+
+struct LoweredCondition {
+    sql: String,
+    params: Vec<SqlValue>,
+}
+
+enum QueryColumn<'a> {
+    Id,
+    CreatedBy,
+    CreatedAt,
+    UpdatedAt,
+    Field(&'a FieldDef),
 }
 
 impl QueryContext<'_> {
@@ -117,39 +132,474 @@ impl QueryContext<'_> {
         self.read_rows_from_current_where_eq(table_name, field, &value, true)
     }
 
-    pub(crate) fn read_rows_for_built_query(
-        &self,
-        query: &BuiltQuery,
-    ) -> Result<Option<Vec<RowView>>> {
-        let Some(QueryStoragePlan::EqCreatedAtDescPage { condition, limit }) = storage_plan(query)
-        else {
-            return Ok(None);
-        };
-        if condition.column == "id" || condition.column == "$createdBy" || self.branch_num != 1 {
-            return Ok(Some(self.read_created_at_desc_page_slow(
-                &query.table,
-                &condition.column,
-                condition.value.clone(),
-                limit,
-            )?));
-        }
+    pub(crate) fn read_rows_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(&query.table)?;
-        let field = table
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        if scope_nums == [self.branch_num]
+            && branch::base_global_epoch(self.conn, self.branch_num)?.is_none()
+        {
+            return self.read_current_built_query(query, table);
+        }
+        let (candidates_sql, mut params) = self.lower_query_candidates(query, table)?;
+        let order_sql = self.lower_query_order(table, &query.order_by)?;
+        let field_columns = table
             .fields
             .iter()
-            .find(|field| field.name == condition.column)
-            .ok_or_else(|| {
-                crate::Error::new(format!(
-                    "unknown field {}.{}",
-                    query.table, condition.column
-                ))
-            })?;
-        Ok(Some(self.read_main_created_at_desc_page_where_eq(
-            &query.table,
-            field,
-            &condition.value,
-            limit,
-        )?))
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["j_query_row_id".to_owned(), "j_query_tx_id".to_owned()];
+        select_columns.extend(field_columns.iter().cloned());
+        select_columns.push("j_query_created_by".to_owned());
+        let mut sql = format!(
+            "WITH candidates AS (
+               {candidates_sql}
+             ),
+             ranked AS (
+               SELECT *,
+                      MIN(j_query_branch_depth) OVER (PARTITION BY j_query_row_id) AS j_query_min_branch_depth
+               FROM candidates
+             )
+             SELECT {}
+             FROM ranked
+             WHERE j_query_branch_depth = j_query_min_branch_depth
+             ORDER BY {order_sql}",
+            select_columns.join(", "),
+        );
+        if let Some(limit) = query.limit {
+            sql.push_str(" LIMIT ?");
+            params.push(SqlValue::Integer(window_value_to_i64(limit, "limit")?));
+        } else if query.offset.is_some() {
+            sql.push_str(" LIMIT -1");
+        }
+        if let Some(offset) = query.offset {
+            sql.push_str(" OFFSET ?");
+            params.push(SqlValue::Integer(window_value_to_i64(offset, "offset")?));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 2 + table.fields.len() + 1;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, SqlValue>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        rows.map(|row| row_to_view(self.conn, &query.table, table, row?))
+            .collect()
+    }
+
+    fn read_current_built_query(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+    ) -> Result<Vec<RowView>> {
+        let (condition_sql, mut params) =
+            self.lower_query_conditions(table, &query.conditions, "current", "ids")?;
+        let order_sql = self.lower_source_query_order(table, &query.order_by, "current", "ids")?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        select_columns.extend(
+            field_columns
+                .iter()
+                .map(|column| format!("current.{column}")),
+        );
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("current", "j_created_by")
+        ));
+        let mut sql = format!(
+            "SELECT {}
+             FROM {} current
+             JOIN jazz_row_id ids ON ids.row_num = current.row_num
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             WHERE current.j_branch_num = ?
+               AND current.is_deleted = 0
+               AND tx.outcome != ?
+               AND {condition_sql}
+               AND {policy_sql}
+             ORDER BY {order_sql}",
+            select_columns.join(", "),
+            crate::schema::current_table(&query.table),
+            policy_sql = self.read_policy_sql(table)?,
+        );
+        let mut query_params = vec![
+            SqlValue::Integer(self.branch_num),
+            SqlValue::Integer(tx::OUTCOME_REJECTED),
+        ];
+        query_params.append(&mut params);
+        if let Some(limit) = query.limit {
+            sql.push_str(" LIMIT ?");
+            query_params.push(SqlValue::Integer(window_value_to_i64(limit, "limit")?));
+        } else if query.offset.is_some() {
+            sql.push_str(" LIMIT -1");
+        }
+        if let Some(offset) = query.offset {
+            sql.push_str(" OFFSET ?");
+            query_params.push(SqlValue::Integer(window_value_to_i64(offset, "offset")?));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 2 + table.fields.len() + 1;
+        let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, SqlValue>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        rows.map(|row| row_to_view(self.conn, &query.table, table, row?))
+            .collect()
+    }
+
+    fn lower_query_candidates(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+    ) -> Result<(String, Vec<SqlValue>)> {
+        let mut parts = Vec::new();
+        let mut params = Vec::new();
+        let base_epoch = if self.branch_num != 1 {
+            branch::base_global_epoch(self.conn, self.branch_num)?
+        } else {
+            None
+        };
+        let (current_sql, current_params) =
+            self.lower_current_query_candidate(query, table, base_epoch.is_none())?;
+        parts.push(current_sql);
+        params.extend(current_params);
+        if let Some(base_epoch) = base_epoch {
+            let (snapshot_sql, snapshot_params) =
+                self.lower_main_snapshot_query_candidate(query, table, base_epoch)?;
+            parts.push(snapshot_sql);
+            params.extend(snapshot_params);
+        }
+        Ok((parts.join("\nUNION ALL\n"), params))
+    }
+
+    fn lower_current_query_candidate(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+        overlay_main: bool,
+    ) -> Result<(String, Vec<SqlValue>)> {
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let scope_placeholders = placeholders(scope_nums.len());
+        let (condition_sql, condition_params) =
+            self.lower_query_conditions(table, &query.conditions, "current", "ids")?;
+        let select_columns = query_candidate_select_columns(
+            table,
+            "current",
+            "ids",
+            "tx",
+            &branch_depth_case_sql(self.conn, self.branch_num, "current")?,
+        );
+        let sql = format!(
+            "SELECT {}
+             FROM {} current
+             JOIN jazz_row_id ids ON ids.row_num = current.row_num
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             WHERE current.is_deleted = 0
+               AND (
+                 current.j_branch_num IN ({scope_placeholders})
+                 OR (
+                   ? = 1
+                   AND ? != 1
+                   AND current.j_branch_num = 1
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM {current_table} branch_current
+                     WHERE branch_current.row_num = current.row_num
+                       AND branch_current.j_branch_num IN ({scope_placeholders})
+                   )
+                 )
+               )
+               AND tx.outcome != ?
+               AND NOT (
+                 current.j_branch_num != ?
+                 AND EXISTS (
+                   SELECT 1
+                   FROM {current_table} active_current
+                   WHERE active_current.row_num = current.row_num
+                     AND active_current.j_branch_num = ?
+                 )
+               )
+               AND {condition_sql}
+               AND {policy_sql}",
+            select_columns.join(", "),
+            crate::schema::current_table(&query.table),
+            current_table = crate::schema::current_table(&query.table),
+            policy_sql = self.read_policy_sql(table)?,
+        );
+        let mut params = scope_nums
+            .iter()
+            .copied()
+            .map(SqlValue::Integer)
+            .collect::<Vec<_>>();
+        params.extend([
+            SqlValue::Integer(i64::from(overlay_main)),
+            SqlValue::Integer(self.branch_num),
+        ]);
+        params.extend(scope_nums.iter().copied().map(SqlValue::Integer));
+        params.extend([
+            SqlValue::Integer(tx::OUTCOME_REJECTED),
+            SqlValue::Integer(self.branch_num),
+            SqlValue::Integer(self.branch_num),
+        ]);
+        params.extend(condition_params);
+        Ok((sql, params))
+    }
+
+    fn lower_main_snapshot_query_candidate(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+        base_epoch: i64,
+    ) -> Result<(String, Vec<SqlValue>)> {
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let scope_placeholders = placeholders(scope_nums.len());
+        let (condition_sql, condition_params) =
+            self.lower_query_conditions(table, &query.conditions, "h", "ids")?;
+        let policy_sql = if self.bypass_policy {
+            "1 = 1".to_owned()
+        } else {
+            policy::snapshot_read_policy_sql_for_alias(
+                self.schema,
+                table,
+                "h",
+                self.user,
+                base_epoch,
+            )?
+        };
+        let select_columns =
+            query_candidate_select_columns(table, "h", "ids", "tx", &(i64::MAX / 4).to_string());
+        let sql = format!(
+            "SELECT {}
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_branch_num = 1
+               AND tx.outcome != ?
+               AND tx.global_epoch IS NOT NULL
+               AND tx.global_epoch <= ?
+               AND h.op != 3
+               AND {policy_sql}
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} newer
+                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 WHERE newer.row_num = h.row_num
+                   AND newer.j_branch_num = 1
+                   AND newer_tx.outcome != ?
+                   AND newer_tx.global_epoch IS NOT NULL
+                   AND newer_tx.global_epoch <= ?
+                   AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
+               )
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {current_table} branch_current
+                 WHERE branch_current.row_num = h.row_num
+                   AND branch_current.j_branch_num IN ({scope_placeholders})
+               )
+               AND {condition_sql}",
+            select_columns.join(", "),
+            crate::schema::history_table(&query.table),
+            history_table = crate::schema::history_table(&query.table),
+            current_table = crate::schema::current_table(&query.table),
+            policy_sql = policy_sql,
+        );
+        let mut params = vec![
+            SqlValue::Integer(tx::OUTCOME_REJECTED),
+            SqlValue::Integer(base_epoch),
+            SqlValue::Integer(tx::OUTCOME_REJECTED),
+            SqlValue::Integer(base_epoch),
+        ];
+        params.extend(scope_nums.iter().copied().map(SqlValue::Integer));
+        params.extend(condition_params);
+        Ok((sql, params))
+    }
+
+    fn lower_query_conditions(
+        &self,
+        table: &crate::schema::TableDef,
+        conditions: &[QueryCondition],
+        row_alias: &str,
+        ids_alias: &str,
+    ) -> Result<(String, Vec<SqlValue>)> {
+        if conditions.is_empty() {
+            return Ok(("1 = 1".to_owned(), Vec::new()));
+        }
+        let mut sql = Vec::new();
+        let mut params = Vec::new();
+        for condition in conditions {
+            let lowered = self.lower_query_condition(table, condition, row_alias, ids_alias)?;
+            sql.push(lowered.sql);
+            params.extend(lowered.params);
+        }
+        Ok((sql.join(" AND "), params))
+    }
+
+    fn lower_query_condition(
+        &self,
+        table: &crate::schema::TableDef,
+        condition: &QueryCondition,
+        row_alias: &str,
+        ids_alias: &str,
+    ) -> Result<LoweredCondition> {
+        let column = query_column(table, &condition.column)?;
+        let column_sql = source_query_column_sql(&column, row_alias, ids_alias);
+        match condition.op {
+            QueryConditionOp::Eq if condition.value.is_null() => Ok(LoweredCondition {
+                sql: format!("{column_sql} IS NULL"),
+                params: Vec::new(),
+            }),
+            QueryConditionOp::Eq => Ok(LoweredCondition {
+                sql: format!("{column_sql} = ?"),
+                params: vec![self.query_condition_value(&column, &condition.value)?],
+            }),
+            QueryConditionOp::Ne if condition.value.is_null() => Ok(LoweredCondition {
+                sql: format!("{column_sql} IS NOT NULL"),
+                params: Vec::new(),
+            }),
+            QueryConditionOp::Ne => Ok(LoweredCondition {
+                sql: format!("{column_sql} IS NOT ?"),
+                params: vec![self.query_condition_value(&column, &condition.value)?],
+            }),
+            QueryConditionOp::Contains => {
+                if !query_column_is_text(&column) {
+                    return Err(crate::Error::new(format!(
+                        "contains only supports text fields, got {}",
+                        condition.column
+                    )));
+                }
+                let Some(needle) = condition.value.as_str() else {
+                    return Err(crate::Error::new(
+                        "contains condition expects a string value",
+                    ));
+                };
+                Ok(LoweredCondition {
+                    sql: format!("instr({column_sql}, ?) > 0"),
+                    params: vec![SqlValue::Text(needle.to_owned())],
+                })
+            }
+            QueryConditionOp::In => {
+                let Some(values) = condition.value.as_array() else {
+                    return Err(crate::Error::new("in condition expects an array value"));
+                };
+                self.lower_in_condition(&column, &column_sql, values)
+            }
+        }
+    }
+
+    fn lower_in_condition(
+        &self,
+        column: &QueryColumn<'_>,
+        column_sql: &str,
+        values: &[JsonValue],
+    ) -> Result<LoweredCondition> {
+        if values.is_empty() {
+            return Ok(LoweredCondition {
+                sql: "0 = 1".to_owned(),
+                params: Vec::new(),
+            });
+        }
+        let mut has_null = false;
+        let mut params = Vec::new();
+        for value in values {
+            if value.is_null() {
+                has_null = true;
+            } else {
+                params.push(self.query_condition_value(column, value)?);
+            }
+        }
+        let sql = match (params.is_empty(), has_null) {
+            (true, true) => format!("{column_sql} IS NULL"),
+            (false, true) => format!(
+                "({column_sql} IN ({}) OR {column_sql} IS NULL)",
+                placeholders(params.len())
+            ),
+            (false, false) => format!("{column_sql} IN ({})", placeholders(params.len())),
+            (true, false) => "0 = 1".to_owned(),
+        };
+        Ok(LoweredCondition { sql, params })
+    }
+
+    fn query_condition_value(
+        &self,
+        column: &QueryColumn<'_>,
+        value: &JsonValue,
+    ) -> Result<SqlValue> {
+        match column {
+            QueryColumn::Id | QueryColumn::CreatedBy => Ok(SqlValue::Text(
+                value
+                    .as_str()
+                    .ok_or_else(|| crate::Error::new("query system field expects a string"))?
+                    .to_owned(),
+            )),
+            QueryColumn::CreatedAt | QueryColumn::UpdatedAt => {
+                Ok(SqlValue::Integer(value.as_i64().ok_or_else(|| {
+                    crate::Error::new("query timestamp field expects an integer")
+                })?))
+            }
+            QueryColumn::Field(field) => {
+                crate::schema::field_sql_value(field, value, |ref_table, row_id| {
+                    row_num(self.conn, row_id).map_err(|err| {
+                        crate::Error::new(format!(
+                            "failed to resolve ref {ref_table}.{row_id} for query predicate: {err}"
+                        ))
+                    })
+                })
+            }
+        }
+    }
+
+    fn lower_query_order(
+        &self,
+        table: &crate::schema::TableDef,
+        order_by: &[QueryOrderBy],
+    ) -> Result<String> {
+        if order_by.is_empty() {
+            return Ok("j_query_created_at DESC, j_query_row_num".to_owned());
+        }
+        let mut parts = Vec::new();
+        for order in order_by {
+            let column = query_column(table, &order.column)?;
+            let direction = match order.direction {
+                QueryDirection::Asc => "ASC",
+                QueryDirection::Desc => "DESC",
+            };
+            parts.push(format!("{} {direction}", final_query_column_sql(&column)));
+        }
+        parts.push("j_query_row_num".to_owned());
+        Ok(parts.join(", "))
+    }
+
+    fn lower_source_query_order(
+        &self,
+        table: &crate::schema::TableDef,
+        order_by: &[QueryOrderBy],
+        row_alias: &str,
+        ids_alias: &str,
+    ) -> Result<String> {
+        if order_by.is_empty() {
+            return Ok(format!(
+                "{row_alias}.j_created_at DESC, {row_alias}.row_num"
+            ));
+        }
+        let mut parts = Vec::new();
+        for order in order_by {
+            let column = query_column(table, &order.column)?;
+            let direction = match order.direction {
+                QueryDirection::Asc => "ASC",
+                QueryDirection::Desc => "DESC",
+            };
+            parts.push(format!(
+                "{} {direction}",
+                source_query_column_sql(&column, row_alias, ids_alias)
+            ));
+        }
+        parts.push(format!("{row_alias}.row_num"));
+        Ok(parts.join(", "))
     }
 
     pub(crate) fn read_rows_where_in(
@@ -1548,111 +1998,6 @@ impl QueryContext<'_> {
             .filter_map(|result| result.transpose())
             .collect()
     }
-
-    fn read_main_created_at_desc_page_where_eq(
-        &self,
-        table_name: &str,
-        field: &FieldDef,
-        value: &JsonValue,
-        limit: usize,
-    ) -> Result<Vec<RowView>> {
-        let table = self.schema.table_def(table_name)?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
-        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
-        select_columns.extend(
-            field_columns
-                .iter()
-                .map(|column| format!("current.{column}")),
-        );
-        select_columns.push(format!(
-            "{} AS j_created_by",
-            users::user_id_expr("current", "j_created_by")
-        ));
-        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-        let (predicate_sql, predicate_value) = if value.is_null() {
-            if !field.nullable {
-                return Err(crate::Error::new(format!(
-                    "expected non-null for {}",
-                    field.name
-                )));
-            }
-            ("IS NULL".to_owned(), None)
-        } else {
-            (
-                "= ?".to_owned(),
-                Some(crate::schema::field_sql_value(
-                    field,
-                    value,
-                    |ref_table, row_id| {
-                        row_num(self.conn, row_id).map_err(|err| {
-                            crate::Error::new(format!(
-                                "failed to resolve ref {ref_table}.{row_id} for equality predicate: {err}"
-                            ))
-                        })
-                    },
-                )?),
-            )
-        };
-        let sql = format!(
-            "SELECT {}
-             FROM {} current
-             JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
-             WHERE current.j_branch_num = ?
-               AND current.is_deleted = 0
-               AND tx.outcome != ?
-               AND current.{predicate_column} {predicate_sql}
-               AND {policy_sql}
-             ORDER BY current.j_created_at DESC, current.row_num
-             LIMIT ?",
-            select_columns.join(", "),
-            crate::schema::current_table(table_name),
-            policy_sql = self.read_policy_sql(table)?,
-        );
-        let mut params = vec![
-            rusqlite::types::Value::Integer(self.branch_num),
-            rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
-        ];
-        if let Some(predicate_value) = predicate_value {
-            params.push(predicate_value);
-        }
-        let limit = i64::try_from(limit)
-            .map_err(|_| crate::Error::new("ordered query limit is too large"))?;
-        params.push(rusqlite::types::Value::Integer(limit));
-        let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
-        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
-            (0..row_width)
-                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })?;
-        rows.map(|row| row_to_view(self.conn, table_name, table, row?))
-            .collect()
-    }
-
-    fn read_created_at_desc_page_slow(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        limit: usize,
-    ) -> Result<Vec<RowView>> {
-        let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
-        let created_at_by_id = current_created_at_by_row_id(self.conn, table_name)?;
-        rows.sort_by(|left, right| {
-            created_at_by_id
-                .get(&right.id)
-                .cmp(&created_at_by_id.get(&left.id))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        rows.truncate(limit);
-        Ok(rows)
-    }
-
     fn read_rows_from_current_where_contains(
         &self,
         table_name: &str,
@@ -1872,6 +2217,97 @@ impl QueryContext<'_> {
     }
 }
 
+fn query_candidate_select_columns(
+    table: &crate::schema::TableDef,
+    row_alias: &str,
+    ids_alias: &str,
+    tx_alias: &str,
+    branch_depth_sql: &str,
+) -> Vec<String> {
+    let mut select_columns = vec![
+        format!("{branch_depth_sql} AS j_query_branch_depth"),
+        format!("{ids_alias}.row_id AS j_query_row_id"),
+        format!("{tx_alias}.tx_id AS j_query_tx_id"),
+    ];
+    select_columns.extend(table.fields.iter().map(|field| {
+        let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        format!("{row_alias}.{column} AS {column}")
+    }));
+    select_columns.extend([
+        format!(
+            "{} AS j_query_created_by",
+            users::user_id_expr(row_alias, "j_created_by")
+        ),
+        format!("{row_alias}.j_created_at AS j_query_created_at"),
+        format!("{row_alias}.j_updated_at AS j_query_updated_at"),
+        format!("{row_alias}.row_num AS j_query_row_num"),
+    ]);
+    select_columns
+}
+
+fn branch_depth_case_sql(conn: &Connection, branch_num: i64, row_alias: &str) -> Result<String> {
+    let arms = branch::scope_depths(conn, branch_num)?
+        .into_iter()
+        .map(|(branch_num, depth)| format!("WHEN {branch_num} THEN {depth}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(format!(
+        "CASE {row_alias}.j_branch_num {arms} ELSE {} END",
+        i64::MAX / 2
+    ))
+}
+
+fn query_column<'a>(table: &'a crate::schema::TableDef, column: &str) -> Result<QueryColumn<'a>> {
+    match column {
+        "id" => Ok(QueryColumn::Id),
+        "$createdBy" => Ok(QueryColumn::CreatedBy),
+        "$createdAt" => Ok(QueryColumn::CreatedAt),
+        "$updatedAt" => Ok(QueryColumn::UpdatedAt),
+        column => table
+            .fields
+            .iter()
+            .find(|field| field.name == column)
+            .map(QueryColumn::Field)
+            .ok_or_else(|| crate::Error::new(format!("unknown field {}.{column}", table.name))),
+    }
+}
+
+fn source_query_column_sql(column: &QueryColumn<'_>, row_alias: &str, ids_alias: &str) -> String {
+    match column {
+        QueryColumn::Id => format!("{ids_alias}.row_id"),
+        QueryColumn::CreatedBy => users::user_id_expr(row_alias, "j_created_by"),
+        QueryColumn::CreatedAt => format!("{row_alias}.j_created_at"),
+        QueryColumn::UpdatedAt => format!("{row_alias}.j_updated_at"),
+        QueryColumn::Field(field) => {
+            format!(
+                "{row_alias}.{}",
+                crate::schema::quote_ident(&crate::schema::storage_column(field))
+            )
+        }
+    }
+}
+
+fn final_query_column_sql(column: &QueryColumn<'_>) -> String {
+    match column {
+        QueryColumn::Id => "j_query_row_id".to_owned(),
+        QueryColumn::CreatedBy => "j_query_created_by".to_owned(),
+        QueryColumn::CreatedAt => "j_query_created_at".to_owned(),
+        QueryColumn::UpdatedAt => "j_query_updated_at".to_owned(),
+        QueryColumn::Field(field) => {
+            crate::schema::quote_ident(&crate::schema::storage_column(field))
+        }
+    }
+}
+
+fn query_column_is_text(column: &QueryColumn<'_>) -> bool {
+    matches!(column, QueryColumn::Id | QueryColumn::CreatedBy)
+        || matches!(column, QueryColumn::Field(field) if matches!(field.kind, FieldKind::Text))
+}
+
+fn window_value_to_i64(value: usize, field: &str) -> Result<i64> {
+    i64::try_from(value).map_err(|_| crate::Error::new(format!("query {field} is too large")))
+}
+
 fn row_to_view(
     conn: &Connection,
     table_name: &str,
@@ -1911,24 +2347,6 @@ fn json_sort_key(value: Option<&JsonValue>) -> String {
         None => String::new(),
     }
 }
-
-fn current_created_at_by_row_id(
-    conn: &Connection,
-    table_name: &str,
-) -> Result<BTreeMap<String, i64>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT ids.row_id, current.j_created_at
-         FROM {} current
-         JOIN jazz_row_id ids ON ids.row_num = current.row_num",
-        crate::schema::current_table(table_name)
-    ))?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
-        .map_err(Into::into)
-}
-
 fn placeholders(count: usize) -> String {
     (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
 }
@@ -2005,7 +2423,7 @@ mod tests {
             "orderBy": [["$createdAt", "desc"]],
             "limit": 10,
         }))?;
-        let rows = context.read_rows_for_built_query(&query)?.unwrap();
+        let rows = context.read_rows_for_built_query(&query)?;
 
         assert_eq!(rows.len(), 10);
         assert_eq!(rows[0].id, "todo-100");

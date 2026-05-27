@@ -35,7 +35,7 @@ struct AwaitingDependencyTx {
     auth_user: String,
 }
 
-struct QueryScopeOptions<'a> {
+pub(crate) struct QueryScopeOptions<'a> {
     ref_include_fields: &'a [&'a str],
     extra_row_ids: &'a [String],
 }
@@ -2389,10 +2389,7 @@ impl Runtime {
             .read_rows_where_eq(table_name, field_name, value)
     }
 
-    pub(crate) fn read_rows_for_built_query(
-        &self,
-        query: &BuiltQuery,
-    ) -> Result<Option<Vec<RowView>>> {
+    pub(crate) fn read_rows_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<RowView>> {
         self.query_context().read_rows_for_built_query(query)
     }
 
@@ -2632,39 +2629,6 @@ impl Runtime {
         limit: usize,
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
-        let query_read = QueryReadRecord {
-            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
-            table: table_name.to_owned(),
-            field: field_name.to_owned(),
-            op: op.to_owned(),
-            value,
-        };
-        self.export_query_read_scope(query_read, rows, ref_include_fields)
-    }
-
-    pub(crate) fn export_built_query_scope(
-        &self,
-        query: BuiltQuery,
-        rows: Vec<RowView>,
-        ref_include_fields: &[&str],
-    ) -> Result<Bundle> {
-        let query_read = QueryReadRecord {
-            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
-            table: query.table.clone(),
-            field: "$query".to_owned(),
-            op: "query".to_owned(),
-            value: query.to_json_value(),
-        };
-        self.export_query_read_scope(query_read, rows, ref_include_fields)
-    }
-
-    fn export_query_read_scope(
-        &self,
-        query_read: QueryReadRecord,
-        rows: Vec<RowView>,
-        ref_include_fields: &[&str],
-    ) -> Result<Bundle> {
-        let table_name = &query_read.table;
         let table = self.schema.table_def(table_name)?;
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
@@ -2785,6 +2749,144 @@ impl Runtime {
             export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        Ok(make_bundle(
+            &self.schema,
+            branches,
+            txs,
+            reads,
+            query_reads,
+            history,
+        ))
+    }
+
+    pub(crate) fn export_built_query_scope(
+        &self,
+        query: BuiltQuery,
+        rows: Vec<RowView>,
+        ref_include_fields: &[&str],
+    ) -> Result<Bundle> {
+        let query_read = QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: query.table.clone(),
+            field: "$query".to_owned(),
+            op: "query".to_owned(),
+            value: query.to_json_value(),
+        };
+        self.export_query_read_scope(
+            query_read,
+            rows,
+            QueryScopeOptions {
+                ref_include_fields,
+                extra_row_ids: &[],
+            },
+        )
+    }
+
+    fn export_query_read_scope(
+        &self,
+        query_read: QueryReadRecord,
+        rows: Vec<RowView>,
+        options: QueryScopeOptions<'_>,
+    ) -> Result<Bundle> {
+        let table_name = &query_read.table;
+        let table = self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+        let visible_row_nums = rows
+            .iter()
+            .map(|row| row_num(&self.conn, &row.id))
+            .collect::<Result<Vec<_>>>()?;
+        let mut repair_row_nums = Vec::new();
+        for row_id in options.extra_row_ids {
+            repair_row_nums.push(row_num(&self.conn, row_id)?);
+        }
+        repair_row_nums.extend(query_scope_repair_row_nums_for_read(
+            &self.conn,
+            table,
+            &query_read,
+        )?);
+        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
+        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
+        repair_row_nums.sort();
+        repair_row_nums.dedup();
+        let mut row_nums = visible_row_nums.clone();
+        row_nums.extend(repair_row_nums.iter());
+        row_nums.sort();
+        row_nums.dedup();
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let mut history = export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            table_name,
+            Some(&visible_row_nums),
+            None,
+        )?;
+        if !repair_row_nums.is_empty() {
+            history.extend(export_visible_table_history(
+                &self.conn,
+                &self.schema,
+                table_name,
+                user,
+                bypass_policy,
+                &branch_nums,
+                Some(&repair_row_nums),
+            )?);
+            history.extend(export_history_versions_for_rows(
+                &self.conn,
+                &self.schema,
+                table_name,
+                Some(&repair_row_nums),
+                None,
+            )?);
+        }
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            PolicyDependencyExport {
+                table_name,
+                policy: &table.read_policy,
+                user,
+                bypass_policy,
+                branch_nums: &branch_nums,
+                child_row_nums: Some(&row_nums),
+            },
+        )?);
+        for ref_field_name in options.ref_include_fields {
+            history.extend(self.export_ref_include_history(
+                table,
+                &rows,
+                ref_field_name,
+                &branch_nums,
+            )?);
+        }
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
+                history.extend(export_history_versions_for_rows(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    Some(&row_nums),
+                    Some(base_epoch),
+                )?);
+                history.extend(export_snapshot_policy_dependency_history(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    user,
+                    bypass_policy,
+                    base_epoch,
+                    Some(&row_nums),
+                )?);
+            }
+        }
+        dedupe_history_records(&mut history);
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let rejected_tx_ids = query_scope_rejected_tx_ids_for_read(&self.conn, table, &query_read)?;
+        let txs =
+            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        let query_reads = vec![query_read];
         Ok(make_bundle(
             &self.schema,
             branches,
@@ -3031,113 +3133,14 @@ impl Runtime {
         rows: Vec<RowView>,
         options: QueryScopeOptions<'_>,
     ) -> Result<Bundle> {
-        let table = self.schema.table_def(table_name)?;
-        let user = self.policy_user();
-        let bypass_policy = self.bypasses_policy();
-        let visible_row_nums = rows
-            .iter()
-            .map(|row| row_num(&self.conn, &row.id))
-            .collect::<Result<Vec<_>>>()?;
-        let mut repair_row_nums = Vec::new();
-        for row_id in options.extra_row_ids {
-            repair_row_nums.push(row_num(&self.conn, row_id)?);
-        }
-        repair_row_nums.extend(query_scope_repair_row_nums(
-            &self.conn, table, field_name, op, &value,
-        )?);
-        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
-        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
-        repair_row_nums.sort();
-        repair_row_nums.dedup();
-        let mut row_nums = visible_row_nums.clone();
-        row_nums.extend(repair_row_nums.iter());
-        row_nums.sort();
-        row_nums.dedup();
-        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let mut history = export_history_versions_for_rows(
-            &self.conn,
-            &self.schema,
-            table_name,
-            Some(&visible_row_nums),
-            None,
-        )?;
-        if !repair_row_nums.is_empty() {
-            history.extend(export_visible_table_history(
-                &self.conn,
-                &self.schema,
-                table_name,
-                user,
-                bypass_policy,
-                &branch_nums,
-                Some(&repair_row_nums),
-            )?);
-        }
-        if !repair_row_nums.is_empty() {
-            history.extend(export_history_versions_for_rows(
-                &self.conn,
-                &self.schema,
-                table_name,
-                Some(&repair_row_nums),
-                None,
-            )?);
-        }
-        history.extend(export_policy_dependency_history(
-            &self.conn,
-            &self.schema,
-            PolicyDependencyExport {
-                table_name,
-                policy: &self.schema.table_def(table_name)?.read_policy,
-                user,
-                bypass_policy,
-                branch_nums: &branch_nums,
-                child_row_nums: Some(&row_nums),
-            },
-        )?);
-        for ref_field_name in options.ref_include_fields {
-            history.extend(self.export_ref_include_history(
-                table,
-                &rows,
-                ref_field_name,
-                &branch_nums,
-            )?);
-        }
-        if self.branch_num != 1 {
-            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
-                history.extend(export_history_versions_for_rows(
-                    &self.conn,
-                    &self.schema,
-                    table_name,
-                    Some(&row_nums),
-                    Some(base_epoch),
-                )?);
-                history.extend(export_snapshot_policy_dependency_history(
-                    &self.conn,
-                    &self.schema,
-                    table_name,
-                    user,
-                    bypass_policy,
-                    base_epoch,
-                    Some(&row_nums),
-                )?);
-            }
-        }
-        dedupe_history_records(&mut history);
-        let reads = export_reads_for_history(&self.conn, &history)?;
-        let rejected_tx_ids =
-            query_scope_rejected_tx_ids(&self.conn, table, field_name, op, &value)?;
-        let txs =
-            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
-        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
-        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
-        let query_reads = vec![query_read];
-        Ok(make_bundle(
-            &self.schema,
-            branches,
-            txs,
-            reads,
-            query_reads,
-            history,
-        ))
+        let query_read = QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: table_name.to_owned(),
+            field: field_name.to_owned(),
+            op: op.to_owned(),
+            value,
+        };
+        self.export_query_read_scope(query_read, rows, options)
     }
 
     fn export_ref_include_history(
@@ -6170,6 +6173,61 @@ fn query_scope_repair_row_nums_for_built_query(
         ));
     };
     query_scope_repair_row_nums(
+        conn,
+        table,
+        &condition.column,
+        condition.op.as_str(),
+        &condition.value,
+    )
+}
+
+fn query_scope_rejected_tx_ids_for_read(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    query_read: &QueryReadRecord,
+) -> Result<Vec<String>> {
+    if query_read.op == "query" {
+        let query = built_query_from_read(query_read)?;
+        return query_scope_rejected_tx_ids_for_built_query(conn, table, &query);
+    }
+    query_scope_rejected_tx_ids(
+        conn,
+        table,
+        &query_read.field,
+        &query_read.op,
+        &query_read.value,
+    )
+}
+
+fn query_scope_rejected_tx_ids_for_built_query(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    built_query: &BuiltQuery,
+) -> Result<Vec<String>> {
+    if built_query.table != table.name {
+        return Err(crate::Error::new(
+            "query read table does not match descriptor",
+        ));
+    }
+    if let Some(query::QueryStoragePlan::EqCreatedAtDescPage {
+        condition,
+        limit: _,
+    }) = query::storage_plan(built_query)
+    {
+        return query_scope_rejected_tx_ids(
+            conn,
+            table,
+            &condition.column,
+            condition.op.as_str(),
+            &condition.value,
+        );
+    }
+    let Some(condition) = query::query_scope_predicate(built_query)? else {
+        return Err(crate::Error::new(
+            "query read rejection tracking supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
+        ));
+    };
+    query_scope_rejected_tx_ids(
         conn,
         table,
         &condition.column,

@@ -120,6 +120,50 @@ fn built_query_reads_newest_matching_rows_from_jazz_tools_json_shape() {
 }
 
 #[test]
+fn built_query_lowers_predicates_ordering_and_window_to_sqlite() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    for (id, body, pinned) in [
+        ("note-old", "keep old", true),
+        ("note-middle", "keep middle", true),
+        ("note-hidden", "keep hidden", false),
+        ("note-new", "keep new", true),
+    ] {
+        alice
+            .insert_row(
+                "notes",
+                id,
+                BTreeMap::from([
+                    ("body".to_owned(), json!(body)),
+                    ("pinned".to_owned(), json!(pinned)),
+                ]),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [
+            {"column": "pinned", "op": "eq", "value": true},
+            {"column": "body", "op": "contains", "value": "keep"}
+        ],
+        "orderBy": [["$createdAt", "desc"]],
+        "limit": 2,
+        "offset": 1
+    }))
+    .unwrap();
+
+    let rows = alice.query(query).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["note-middle", "note-old"]
+    );
+}
+
+#[test]
 fn built_query_rejects_graph_only_jazz_tools_fields() {
     let query = BuiltQuery::from_json_value(json!({
         "table": "notes",

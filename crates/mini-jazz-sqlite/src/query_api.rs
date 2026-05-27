@@ -4,7 +4,6 @@ use crate::sync::Bundle;
 use crate::types::{RowView, SubscriptionDelta};
 use crate::{Error, Result};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::cmp::Ordering;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltQuery {
@@ -135,13 +134,7 @@ impl QueryDirection {
 
 impl Runtime {
     pub fn query(&self, query: BuiltQuery) -> Result<Vec<RowView>> {
-        if let Some(rows) = self.read_rows_for_built_query(&query)? {
-            return Ok(rows);
-        }
-
-        let mut rows = self.rows_for_conditions(&query.table, &query.conditions)?;
-        apply_ordering(&mut rows, &query.order_by)?;
-        Ok(apply_window(rows, query.offset, query.limit))
+        self.read_rows_for_built_query(&query)
     }
 
     pub fn one(&self, query: BuiltQuery) -> Result<Option<RowView>> {
@@ -204,57 +197,6 @@ impl Runtime {
             RowsSubscriptionQuery::Built(query) => self.query(query.clone())?,
         };
         Ok(subscription.replace_with_subscription_delta(rows))
-    }
-
-    fn rows_for_conditions(
-        &self,
-        table: &str,
-        conditions: &[QueryCondition],
-    ) -> Result<Vec<RowView>> {
-        let mut rows = match conditions.first() {
-            Some(condition) => self.rows_for_condition(table, condition)?,
-            None => self.read_rows(table)?,
-        };
-        if conditions.len() > 1 {
-            let mut filtered = Vec::new();
-            for row in rows {
-                let mut matches = true;
-                for condition in conditions {
-                    if !condition_matches(&row, condition)? {
-                        matches = false;
-                        break;
-                    }
-                }
-                if matches {
-                    filtered.push(row);
-                }
-            }
-            rows = filtered;
-        }
-        Ok(rows)
-    }
-
-    fn rows_for_condition(&self, table: &str, condition: &QueryCondition) -> Result<Vec<RowView>> {
-        match condition.op {
-            QueryConditionOp::Eq => {
-                self.read_rows_where_eq(table, &condition.column, condition.value.clone())
-            }
-            QueryConditionOp::Ne => {
-                self.read_rows_where_ne(table, &condition.column, condition.value.clone())
-            }
-            QueryConditionOp::In => {
-                let Some(values) = condition.value.as_array() else {
-                    return Err(Error::new("in condition expects an array value"));
-                };
-                self.read_rows_where_in(table, &condition.column, values.clone())
-            }
-            QueryConditionOp::Contains => {
-                let Some(needle) = condition.value.as_str() else {
-                    return Err(Error::new("contains condition expects a string value"));
-                };
-                self.read_rows_where_contains(table, &condition.column, needle)
-            }
-        }
     }
 }
 
@@ -406,113 +348,6 @@ fn parse_usize_field(object: &JsonMap<String, JsonValue>, field: &str) -> Result
     usize::try_from(value)
         .map(Some)
         .map_err(|_| Error::new(format!("query {field} is too large")))
-}
-
-fn condition_matches(row: &RowView, condition: &QueryCondition) -> Result<bool> {
-    match condition.op {
-        QueryConditionOp::Eq => {
-            Ok(row_query_value(row, &condition.column).as_ref() == Some(&condition.value))
-        }
-        QueryConditionOp::Ne => {
-            if condition.column == "id" || condition.column == "$createdBy" {
-                return Ok(
-                    row_query_value(row, &condition.column).as_ref() != Some(&condition.value)
-                );
-            }
-            Ok(row
-                .values
-                .get(&condition.column)
-                .is_some_and(|value| value != &condition.value))
-        }
-        QueryConditionOp::In => {
-            let Some(values) = condition.value.as_array() else {
-                return Err(Error::new("in condition expects an array value"));
-            };
-            Ok(row_query_value(row, &condition.column)
-                .as_ref()
-                .is_some_and(|value| values.contains(value)))
-        }
-        QueryConditionOp::Contains => {
-            let Some(needle) = condition.value.as_str() else {
-                return Err(Error::new("contains condition expects a string value"));
-            };
-            Ok(row_query_value(row, &condition.column)
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .is_some_and(|value| value.contains(needle)))
-        }
-    }
-}
-
-fn row_query_value(row: &RowView, column: &str) -> Option<JsonValue> {
-    match column {
-        "id" => Some(JsonValue::String(row.id.clone())),
-        "$createdBy" => Some(JsonValue::String(row.created_by.clone())),
-        column => row.values.get(column).cloned(),
-    }
-}
-
-fn apply_ordering(rows: &mut [RowView], order_by: &[QueryOrderBy]) -> Result<()> {
-    if order_by.is_empty() {
-        return Ok(());
-    }
-    if order_by.iter().any(|order| order.column == "$createdAt") {
-        return Err(Error::new(
-            "$createdAt orderBy requires one eq condition, desc direction, limit, and no offset",
-        ));
-    }
-    rows.sort_by(|left, right| {
-        for order in order_by {
-            let ordering = compare_json_values(
-                row_query_value(left, &order.column).as_ref(),
-                row_query_value(right, &order.column).as_ref(),
-            );
-            let ordering = match order.direction {
-                QueryDirection::Asc => ordering,
-                QueryDirection::Desc => ordering.reverse(),
-            };
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
-        }
-        left.id.cmp(&right.id)
-    });
-    Ok(())
-}
-
-fn compare_json_values(left: Option<&JsonValue>, right: Option<&JsonValue>) -> Ordering {
-    let left_rank = json_value_rank(left);
-    let right_rank = json_value_rank(right);
-    left_rank
-        .cmp(&right_rank)
-        .then_with(|| match (left, right) {
-            (Some(JsonValue::Bool(left)), Some(JsonValue::Bool(right))) => left.cmp(right),
-            (Some(JsonValue::Number(left)), Some(JsonValue::Number(right))) => left
-                .as_f64()
-                .partial_cmp(&right.as_f64())
-                .unwrap_or(Ordering::Equal),
-            (Some(JsonValue::String(left)), Some(JsonValue::String(right))) => left.cmp(right),
-            (Some(left), Some(right)) => left.to_string().cmp(&right.to_string()),
-            _ => Ordering::Equal,
-        })
-}
-
-fn json_value_rank(value: Option<&JsonValue>) -> u8 {
-    match value {
-        None | Some(JsonValue::Null) => 0,
-        Some(JsonValue::Bool(_)) => 1,
-        Some(JsonValue::Number(_)) => 2,
-        Some(JsonValue::String(_)) => 3,
-        Some(JsonValue::Array(_)) => 4,
-        Some(JsonValue::Object(_)) => 5,
-    }
-}
-
-fn apply_window(rows: Vec<RowView>, offset: Option<usize>, limit: Option<usize>) -> Vec<RowView> {
-    let offset = offset.unwrap_or(0);
-    match limit {
-        Some(limit) => rows.into_iter().skip(offset).take(limit).collect(),
-        None => rows.into_iter().skip(offset).collect(),
-    }
 }
 
 #[cfg(test)]
