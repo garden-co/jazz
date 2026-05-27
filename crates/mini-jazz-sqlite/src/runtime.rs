@@ -5,6 +5,7 @@ use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
 };
+use crate::time::now_ms;
 use crate::types::{BranchInfo, RejectionInfo, RowView, StorageStats, TransactionInfo};
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
@@ -13,7 +14,6 @@ use crate::{
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Runtime {
     conn: Connection,
@@ -5077,13 +5077,6 @@ fn integer_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
         rusqlite::types::Value::Integer(value) => Ok(*value),
         _ => Err(crate::Error::new(format!("expected integer {name}"))),
     }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {
