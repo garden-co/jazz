@@ -69,3 +69,12 @@ size 100, the 10k/1k/page-50 smoke seed time dropped from about 8.5 s to
 of 1k, bundle bytes dropped from about 622 KB to 402 KB and api-to-first-result
 from about 767 ms to 562 ms. This is a fixture-generation knob, not a product
 claim; reports now include `seed_batch_size` so comparisons do not mix shapes.
+
+## 2026-05-26 21:21 PDT
+
+Ran the first PR-898-default-scale-ish profile: 100k total documents, 10k
+target-owner rows, page size 50, seed batch size 100. Result: about 5.7 s
+api-to-first-result, 4.1 MB bundle, 10k history rows synced, 100 transaction
+records, and about 1.8 s apply time per hop. Final tab query was still only
+about 0.4 ms. This strongly confirms that top-page sync/apply volume dominates
+the current whole-topology path.
