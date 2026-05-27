@@ -248,3 +248,16 @@ KB / 51 tx records. Export time stays close (5.9 ms vs 5.2 ms) because scoped tx
 metadata now only exports the transactions touched by the page/policy rows. This
 supports the transaction model for read-time scope, while making write/seeding
 cost and tx table size a separate concern.
+
+## 2026-05-26 22:01 PDT
+
+Added a recursive policy probe: teams are readable if created by the user,
+projects are readable if their team is readable, and documents are readable if
+their project is readable. The query remains the same owner ordered page over
+documents. Profile is 20k docs / 2k owner docs / page 50 / policy depth 3.
+
+Result: core top-page query stays under 1 ms, export is about 17 ms, bundle is 54
+KB, and history rows are 110 (50 docs + 50 projects + 10 teams). This is
+encouraging for recursively lowerable policy chains at page-sized scopes. It
+also shows dependency cardinality follows the distinct ancestors of the observed
+page, not the total table size.

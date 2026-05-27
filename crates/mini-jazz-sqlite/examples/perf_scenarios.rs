@@ -16,6 +16,7 @@ fn main() -> BenchResult<()> {
     let report = BenchmarkReport {
         primary: run_core_only_scoped_page(&config)?,
         tx_granularity_probe: run_tx_granularity_probe()?,
+        recursive_policy_probe: run_recursive_policy_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -48,6 +49,7 @@ impl Config {
 struct BenchmarkReport {
     primary: ScenarioReport,
     tx_granularity_probe: TxGranularityProbe,
+    recursive_policy_probe: RecursivePolicyProbe,
 }
 
 #[derive(Serialize)]
@@ -99,6 +101,21 @@ struct TxGranularityCase {
     history_rows_synced: usize,
     transaction_rows_synced: usize,
     core_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct RecursivePolicyProbe {
+    total_rows: usize,
+    target_owner_rows: usize,
+    policy_depth: usize,
+    visible_rows_returned: usize,
+    history_rows_synced: usize,
+    transaction_rows_synced: usize,
+    bundle_bytes: usize,
+    core_database_bytes: i64,
+    seed_ms: f64,
+    core_query_ms: f64,
+    export_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -318,6 +335,54 @@ fn run_tx_granularity_case(seed_batch_size: usize) -> BenchResult<TxGranularityC
     })
 }
 
+fn run_recursive_policy_probe() -> BenchResult<RecursivePolicyProbe> {
+    let total_rows = 20_000;
+    let target_owner_rows = 2_000;
+    let page_size = 50;
+    let dir = tempdir()?;
+    let schema = recursive_policy_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema,
+    )?;
+
+    let seed_started = Instant::now();
+    seed_recursive_policy_graph(&mut core, total_rows, target_owner_rows, 100)?;
+    let seed_elapsed = seed_started.elapsed();
+
+    let query_started = Instant::now();
+    let rows = core.run_as_user(OWNER, |core| {
+        core.read_rows_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!(OWNER),
+            "updated_at",
+            page_size,
+        )
+    })?;
+    let query_elapsed = query_started.elapsed();
+
+    let export_started = Instant::now();
+    let bundle = export_top_owner_page(&mut core, page_size)?;
+    let export_elapsed = export_started.elapsed();
+    let summary = BundleSummary::from(&bundle)?;
+
+    Ok(RecursivePolicyProbe {
+        total_rows,
+        target_owner_rows,
+        policy_depth: 3,
+        visible_rows_returned: rows.len(),
+        history_rows_synced: bundle.history.len(),
+        transaction_rows_synced: bundle.txs.len(),
+        bundle_bytes: summary.bytes,
+        core_database_bytes: core.storage_stats()?.database_bytes,
+        seed_ms: ms(seed_elapsed),
+        core_query_ms: ms(query_elapsed),
+        export_ms: ms(export_elapsed),
+    })
+}
+
 fn run_edge_warm_worker_cold(
     config: &Config,
     dir: &tempfile::TempDir,
@@ -477,6 +542,27 @@ fn documents_schema() -> SchemaDef {
         })
 }
 
+fn recursive_policy_schema() -> SchemaDef {
+    SchemaDef::new()
+        .table("teams", |table| {
+            table.text("name");
+            table.read_if_created_by_user();
+        })
+        .table("projects", |table| {
+            table.text("name");
+            table.ref_("team", "teams");
+            table.read_if_ref_readable("team");
+        })
+        .table("documents", |table| {
+            table.text("owner_id");
+            table.ref_("project", "projects");
+            table.text("updated_at");
+            table.text("title");
+            table.index("owner_updated", ["owner_id", "updated_at"]);
+            table.read_if_ref_readable("project");
+        })
+}
+
 struct DiffCounts {
     added: usize,
     updated: usize,
@@ -539,6 +625,53 @@ fn seed_orgs(runtime: &mut Runtime) -> Result<()> {
         }
         tx.commit().map(|_| ())
     })
+}
+
+fn seed_recursive_policy_graph(
+    runtime: &mut Runtime,
+    total_rows: usize,
+    target_owner_rows: usize,
+    seed_batch_size: usize,
+) -> Result<()> {
+    runtime.run_attributing_to_user(OWNER, |runtime| {
+        let mut tx = runtime.transaction();
+        for team_index in 0..10 {
+            tx = tx.insert_row(
+                "teams",
+                &format!("team-{team_index}"),
+                BTreeMap::from([("name".to_owned(), json!(format!("Team {team_index}")))]),
+            );
+        }
+        for project_index in 0..100 {
+            tx = tx.insert_row(
+                "projects",
+                &format!("project-{project_index}"),
+                BTreeMap::from([
+                    ("name".to_owned(), json!(format!("Project {project_index}"))),
+                    (
+                        "team".to_owned(),
+                        json!(format!("team-{}", project_index % 10)),
+                    ),
+                ]),
+            );
+        }
+        tx.commit().map(|_| ())
+    })?;
+
+    let seed_batch_size = seed_batch_size.max(1);
+    for chunk_start in (0..total_rows).step_by(seed_batch_size) {
+        let chunk_end = (chunk_start + seed_batch_size).min(total_rows);
+        let mut tx = runtime.transaction();
+        for row_index in chunk_start..chunk_end {
+            tx = tx.insert_row(
+                "documents",
+                &format!("recursive-doc-{row_index}"),
+                recursive_document_values(row_index, target_owner_rows),
+            );
+        }
+        tx.commit()?;
+    }
+    Ok(())
 }
 
 fn export_top_owner_page(runtime: &mut Runtime, page_size: usize) -> Result<Bundle> {
@@ -608,6 +741,30 @@ fn document_values(
         ("org".to_owned(), json!(format!("org-{}", row_index % 100))),
         ("updated_at".to_owned(), json!(format!("{:020}", row_index))),
         ("title".to_owned(), json!(format!("Document {row_index}"))),
+    ])
+}
+
+fn recursive_document_values(
+    row_index: usize,
+    target_owner_rows: usize,
+) -> BTreeMap<String, serde_json::Value> {
+    let is_target_owner = row_index < target_owner_rows;
+    let owner_id = if is_target_owner {
+        OWNER.to_owned()
+    } else {
+        format!("user-{}", row_index % 10_000)
+    };
+    BTreeMap::from([
+        ("owner_id".to_owned(), json!(owner_id)),
+        (
+            "project".to_owned(),
+            json!(format!("project-{}", row_index % 100)),
+        ),
+        ("updated_at".to_owned(), json!(format!("{:020}", row_index))),
+        (
+            "title".to_owned(),
+            json!(format!("Recursive document {row_index}")),
+        ),
     ])
 }
 
