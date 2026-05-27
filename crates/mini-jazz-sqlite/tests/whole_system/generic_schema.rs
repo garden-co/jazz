@@ -835,42 +835,9 @@ fn built_query_scope_export_accepts_multiple_filters() {
     peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
         .unwrap();
 
-    let rows = peer.query(query).unwrap();
+    let rows = peer.query(query.clone()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "note-match");
-}
-
-#[test]
-fn built_query_scope_refresh_removes_row_that_left_multiple_filters() {
-    let schema = support::notes_schema();
-    let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
-    let mut peer =
-        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
-
-    alice
-        .insert_row(
-            "notes",
-            "note-match",
-            BTreeMap::from([
-                ("body".to_owned(), json!("ship the small thing")),
-                ("pinned".to_owned(), json!(true)),
-            ]),
-        )
-        .unwrap();
-
-    let query = BuiltQuery::from_json_value(json!({
-        "table": "notes",
-        "conditions": [
-            {"column": "pinned", "op": "eq", "value": true},
-            {"column": "body", "op": "contains", "value": "ship"}
-        ],
-    }))
-    .unwrap();
-
-    peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
-        .unwrap();
-    assert_eq!(peer.query(query.clone()).unwrap()[0].id, "note-match");
 
     alice
         .update_row(
