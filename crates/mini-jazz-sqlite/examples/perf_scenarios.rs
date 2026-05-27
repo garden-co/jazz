@@ -42,6 +42,7 @@ fn main() -> BenchResult<()> {
         dashboard_query_scaling_probe: run_dashboard_query_scaling_probe()?,
         recursive_tree_subscription_probe: run_recursive_tree_subscription_probe()?,
         recursive_closure_layout_probe: run_recursive_closure_layout_probe()?,
+        cold_reopen_profile_probe: run_cold_reopen_profile_probe()?,
         project_board_probe: run_project_board_probe()?,
         current_projection_tradeoff_probe: run_current_projection_tradeoff_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
@@ -157,6 +158,7 @@ struct BenchmarkReport {
     dashboard_query_scaling_probe: DashboardQueryScalingProbe,
     recursive_tree_subscription_probe: RecursiveTreeSubscriptionProbe,
     recursive_closure_layout_probe: RecursiveClosureLayoutProbe,
+    cold_reopen_profile_probe: ColdReopenProfileProbe,
     project_board_probe: ProjectBoardProbe,
     current_projection_tradeoff_probe: CurrentProjectionTradeoffProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
@@ -420,6 +422,27 @@ struct RecursiveClosureLayoutProbe {
     closure_query_ms: f64,
     recursive_rows: usize,
     closure_rows_returned: usize,
+}
+
+#[derive(Serialize)]
+struct ColdReopenProfileProbe {
+    total_rows: usize,
+    target_owner_rows: usize,
+    page_size: usize,
+    seed_ms: f64,
+    cold_export_total_ms: f64,
+    warm_export_total_ms: f64,
+    cold_export_read_rows_ms: f64,
+    warm_export_read_rows_ms: f64,
+    cold_export_history_rows: usize,
+    bundle_bytes: usize,
+    cold_worker_apply_ms: f64,
+    cold_worker_apply_history_ms: f64,
+    warm_worker_query_ms: f64,
+    reopened_worker_query_ms: f64,
+    reopened_worker_observed_reads: usize,
+    core_database_bytes: i64,
+    worker_database_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -1675,6 +1698,94 @@ fn run_recursive_closure_layout_probe() -> BenchResult<RecursiveClosureLayoutPro
         closure_query_ms: ms(closure_elapsed),
         recursive_rows,
         closure_rows_returned,
+    })
+}
+
+fn run_cold_reopen_profile_probe() -> BenchResult<ColdReopenProfileProbe> {
+    let total_rows = env_usize("MINI_JAZZ_PERF_COLD_TOTAL_ROWS", 50_000);
+    let target_owner_rows = env_usize("MINI_JAZZ_PERF_COLD_TARGET_OWNER_ROWS", 5_000);
+    let page_size = env_usize("MINI_JAZZ_PERF_COLD_PAGE_SIZE", 50);
+    let dir = tempdir()?;
+    let core_path = dir.path().join("cold-core.sqlite");
+    let worker_path = dir.path().join("cold-worker.sqlite");
+    let schema = documents_schema();
+
+    let seed_elapsed = {
+        let mut core = Runtime::open_trusted_with_schema(
+            Storage::File(core_path.clone()),
+            "core",
+            schema.clone(),
+        )?;
+        let seed_started = Instant::now();
+        seed_documents(&mut core, total_rows, target_owner_rows, 100)?;
+        seed_started.elapsed()
+    };
+
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(core_path.clone()),
+        "core",
+        schema.clone(),
+    )?;
+    let (bundle, cold_export_profile) = core.run_as_user(OWNER, |core| {
+        core.profile_export_query_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!(OWNER),
+            "updated_at",
+            page_size,
+        )
+    })?;
+    let (_, warm_export_profile) = core.run_as_user(OWNER, |core| {
+        core.profile_export_query_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!(OWNER),
+            "updated_at",
+            page_size,
+        )
+    })?;
+    let bundle_summary = BundleSummary::from(&bundle)?;
+    let core_database_bytes = core.storage_stats()?.database_bytes;
+
+    let mut worker = Runtime::open_with_schema(
+        Storage::File(worker_path.clone()),
+        "worker",
+        OWNER,
+        schema.clone(),
+    )?;
+    let cold_worker_apply = worker.profile_apply_bundle(&bundle)?;
+    let warm_query_started = Instant::now();
+    let warm_rows = read_top_owner_page(&worker, page_size)?;
+    let warm_query_elapsed = warm_query_started.elapsed();
+    assert_eq!(warm_rows.len(), page_size);
+    drop(worker);
+
+    let reopened = Runtime::open_with_schema(Storage::File(worker_path), "worker", OWNER, schema)?;
+    let reopened_query_started = Instant::now();
+    let reopened_rows = read_top_owner_page(&reopened, page_size)?;
+    let reopened_query_elapsed = reopened_query_started.elapsed();
+    assert_eq!(reopened_rows.len(), page_size);
+    let reopened_worker_observed_reads = reopened.observed_query_reads()?.len();
+    let worker_database_bytes = reopened.storage_stats()?.database_bytes;
+
+    Ok(ColdReopenProfileProbe {
+        total_rows,
+        target_owner_rows,
+        page_size,
+        seed_ms: ms(seed_elapsed),
+        cold_export_total_ms: cold_export_profile.total_ms,
+        warm_export_total_ms: warm_export_profile.total_ms,
+        cold_export_read_rows_ms: cold_export_profile.read_rows_ms,
+        warm_export_read_rows_ms: warm_export_profile.read_rows_ms,
+        cold_export_history_rows: bundle.history.len(),
+        bundle_bytes: bundle_summary.bytes,
+        cold_worker_apply_ms: cold_worker_apply.total_ms,
+        cold_worker_apply_history_ms: cold_worker_apply.history_ms,
+        warm_worker_query_ms: ms(warm_query_elapsed),
+        reopened_worker_query_ms: ms(reopened_query_elapsed),
+        reopened_worker_observed_reads,
+        core_database_bytes,
+        worker_database_bytes,
     })
 }
 

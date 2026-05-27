@@ -1506,3 +1506,26 @@ joining current rows to txs/ids, materializing full `RowView`s, ordering, and
 possibly export repair/policy machinery. Closure tables could still help, but
 the next sharper step is to profile the actual Jazz recursive SQL plan and row
 materialization path rather than assuming "recursive CTE bad".
+
+## 2026-05-27 02:02 PDT
+
+Added a cold/reopen profile probe for the ordinary indexed owner page path. It
+seeds a durable core, closes/reopens it, compares first export vs immediate
+second export, applies the bundle into a durable worker, queries once warm,
+reopens the worker, then queries again.
+
+50k-row / 5k-owner-row sample:
+
+- cold core export: ~1.37 ms
+- warm core export: ~1.19 ms
+- cold export read phase: ~0.29 ms
+- warm export read phase: ~0.20 ms
+- bundle: ~36.7 KB, 100 history rows
+- cold worker apply: ~3.0 ms, with ~2.2 ms in history
+- warm worker query: ~0.21 ms
+- reopened worker query: ~0.21 ms
+- observed query reads survive reopen: 1
+
+Learning: for the normal indexed page path, SQLite page-cache coldness and
+worker reopen are not scary at this scale. The dangerous path remains recursive
+tree reads/subscriptions, not ordinary durable restart.
