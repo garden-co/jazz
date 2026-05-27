@@ -445,3 +445,15 @@ history. I initially modeled this as 20 different users in one runtime, which
 correctly produced no diffs because query reads are bound to the runtime's user
 context rather than storing per-query auth. That is a useful semantic reminder:
 multi-user fanout belongs at the broker/edge layer, not inside one app runtime.
+
+## 2026-05-26 22:37 PDT
+
+Switched dynamic history/current projection inserts to `prepare_cached` so
+repeated same-shape inserts reuse SQLite prepared statements. The query-scope
+test suite passes.
+
+Result: another small but consistent apply-path improvement. Cold first-result
+drops to about 113 ms, refresh after 50 top rows to about 144 ms, mixed refresh
+apply to about 23 ms, and subscription storm apply to about 79 ms. The biggest
+apply win remains identity caching; statement caching helps most as bundle row
+count grows.

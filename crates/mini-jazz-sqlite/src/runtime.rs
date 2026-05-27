@@ -5824,12 +5824,10 @@ fn insert_dynamic(
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(", ");
-    conn.execute(
-        &format!(
-            "INSERT OR REPLACE INTO {table} ({}) VALUES ({placeholders})",
-            columns.join(", ")
-        ),
-        params_from_iter(values.iter()),
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "INSERT OR REPLACE INTO {table} ({}) VALUES ({placeholders})",
+        columns.join(", ")
+    ))?;
+    stmt.execute(params_from_iter(values.iter()))?;
     Ok(())
 }
