@@ -41,6 +41,7 @@ fn main() -> BenchResult<()> {
         permissioned_dashboard_probe: run_permissioned_dashboard_probe()?,
         dashboard_query_scaling_probe: run_dashboard_query_scaling_probe()?,
         recursive_tree_subscription_probe: run_recursive_tree_subscription_probe()?,
+        recursive_closure_layout_probe: run_recursive_closure_layout_probe()?,
         project_board_probe: run_project_board_probe()?,
         current_projection_tradeoff_probe: run_current_projection_tradeoff_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
@@ -155,6 +156,7 @@ struct BenchmarkReport {
     permissioned_dashboard_probe: PermissionedDashboardProbe,
     dashboard_query_scaling_probe: DashboardQueryScalingProbe,
     recursive_tree_subscription_probe: RecursiveTreeSubscriptionProbe,
+    recursive_closure_layout_probe: RecursiveClosureLayoutProbe,
     project_board_probe: ProjectBoardProbe,
     current_projection_tradeoff_probe: CurrentProjectionTradeoffProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
@@ -403,6 +405,21 @@ struct RecursiveTreeSubscriptionProbe {
     visible_rows_after_refresh: usize,
     core_database_bytes: i64,
     tab_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct RecursiveClosureLayoutProbe {
+    node_count: usize,
+    branch_factor: usize,
+    edge_only_database_bytes: i64,
+    closure_database_bytes: i64,
+    closure_rows: usize,
+    seed_edges_ms: f64,
+    seed_closure_ms: f64,
+    recursive_cte_ms: f64,
+    closure_query_ms: f64,
+    recursive_rows: usize,
+    closure_rows_returned: usize,
 }
 
 #[derive(Serialize)]
@@ -1596,6 +1613,68 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
         visible_rows_after_refresh,
         core_database_bytes: core.storage_stats()?.database_bytes,
         tab_database_bytes: tab.storage_stats()?.database_bytes,
+    })
+}
+
+fn run_recursive_closure_layout_probe() -> BenchResult<RecursiveClosureLayoutProbe> {
+    let node_count = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_NODES", 2_000);
+    let branch_factor = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_BRANCH_FACTOR", 5).max(1);
+
+    let edge_conn = Connection::open_in_memory()?;
+    edge_conn.execute_batch(
+        "CREATE TABLE folder_current (
+           row_num INTEGER PRIMARY KEY,
+           parent_num INTEGER,
+           name TEXT NOT NULL
+         );
+         CREATE INDEX folder_parent_idx ON folder_current(parent_num, row_num);",
+    )?;
+    let seed_edges_started = Instant::now();
+    seed_raw_folder_edges(&edge_conn, node_count, branch_factor)?;
+    let seed_edges_elapsed = seed_edges_started.elapsed();
+    let edge_only_database_bytes = sqlite_database_bytes(&edge_conn)?;
+    let recursive_started = Instant::now();
+    let recursive_rows = query_raw_recursive_cte(&edge_conn)?;
+    let recursive_elapsed = recursive_started.elapsed();
+
+    let closure_conn = Connection::open_in_memory()?;
+    closure_conn.execute_batch(
+        "CREATE TABLE folder_current (
+           row_num INTEGER PRIMARY KEY,
+           parent_num INTEGER,
+           name TEXT NOT NULL
+         );
+         CREATE INDEX folder_parent_idx ON folder_current(parent_num, row_num);
+         CREATE TABLE folder_closure (
+           ancestor_num INTEGER NOT NULL,
+           descendant_num INTEGER NOT NULL,
+           depth INTEGER NOT NULL,
+           PRIMARY KEY (ancestor_num, descendant_num)
+         ) WITHOUT ROWID;
+         CREATE INDEX folder_closure_descendant_idx
+           ON folder_closure(descendant_num, ancestor_num);",
+    )?;
+    seed_raw_folder_edges(&closure_conn, node_count, branch_factor)?;
+    let seed_closure_started = Instant::now();
+    let closure_rows = seed_raw_folder_closure(&closure_conn, node_count, branch_factor)?;
+    let seed_closure_elapsed = seed_closure_started.elapsed();
+    let closure_database_bytes = sqlite_database_bytes(&closure_conn)?;
+    let closure_started = Instant::now();
+    let closure_rows_returned = query_raw_closure(&closure_conn)?;
+    let closure_elapsed = closure_started.elapsed();
+
+    Ok(RecursiveClosureLayoutProbe {
+        node_count,
+        branch_factor,
+        edge_only_database_bytes,
+        closure_database_bytes,
+        closure_rows,
+        seed_edges_ms: ms(seed_edges_elapsed),
+        seed_closure_ms: ms(seed_closure_elapsed),
+        recursive_cte_ms: ms(recursive_elapsed),
+        closure_query_ms: ms(closure_elapsed),
+        recursive_rows,
+        closure_rows_returned,
     })
 }
 
@@ -3254,6 +3333,75 @@ fn mutate_folder_tree(
     }
     tx.commit()?;
     Ok(())
+}
+
+fn seed_raw_folder_edges(
+    conn: &Connection,
+    node_count: usize,
+    branch_factor: usize,
+) -> rusqlite::Result<()> {
+    let mut stmt =
+        conn.prepare("INSERT INTO folder_current (row_num, parent_num, name) VALUES (?, ?, ?)")?;
+    for index in 0..node_count {
+        let parent = if index == 0 {
+            None
+        } else {
+            Some(((index - 1) / branch_factor) as i64)
+        };
+        stmt.execute(params![index as i64, parent, format!("Folder {index:06}")])?;
+    }
+    Ok(())
+}
+
+fn seed_raw_folder_closure(
+    conn: &Connection,
+    node_count: usize,
+    branch_factor: usize,
+) -> rusqlite::Result<usize> {
+    let mut rows = 0;
+    let mut stmt = conn.prepare(
+        "INSERT INTO folder_closure (ancestor_num, descendant_num, depth)
+         VALUES (?, ?, ?)",
+    )?;
+    for descendant in 0..node_count {
+        stmt.execute(params![descendant as i64, descendant as i64, 0_i64])?;
+        rows += 1;
+        let mut ancestor = descendant;
+        let mut depth = 1_i64;
+        while ancestor > 0 {
+            ancestor = (ancestor - 1) / branch_factor;
+            stmt.execute(params![ancestor as i64, descendant as i64, depth])?;
+            rows += 1;
+            depth += 1;
+        }
+    }
+    Ok(rows)
+}
+
+fn query_raw_recursive_cte(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.query_row(
+        "WITH RECURSIVE subtree(row_num) AS (
+           SELECT row_num FROM folder_current WHERE row_num = 0
+           UNION
+           SELECT child.row_num
+           FROM folder_current child
+           JOIN subtree ON child.parent_num = subtree.row_num
+         )
+         SELECT COUNT(*) FROM subtree",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn query_raw_closure(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.query_row(
+        "SELECT COUNT(*)
+         FROM folder_closure closure
+         JOIN folder_current current ON current.row_num = closure.descendant_num
+         WHERE closure.ancestor_num = 0",
+        [],
+        |row| row.get(0),
+    )
 }
 
 struct MixedMutationConfig {

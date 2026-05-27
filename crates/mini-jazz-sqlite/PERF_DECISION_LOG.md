@@ -1479,3 +1479,30 @@ Learning: recursive query optimization cannot simply drop duplicate tracking
 unless we also change root/cycle semantics or add explicit visited-depth guards.
 The next serious move should be `EXPLAIN QUERY PLAN` plus a dedicated closure,
 path, or descendant index strategy.
+
+## 2026-05-27 02:00 PDT
+
+Added a raw recursive-layout comparison probe:
+
+- edge-only table with `(parent_num, row_num)` index queried through a recursive
+  CTE
+- closure table with `(ancestor_num, descendant_num, depth)`
+
+2k-node / branch-factor-5 sample:
+
+- raw edge-only recursive CTE count: ~0.69 ms
+- raw closure query count: ~0.09 ms
+- edge-only DB: ~90 KB
+- closure DB: ~344 KB
+- closure rows: 11,025
+- closure build: ~15 ms
+
+Also tried a scoped `row_num -> row_id` materialization cache for the real Jazz
+recursive read. It did not improve the 2k-node probe, so I reverted it.
+
+Learning: SQLite recursive CTEs are not inherently the 700 ms problem. The raw
+shape is fast. The slowness likely comes from the richer Jazz query shape:
+joining current rows to txs/ids, materializing full `RowView`s, ordering, and
+possibly export repair/policy machinery. Closure tables could still help, but
+the next sharper step is to profile the actual Jazz recursive SQL plan and row
+materialization path rather than assuming "recursive CTE bad".
