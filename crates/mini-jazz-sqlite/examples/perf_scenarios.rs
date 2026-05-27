@@ -24,6 +24,7 @@ fn main() -> BenchResult<()> {
         storage_topology_probe: run_storage_topology_probe()?,
         multi_query_refresh_probe: run_multi_query_refresh_probe()?,
         subscription_storm_probe: run_subscription_storm_probe()?,
+        branch_overlay_probe: run_branch_overlay_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -64,6 +65,7 @@ struct BenchmarkReport {
     storage_topology_probe: StorageTopologyProbe,
     multi_query_refresh_probe: MultiQueryRefreshProbe,
     subscription_storm_probe: SubscriptionStormProbe,
+    branch_overlay_probe: BranchOverlayProbe,
 }
 
 #[derive(Serialize)]
@@ -263,6 +265,22 @@ struct SubscriptionStormProbe {
     total_added: usize,
     total_updated: usize,
     total_removed: usize,
+}
+
+#[derive(Serialize)]
+struct BranchOverlayProbe {
+    total_rows: usize,
+    target_owner_rows: usize,
+    page_size: usize,
+    branch_overlay_updates: usize,
+    main_visible_rows: usize,
+    branch_visible_rows: usize,
+    main_query_ms: f64,
+    branch_query_ms: f64,
+    branch_export_ms: f64,
+    branch_bundle_bytes: usize,
+    branch_history_rows: usize,
+    branch_transaction_rows: usize,
 }
 
 #[derive(Serialize)]
@@ -986,6 +1004,67 @@ fn run_subscription_storm_probe() -> BenchResult<SubscriptionStormProbe> {
         total_added: total_counts.added,
         total_updated: total_counts.updated,
         total_removed: total_counts.removed,
+    })
+}
+
+fn run_branch_overlay_probe() -> BenchResult<BranchOverlayProbe> {
+    let total_rows = 20_000;
+    let target_owner_rows = 2_000;
+    let page_size = 50;
+    let branch_overlay_updates = 100;
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut runtime = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema,
+    )?;
+
+    seed_documents(&mut runtime, total_rows, target_owner_rows, 100)?;
+    let main_query_started = Instant::now();
+    let main_rows = read_top_owner_page(&runtime, page_size)?;
+    let main_query_elapsed = main_query_started.elapsed();
+
+    runtime.create_branch_from_branches("draft", &["main"])?;
+    runtime.checkout_branch("draft")?;
+    let mut tx = runtime.transaction();
+    for index in 0..branch_overlay_updates {
+        let row_index = target_owner_rows - 1 - index;
+        tx = tx.update_row(
+            "documents",
+            &format!("doc-{row_index}"),
+            BTreeMap::from([
+                ("title".to_owned(), json!(format!("Draft update {index}"))),
+                (
+                    "updated_at".to_owned(),
+                    json!(format!("{:020}", total_rows + index)),
+                ),
+            ]),
+        );
+    }
+    tx.commit()?;
+
+    let branch_query_started = Instant::now();
+    let branch_rows = read_top_owner_page(&runtime, page_size)?;
+    let branch_query_elapsed = branch_query_started.elapsed();
+    let branch_export_started = Instant::now();
+    let branch_bundle = export_top_owner_page(&mut runtime, page_size)?;
+    let branch_export_elapsed = branch_export_started.elapsed();
+    let branch_summary = BundleSummary::from(&branch_bundle)?;
+
+    Ok(BranchOverlayProbe {
+        total_rows,
+        target_owner_rows,
+        page_size,
+        branch_overlay_updates,
+        main_visible_rows: main_rows.len(),
+        branch_visible_rows: branch_rows.len(),
+        main_query_ms: ms(main_query_elapsed),
+        branch_query_ms: ms(branch_query_elapsed),
+        branch_export_ms: ms(branch_export_elapsed),
+        branch_bundle_bytes: branch_summary.bytes,
+        branch_history_rows: branch_bundle.history.len(),
+        branch_transaction_rows: branch_bundle.txs.len(),
     })
 }
 

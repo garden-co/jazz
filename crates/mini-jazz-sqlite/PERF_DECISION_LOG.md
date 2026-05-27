@@ -457,3 +457,18 @@ drops to about 113 ms, refresh after 50 top rows to about 144 ms, mixed refresh
 apply to about 23 ms, and subscription storm apply to about 79 ms. The biggest
 apply win remains identity caching; statement caching helps most as bundle row
 count grows.
+
+## 2026-05-26 22:40 PDT
+
+Added a branch overlay probe: 20k main rows, 2k matching owner rows, then a
+`draft` branch sourced from `main` with 100 sparse overlay updates. The first
+attempt created an empty branch with no source and correctly failed to update
+main rows; the probe now uses an explicit source branch.
+
+Result: main top-page query is about 0.6 ms, but branch top-page query is about
+26 ms and branch export about 45 ms for a page-50 bundle with 150 history rows.
+This is the clearest branch-specific performance risk found tonight. The sparse
+overlay semantics work, but the current branch query path falls back to a
+materialize/filter/sort style rather than a fully SQL-lowered indexed top-page
+plan. This should become a top derisk target before we rely on branch-heavy
+product workflows.
