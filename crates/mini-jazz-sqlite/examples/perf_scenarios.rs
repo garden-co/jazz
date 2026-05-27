@@ -382,11 +382,16 @@ struct RecursiveTreeSubscriptionProbe {
     node_count: usize,
     branch_factor: usize,
     seed_ms: f64,
+    initial_read_ms: f64,
+    initial_admin_read_ms: f64,
+    initial_rows_read: usize,
     initial_export_ms: f64,
     initial_bundle_bytes: usize,
     initial_history_rows: usize,
     initial_apply_ms: f64,
     subscribe_ms: f64,
+    refresh_read_ms: f64,
+    refresh_rows_read: usize,
     refresh_export_ms: f64,
     refresh_bundle_bytes: usize,
     refresh_history_rows: usize,
@@ -1519,6 +1524,17 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     })?;
     let seed_elapsed = seed_started.elapsed();
 
+    let initial_read_started = Instant::now();
+    let initial_rows = core.run_as_user(OWNER, |core| {
+        core.read_recursive_refs("folders", "folder-0", "parent")
+    })?;
+    let initial_read_elapsed = initial_read_started.elapsed();
+    let initial_admin_read_started = Instant::now();
+    core.run_attributing_to_user(OWNER, |core| {
+        core.read_recursive_refs("folders", "folder-0", "parent")
+    })?;
+    let initial_admin_read_elapsed = initial_admin_read_started.elapsed();
+
     let export_started = Instant::now();
     let initial_bundle = core.run_as_user(OWNER, |core| {
         core.export_recursive_refs("folders", "folder-0", "parent")
@@ -1534,6 +1550,11 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     core.run_as_user(OWNER, |core| {
         mutate_folder_tree(core, node_count, branch_factor)
     })?;
+    let refresh_read_started = Instant::now();
+    let refresh_rows = core.run_as_user(OWNER, |core| {
+        core.read_recursive_refs("folders", "folder-0", "parent")
+    })?;
+    let refresh_read_elapsed = refresh_read_started.elapsed();
     let refresh_started = Instant::now();
     let refresh_bundles = core.run_as_user(OWNER, |core| {
         core.export_query_read_refreshes(&tab.observed_query_reads()?)
@@ -1554,11 +1575,16 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
         node_count,
         branch_factor,
         seed_ms: ms(seed_elapsed),
+        initial_read_ms: ms(initial_read_elapsed),
+        initial_admin_read_ms: ms(initial_admin_read_elapsed),
+        initial_rows_read: initial_rows.len(),
         initial_export_ms: ms(export_elapsed),
         initial_bundle_bytes: initial_summary.bytes,
         initial_history_rows: initial_bundle.history.len(),
         initial_apply_ms: ms(initial_apply_elapsed),
         subscribe_ms: ms(subscribe_elapsed),
+        refresh_read_ms: ms(refresh_read_elapsed),
+        refresh_rows_read: refresh_rows.len(),
         refresh_export_ms: ms(refresh_elapsed),
         refresh_bundle_bytes: refresh_summary.bytes,
         refresh_history_rows: refresh_merged.history.len(),

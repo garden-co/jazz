@@ -1437,3 +1437,24 @@ spike. SQLite storage/apply is not the main issue here; repeated recursive
 query execution, subscription diffing, and full recursive-scope export are. We
 need explain plans and likely a more incremental recursive query/read-set
 strategy before treating large trees as product-safe.
+
+## 2026-05-27 01:48 PDT
+
+Split the recursive tree probe into direct read vs export vs subscribe/poll,
+and added an admin/bypass read comparison.
+
+2k-node sample after the split:
+
+- direct recursive read as user: ~743 ms
+- direct recursive read with policy bypass: ~738 ms
+- export: ~764 ms
+- subscribe: ~732 ms
+- refresh direct read: ~757 ms
+- refresh export: ~771 ms
+- poll/diff: ~750 ms
+
+Learning: this is not created-by policy overhead. The recursive CTE read itself
+dominates, and export/subscribe/poll are slow because they rerun the same slow
+recursive read. The most likely next risk is missing or unusable indexing for
+`current.parent -> subtree.row_num` traversal, or an inefficient recursive CTE
+shape.
