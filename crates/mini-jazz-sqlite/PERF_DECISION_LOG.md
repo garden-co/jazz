@@ -78,3 +78,30 @@ api-to-first-result, 4.1 MB bundle, 10k history rows synced, 100 transaction
 records, and about 1.8 s apply time per hop. Final tab query was still only
 about 0.4 ms. This strongly confirms that top-page sync/apply volume dominates
 the current whole-topology path.
+
+## 2026-05-26 21:21 PDT
+
+Next feature attempt: make top-page query reads carry observed row ids. Refresh
+can then export current top rows plus previously observed rows, instead of
+broadening top-page history export to the entire equality predicate. Expected
+result: initial page sync scales with page size while boundary replacement and
+delete/rejection repair still have the old observed ids needed for cleanup.
+
+## 2026-05-26 21:26 PDT
+
+Implemented observed-row top-page query repair for both `$createdAt`-ordered
+and user-column ordered page descriptors. Query reads now persist the current
+observed page row ids. Refresh exports the new page plus the previously
+observed ids so displaced/deleted boundary rows can be repaired without shipping
+the whole equality predicate.
+
+New tests cover that initial user-column ordered page export ships only the
+observed page rows, and that reconnect refresh repairs a previously observed row
+that was deleted upstream. The full whole-system suite passes.
+
+The 100k-row / 10k-owner-row / page-50 cold topology benchmark changed from
+about 4.1 MB, 10k history rows, 100 tx records, and 5.7 s api-to-first-result to
+26 KB, 50 history rows, 1 tx record, and 63 ms api-to-first-result. Apply time
+per hop dropped to roughly 10-12 ms. This is the strongest evidence so far that
+the embedded-DB shape can support the small-page-over-large-scope workload if
+query scopes encode observed page boundaries precisely.

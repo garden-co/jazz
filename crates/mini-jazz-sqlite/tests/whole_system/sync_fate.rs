@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 #[test]
 fn query_scoped_sync_converges_memory_and_durable_nodes() {
@@ -256,6 +257,181 @@ fn durable_user_column_ordered_query_read_refreshes_page_boundary_after_restart(
             .map(|row| row.id.as_str())
             .collect::<Vec<_>>(),
         vec!["doc-new", "doc-middle"]
+    );
+}
+
+#[test]
+fn ordered_page_export_is_scoped_to_observed_page_rows() {
+    let harness = support::Harness::new();
+    let schema = SchemaDef::new().table("documents", |table| {
+        table.text("owner_id");
+        table.text("updated_at");
+        table.text("title");
+        table.index("owner_updated", ["owner_id", "updated_at"]);
+    });
+    let mut upstream = harness
+        .memory_with_schema("upstream", "alice", schema)
+        .unwrap();
+
+    for index in 0..5 {
+        upstream
+            .insert_row(
+                "documents",
+                &format!("alice-doc-{index}"),
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!("alice")),
+                    ("updated_at".to_owned(), json!(format!("{index:04}"))),
+                    ("title".to_owned(), json!(format!("Alice doc {index}"))),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let bundle = upstream
+        .export_query_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!("alice"),
+            "updated_at",
+            2,
+        )
+        .unwrap();
+    let exported_doc_ids = bundle
+        .history
+        .iter()
+        .filter(|record| record.table == "documents")
+        .map(|record| record.row_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        exported_doc_ids,
+        BTreeSet::from(["alice-doc-4", "alice-doc-3"])
+    );
+    assert_eq!(
+        bundle.query_reads[0].value["observed_ids"],
+        json!(["alice-doc-4", "alice-doc-3"])
+    );
+}
+
+#[test]
+fn ordered_page_refresh_repairs_previously_observed_deleted_rows() {
+    let harness = support::Harness::new();
+    let schema = SchemaDef::new().table("documents", |table| {
+        table.text("owner_id");
+        table.text("updated_at");
+        table.text("title");
+        table.index("owner_updated", ["owner_id", "updated_at"]);
+    });
+    let mut upstream = harness
+        .memory_with_schema("upstream", "alice", schema.clone())
+        .unwrap();
+
+    for (id, updated_at) in [
+        ("doc-old", "0001"),
+        ("doc-middle", "0002"),
+        ("doc-new", "0003"),
+    ] {
+        upstream
+            .insert_row(
+                "documents",
+                id,
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!("alice")),
+                    ("updated_at".to_owned(), json!(updated_at)),
+                    ("title".to_owned(), json!(id)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    {
+        let mut worker = harness
+            .durable_with_schema(
+                "ordered-page-delete-worker.sqlite",
+                "worker",
+                "alice",
+                schema.clone(),
+            )
+            .unwrap();
+        support::apply(
+            upstream
+                .export_query_where_eq_top_field_desc(
+                    "documents",
+                    "owner_id",
+                    json!("alice"),
+                    "updated_at",
+                    2,
+                )
+                .unwrap(),
+            &mut worker,
+        )
+        .unwrap();
+        assert_eq!(
+            worker
+                .read_rows_where_eq_top_field_desc(
+                    "documents",
+                    "owner_id",
+                    json!("alice"),
+                    "updated_at",
+                    2,
+                )
+                .unwrap()
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["doc-new", "doc-middle"]
+        );
+    }
+
+    upstream.delete_row("documents", "doc-new").unwrap();
+
+    let mut reopened = harness
+        .durable_with_schema(
+            "ordered-page-delete-worker.sqlite",
+            "worker-reopened",
+            "alice",
+            schema,
+        )
+        .unwrap();
+    let refresh_bundles = upstream
+        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
+        .unwrap();
+    let exported_doc_ids = refresh_bundles[0]
+        .history
+        .iter()
+        .filter(|record| record.table == "documents")
+        .map(|record| record.row_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        exported_doc_ids,
+        BTreeSet::from(["doc-middle", "doc-old", "doc-new"])
+    );
+    assert_eq!(
+        refresh_bundles[0]
+            .history
+            .iter()
+            .filter(|record| record.table == "documents")
+            .count(),
+        4
+    );
+
+    for bundle in refresh_bundles {
+        support::apply(bundle, &mut reopened).unwrap();
+    }
+    assert_eq!(
+        reopened
+            .read_rows_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!("alice"),
+                "updated_at",
+                3,
+            )
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["doc-middle", "doc-old"]
     );
 }
 

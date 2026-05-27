@@ -30,6 +30,20 @@ struct AwaitingDependencyTx {
     auth_user: String,
 }
 
+struct QueryScopeOptions<'a> {
+    ref_include_fields: &'a [&'a str],
+    extra_row_ids: &'a [String],
+}
+
+impl QueryScopeOptions<'_> {
+    fn empty() -> Self {
+        Self {
+            ref_include_fields: &[],
+            extra_row_ids: &[],
+        }
+    }
+}
+
 pub const ADMIN_SYSTEM_USER: &str = "@system/admin";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -736,11 +750,12 @@ impl Runtime {
                     .get("limit")
                     .and_then(JsonValue::as_u64)
                     .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-                self.export_query_where_eq_top_created_at_desc(
+                self.export_query_where_eq_top_created_at_desc_with_previous_observed(
                     &read.table,
                     &read.field,
                     value.clone(),
                     limit as usize,
+                    observed_ids_from_query_value(&read.value)?,
                 )
             }
             "eq_top_field_desc" => {
@@ -758,12 +773,13 @@ impl Runtime {
                     .get("limit")
                     .and_then(JsonValue::as_u64)
                     .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
-                self.export_query_where_eq_top_field_desc(
+                self.export_query_where_eq_top_field_desc_with_previous_observed(
                     &read.table,
                     &read.field,
                     value.clone(),
                     order_field,
                     limit as usize,
+                    observed_ids_from_query_value(&read.value)?,
                 )
             }
             "absent" => {
@@ -2228,7 +2244,7 @@ impl Runtime {
             "eq",
             value.clone(),
             self.read_rows_where_eq(table_name, field_name, value)?,
-            &[],
+            QueryScopeOptions::empty(),
         )
     }
 
@@ -2245,7 +2261,10 @@ impl Runtime {
             "eq",
             value.clone(),
             self.read_rows_where_eq(table_name, field_name, value)?,
-            &[ref_field_name],
+            QueryScopeOptions {
+                ref_include_fields: &[ref_field_name],
+                extra_row_ids: &[],
+            },
         )
     }
 
@@ -2261,7 +2280,7 @@ impl Runtime {
             "contains",
             JsonValue::String(needle.to_owned()),
             self.read_rows_where_contains(table_name, field_name, needle)?,
-            &[],
+            QueryScopeOptions::empty(),
         )
     }
 
@@ -2277,7 +2296,7 @@ impl Runtime {
             "in",
             JsonValue::Array(values.clone()),
             self.read_rows_where_in(table_name, field_name, values)?,
-            &[],
+            QueryScopeOptions::empty(),
         )
     }
 
@@ -2293,7 +2312,7 @@ impl Runtime {
             "ne",
             value.clone(),
             self.read_rows_where_ne(table_name, field_name, value)?,
-            &[],
+            QueryScopeOptions::empty(),
         )
     }
 
@@ -2304,6 +2323,29 @@ impl Runtime {
         value: JsonValue,
         limit: usize,
     ) -> Result<Bundle> {
+        self.export_query_where_eq_top_created_at_desc_with_previous_observed(
+            table_name,
+            field_name,
+            value,
+            limit,
+            Vec::new(),
+        )
+    }
+
+    fn export_query_where_eq_top_created_at_desc_with_previous_observed(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+        previous_observed_ids: Vec<String>,
+    ) -> Result<Bundle> {
+        let rows = self.read_rows_where_eq_top_created_at_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            limit,
+        )?;
         self.export_query_scope(
             table_name,
             field_name,
@@ -2311,9 +2353,13 @@ impl Runtime {
             json!({
                 "eq": value.clone(),
                 "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
             }),
-            self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
-            &[],
+            rows,
+            QueryScopeOptions {
+                ref_include_fields: &[],
+                extra_row_ids: &previous_observed_ids,
+            },
         )
     }
 
@@ -2325,6 +2371,12 @@ impl Runtime {
         limit: usize,
         ref_field_name: &str,
     ) -> Result<Bundle> {
+        let rows = self.read_rows_where_eq_top_created_at_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            limit,
+        )?;
         self.export_query_scope(
             table_name,
             field_name,
@@ -2332,9 +2384,13 @@ impl Runtime {
             json!({
                 "eq": value.clone(),
                 "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
             }),
-            self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
-            &[ref_field_name],
+            rows,
+            QueryScopeOptions {
+                ref_include_fields: &[ref_field_name],
+                extra_row_ids: &[],
+            },
         )
     }
 
@@ -2346,6 +2402,32 @@ impl Runtime {
         order_field_name: &str,
         limit: usize,
     ) -> Result<Bundle> {
+        self.export_query_where_eq_top_field_desc_with_previous_observed(
+            table_name,
+            field_name,
+            value,
+            order_field_name,
+            limit,
+            Vec::new(),
+        )
+    }
+
+    fn export_query_where_eq_top_field_desc_with_previous_observed(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+        previous_observed_ids: Vec<String>,
+    ) -> Result<Bundle> {
+        let rows = self.read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            order_field_name,
+            limit,
+        )?;
         self.export_query_scope(
             table_name,
             field_name,
@@ -2354,15 +2436,13 @@ impl Runtime {
                 "eq": value.clone(),
                 "order_field": order_field_name,
                 "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
             }),
-            self.read_rows_where_eq_top_field_desc(
-                table_name,
-                field_name,
-                value,
-                order_field_name,
-                limit,
-            )?,
-            &[],
+            rows,
+            QueryScopeOptions {
+                ref_include_fields: &[],
+                extra_row_ids: &previous_observed_ids,
+            },
         )
     }
 
@@ -2373,7 +2453,7 @@ impl Runtime {
         op: &str,
         value: JsonValue,
         rows: Vec<RowView>,
-        ref_include_fields: &[&str],
+        options: QueryScopeOptions<'_>,
     ) -> Result<Bundle> {
         let table = self.schema.table_def(table_name)?;
         let user = self.policy_user();
@@ -2382,6 +2462,9 @@ impl Runtime {
             .iter()
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
+        for row_id in options.extra_row_ids {
+            row_nums.push(row_num(&self.conn, row_id)?);
+        }
         row_nums.extend(query_scope_repair_row_nums(
             &self.conn, table, field_name, op, &value,
         )?);
@@ -2416,7 +2499,7 @@ impl Runtime {
                 child_row_nums: Some(&row_nums),
             },
         )?);
-        for ref_field_name in ref_include_fields {
+        for ref_field_name in options.ref_include_fields {
             history.extend(self.export_ref_include_history(
                 table,
                 &rows,
@@ -4844,10 +4927,17 @@ fn query_scope_repair_row_nums(
     value: &JsonValue,
 ) -> Result<Vec<i64>> {
     if op == "eq_top_created_at_desc" || op == "eq_top_field_desc" {
-        let value = value
-            .get("eq")
-            .ok_or_else(|| crate::Error::new("top query expects eq value"))?;
-        return query_scope_repair_row_nums(conn, table, field_name, "eq", value);
+        let observed_ids = observed_ids_from_query_value(value)?;
+        if observed_ids.is_empty() {
+            let value = value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top query expects eq value"))?;
+            return query_scope_repair_row_nums(conn, table, field_name, "eq", value);
+        }
+        return observed_ids
+            .into_iter()
+            .map(|row_id| row_num(conn, &row_id))
+            .collect();
     }
     if field_name == "id" {
         if op == "ne" {
@@ -5258,6 +5348,27 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn observed_row_ids(rows: &[RowView]) -> Vec<String> {
+    rows.iter().map(|row| row.id.clone()).collect()
+}
+
+fn observed_ids_from_query_value(value: &JsonValue) -> Result<Vec<String>> {
+    let Some(observed_ids) = value.get("observed_ids") else {
+        return Ok(Vec::new());
+    };
+    observed_ids
+        .as_array()
+        .ok_or_else(|| crate::Error::new("observed_ids expects an array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| crate::Error::new("observed_ids expects string row ids"))
+        })
+        .collect()
 }
 
 fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {
