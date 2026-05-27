@@ -803,19 +803,6 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
     )?;
     let seed_elapsed = seed_started.elapsed();
 
-    let core_query_started = Instant::now();
-    let core_rows = core.run_as_user(OWNER, |core| {
-        core.read_rows_where_eq_top_field_desc(
-            "documents",
-            "owner_id",
-            json!(OWNER),
-            "updated_at",
-            config.page_size,
-        )
-    })?;
-    let core_query_elapsed = core_query_started.elapsed();
-    assert_eq!(core_rows.len(), config.page_size);
-
     let export_started = Instant::now();
     let core_bundle = export_top_owner_page(&mut core, config.page_size)?;
     let export_elapsed = export_started.elapsed();
@@ -841,6 +828,18 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         config.page_size,
     )?;
     let tab_query_elapsed = query_started.elapsed();
+    let core_query_started = Instant::now();
+    let core_rows = core.run_as_user(OWNER, |core| {
+        core.read_rows_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!(OWNER),
+            "updated_at",
+            config.page_size,
+        )
+    })?;
+    let core_query_elapsed = core_query_started.elapsed();
+    assert_eq!(core_rows.len(), config.page_size);
     let edge_warm_worker_cold = run_edge_warm_worker_cold(config, &dir, &schema, &mut edge)?;
     let worker_warm_tab_cold = run_worker_warm_tab_cold(config, &mut worker)?;
     let mut tab_subscription = tab.subscribe_rows_where_eq_top_field_desc(

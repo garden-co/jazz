@@ -2356,3 +2356,33 @@ memory worker apply, repeated no-op apply, or polling. The likely interpretation
 is that cache size can reduce file-backed page churn on broad refreshes, but it
 does not address CPU work or in-memory nodes. Useful deployment knob, not a core
 design fix.
+
+## 2026-05-27 09:24 PDT
+
+Fixed the primary benchmark's cold first-result measurement after PR review.
+Previously the scenario ran the same top-page core query immediately before
+timing `export_top_owner_page`, warming SQLite/page-cache/query paths before the
+reported "first result" path. The direct core query probe now runs after the
+first-result topology flow, so it remains visible without warming the headline.
+
+Remeasured:
+
+- primary repeat, 5 release samples:
+  - median API-to-first-result: ~33.3 ms
+  - median refresh: ~36.1 ms
+  - median bundle size: ~36.8 KiB
+- corrected full default release harness:
+  - primary export: ~24.7 ms
+  - primary intermediary exports: edge ~1.1 ms, worker ~1.0 ms
+  - primary API-to-first-result: ~32.2 ms
+  - primary refresh API-to-updated-result: ~36.6 ms
+  - primary subscription poll: ~0.24 ms
+  - dashboard 48-query case: initial export ~21.1 ms, refresh export ~22.9 ms,
+    tab apply ~6.2 ms, refresh apply ~3.5 ms
+  - recursive 2k: initial read ~5.8 ms, initial export ~23.9 ms, initial apply
+    ~29.5 ms, refresh export ~34.2 ms, refresh apply ~12.3 ms
+
+Learning: fixing the warmup bug did not materially change the page-query
+headline. The primary path remains around low-30 ms API-to-first-result at this
+scale. The benchmark is now semantically cleaner, which matters more than the
+small numeric movement.
