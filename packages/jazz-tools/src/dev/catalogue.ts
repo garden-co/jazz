@@ -10,8 +10,7 @@ export type CatalogueEvent =
   | { type: "schema-loaded"; schemaFile: string }
   | { type: "schema-published"; hash: string; objectId?: string }
   | { type: "permissions-loaded"; permissionsFile: string }
-  | { type: "permissions-published"; schemaHash: string; version?: number }
-  | { type: "warning"; message: string };
+  | { type: "permissions-published"; schemaHash: string; version?: number };
 
 export interface CatalogueProjectOptions {
   appId: string;
@@ -57,25 +56,9 @@ export interface PushMigrationOptions {
   onEvent?: (event: CatalogueEvent) => void;
 }
 
-export interface PushMigrationResult {
-  fromHash: string;
-  toHash: string;
-  status: "published";
-  filePath?: string;
-}
-
 export interface DeployOptions extends CatalogueProjectOptions {
   migrationsDir: string;
   noVerify?: boolean;
-}
-
-export interface DeployResult {
-  schema: PushSchemaResult;
-  migration?:
-    | PushMigrationResult
-    | { status: "already-connected"; fromHash: string; toHash: string };
-  permissions?: PushPermissionsResult;
-  warnings: string[];
 }
 
 function emit(options: { onEvent?: (event: CatalogueEvent) => void }, event: CatalogueEvent): void {
@@ -193,10 +176,10 @@ export async function pushSchemaCatalogue(
   return { hash: result.hash };
 }
 
-export async function pushMigration(_options: PushMigrationOptions): Promise<PushMigrationResult> {
+export async function pushMigration(_options: PushMigrationOptions): Promise<never> {
   throw new Error("pushMigration is not implemented yet.");
 }
 
-export async function deploy(_options: DeployOptions): Promise<DeployResult> {
+export async function deploy(_options: DeployOptions): Promise<never> {
   throw new Error("deploy is not implemented yet.");
 }

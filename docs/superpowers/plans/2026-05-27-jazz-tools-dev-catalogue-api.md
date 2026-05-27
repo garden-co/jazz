@@ -124,11 +124,8 @@ import {
 export type CatalogueEvent =
   | { type: "schema-loaded"; schemaFile: string }
   | { type: "schema-published"; hash: string; objectId?: string }
-  | { type: "schema-skipped"; hash: string; reason: "already-stored" }
   | { type: "permissions-loaded"; permissionsFile: string }
-  | { type: "permissions-published"; schemaHash: string; version?: number }
-  | { type: "permissions-skipped"; reason: "missing-permissions-file" }
-  | { type: "warning"; message: string };
+  | { type: "permissions-published"; schemaHash: string; version?: number };
 
 export interface CatalogueProjectOptions {
   appId: string;
@@ -138,19 +135,17 @@ export interface CatalogueProjectOptions {
   onEvent?: (event: CatalogueEvent) => void;
 }
 
-export interface PushSchemaOptions extends CatalogueProjectOptions {
-  skipIfStored?: boolean;
-}
+export interface PushSchemaOptions extends CatalogueProjectOptions {}
 
 export interface PushSchemaResult {
   hash: string;
   schemaFile: string;
-  status: "published" | "already-stored";
+  status: "published";
   objectId?: string;
 }
 
 export interface PushPermissionsOptions extends CatalogueProjectOptions {
-  schemaHash?: string;
+  schemaHash: string;
 }
 
 export interface PushPermissionsResult {
@@ -176,25 +171,9 @@ export interface PushMigrationOptions {
   onEvent?: (event: CatalogueEvent) => void;
 }
 
-export interface PushMigrationResult {
-  fromHash: string;
-  toHash: string;
-  status: "published";
-  filePath?: string;
-}
-
 export interface DeployOptions extends CatalogueProjectOptions {
   migrationsDir: string;
   noVerify?: boolean;
-}
-
-export interface DeployResult {
-  schema: PushSchemaResult;
-  migration?:
-    | PushMigrationResult
-    | { status: "already-connected"; fromHash: string; toHash: string };
-  permissions?: PushPermissionsResult;
-  warnings: string[];
 }
 
 function emit(options: { onEvent?: (event: CatalogueEvent) => void }, event: CatalogueEvent): void {
@@ -249,13 +228,6 @@ export async function pushPermissions(
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   emit(options, { type: "permissions-loaded", permissionsFile: compiled.permissionsFile });
 
-  const schemaHash = options.schemaHash;
-  if (!schemaHash) {
-    throw new Error(
-      "Missing schema hash. Push or resolve the structural schema before pushing permissions.",
-    );
-  }
-
   const { head: previousHead } = await fetchPermissionsHead(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
@@ -264,15 +236,19 @@ export async function pushPermissions(
   const { head } = await publishStoredPermissions(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
-    schemaHash,
+    schemaHash: options.schemaHash,
     permissions: compiled.permissions,
     expectedParentBundleObjectId: previousHead?.bundleObjectId ?? null,
   });
 
-  emit(options, { type: "permissions-published", schemaHash, version: head?.version });
+  emit(options, {
+    type: "permissions-published",
+    schemaHash: options.schemaHash,
+    version: head?.version,
+  });
 
   return {
-    schemaHash,
+    schemaHash: options.schemaHash,
     permissionsFile: compiled.permissionsFile,
     previousHead,
     head,
@@ -308,11 +284,11 @@ export async function pushSchemaCatalogue(
   return { hash: schema.hash };
 }
 
-export async function pushMigration(_options: PushMigrationOptions): Promise<PushMigrationResult> {
+export async function pushMigration(_options: PushMigrationOptions): Promise<never> {
   throw new Error("pushMigration is not implemented yet.");
 }
 
-export async function deploy(_options: DeployOptions): Promise<DeployResult> {
+export async function deploy(_options: DeployOptions): Promise<never> {
   throw new Error("deploy is not implemented yet.");
 }
 ```
@@ -346,9 +322,7 @@ export {
   pushSchemaCatalogue,
   type CatalogueEvent,
   type DeployOptions,
-  type DeployResult,
   type PushMigrationOptions,
-  type PushMigrationResult,
   type PushPermissionsOptions,
   type PushPermissionsResult,
   type PushSchemaCatalogueOptions,
@@ -1025,11 +999,27 @@ pnpm --filter jazz-tools exec vitest run --config vitest.config.ts src/dev/catal
 
 Expected: FAIL because programmatic `deploy` is not implemented yet.
 
-- [ ] **Step 3: Add deploy result types**
+- [ ] **Step 3: Add deploy event and result types**
 
 Add to `catalogue.ts`:
 
 ```ts
+export type CatalogueEvent =
+  | { type: "schema-loaded"; schemaFile: string }
+  | { type: "schema-published"; hash: string; objectId?: string }
+  | { type: "schema-skipped"; hash: string; reason: "already-stored" }
+  | { type: "permissions-loaded"; permissionsFile: string }
+  | { type: "permissions-published"; schemaHash: string; version?: number }
+  | { type: "permissions-skipped"; reason: "missing-permissions-file" }
+  | { type: "warning"; message: string };
+
+export interface PushSchemaResult {
+  hash: string;
+  schemaFile: string;
+  status: "published" | "already-stored";
+  objectId?: string;
+}
+
 export interface DeployOptions extends CatalogueProjectOptions {
   migrationsDir: string;
   noVerify?: boolean;
