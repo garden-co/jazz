@@ -482,3 +482,16 @@ produces the same visible result as applying the individual bundles separately.
 Result: this turns the multi-query perf learning into a reusable runtime/sync
 primitive. The first compile caught that the crate error type does not convert
 serde errors, so the merge helper now wraps JSON keying failures explicitly.
+
+## 2026-05-26 22:47 PDT
+
+Implemented the smallest branch top-page SQL fast path: non-pinned branch,
+directly sourced from `main`, equality predicate plus ordered top-K. Harder
+branch shapes still use the existing fallback. Banach's review identified the
+root cause: non-main `read_rows_where_eq_top_field_desc` materialized every
+matching effective row, sorted in Rust, then truncated.
+
+Result: the branch overlay probe improves from about 26 ms query / 45 ms export
+to about 1.5 ms query / 16 ms export, with the full `whole_system` suite green.
+This substantially derisks the common sparse branch overlay case while leaving
+pinned snapshots and multi-source merge branches as explicit future work.
