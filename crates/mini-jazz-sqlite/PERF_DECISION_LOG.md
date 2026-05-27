@@ -684,3 +684,18 @@ Result on the apply profile probe: apply dropped from ~42.7 ms to ~37.8 ms,
 with `history_ms` dropping from ~32.5 ms to ~28.1 ms and rejected cleanup from
 ~0.16 ms to effectively zero. This is a useful win but confirms that dynamic
 per-row history/current inserts remain the larger apply cost.
+
+## 2026-05-26 23:53 PDT
+
+Tried a naive opt-in mirror index on history tables for declared user indexes:
+`(j_branch_num, op, indexed_columns...)`. It was a bad shape for the pinned
+snapshot top-K query. The pinned query regressed from ~5.9 ms to ~970 ms, and
+profiled export regressed from ~30 ms to ~1052 ms. SQLite likely chose the new
+index for the base snapshot arm even though `op != 3`, latest-version
+anti-joins, and snapshot policy made it a poor plan.
+
+Decision: do not keep naive history mirror indexes. If we revisit history
+indexes, use `EXPLAIN QUERY PLAN` against the exact snapshot CTEs and try a
+more targeted shape, likely involving predicate/order columns without leading
+low-selectivity `op`, or partial indexes if the embedded targets support them
+well enough.
