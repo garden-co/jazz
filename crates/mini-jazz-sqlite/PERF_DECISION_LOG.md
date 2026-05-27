@@ -1644,3 +1644,30 @@ traversal; tiny subtrees want the SQL CTE. It is not the final planner. It will
 be wrong for large tables with broad subtrees and for small tables where a
 recursive CTE can be made cheap, but it makes the prototype much more honest for
 client-perceived recursive subscriptions.
+
+## 2026-05-27 02:20 PDT
+
+Refactored visible-row recursive traversal from repeated frontier scans into a
+parent-to-children map. Then stretched the recursive probe to 10k rows.
+
+Important failure with the original 10k threshold:
+
+- initial root read at exactly 10k rows used visible traversal: ~29.5 ms
+- refresh after the mutation had 10,015 visible rows, crossed the threshold,
+  fell back to the SQL CTE, and exploded to ~20.8 s
+
+Raised the prototype threshold to 50k rows. 10k-node tree with map traversal and
+50k threshold:
+
+- initial root read: ~28.4 ms
+- initial export: ~124.7 ms
+- refresh read: ~28.6 ms
+- refresh export: ~129.6 ms
+- subscription poll: ~34.0 ms
+- apply initial bundle: ~243.6 ms
+- apply refresh bundle: ~164.0 ms
+
+Learning: thresholds without hysteresis can create catastrophic cliffs in
+reconnect/refresh paths. The map traversal scales well enough to keep 10k-row
+tree reads plausible, but export/apply of 10k recursive history rows is now the
+dominant client-perceived cost.

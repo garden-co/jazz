@@ -767,7 +767,7 @@ impl QueryContext<'_> {
         let threshold = std::env::var("MINI_JAZZ_SQLITE_RECURSIVE_VISIBLE_ROWS_MAX_TABLE_ROWS")
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(10_000);
+            .unwrap_or(50_000);
         if threshold <= 0 {
             return Ok(false);
         }
@@ -806,35 +806,40 @@ impl QueryContext<'_> {
         root_id: &str,
         parent_field: &FieldDef,
     ) -> Result<Vec<RowView>> {
-        let mut rows_by_id = self
-            .read_rows(table_name)?
-            .into_iter()
-            .map(|row| (row.id.clone(), row))
-            .collect::<BTreeMap<_, _>>();
-        let Some(root) = rows_by_id.remove(root_id) else {
+        let mut root = None;
+        let mut children_by_parent: BTreeMap<String, Vec<RowView>> = BTreeMap::new();
+        for row in self.read_rows(table_name)? {
+            if row.id == root_id {
+                root = Some(row);
+                continue;
+            }
+            if let Some(parent_id) = row
+                .values
+                .get(&parent_field.name)
+                .and_then(JsonValue::as_str)
+            {
+                children_by_parent
+                    .entry(parent_id.to_owned())
+                    .or_default()
+                    .push(row);
+            }
+        }
+        let Some(root) = root else {
             return Ok(Vec::new());
         };
+        for children in children_by_parent.values_mut() {
+            children.sort_by(|left, right| left.id.cmp(&right.id));
+        }
         let mut ordered = vec![root];
         let mut frontier = vec![root_id.to_owned()];
         while !frontier.is_empty() {
             let mut next_ids = Vec::new();
-            let ids = rows_by_id.keys().cloned().collect::<Vec<_>>();
-            for id in ids {
-                let Some(row) = rows_by_id.get(&id) else {
-                    continue;
-                };
-                let parent_id = row
-                    .values
-                    .get(&parent_field.name)
-                    .and_then(JsonValue::as_str);
-                if parent_id.is_some_and(|parent_id| frontier.iter().any(|seen| seen == parent_id))
-                {
-                    next_ids.push(id);
-                }
-            }
-            for id in &next_ids {
-                if let Some(row) = rows_by_id.remove(id) {
-                    ordered.push(row);
+            for parent_id in frontier {
+                if let Some(children) = children_by_parent.remove(&parent_id) {
+                    for row in children {
+                        next_ids.push(row.id.clone());
+                        ordered.push(row);
+                    }
                 }
             }
             frontier = next_ids;
