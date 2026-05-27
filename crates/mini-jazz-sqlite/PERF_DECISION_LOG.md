@@ -1231,3 +1231,19 @@ records and maintaining current state. Query-scope repair is visible but
 secondary. This points future apply optimization toward prepared dynamic inserts,
 current maintenance batching, and avoiding unnecessary current probes rather than
 transaction metadata work.
+
+## 2026-05-27 01:21 PDT
+
+Cached `jazz_user` lookups during bundle apply. Before this, every history
+record resolved `created_by` and `updated_by` through `INSERT OR IGNORE` +
+`SELECT`, even when hundreds of rows shared the same author.
+
+Board apply profile improved in the release sample:
+
+- total apply: ~14.5 ms -> ~12.8 ms
+- history phase: ~10.8 ms -> ~9.3 ms
+- other phases stayed roughly unchanged
+
+Learning: small storage normalization choices need matching apply-time caches.
+The remaining history cost is now less about user metadata lookup and more about
+dynamic history/current insertion and visibility maintenance.

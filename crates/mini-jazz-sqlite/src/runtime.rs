@@ -642,6 +642,7 @@ impl Runtime {
 
         let reads_started = Instant::now();
         let mut row_nums_by_id = BTreeMap::new();
+        let mut user_nums_by_id = BTreeMap::new();
         for read_record in &bundle.reads {
             let tx_num = tx_nums_by_id
                 .get(&read_record.tx_id)
@@ -715,6 +716,7 @@ impl Runtime {
             branch_nums_by_id: &branch_nums_by_id,
             table_nums_by_name: &table_nums_by_name,
             row_nums_by_id: &mut row_nums_by_id,
+            user_nums_by_id: &mut user_nums_by_id,
         };
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
@@ -1611,8 +1613,10 @@ impl Runtime {
             "j_created_by".to_owned(),
             "j_updated_by".to_owned(),
         ]);
-        let created_by_num = users::ensure_user(context.db, &record.created_by)?;
-        let updated_by_num = users::ensure_user(context.db, &record.updated_by)?;
+        let created_by_num =
+            cached_ensure_user(context.db, context.user_nums_by_id, &record.created_by)?;
+        let updated_by_num =
+            cached_ensure_user(context.db, context.user_nums_by_id, &record.updated_by)?;
         values.extend([
             rusqlite::types::Value::Integer(record.created_at),
             rusqlite::types::Value::Integer(record.updated_at),
@@ -4731,6 +4735,7 @@ struct ApplyHistoryContext<'a> {
     branch_nums_by_id: &'a BTreeMap<String, i64>,
     table_nums_by_name: &'a BTreeMap<String, i64>,
     row_nums_by_id: &'a mut BTreeMap<(String, String), i64>,
+    user_nums_by_id: &'a mut BTreeMap<String, i64>,
 }
 
 fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {
@@ -6438,6 +6443,19 @@ fn cached_ensure_row_id(
     let row_num = ensure_row_id(conn, table, row_id)?;
     cache.insert(key, row_num);
     Ok(row_num)
+}
+
+fn cached_ensure_user(
+    conn: &Connection,
+    cache: &mut BTreeMap<String, i64>,
+    user_id: &str,
+) -> Result<i64> {
+    if let Some(user_num) = cache.get(user_id) {
+        return Ok(*user_num);
+    }
+    let user_num = users::ensure_user(conn, user_id)?;
+    cache.insert(user_id.to_owned(), user_num);
+    Ok(user_num)
 }
 
 fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<String> {
