@@ -1,12 +1,18 @@
 import { resolve } from "node:path";
-import { defineConfig } from "vite";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react-swc";
+import { defineConfig } from "vite";
 
 export default defineConfig(({ mode }) => {
   const isExtensionBuild = mode === "extension";
 
   return {
-    plugins: [react()],
+    plugins: [
+      tanstackRouter({
+        target: "react",
+      }),
+      react(),
+    ],
     base: isExtensionBuild ? "./" : "/",
     publicDir: isExtensionBuild ? "chrome-extension" : "public",
     worker: {
