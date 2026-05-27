@@ -311,24 +311,13 @@ impl Runtime {
         order_field_name: &str,
         limit: usize,
     ) -> Result<Vec<RowView>> {
-        self.schema
-            .table_def(table_name)?
-            .fields
-            .iter()
-            .find(|field| field.name == order_field_name)
-            .ok_or_else(|| {
-                crate::Error::new(format!(
-                    "unknown order field {table_name}.{order_field_name}"
-                ))
-            })?;
-        let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
-        rows.sort_by(|left, right| {
-            json_sort_key(right.values.get(order_field_name))
-                .cmp(&json_sort_key(left.values.get(order_field_name)))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        rows.truncate(limit);
-        Ok(rows)
+        self.query_context().read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value,
+            order_field_name,
+            limit,
+        )
     }
 
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
@@ -4392,16 +4381,6 @@ fn current_created_at_by_row_id(
     })?;
     rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
         .map_err(Into::into)
-}
-
-fn json_sort_key(value: Option<&JsonValue>) -> String {
-    match value {
-        Some(JsonValue::String(value)) => format!("s:{value}"),
-        Some(JsonValue::Number(value)) => format!("n:{value:>020}"),
-        Some(JsonValue::Bool(value)) => format!("b:{value}"),
-        Some(value) => format!("j:{value}"),
-        None => String::new(),
-    }
 }
 
 fn export_table_history(

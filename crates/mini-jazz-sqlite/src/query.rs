@@ -98,6 +98,91 @@ impl QueryContext<'_> {
             .collect())
     }
 
+    pub(crate) fn read_rows_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        if self.branch_num != 1 {
+            let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
+            rows.sort_by(|left, right| {
+                json_sort_key(right.values.get(order_field_name))
+                    .cmp(&json_sort_key(left.values.get(order_field_name)))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            rows.truncate(limit);
+            return Ok(rows);
+        }
+        let table = self.schema.table_def(table_name)?;
+        let field = table
+            .fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
+        let order_field = table
+            .fields
+            .iter()
+            .find(|field| field.name == order_field_name)
+            .ok_or_else(|| {
+                crate::Error::new(format!(
+                    "unknown order field {table_name}.{order_field_name}"
+                ))
+            })?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        select_columns.extend(
+            field_columns
+                .iter()
+                .map(|column| format!("current.{column}")),
+        );
+        select_columns.push("current.j_created_by".to_owned());
+        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        let order_column = crate::schema::quote_ident(&crate::schema::storage_column(order_field));
+        let predicate_value =
+            crate::schema::field_sql_value(field, &value, |ref_table, row_id| {
+                row_num(self.conn, row_id).map_err(|err| {
+                    crate::Error::new(format!(
+                        "failed to resolve ref {ref_table}.{row_id} for equality predicate: {err}"
+                    ))
+                })
+            })?;
+        let sql = format!(
+            "SELECT {}
+             FROM {} current
+             JOIN jazz_row_id ids ON ids.row_num = current.row_num
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             WHERE current.j_branch_num = 1
+               AND current.is_deleted = 0
+               AND tx.outcome != ?
+               AND current.{predicate_column} = ?
+               AND {policy_sql}
+             ORDER BY current.{order_column} DESC, current.row_num
+             LIMIT ?",
+            select_columns.join(", "),
+            crate::schema::current_table(table_name),
+            policy_sql = self.read_policy_sql(table)?,
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 2 + table.fields.len() + 1;
+        let rows = stmt.query_map(
+            params![tx::OUTCOME_REJECTED, predicate_value, limit as i64],
+            |row| {
+                (0..row_width)
+                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            },
+        )?;
+        rows.map(|row| row_to_view(self.conn, table_name, table, row?))
+            .collect()
+    }
+
     pub(crate) fn read_rows_where_ne(
         &self,
         table_name: &str,
@@ -986,6 +1071,16 @@ fn branch_num_from_row(raw: &mut Vec<rusqlite::types::Value>) -> Result<i64> {
     match raw.remove(0) {
         rusqlite::types::Value::Integer(value) => Ok(value),
         _ => Err(crate::Error::new("expected branch num")),
+    }
+}
+
+fn json_sort_key(value: Option<&JsonValue>) -> String {
+    match value {
+        Some(JsonValue::String(value)) => format!("s:{value}"),
+        Some(JsonValue::Number(value)) => format!("n:{value:>020}"),
+        Some(JsonValue::Bool(value)) => format!("b:{value}"),
+        Some(value) => format!("j:{value}"),
+        None => String::new(),
     }
 }
 

@@ -51,3 +51,12 @@ Result: about 787 ms api-to-first-result; export was about 156 ms, each apply
 hop about 208-213 ms, and final tab query about 0.5 ms. Current bottleneck is
 bundle export/apply volume and repeated hop materialization, not local final
 query latency.
+
+## 2026-05-26 21:17 PDT
+
+Lowered the user-column ordered read path for the main branch into SQLite
+`ORDER BY order_field DESC LIMIT n`. The 10k/1k/page-50 smoke improved export
+only modestly, from about 156 ms to 144 ms, because the sync bundle still
+contains the full 1k owner predicate slice. Next sharp feature gap: top-page
+query-scoped sync needs page-boundary/observed-row repair instead of broadening
+history export to the whole equality predicate.
