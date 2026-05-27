@@ -2,15 +2,21 @@ use crate::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub(crate) fn ensure_row_id(conn: &Connection, _table: &str, row_id: &str) -> Result<i64> {
+    Ok(ensure_row_id_with_status(conn, row_id)?.0)
+}
+
+pub(crate) fn ensure_row_id_with_status(conn: &Connection, row_id: &str) -> Result<(i64, bool)> {
     conn.execute(
         "INSERT OR IGNORE INTO jazz_row_id (row_id) VALUES (?)",
         params![row_id],
     )?;
+    let created = conn.changes() > 0;
     Ok(conn.query_row(
         "SELECT row_num FROM jazz_row_id WHERE row_id = ?",
         params![row_id],
         |row| row.get(0),
     )?)
+    .map(|row_num| (row_num, created))
 }
 
 pub(crate) fn row_num(conn: &Connection, row_id: &str) -> Result<i64> {

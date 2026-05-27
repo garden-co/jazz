@@ -23,6 +23,15 @@ pub(crate) fn record_tx_create_read(
     record_tx_read_with_observed(conn, tx_num, table_name, row_num, reason, observed_tx_num)
 }
 
+pub(crate) fn record_tx_absent_read(
+    conn: &Connection,
+    tx_num: i64,
+    table_name: &str,
+    row_num: i64,
+) -> Result<()> {
+    record_tx_read_with_observed(conn, tx_num, table_name, row_num, REASON_ABSENT, None)
+}
+
 pub(crate) fn record_tx_read(
     conn: &Connection,
     tx_num: i64,

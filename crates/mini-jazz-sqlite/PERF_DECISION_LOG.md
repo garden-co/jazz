@@ -818,3 +818,21 @@ Learning: debug numbers are useful for relative deltas, but the release numbers
 are much more encouraging for the product story. The remaining obvious
 non-release outlier is bulk seeding/import speed, not steady-state page read,
 permissioned export, or client apply.
+
+## 2026-05-27 00:27 PDT
+
+Optimized bulk creates by teaching row-id allocation to report whether the row
+id was newly inserted. For brand-new row ids, create transactions can record the
+absence read directly instead of probing current state first. If a row id was
+already allocated, the old current-state read remains in place, preserving
+staleness semantics for references to future rows and upsert-like cases.
+
+Release seed numbers improved:
+
+- primary 100k-row seed: ~3.80 s -> ~3.58 s
+- many-user 50k-row seed: ~1.85 s -> ~1.58 s
+- 5k rows batched by 100: ~461 ms debug earlier / now ~143 ms release
+- 5k one-write-per-row: still ~3.47 s release, confirming transaction
+  granularity dominates that case
+
+Full whole-system tests remained green.

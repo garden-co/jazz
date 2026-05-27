@@ -1,4 +1,4 @@
-use crate::rows::{ensure_row_id, public_row_id, row_num};
+use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
@@ -3421,7 +3421,7 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
 fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     validate_write_fields(table, args.values)?;
-    let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
+    let (row_num, row_id_created) = ensure_row_id_with_status(args.db, args.id)?;
     let effective_values = effective_write_values(EffectiveWriteValues {
         db: args.db,
         schema: args.schema,
@@ -3433,13 +3433,17 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         op: args.op,
     })?;
     if args.op == 1 {
-        read_set::record_tx_create_read(
-            args.db,
-            args.tx_num,
-            args.table_name,
-            row_num,
-            args.branch_num,
-        )?;
+        if row_id_created {
+            read_set::record_tx_absent_read(args.db, args.tx_num, args.table_name, row_num)?;
+        } else {
+            read_set::record_tx_create_read(
+                args.db,
+                args.tx_num,
+                args.table_name,
+                row_num,
+                args.branch_num,
+            )?;
+        }
     } else {
         read_set::record_tx_read(
             args.db,
