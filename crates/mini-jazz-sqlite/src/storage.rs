@@ -12,11 +12,12 @@ pub enum Storage {
 }
 
 pub(crate) fn open(storage: Storage) -> Result<Connection> {
+    let durable = matches!(storage, Storage::File(_));
     let conn = match storage {
         Storage::Memory => Connection::open_in_memory()?,
         Storage::File(path) => Connection::open(path)?,
     };
-    apply_tuning_pragmas(&conn)?;
+    apply_tuning_pragmas(&conn, durable)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     ensure_storage_version(&conn)?;
     Ok(conn)
@@ -26,7 +27,7 @@ pub(crate) fn storage_version(conn: &Connection) -> Result<i64> {
     Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
 }
 
-fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
+fn apply_tuning_pragmas(conn: &Connection, durable: bool) -> Result<()> {
     if let Some(page_size) = env_i64("MINI_JAZZ_SQLITE_PAGE_SIZE")? {
         conn.pragma_update(None, "page_size", page_size)?;
     }
@@ -38,12 +39,16 @@ fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
         &["DELETE", "WAL", "MEMORY", "OFF"],
     )? {
         conn.pragma_update(None, "journal_mode", journal_mode)?;
+    } else if durable {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
     }
     if let Some(synchronous) = env_one_of(
         "MINI_JAZZ_SQLITE_SYNCHRONOUS",
         &["EXTRA", "FULL", "NORMAL", "OFF"],
     )? {
         conn.pragma_update(None, "synchronous", synchronous)?;
+    } else if durable {
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
     }
     if let Some(temp_store) = env_one_of(
         "MINI_JAZZ_SQLITE_TEMP_STORE",

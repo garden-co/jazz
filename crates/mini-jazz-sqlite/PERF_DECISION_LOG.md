@@ -1099,3 +1099,20 @@ Learning: WAL is a real speed win for file-backed durable nodes even with
 unsafe benchmark lower bounds. We should likely default durable worker/edge/core
 SQLite connections toward WAL+NORMAL once the prototype stops needing exact file
 size comparability on every run.
+
+## 2026-05-27 01:09 PDT
+
+Changed file-backed SQLite storage to default to WAL journal mode with
+`synchronous=NORMAL`; memory storage remains unchanged and env vars still
+override both pragmas.
+
+Validation:
+
+- storage projection tests pass
+- 50k release sample with defaults now matches the WAL+NORMAL sample: seed
+  ~1.19 s, first result ~11.2 ms, refresh ~16.0 ms, core files ~18.2 MB
+- dashboard export in the same run ~83.4 ms, board batched export ~59.4 ms
+
+Learning: this is the first SQLite tuning knob that looked worth making default
+for durable nodes. The cost is extra WAL footprint, so storage stats must keep
+reporting total file bytes, not only main database page bytes.
