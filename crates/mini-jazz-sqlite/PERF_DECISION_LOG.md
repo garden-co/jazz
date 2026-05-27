@@ -273,3 +273,18 @@ bundle size is 46 KB, and each tab apply averages about 19 ms with about 0.65 ms
 query time. This supports a broker/coalescing model: the expensive part should
 be done once in the worker, then tabs pay mostly local apply. It also highlights
 tab apply as an optimization target if we expect many simultaneous tabs.
+
+## 2026-05-26 22:08 PDT
+
+Narrowed rejected-transaction fate export. The previous scoped tx export still
+scanned the entire table history for rejected txs so query refreshes could
+deliver rejections even when no new history row was needed. Removing it broke the
+rejection-refresh invariant, so I replaced it with query-scoped rejected fate
+lookup: top-page queries use observed row ids, id predicates use id-derived row
+nums, and ordinary predicates use the lowered predicate over rejected history.
+
+`query_scope` tests pass, including the rejection refresh case. On the
+policy-scoped 100k/10k/page-50 benchmark, cold export improved from roughly
+86-87 ms to about 73 ms, and refresh export from roughly 95 ms to about 81 ms.
+This confirms whole-table rejected fate scanning was one real cold-core cost,
+but not the only one.

@@ -477,7 +477,7 @@ impl Runtime {
         }
         dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
-        let txs = export_txs_for_query_scope(&self.conn, table_name, &history, &reads)?;
+        let txs = export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &[])?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         let query_reads = vec![QueryReadRecord {
@@ -2538,7 +2538,10 @@ impl Runtime {
         }
         dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
-        let txs = export_txs_for_query_scope(&self.conn, table_name, &history, &reads)?;
+        let rejected_tx_ids =
+            query_scope_rejected_tx_ids(&self.conn, table, field_name, op, &value)?;
+        let txs =
+            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         let query_reads = vec![QueryReadRecord {
@@ -4300,33 +4303,23 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
 
 fn export_txs_for_query_scope(
     conn: &Connection,
-    table_name: &str,
+    _table_name: &str,
     history: &[HistoryRecord],
     reads: &[ReadRecord],
+    extra_tx_ids: &[String],
 ) -> Result<Vec<TxRecord>> {
     let mut needed_tx_ids = history
         .iter()
         .map(|record| record.tx_id.as_str())
         .collect::<BTreeSet<_>>();
+    for tx_id in extra_tx_ids {
+        needed_tx_ids.insert(tx_id.as_str());
+    }
     for record in reads {
         needed_tx_ids.insert(record.tx_id.as_str());
         if let Some(observed_tx_id) = &record.observed_tx_id {
             needed_tx_ids.insert(observed_tx_id.as_str());
         }
-    }
-    let mut rejected_stmt = conn.prepare(&format!(
-        "SELECT DISTINCT tx.tx_id
-         FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-         WHERE tx.outcome = ?
-         ORDER BY tx.tx_num",
-        crate::schema::history_table(table_name)
-    ))?;
-    let rejected_tx_ids = rejected_stmt
-        .query_map(params![tx::OUTCOME_REJECTED], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    for tx_id in &rejected_tx_ids {
-        needed_tx_ids.insert(tx_id.as_str());
     }
     export_txs_by_ids(conn, needed_tx_ids)
 }
@@ -5165,6 +5158,153 @@ fn query_scope_repair_row_nums(
         row.get::<_, i64>(0)
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn query_scope_rejected_tx_ids(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    field_name: &str,
+    op: &str,
+    value: &JsonValue,
+) -> Result<Vec<String>> {
+    if op == "eq_top_created_at_desc" || op == "eq_top_field_desc" {
+        let observed_ids = observed_ids_from_query_value(value)?;
+        if observed_ids.is_empty() {
+            let value = value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top query expects eq value"))?;
+            return query_scope_rejected_tx_ids(conn, table, field_name, "eq", value);
+        }
+        let row_nums = observed_ids
+            .into_iter()
+            .map(|row_id| row_num(conn, &row_id))
+            .collect::<Result<Vec<_>>>()?;
+        return rejected_tx_ids_for_row_nums(conn, &table.name, &row_nums);
+    }
+    if op == "in" {
+        let mut tx_ids = Vec::new();
+        for value in value
+            .as_array()
+            .ok_or_else(|| crate::Error::new("in predicate expects an array value"))?
+        {
+            tx_ids.extend(query_scope_rejected_tx_ids(
+                conn, table, field_name, "eq", value,
+            )?);
+        }
+        tx_ids.sort();
+        tx_ids.dedup();
+        return Ok(tx_ids);
+    }
+    if field_name == "id" {
+        if op == "ne" {
+            let excluded_id = value
+                .as_str()
+                .ok_or_else(|| crate::Error::new("id inequality expects a string value"))?;
+            let sql = format!(
+                "SELECT DISTINCT tx.tx_id
+                 FROM {} h
+                 JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                 JOIN jazz_row_id ids ON ids.row_num = h.row_num
+                 WHERE ids.table_name = ?
+                   AND ids.row_id != ?
+                   AND tx.outcome = ?
+                 ORDER BY tx.tx_num",
+                crate::schema::history_table(&table.name),
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let tx_ids = stmt.query_map(
+                params![table.name, excluded_id, tx::OUTCOME_REJECTED],
+                |row| row.get::<_, String>(0),
+            )?;
+            return tx_ids
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into);
+        }
+        let row_nums = id_predicate_values(op, value)?
+            .into_iter()
+            .map(|row_id| ensure_row_id(conn, &table.name, &row_id))
+            .collect::<Result<Vec<_>>>()?;
+        return rejected_tx_ids_for_row_nums(conn, &table.name, &row_nums);
+    }
+    if field_name == "$createdBy" {
+        let created_by = value
+            .as_str()
+            .ok_or_else(|| crate::Error::new("$createdBy predicate expects a string value"))?;
+        let created_by_sql = match op {
+            "eq" => "h.j_created_by = ?",
+            "ne" => "h.j_created_by != ?",
+            op => {
+                return Err(crate::Error::new(format!(
+                    "unsupported $createdBy predicate op {op}"
+                )));
+            }
+        };
+        let sql = format!(
+            "SELECT DISTINCT tx.tx_id
+             FROM {} h
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE {created_by_sql}
+               AND tx.outcome = ?
+             ORDER BY tx.tx_num",
+            crate::schema::history_table(&table.name),
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let tx_ids = stmt.query_map(params![created_by, tx::OUTCOME_REJECTED], |row| {
+            row.get::<_, String>(0)
+        })?;
+        return tx_ids
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into);
+    }
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field_name)
+        .ok_or_else(|| crate::Error::new(format!("unknown query field {field_name}")))?;
+    let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let predicate_sql = query_predicate::sql(field, &format!("h.{predicate_column}"), op)?;
+    let predicate_value = query_predicate::value(field, op, value, conn)?;
+    let sql = format!(
+        "SELECT DISTINCT tx.tx_id
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE {predicate_sql}
+           AND tx.outcome = ?
+         ORDER BY tx.tx_num",
+        crate::schema::history_table(&table.name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let tx_ids = stmt.query_map(params![predicate_value, tx::OUTCOME_REJECTED], |row| {
+        row.get::<_, String>(0)
+    })?;
+    tx_ids
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn rejected_tx_ids_for_row_nums(
+    conn: &Connection,
+    table_name: &str,
+    row_nums: &[i64],
+) -> Result<Vec<String>> {
+    if row_nums.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT DISTINCT tx.tx_id
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE {}
+           AND tx.outcome = ?
+         ORDER BY tx.tx_num",
+        crate::schema::history_table(table_name),
+        history_row_filter_sql("h", Some(row_nums)),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let tx_ids = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| row.get::<_, String>(0))?;
+    tx_ids
+        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 
