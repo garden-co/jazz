@@ -150,3 +150,11 @@ Added a direct core query timing to the perf report. On the policy-scoped
 bundle export is about 98 ms. That strongly points at our export/policy/history
 materialization path, not SQLite query planning for the page query, as the next
 optimization target.
+
+## 2026-05-26 21:36 PDT
+
+Added approximate raw JSON payload bytes to the perf report. For the
+policy-scoped 100k document + 100 org profile, raw serialized user values are
+about 9.9 MB and the core SQLite database is about 38 MB, roughly 3.8x raw JSON
+payload. This includes current projection, history tables, tx/read/query/system
+metadata, ids, indexes, and SQLite page overhead.

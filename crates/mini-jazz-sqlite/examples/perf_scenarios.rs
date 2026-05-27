@@ -54,6 +54,8 @@ struct ScenarioReport {
     transaction_rows_synced: usize,
     observed_facts_synced: usize,
     bundle_bytes: usize,
+    approx_raw_json_payload_bytes: usize,
+    core_database_to_raw_payload_ratio: f64,
     core_database_bytes: i64,
     edge_database_bytes: i64,
     worker_database_bytes: i64,
@@ -155,6 +157,8 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
     let mut seed_rows_by_table = BTreeMap::new();
     seed_rows_by_table.insert("orgs", 100);
     seed_rows_by_table.insert("documents", config.total_rows);
+    let approx_raw_json_payload_bytes = approx_raw_json_payload_bytes(config)?;
+    let core_database_bytes = core.storage_stats()?.database_bytes;
 
     Ok(ScenarioReport {
         scenario_id: "C1_CORE_ONLY_SCOPED_PAGE_UPDATED_AT",
@@ -175,7 +179,10 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         transaction_rows_synced: core_bundle.txs.len(),
         observed_facts_synced: core_bundle.query_reads.len(),
         bundle_bytes: core_bundle_summary.bytes,
-        core_database_bytes: core.storage_stats()?.database_bytes,
+        approx_raw_json_payload_bytes,
+        core_database_to_raw_payload_ratio: core_database_bytes as f64
+            / approx_raw_json_payload_bytes as f64,
+        core_database_bytes,
         edge_database_bytes: edge.storage_stats()?.database_bytes,
         worker_database_bytes: worker.storage_stats()?.database_bytes,
         tab_database_bytes: tab.storage_stats()?.database_bytes,
@@ -366,6 +373,21 @@ fn document_values(
         ("updated_at".to_owned(), json!(format!("{:020}", row_index))),
         ("title".to_owned(), json!(format!("Document {row_index}"))),
     ])
+}
+
+fn approx_raw_json_payload_bytes(config: &Config) -> BenchResult<usize> {
+    let mut total = 0;
+    for org_index in 0..100 {
+        total += serde_json::to_vec(&BTreeMap::from([(
+            "name".to_owned(),
+            json!(format!("Organization {org_index}")),
+        )]))?
+        .len();
+    }
+    for row_index in 0..config.total_rows {
+        total += serde_json::to_vec(&document_values(row_index, config.target_owner_rows))?.len();
+    }
+    Ok(total)
 }
 
 fn storage_for(config: &Config, dir: &tempfile::TempDir, file_name: &str) -> Storage {
