@@ -3637,6 +3637,7 @@ impl Runtime {
                     query.op
                 )));
             }
+            RowsSubscriptionQuery::Built(query) => self.query(query.clone())?,
         };
         Ok(subscription.replace_with_diff(next_rows))
     }

@@ -54,6 +54,190 @@ fn rejection_subscription_reports_new_sync_rejections_with_detail_once() {
 }
 
 #[test]
+fn built_query_reads_newest_matching_rows_from_jazz_tools_json_shape() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-old",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-middle",
+            BTreeMap::from([
+                ("body".to_owned(), json!("middle")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-new",
+            BTreeMap::from([
+                ("body".to_owned(), json!("new")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-hidden",
+            BTreeMap::from([
+                ("body".to_owned(), json!("hidden")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [{"column": "pinned", "op": "eq", "value": true}],
+        "includes": {},
+        "orderBy": [["$createdAt", "desc"]],
+        "limit": 2
+    }))
+    .unwrap();
+
+    let rows = alice.query(query.clone()).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["note-new", "note-middle"]
+    );
+    assert_eq!(alice.one(query).unwrap().unwrap().id, "note-new");
+}
+
+#[test]
+fn built_query_rejects_graph_only_jazz_tools_fields() {
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [],
+        "includes": {"author": true}
+    }))
+    .unwrap_err();
+
+    assert!(query
+        .to_string()
+        .contains("mini-sqlite query does not support includes"));
+}
+
+#[test]
+fn query_subscription_delta_matches_jazz_tools_subscribe_all_shape() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-old",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-middle",
+            BTreeMap::from([
+                ("body".to_owned(), json!("middle")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [{"column": "pinned", "op": "eq", "value": true}],
+        "orderBy": [["$createdAt", "desc"]],
+        "limit": 2
+    }))
+    .unwrap();
+    let mut subscription = alice.subscribe_query(query).unwrap();
+
+    let initial = subscription.initial_delta();
+    assert_eq!(
+        initial
+            .all
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-middle", "note-old"]
+    );
+    assert_eq!(
+        initial.delta,
+        vec![
+            SubscriptionRowDelta::Added {
+                id: "note-middle".to_owned(),
+                index: 0,
+                item: initial.all[0].clone(),
+            },
+            SubscriptionRowDelta::Added {
+                id: "note-old".to_owned(),
+                index: 1,
+                item: initial.all[1].clone(),
+            },
+        ]
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-new",
+            BTreeMap::from([
+                ("body".to_owned(), json!("new")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let update = alice.subscription_delta(&mut subscription).unwrap();
+    assert_eq!(
+        update
+            .all
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-new", "note-middle"]
+    );
+    assert_eq!(
+        update.delta,
+        vec![
+            SubscriptionRowDelta::Added {
+                id: "note-new".to_owned(),
+                index: 0,
+                item: update.all[0].clone(),
+            },
+            SubscriptionRowDelta::Removed {
+                id: "note-old".to_owned(),
+                index: 1,
+            },
+            SubscriptionRowDelta::Updated {
+                id: "note-middle".to_owned(),
+                index: 1,
+                item: None,
+            },
+        ]
+    );
+}
+
+#[test]
 fn restarted_rejection_subscription_baselines_old_rejections_and_reports_later_ones() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");

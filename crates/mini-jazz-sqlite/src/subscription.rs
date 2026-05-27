@@ -1,5 +1,6 @@
+use crate::query_api::BuiltQuery;
 use crate::sync::QueryPredicateRecord;
-use crate::types::{RejectionInfo, RowDiff, RowView};
+use crate::types::{RejectionInfo, RowDiff, RowView, SubscriptionDelta, SubscriptionRowDelta};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
@@ -18,6 +19,7 @@ pub struct RejectionSubscription {
 pub(crate) enum RowsSubscriptionQuery {
     Table { table: String },
     Predicate(QueryPredicateRecord),
+    Built(BuiltQuery),
 }
 
 impl RowsSubscription {
@@ -143,8 +145,19 @@ impl RowsSubscription {
         }
     }
 
+    pub(crate) fn query(query: BuiltQuery, rows: Vec<RowView>) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::Built(query),
+            last_rows: rows,
+        }
+    }
+
     pub fn initial_rows(&self) -> &[RowView] {
         &self.last_rows
+    }
+
+    pub fn initial_delta(&self) -> SubscriptionDelta {
+        SubscriptionDelta::initial(self.last_rows.clone())
     }
 
     pub(crate) fn replace_with_diff(&mut self, next_rows: Vec<RowView>) -> Vec<RowDiff> {
@@ -197,6 +210,18 @@ impl RowsSubscription {
         self.last_rows = next_rows;
         diffs
     }
+
+    pub(crate) fn replace_with_subscription_delta(
+        &mut self,
+        next_rows: Vec<RowView>,
+    ) -> SubscriptionDelta {
+        let delta = indexed_delta(&self.last_rows, &next_rows);
+        self.last_rows = next_rows;
+        SubscriptionDelta {
+            all: self.last_rows.clone(),
+            delta,
+        }
+    }
 }
 
 impl RejectionSubscription {
@@ -242,6 +267,56 @@ fn positions_by_id(rows: &[RowView]) -> BTreeMap<String, usize> {
         .enumerate()
         .map(|(index, row)| (row.id.clone(), index))
         .collect()
+}
+
+fn indexed_delta(before: &[RowView], after: &[RowView]) -> Vec<SubscriptionRowDelta> {
+    let before = before
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id.as_str(), (index, row)))
+        .collect::<BTreeMap<_, _>>();
+    let after = after
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id.as_str(), (index, row)))
+        .collect::<BTreeMap<_, _>>();
+    let mut delta = Vec::new();
+
+    for (id, (before_index, before_row)) in &before {
+        match after.get(id) {
+            Some((after_index, after_row)) => {
+                if before_index != after_index || before_row != after_row {
+                    delta.push(SubscriptionRowDelta::Updated {
+                        id: (*id).to_owned(),
+                        index: *after_index,
+                        item: (before_row != after_row).then(|| (*after_row).clone()),
+                    });
+                }
+            }
+            None => delta.push(SubscriptionRowDelta::Removed {
+                id: (*id).to_owned(),
+                index: *before_index,
+            }),
+        }
+    }
+
+    for (id, (after_index, after_row)) in &after {
+        if !before.contains_key(id) {
+            delta.push(SubscriptionRowDelta::Added {
+                id: (*id).to_owned(),
+                index: *after_index,
+                item: (*after_row).clone(),
+            });
+        }
+    }
+
+    delta.sort_by(|left, right| {
+        left.index()
+            .cmp(&right.index())
+            .then(left.kind().cmp(&right.kind()))
+            .then(left.id().cmp(right.id()))
+    });
+    delta
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use serde_json::Value as JsonValue;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -26,6 +27,105 @@ pub enum RowDiff {
         after_index: usize,
     },
     Removed(RowView),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SubscriptionDelta {
+    pub all: Vec<RowView>,
+    pub delta: Vec<SubscriptionRowDelta>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubscriptionRowDelta {
+    Added {
+        id: String,
+        index: usize,
+        item: RowView,
+    },
+    Removed {
+        id: String,
+        index: usize,
+    },
+    Updated {
+        id: String,
+        index: usize,
+        item: Option<RowView>,
+    },
+}
+
+impl SubscriptionDelta {
+    pub fn initial(all: Vec<RowView>) -> Self {
+        let delta = all
+            .iter()
+            .enumerate()
+            .map(|(index, row)| SubscriptionRowDelta::Added {
+                id: row.id.clone(),
+                index,
+                item: row.clone(),
+            })
+            .collect();
+        Self { all, delta }
+    }
+}
+
+impl SubscriptionRowDelta {
+    pub fn kind(&self) -> u8 {
+        match self {
+            Self::Added { .. } => 0,
+            Self::Removed { .. } => 1,
+            Self::Updated { .. } => 2,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Added { id, .. } | Self::Removed { id, .. } | Self::Updated { id, .. } => id,
+        }
+    }
+
+    pub fn index(&self) -> usize {
+        match self {
+            Self::Added { index, .. }
+            | Self::Removed { index, .. }
+            | Self::Updated { index, .. } => *index,
+        }
+    }
+}
+
+impl Serialize for SubscriptionRowDelta {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            SubscriptionRowDelta::Added { id, index, item } => {
+                let mut state = serializer.serialize_struct("SubscriptionRowDelta", 4)?;
+                state.serialize_field("kind", &0_u8)?;
+                state.serialize_field("id", id)?;
+                state.serialize_field("index", index)?;
+                state.serialize_field("item", item)?;
+                state.end()
+            }
+            SubscriptionRowDelta::Removed { id, index } => {
+                let mut state = serializer.serialize_struct("SubscriptionRowDelta", 3)?;
+                state.serialize_field("kind", &1_u8)?;
+                state.serialize_field("id", id)?;
+                state.serialize_field("index", index)?;
+                state.end()
+            }
+            SubscriptionRowDelta::Updated { id, index, item } => {
+                let field_count = if item.is_some() { 4 } else { 3 };
+                let mut state = serializer.serialize_struct("SubscriptionRowDelta", field_count)?;
+                state.serialize_field("kind", &2_u8)?;
+                state.serialize_field("id", id)?;
+                state.serialize_field("index", index)?;
+                if let Some(item) = item {
+                    state.serialize_field("item", item)?;
+                }
+                state.end()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
