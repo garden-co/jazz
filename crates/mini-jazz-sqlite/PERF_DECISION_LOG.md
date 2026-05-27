@@ -1458,3 +1458,24 @@ dominates, and export/subscribe/poll are slow because they rerun the same slow
 recursive read. The most likely next risk is missing or unusable indexing for
 `current.parent -> subtree.row_num` traversal, or an inefficient recursive CTE
 shape.
+
+## 2026-05-27 01:51 PDT
+
+Tried two quick recursive-query hypotheses:
+
+1. `MINI_JAZZ_SQLITE_BRANCH_FIRST_INDEXES=1`, which changes user indexes from
+   `(is_deleted, ...)` to `(j_branch_num, is_deleted, ...)`.
+2. Replacing the recursive CTE `UNION` with `UNION ALL`.
+
+Results:
+
+- Branch-first indexes only moved the 2k-node direct recursive read from
+  ~743 ms to ~716 ms, so index prefix is not enough.
+- `UNION ALL` is invalid with current semantics: self-parent roots and possible
+  cycles can make recursive queries non-terminating. The experiment hung the
+  recursive correctness tests and was immediately reverted.
+
+Learning: recursive query optimization cannot simply drop duplicate tracking
+unless we also change root/cycle semantics or add explicit visited-depth guards.
+The next serious move should be `EXPLAIN QUERY PLAN` plus a dedicated closure,
+path, or descendant index strategy.
