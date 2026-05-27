@@ -1178,26 +1178,34 @@ fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe>
 
     let owners = dashboard_owner_filters(query_count);
     let export_started = Instant::now();
-    let bundles = owners
-        .iter()
-        .map(|owner| export_top_owner_page_for(&mut core, OWNER, owner, page_size))
-        .collect::<Result<Vec<_>>>()?;
+    let merged_bundle = core.run_as_user(OWNER, |core| {
+        core.export_many_query_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            owners.iter().map(|owner| json!(owner)).collect(),
+            "updated_at",
+            page_size,
+        )
+    })?;
     let core_export_elapsed = export_started.elapsed();
-    let merged_bundle = merge_bundles(&bundles)?;
     let merged_summary = BundleSummary::from(&merged_bundle)?;
     let edge_apply_elapsed = timed(|| edge.apply_bundle(&merged_bundle))?;
-    let edge_bundle = merge_bundles(
-        &owners
-            .iter()
-            .map(|owner| export_top_owner_page_for(&mut edge, OWNER, owner, page_size))
-            .collect::<Result<Vec<_>>>()?,
-    )?;
+    let edge_bundle = edge.run_as_user(OWNER, |edge| {
+        edge.export_many_query_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            owners.iter().map(|owner| json!(owner)).collect(),
+            "updated_at",
+            page_size,
+        )
+    })?;
     let worker_apply_elapsed = timed(|| worker.apply_bundle(&edge_bundle))?;
-    let worker_bundle = merge_bundles(
-        &owners
-            .iter()
-            .map(|owner| export_top_owner_page_for(&mut worker, OWNER, owner, page_size))
-            .collect::<Result<Vec<_>>>()?,
+    let worker_bundle = worker.export_many_query_where_eq_top_field_desc(
+        "documents",
+        "owner_id",
+        owners.iter().map(|owner| json!(owner)).collect(),
+        "updated_at",
+        page_size,
     )?;
     let tab_apply_elapsed = timed(|| tab.apply_bundle(&worker_bundle))?;
 

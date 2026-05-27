@@ -2600,6 +2600,24 @@ impl Runtime {
         )
     }
 
+    pub fn export_many_query_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Bundle> {
+        self.export_many_query_where_eq_top_field_desc_inner(
+            table_name,
+            field_name,
+            values,
+            order_field_name,
+            limit,
+            &[],
+        )
+    }
+
     pub fn export_many_query_where_eq_top_field_desc_with_ref_include(
         &self,
         table_name: &str,
@@ -2608,6 +2626,25 @@ impl Runtime {
         order_field_name: &str,
         limit: usize,
         ref_field_name: &str,
+    ) -> Result<Bundle> {
+        self.export_many_query_where_eq_top_field_desc_inner(
+            table_name,
+            field_name,
+            values,
+            order_field_name,
+            limit,
+            &[ref_field_name],
+        )
+    }
+
+    fn export_many_query_where_eq_top_field_desc_inner(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+        order_field_name: &str,
+        limit: usize,
+        ref_include_fields: &[&str],
     ) -> Result<Bundle> {
         let table = self.schema.table_def(table_name)?;
         let user = self.policy_user();
@@ -2712,12 +2749,14 @@ impl Runtime {
                 child_row_nums: Some(&row_nums),
             },
         )?);
-        history.extend(self.export_ref_include_history(
-            table,
-            &all_rows,
-            ref_field_name,
-            &branch_nums,
-        )?);
+        for ref_field_name in ref_include_fields {
+            history.extend(self.export_ref_include_history(
+                table,
+                &all_rows,
+                ref_field_name,
+                &branch_nums,
+            )?);
+        }
         dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
         let txs =

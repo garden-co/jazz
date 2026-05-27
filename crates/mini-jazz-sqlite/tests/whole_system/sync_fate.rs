@@ -1511,6 +1511,50 @@ fn batched_top_field_ref_include_matches_individual_exports() {
 }
 
 #[test]
+fn batched_top_field_query_matches_individual_exports_without_include() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut individual_peer = Runtime::open(Storage::Memory, "individual-peer", "alice").unwrap();
+    let mut batch_peer = Runtime::open(Storage::Memory, "batch-peer", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-open-a", "A open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-open-z", "Z open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-z", "Z done", true, "project-1")
+        .unwrap();
+
+    let open = alice
+        .export_query_where_eq_top_field_desc("todos", "done", json!(false), "title", 1)
+        .unwrap();
+    let done = alice
+        .export_query_where_eq_top_field_desc("todos", "done", json!(true), "title", 1)
+        .unwrap();
+    individual_peer.apply_bundle(&open).unwrap();
+    individual_peer.apply_bundle(&done).unwrap();
+
+    let batch = alice
+        .export_many_query_where_eq_top_field_desc(
+            "todos",
+            "done",
+            vec![json!(false), json!(true)],
+            "title",
+            1,
+        )
+        .unwrap();
+    batch_peer.apply_bundle(&batch).unwrap();
+
+    assert_eq!(
+        batch_peer.open_todos().unwrap(),
+        individual_peer.open_todos().unwrap()
+    );
+    assert_eq!(batch.query_reads.len(), 2);
+}
+
+#[test]
 fn missing_optional_ref_include_observed_refresh_delivers_later_dependency() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();

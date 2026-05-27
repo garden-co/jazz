@@ -1247,3 +1247,22 @@ Board apply profile improved in the release sample:
 Learning: small storage normalization choices need matching apply-time caches.
 The remaining history cost is now less about user metadata lookup and more about
 dynamic history/current insertion and visibility maintenance.
+
+## 2026-05-27 01:26 PDT
+
+Generalized the batched same-shape top-page export helper so it works without a
+ref include, added a whole-system equivalence test against individual exports,
+and switched the permissioned dashboard initial sync through core -> edge ->
+worker -> tab to use the batched export at each hop.
+
+Release sample for the 50k-row / 24-query permissioned dashboard probe:
+
+- initial core export: previously in the ~80-90 ms band, now ~5.0 ms
+- merged initial bundle: ~86 KB, 188 history rows, 7 transactions
+- edge apply: ~5.8 ms; worker apply: ~5.7 ms; tab apply: ~5.4 ms
+- refresh export after subscribed mutations is still ~87.8 ms
+
+Learning: the old dashboard initial export number was dominated by per-query
+export/finalization overhead rather than SQLite row lookup. Batching same-shape
+query descriptors is a core primitive, not merely a benchmark trick. The next
+visible dashboard bottleneck is refresh over persisted observed query reads.
