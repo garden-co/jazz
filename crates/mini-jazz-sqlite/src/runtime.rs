@@ -2715,6 +2715,30 @@ impl Runtime {
         ))
     }
 
+    pub fn subscribe_rows_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            order_field_name,
+            limit,
+            self.read_rows_where_eq_top_field_desc(
+                table_name,
+                field_name,
+                value,
+                order_field_name,
+                limit,
+            )?,
+        ))
+    }
+
     pub fn subscribe_observed_query(&self, read: &QueryReadRecord) -> Result<RowsSubscription> {
         if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
             return Err(crate::Error::new(
@@ -2761,6 +2785,29 @@ impl Runtime {
                     &read.table,
                     &read.field,
                     value.clone(),
+                    limit as usize,
+                )
+            }
+            "eq_top_field_desc" => {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+                let order_field = read
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+                self.subscribe_rows_where_eq_top_field_desc(
+                    &read.table,
+                    &read.field,
+                    value.clone(),
+                    order_field,
                     limit as usize,
                 )
             }
@@ -2904,6 +2951,29 @@ impl Runtime {
                     &query.table,
                     &query.field,
                     value.clone(),
+                    limit as usize,
+                )?
+            }
+            RowsSubscriptionQuery::Predicate(query) if query.op == "eq_top_field_desc" => {
+                let value = query
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+                let order_field = query
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+                let limit = query
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+                self.read_rows_where_eq_top_field_desc(
+                    &query.table,
+                    &query.field,
+                    value.clone(),
+                    order_field,
                     limit as usize,
                 )?
             }

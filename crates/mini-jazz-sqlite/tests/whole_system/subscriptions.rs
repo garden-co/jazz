@@ -739,6 +739,70 @@ fn ordered_page_subscription_replaces_displaced_boundary_row() {
 }
 
 #[test]
+fn ordered_field_page_subscription_replaces_displaced_boundary_row() {
+    let schema = SchemaDef::new().table("documents", |table| {
+        table.text("owner_id");
+        table.text("updated_at");
+        table.text("title");
+        table.index("owner_updated", ["owner_id", "updated_at"]);
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    for (id, updated_at) in [("doc-old", "0001"), ("doc-middle", "0002")] {
+        alice
+            .insert_row(
+                "documents",
+                id,
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!("alice")),
+                    ("updated_at".to_owned(), json!(updated_at)),
+                    ("title".to_owned(), json!(id)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let mut subscription = alice
+        .subscribe_rows_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!("alice"),
+            "updated_at",
+            2,
+        )
+        .unwrap();
+    assert_eq!(
+        subscription
+            .initial_rows()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["doc-middle", "doc-old"]
+    );
+
+    alice
+        .insert_row(
+            "documents",
+            "doc-new",
+            BTreeMap::from([
+                ("owner_id".to_owned(), json!("alice")),
+                ("updated_at".to_owned(), json!("0003")),
+                ("title".to_owned(), json!("newest")),
+            ]),
+        )
+        .unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+
+    assert!(diffs
+        .iter()
+        .any(|diff| matches!(diff, RowDiff::Added(row) if row.id == "doc-new")));
+    assert!(diffs
+        .iter()
+        .any(|diff| matches!(diff, RowDiff::Removed(row) if row.id == "doc-old")));
+}
+
+#[test]
 fn subscription_removes_child_when_parent_policy_dependency_changes() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

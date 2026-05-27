@@ -120,6 +120,29 @@ impl RowsSubscription {
         }
     }
 
+    pub(crate) fn where_eq_top_field_desc(
+        table: &str,
+        field: &str,
+        value: JsonValue,
+        order_field: &str,
+        limit: usize,
+        rows: Vec<RowView>,
+    ) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+                table,
+                field,
+                "eq_top_field_desc",
+                serde_json::json!({
+                    "eq": value,
+                    "order_field": order_field,
+                    "limit": limit,
+                }),
+            )),
+            last_rows: rows,
+        }
+    }
+
     pub fn initial_rows(&self) -> &[RowView] {
         &self.last_rows
     }

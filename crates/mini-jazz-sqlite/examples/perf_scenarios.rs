@@ -1,5 +1,5 @@
 use mini_jazz_sqlite::sync::Bundle;
-use mini_jazz_sqlite::{Result, Runtime, SchemaDef, Storage};
+use mini_jazz_sqlite::{Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -84,6 +84,10 @@ struct RefreshReport {
     edge_to_worker_apply_ms: f64,
     worker_to_tab_apply_ms: f64,
     tab_query_ms: f64,
+    tab_subscription_poll_ms: f64,
+    tab_subscription_added: usize,
+    tab_subscription_updated: usize,
+    tab_subscription_removed: usize,
     api_to_updated_result_ms: f64,
 }
 
@@ -151,8 +155,21 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         config.page_size,
     )?;
     let tab_query_elapsed = query_started.elapsed();
-    let refresh_after_new_top_rows =
-        run_refresh_after_new_top_rows(config, &mut core, &mut edge, &mut worker, &mut tab)?;
+    let mut tab_subscription = tab.subscribe_rows_where_eq_top_field_desc(
+        "documents",
+        "owner_id",
+        json!(OWNER),
+        "updated_at",
+        config.page_size,
+    )?;
+    let refresh_after_new_top_rows = run_refresh_after_new_top_rows(
+        config,
+        &mut core,
+        &mut edge,
+        &mut worker,
+        &mut tab,
+        &mut tab_subscription,
+    )?;
 
     let mut seed_rows_by_table = BTreeMap::new();
     seed_rows_by_table.insert("orgs", 100);
@@ -208,6 +225,7 @@ fn run_refresh_after_new_top_rows(
     edge: &mut Runtime,
     worker: &mut Runtime,
     tab: &mut Runtime,
+    tab_subscription: &mut RowsSubscription,
 ) -> BenchResult<RefreshReport> {
     insert_new_top_documents(
         core,
@@ -241,6 +259,10 @@ fn run_refresh_after_new_top_rows(
         config.page_size,
     )?;
     let tab_query_elapsed = query_started.elapsed();
+    let subscription_poll_started = Instant::now();
+    let diffs = tab.poll_subscription(tab_subscription)?;
+    let subscription_poll_elapsed = subscription_poll_started.elapsed();
+    let diff_counts = DiffCounts::from(&diffs);
 
     Ok(RefreshReport {
         inserted_rows: config.refresh_new_top_rows,
@@ -254,6 +276,10 @@ fn run_refresh_after_new_top_rows(
         edge_to_worker_apply_ms: ms(worker_apply_elapsed),
         worker_to_tab_apply_ms: ms(tab_apply_elapsed),
         tab_query_ms: ms(tab_query_elapsed),
+        tab_subscription_poll_ms: ms(subscription_poll_elapsed),
+        tab_subscription_added: diff_counts.added,
+        tab_subscription_updated: diff_counts.updated,
+        tab_subscription_removed: diff_counts.removed,
         api_to_updated_result_ms: ms(export_elapsed
             + edge_apply_elapsed
             + worker_apply_elapsed
@@ -276,6 +302,30 @@ fn documents_schema() -> SchemaDef {
             table.index("owner_updated", ["owner_id", "updated_at"]);
             table.read_if_ref_readable("org");
         })
+}
+
+struct DiffCounts {
+    added: usize,
+    updated: usize,
+    removed: usize,
+}
+
+impl DiffCounts {
+    fn from(diffs: &[RowDiff]) -> Self {
+        let mut counts = Self {
+            added: 0,
+            updated: 0,
+            removed: 0,
+        };
+        for diff in diffs {
+            match diff {
+                RowDiff::Added(_) => counts.added += 1,
+                RowDiff::Updated { .. } => counts.updated += 1,
+                RowDiff::Removed(_) => counts.removed += 1,
+            }
+        }
+        counts
+    }
 }
 
 fn seed_documents(

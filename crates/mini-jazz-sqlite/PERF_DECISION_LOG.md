@@ -187,3 +187,16 @@ small in this scenario: cold export remained around 87 ms and refresh around 98
 ms. This suggests the bigger cost is not simply duplicate child history export;
 policy dependency export, SQL policy checks, JSON/ref conversion, or apply
 rebuild remain more likely.
+
+## 2026-05-26 21:51 PDT
+
+Added user-column ordered page subscriptions (`eq_top_field_desc`) so the perf
+scenario can measure client-visible subscription diff cost for the same
+`owner_id ORDER BY updated_at DESC LIMIT n` shape. Added a whole-system test for
+boundary displacement on that subscription kind.
+
+The benchmark now creates a tab subscription before reconnect refresh. After 50
+new top rows arrive, polling the subscription over the refreshed tab takes about
+0.7 ms and reports exactly 50 added / 50 removed / 0 updated diffs. This is a
+good sign: after sync/apply, semantic diffing of a page-sized result is cheap and
+deterministic. The expensive parts remain upstream export and per-hop apply.
