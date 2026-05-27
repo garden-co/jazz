@@ -299,3 +299,16 @@ the query-scope test suite.
 The benchmark did not materially move beyond the rejected-fate narrowing: cold
 export remains about 72 ms and refresh export about 81 ms. So repeated policy
 checks for the 50 result rows are not the remaining dominant cost.
+
+## 2026-05-26 22:12 PDT
+
+Added a many-user page probe: 100 users, 50k total documents, 500 documents per
+user, each user has their own policy-readable org, and core exports page-20
+queries for 20 sampled users.
+
+Result: seeding takes about 4.9 s, core DB is about 21 MB, and 20 sampled page
+exports take about 266 ms total, averaging 13.3 ms per user. Average bundle is
+about 19 KB, 21 history rows, and 2 tx records. This is a strong product-shaped
+data point for “many users each reading small policy-scoped pages”: per-user
+query export scales with page/dependency size, not total table size, once the
+predicate is selective.

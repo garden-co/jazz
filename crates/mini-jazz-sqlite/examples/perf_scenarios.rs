@@ -18,6 +18,7 @@ fn main() -> BenchResult<()> {
         tx_granularity_probe: run_tx_granularity_probe()?,
         recursive_policy_probe: run_recursive_policy_probe()?,
         multi_tab_fanout_probe: run_multi_tab_fanout_probe()?,
+        many_user_page_probe: run_many_user_page_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -52,6 +53,7 @@ struct BenchmarkReport {
     tx_granularity_probe: TxGranularityProbe,
     recursive_policy_probe: RecursivePolicyProbe,
     multi_tab_fanout_probe: MultiTabFanoutProbe,
+    many_user_page_probe: ManyUserPageProbe,
 }
 
 #[derive(Serialize)]
@@ -134,6 +136,25 @@ struct MultiTabFanoutProbe {
     average_tab_apply_ms: f64,
     total_tab_query_ms: f64,
     average_tab_query_ms: f64,
+}
+
+#[derive(Serialize)]
+struct ManyUserPageProbe {
+    user_count: usize,
+    total_rows: usize,
+    rows_per_user: usize,
+    sampled_users: usize,
+    page_size: usize,
+    seed_ms: f64,
+    total_export_ms: f64,
+    average_export_ms: f64,
+    total_bundle_bytes: usize,
+    average_bundle_bytes: f64,
+    total_history_rows_synced: usize,
+    average_history_rows_synced: f64,
+    total_transaction_rows_synced: usize,
+    average_transaction_rows_synced: f64,
+    core_database_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -463,6 +484,58 @@ fn run_multi_tab_fanout_probe() -> BenchResult<MultiTabFanoutProbe> {
     })
 }
 
+fn run_many_user_page_probe() -> BenchResult<ManyUserPageProbe> {
+    let user_count = 100;
+    let rows_per_user = 500;
+    let total_rows = user_count * rows_per_user;
+    let sampled_users = 20;
+    let page_size = 20;
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema,
+    )?;
+
+    let seed_started = Instant::now();
+    seed_many_user_documents(&mut core, user_count, rows_per_user, 100)?;
+    let seed_elapsed = seed_started.elapsed();
+
+    let export_started = Instant::now();
+    let mut total_bundle_bytes = 0;
+    let mut total_history_rows_synced = 0;
+    let mut total_transaction_rows_synced = 0;
+    for user_index in 0..sampled_users {
+        let user = format!("user-{user_index}");
+        let bundle = export_top_owner_page_for(&mut core, &user, &user, page_size)?;
+        let summary = BundleSummary::from(&bundle)?;
+        total_bundle_bytes += summary.bytes;
+        total_history_rows_synced += bundle.history.len();
+        total_transaction_rows_synced += bundle.txs.len();
+    }
+    let export_elapsed = export_started.elapsed();
+
+    Ok(ManyUserPageProbe {
+        user_count,
+        total_rows,
+        rows_per_user,
+        sampled_users,
+        page_size,
+        seed_ms: ms(seed_elapsed),
+        total_export_ms: ms(export_elapsed),
+        average_export_ms: ms(export_elapsed) / sampled_users as f64,
+        total_bundle_bytes,
+        average_bundle_bytes: total_bundle_bytes as f64 / sampled_users as f64,
+        total_history_rows_synced,
+        average_history_rows_synced: total_history_rows_synced as f64 / sampled_users as f64,
+        total_transaction_rows_synced,
+        average_transaction_rows_synced: total_transaction_rows_synced as f64
+            / sampled_users as f64,
+        core_database_bytes: core.storage_stats()?.database_bytes,
+    })
+}
+
 fn run_edge_warm_worker_cold(
     config: &Config,
     dir: &tempfile::TempDir,
@@ -754,13 +827,73 @@ fn seed_recursive_policy_graph(
     Ok(())
 }
 
+fn seed_many_user_documents(
+    runtime: &mut Runtime,
+    user_count: usize,
+    rows_per_user: usize,
+    seed_batch_size: usize,
+) -> Result<()> {
+    for user_index in 0..user_count {
+        let user = format!("user-{user_index}");
+        runtime.run_attributing_to_user(&user, |runtime| {
+            runtime
+                .transaction()
+                .insert_row(
+                    "orgs",
+                    &format!("org-{user_index}"),
+                    BTreeMap::from([(
+                        "name".to_owned(),
+                        json!(format!("Organization {user_index}")),
+                    )]),
+                )
+                .commit()
+                .map(|_| ())
+        })?;
+    }
+
+    let total_rows = user_count * rows_per_user;
+    let seed_batch_size = seed_batch_size.max(1);
+    for chunk_start in (0..total_rows).step_by(seed_batch_size) {
+        let chunk_end = (chunk_start + seed_batch_size).min(total_rows);
+        let mut tx = runtime.transaction();
+        for row_index in chunk_start..chunk_end {
+            let user_index = row_index / rows_per_user;
+            let owner_id = format!("user-{user_index}");
+            tx = tx.insert_row(
+                "documents",
+                &format!("many-user-doc-{row_index}"),
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!(owner_id)),
+                    ("org".to_owned(), json!(format!("org-{user_index}"))),
+                    ("updated_at".to_owned(), json!(format!("{:020}", row_index))),
+                    (
+                        "title".to_owned(),
+                        json!(format!("Many-user document {row_index}")),
+                    ),
+                ]),
+            );
+        }
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 fn export_top_owner_page(runtime: &mut Runtime, page_size: usize) -> Result<Bundle> {
+    export_top_owner_page_for(runtime, OWNER, OWNER, page_size)
+}
+
+fn export_top_owner_page_for(
+    runtime: &mut Runtime,
+    user: &str,
+    owner_id: &str,
+    page_size: usize,
+) -> Result<Bundle> {
     if runtime.is_trusted() {
-        runtime.run_as_user(OWNER, |runtime| {
+        runtime.run_as_user(user, |runtime| {
             runtime.export_query_where_eq_top_field_desc(
                 "documents",
                 "owner_id",
-                json!(OWNER),
+                json!(owner_id),
                 "updated_at",
                 page_size,
             )
@@ -769,7 +902,7 @@ fn export_top_owner_page(runtime: &mut Runtime, page_size: usize) -> Result<Bund
         runtime.export_query_where_eq_top_field_desc(
             "documents",
             "owner_id",
-            json!(OWNER),
+            json!(owner_id),
             "updated_at",
             page_size,
         )
