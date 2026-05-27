@@ -392,3 +392,15 @@ is not the current dominant export cost for page-sized bundles. I am keeping the
 cache because it is local, simple, and should protect more ref-dense pages, but
 future profiling should focus on policy dependency SQL and history row
 materialization.
+
+## 2026-05-26 22:26 PDT
+
+Added a storage topology probe that compares the same 20k/2k/page-50 sync over
+core -> edge -> worker -> tab with durable vs in-memory edge/worker
+intermediaries.
+
+Result: all-memory intermediaries take about 78 ms API-to-first-result, durable
+intermediaries about 82 ms. The difference is only about 4 ms for page-sized
+bundles. This suggests the current main-thread latency is dominated by SQL work
+and repeated bundle apply/export mechanics rather than SQLite file I/O for
+edge/worker caches.

@@ -21,6 +21,7 @@ fn main() -> BenchResult<()> {
         many_user_page_probe: run_many_user_page_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
         wide_schema_apply_probe: run_wide_schema_apply_probe()?,
+        storage_topology_probe: run_storage_topology_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -58,6 +59,7 @@ struct BenchmarkReport {
     many_user_page_probe: ManyUserPageProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
     wide_schema_apply_probe: WideSchemaApplyProbe,
+    storage_topology_probe: StorageTopologyProbe,
 }
 
 #[derive(Serialize)]
@@ -198,6 +200,31 @@ struct WideSchemaApplyProbe {
     apply_ms: f64,
     query_ms: f64,
     tab_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct StorageTopologyProbe {
+    all_memory_intermediaries: StorageTopologyCase,
+    durable_intermediaries: StorageTopologyCase,
+}
+
+#[derive(Serialize)]
+struct StorageTopologyCase {
+    durable_intermediaries: bool,
+    total_rows: usize,
+    target_owner_rows: usize,
+    page_size: usize,
+    bundle_bytes: usize,
+    core_export_ms: f64,
+    edge_apply_ms: f64,
+    edge_export_ms: f64,
+    worker_apply_ms: f64,
+    worker_export_ms: f64,
+    tab_apply_ms: f64,
+    tab_query_ms: f64,
+    api_to_first_result_ms: f64,
+    edge_database_bytes: i64,
+    worker_database_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -701,6 +728,91 @@ fn run_wide_schema_apply_probe() -> BenchResult<WideSchemaApplyProbe> {
         apply_ms: ms(apply_elapsed),
         query_ms: ms(query_elapsed),
         tab_database_bytes: tab.storage_stats()?.database_bytes,
+    })
+}
+
+fn run_storage_topology_probe() -> BenchResult<StorageTopologyProbe> {
+    Ok(StorageTopologyProbe {
+        all_memory_intermediaries: run_storage_topology_case(false)?,
+        durable_intermediaries: run_storage_topology_case(true)?,
+    })
+}
+
+fn run_storage_topology_case(durable_intermediaries: bool) -> BenchResult<StorageTopologyCase> {
+    let config = Config {
+        total_rows: 20_000,
+        target_owner_rows: 2_000,
+        page_size: 50,
+        seed_batch_size: 100,
+        refresh_new_top_rows: 0,
+        durable_intermediaries,
+    };
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut edge = Runtime::open_trusted_with_schema(
+        storage_for(&config, &dir, "edge-storage-probe.sqlite"),
+        "edge",
+        schema.clone(),
+    )?;
+    let mut worker = Runtime::open_with_schema(
+        storage_for(&config, &dir, "worker-storage-probe.sqlite"),
+        "worker",
+        OWNER,
+        schema.clone(),
+    )?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema.clone())?;
+
+    seed_documents(
+        &mut core,
+        config.total_rows,
+        config.target_owner_rows,
+        config.seed_batch_size,
+    )?;
+
+    let core_export_started = Instant::now();
+    let core_bundle = export_top_owner_page(&mut core, config.page_size)?;
+    let core_export_elapsed = core_export_started.elapsed();
+    let bundle_summary = BundleSummary::from(&core_bundle)?;
+    let edge_apply_elapsed = timed(|| edge.apply_bundle(&core_bundle))?;
+    let edge_export_started = Instant::now();
+    let edge_bundle = export_top_owner_page(&mut edge, config.page_size)?;
+    let edge_export_elapsed = edge_export_started.elapsed();
+    let worker_apply_elapsed = timed(|| worker.apply_bundle(&edge_bundle))?;
+    let worker_export_started = Instant::now();
+    let worker_bundle = export_top_owner_page(&mut worker, config.page_size)?;
+    let worker_export_elapsed = worker_export_started.elapsed();
+    let tab_apply_elapsed = timed(|| tab.apply_bundle(&worker_bundle))?;
+    let query_started = Instant::now();
+    let _rows = read_top_owner_page(&tab, config.page_size)?;
+    let query_elapsed = query_started.elapsed();
+
+    Ok(StorageTopologyCase {
+        durable_intermediaries,
+        total_rows: config.total_rows,
+        target_owner_rows: config.target_owner_rows,
+        page_size: config.page_size,
+        bundle_bytes: bundle_summary.bytes,
+        core_export_ms: ms(core_export_elapsed),
+        edge_apply_ms: ms(edge_apply_elapsed),
+        edge_export_ms: ms(edge_export_elapsed),
+        worker_apply_ms: ms(worker_apply_elapsed),
+        worker_export_ms: ms(worker_export_elapsed),
+        tab_apply_ms: ms(tab_apply_elapsed),
+        tab_query_ms: ms(query_elapsed),
+        api_to_first_result_ms: ms(core_export_elapsed
+            + edge_apply_elapsed
+            + edge_export_elapsed
+            + worker_apply_elapsed
+            + worker_export_elapsed
+            + tab_apply_elapsed
+            + query_elapsed),
+        edge_database_bytes: edge.storage_stats()?.database_bytes,
+        worker_database_bytes: worker.storage_stats()?.database_bytes,
     })
 }
 
