@@ -148,6 +148,118 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
 }
 
 #[test]
+fn durable_user_column_ordered_query_read_refreshes_page_boundary_after_restart() {
+    let harness = support::Harness::new();
+    let schema = SchemaDef::new().table("documents", |table| {
+        table.text("owner_id");
+        table.text("updated_at");
+        table.text("title");
+        table.index("owner_updated", ["owner_id", "updated_at"]);
+    });
+    let mut upstream = harness
+        .memory_with_schema("upstream", "alice", schema.clone())
+        .unwrap();
+
+    for (id, updated_at) in [
+        ("doc-old", "0001"),
+        ("doc-middle", "0002"),
+        ("doc-bob", "9999"),
+    ] {
+        upstream
+            .insert_row(
+                "documents",
+                id,
+                BTreeMap::from([
+                    (
+                        "owner_id".to_owned(),
+                        json!(if id == "doc-bob" { "bob" } else { "alice" }),
+                    ),
+                    ("updated_at".to_owned(), json!(updated_at)),
+                    ("title".to_owned(), json!(id)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    {
+        let mut worker = harness
+            .durable_with_schema(
+                "ordered-field-worker.sqlite",
+                "worker",
+                "alice",
+                schema.clone(),
+            )
+            .unwrap();
+        support::apply(
+            upstream
+                .export_query_where_eq_top_field_desc(
+                    "documents",
+                    "owner_id",
+                    json!("alice"),
+                    "updated_at",
+                    2,
+                )
+                .unwrap(),
+            &mut worker,
+        )
+        .unwrap();
+        assert_eq!(
+            worker
+                .read_rows_where_eq_top_field_desc(
+                    "documents",
+                    "owner_id",
+                    json!("alice"),
+                    "updated_at",
+                    2,
+                )
+                .unwrap()
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["doc-middle", "doc-old"]
+        );
+    }
+
+    upstream
+        .insert_row(
+            "documents",
+            "doc-new",
+            BTreeMap::from([
+                ("owner_id".to_owned(), json!("alice")),
+                ("updated_at".to_owned(), json!("0003")),
+                ("title".to_owned(), json!("new")),
+            ]),
+        )
+        .unwrap();
+
+    let mut reopened = harness
+        .durable_with_schema(
+            "ordered-field-worker.sqlite",
+            "worker-reopened",
+            "alice",
+            schema,
+        )
+        .unwrap();
+    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
+
+    assert_eq!(
+        reopened
+            .read_rows_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!("alice"),
+                "updated_at",
+                3,
+            )
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["doc-new", "doc-middle"]
+    );
+}
+
+#[test]
 fn durable_worker_rehydrates_fresh_memory_tab_after_restart() {
     let harness = support::Harness::new();
     let mut tab = harness.memory("alice-tab", "alice").unwrap();

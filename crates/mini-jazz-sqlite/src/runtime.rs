@@ -303,6 +303,34 @@ impl Runtime {
         Ok(rows)
     }
 
+    pub fn read_rows_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        self.schema
+            .table_def(table_name)?
+            .fields
+            .iter()
+            .find(|field| field.name == order_field_name)
+            .ok_or_else(|| {
+                crate::Error::new(format!(
+                    "unknown order field {table_name}.{order_field_name}"
+                ))
+            })?;
+        let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
+        rows.sort_by(|left, right| {
+            json_sort_key(right.values.get(order_field_name))
+                .cmp(&json_sort_key(left.values.get(order_field_name)))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
         let user = self.policy_user();
@@ -387,7 +415,6 @@ impl Runtime {
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let txs = export_txs(&self.conn)?;
         let mut history = export_visible_table_history(
             &self.conn,
             &self.schema,
@@ -447,6 +474,7 @@ impl Runtime {
         }
         dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
+        let txs = export_txs_for_query_scope(&self.conn, table_name, &history, &reads)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         let query_reads = vec![QueryReadRecord {
@@ -723,6 +751,29 @@ impl Runtime {
                     &read.table,
                     &read.field,
                     value.clone(),
+                    limit as usize,
+                )
+            }
+            "eq_top_field_desc" => {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+                let order_field = read
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+                self.export_query_where_eq_top_field_desc(
+                    &read.table,
+                    &read.field,
+                    value.clone(),
+                    order_field,
                     limit as usize,
                 )
             }
@@ -1100,6 +1151,76 @@ impl Runtime {
                            AND tx.outcome != ?
                            AND {current_predicate_sql}
                          ORDER BY current.j_created_at DESC, current.row_num
+                         LIMIT ?
+                       )",
+                    crate::schema::current_table(&query_read.table),
+                    current_table = crate::schema::current_table(&query_read.table),
+                    current_predicate_sql =
+                        query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
+                ),
+                params![
+                    branch_num,
+                    predicate_value.clone(),
+                    branch_num,
+                    tx::OUTCOME_REJECTED,
+                    predicate_value,
+                    limit as i64
+                ],
+            )?;
+            return Ok(());
+        }
+        if query_read.op == "eq_top_field_desc" {
+            let value = query_read
+                .value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+            let order_field_name = query_read
+                .value
+                .get("order_field")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+            let limit = query_read
+                .value
+                .get("limit")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+            let table = schema.table_def(&query_read.table)?;
+            let field = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == query_read.field)
+                .ok_or_else(|| {
+                    crate::Error::new(format!("unknown query field {}", query_read.field))
+                })?;
+            let order_field = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == order_field_name)
+                .ok_or_else(|| {
+                    crate::Error::new(format!("unknown order field {order_field_name}"))
+                })?;
+            let branch_num = branch::checkout(db, &query_read.branch_id)?;
+            let predicate_column =
+                crate::schema::quote_ident(&crate::schema::storage_column(field));
+            let order_column =
+                crate::schema::quote_ident(&crate::schema::storage_column(order_field));
+            let predicate_sql = query_predicate::sql(field, &predicate_column, "eq")?;
+            let predicate_value = query_predicate::value(field, "eq", value, db)?;
+            db.execute(
+                &format!(
+                    "DELETE FROM {}
+                     WHERE j_branch_num = ?
+                       AND is_deleted = 0
+                       AND {predicate_sql}
+                       AND row_num NOT IN (
+                         SELECT current.row_num
+                         FROM {current_table} current
+                         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                         WHERE current.j_branch_num = ?
+                           AND current.is_deleted = 0
+                           AND tx.outcome != ?
+                           AND {current_predicate_sql}
+                         ORDER BY current.{order_column} DESC, current.row_num
                          LIMIT ?
                        )",
                     crate::schema::current_table(&query_read.table),
@@ -2228,6 +2349,34 @@ impl Runtime {
         )
     }
 
+    pub fn export_query_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Bundle> {
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "eq_top_field_desc",
+            json!({
+                "eq": value.clone(),
+                "order_field": order_field_name,
+                "limit": limit,
+            }),
+            self.read_rows_where_eq_top_field_desc(
+                table_name,
+                field_name,
+                value,
+                order_field_name,
+                limit,
+            )?,
+            &[],
+        )
+    }
+
     fn export_query_scope(
         &self,
         table_name: &str,
@@ -2250,7 +2399,6 @@ impl Runtime {
         row_nums.sort();
         row_nums.dedup();
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let txs = export_txs(&self.conn)?;
         let mut history = export_visible_table_history(
             &self.conn,
             &self.schema,
@@ -2309,6 +2457,7 @@ impl Runtime {
         }
         dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
+        let txs = export_txs_for_query_scope(&self.conn, table_name, &history, &reads)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         let query_reads = vec![QueryReadRecord {
@@ -3998,6 +4147,42 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
         .map_err(Into::into)
 }
 
+fn export_txs_for_query_scope(
+    conn: &Connection,
+    table_name: &str,
+    history: &[HistoryRecord],
+    reads: &[ReadRecord],
+) -> Result<Vec<TxRecord>> {
+    let mut needed_tx_ids = history
+        .iter()
+        .map(|record| record.tx_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for record in reads {
+        needed_tx_ids.insert(record.tx_id.as_str());
+        if let Some(observed_tx_id) = &record.observed_tx_id {
+            needed_tx_ids.insert(observed_tx_id.as_str());
+        }
+    }
+    let mut rejected_stmt = conn.prepare(&format!(
+        "SELECT DISTINCT tx.tx_id
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE tx.outcome = ?
+         ORDER BY tx.tx_num",
+        crate::schema::history_table(table_name)
+    ))?;
+    let rejected_tx_ids = rejected_stmt
+        .query_map(params![tx::OUTCOME_REJECTED], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for tx_id in &rejected_tx_ids {
+        needed_tx_ids.insert(tx_id.as_str());
+    }
+    Ok(export_txs(conn)?
+        .into_iter()
+        .filter(|record| needed_tx_ids.contains(record.tx_id.as_str()))
+        .collect())
+}
+
 fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
     let detail = serde_json::from_str::<JsonValue>(detail_json)
         .map_err(|err| crate::Error::new(format!("invalid rejection detail JSON: {err}")))?;
@@ -4207,6 +4392,16 @@ fn current_created_at_by_row_id(
     })?;
     rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
         .map_err(Into::into)
+}
+
+fn json_sort_key(value: Option<&JsonValue>) -> String {
+    match value {
+        Some(JsonValue::String(value)) => format!("s:{value}"),
+        Some(JsonValue::Number(value)) => format!("n:{value:>020}"),
+        Some(JsonValue::Bool(value)) => format!("b:{value}"),
+        Some(value) => format!("j:{value}"),
+        None => String::new(),
+    }
 }
 
 fn export_table_history(
@@ -4669,10 +4864,10 @@ fn query_scope_repair_row_nums(
     op: &str,
     value: &JsonValue,
 ) -> Result<Vec<i64>> {
-    if op == "eq_top_created_at_desc" {
+    if op == "eq_top_created_at_desc" || op == "eq_top_field_desc" {
         let value = value
             .get("eq")
-            .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
+            .ok_or_else(|| crate::Error::new("top query expects eq value"))?;
         return query_scope_repair_row_nums(conn, table, field_name, "eq", value);
     }
     if field_name == "id" {
