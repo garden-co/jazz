@@ -15,25 +15,6 @@ A query plan contains:
 - observed-fact collector
 - expected index information when relevant
 
-The public query boundary should be a semantic query descriptor or relational
-IR, not a growing set of per-feature helper methods. TypeScript and framework
-packages may provide rich DSLs, but they lower to this descriptor before
-crossing into the Rust runtime or platform bindings. Native, WASM, and future
-language bindings pass the same semantic shape to the core query engine.
-
-The descriptor is allowed to be smaller than the eventual Jazz query model in
-early prototypes. Supported operators and graph features define the portable
-contract. Unsupported semantic features are outside that contract until they
-have a generic lowering, and should not be exposed through binding-specific
-shortcuts.
-
-Supported indexable query forms should lower to the embedded database on current
-projections. Falling back to full visible-row scans is optimization debt and
-should be named as such. The correctness baseline allows slower fallback paths
-for historical pinned-base branch snapshots, arbitrary historical snapshots, and
-other query-time visibility cases where no derived projection has been promoted
-yet.
-
 Includes follow ordinary relational semantics:
 
 - required includes lower to inner joins

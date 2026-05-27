@@ -165,30 +165,17 @@ feature exists.
 - Bundle locators dedupe concrete rows/transactions even when facts repeat.
 - Normalized predicates/ranges compare deterministically for supported planner
   forms.
-- Query-scope refresh repairs rows that leave a supported query condition set
-  through an update, including multi-filter built queries and queries with
-  ordering/windowing.
-- Query-scope refresh repairs rows that leave a supported query condition set
-  through a delete by sending tombstone history.
-- Query-scope export includes observed facts with table, condition descriptor,
-  and branch context for supported predicate reads and built-query descriptors.
+- Query-scope refresh repairs rows that leave a predicate through an update.
+- Query-scope refresh repairs rows that leave a predicate through a delete by
+  sending tombstone history.
+- Query-scope export includes predicate observed facts with table, field, value,
+  and branch context for supported predicates.
 - Query-scope repair rows may be included even when they are no longer semantic
   result rows.
 - Query-scope export dedupes concrete history records included for several
   reasons.
 - Recursive query-scope export includes deleted descendant subtrees, not only
   direct deleted children.
-- Public query APIs expose generic semantic descriptors rather than
-  app-specific query helper methods.
-- Native, WASM, and higher-level bindings execute the same supported query
-  descriptor with the same semantic result.
-- Cross-binding query semantics cover supported query descriptor features.
-- Supported indexable predicates, ordering, limit, and offset on current
-  projections are executed by the storage query plan. Full visible-row scans are
-  optimization debt reserved for historical or unpromoted visibility cases.
-- Query window values crossing platform boundaries fail on invalid or oversized
-  values instead of wrapping, truncating, or silently changing the requested
-  page.
 
 ### D.7 Sync Invariants
 
@@ -215,18 +202,10 @@ feature exists.
 
 - Subscription first delivery equals the corresponding one-shot query at the
   same tier.
-- Public subscriptions are push/callback APIs; rerun scheduling is internal,
-  not the application-facing contract.
-- Subscription deliveries include the current semantic result and deterministic
-  row-level changes from the previous delivered result.
 - Subscription updates are semantic row diffs.
 - Ordered subscriptions emit deterministic moved diffs for order-only changes.
 - Subscription diff ordering is deterministic and follows the same effective
   ordering as the corresponding query result.
-- Subscription row changes identify public row ids, change kind, and stable
-  result positions; added changes carry the new semantic item. Updated changes
-  carry the new semantic item when the semantic row changed, and may omit it
-  when only the result position changed.
 - Dependency-only changes can update parent semantic rows.
 - Every subscription update is tier-gated.
 - Rows may arrive before query settlement without being published.
@@ -400,10 +379,6 @@ feature exists.
   columns according to stable JS boundary rules.
 - Generated row/result layout follows declared schema order plus requested
   includes and subscription deltas.
-- Browser WASM exposes the same supported query and subscription semantics as
-  the native runtime.
-- Browser storage and worker topology affect persistence and latency, not row,
-  query, subscription, transaction, or sync meaning.
 
 ### D.15 File/Blob Invariants
 

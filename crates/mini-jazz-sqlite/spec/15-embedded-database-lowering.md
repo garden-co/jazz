@@ -130,12 +130,6 @@ query plans. Generated or side indexes over history payloads should be added
 only when measurements show a hot historical query, conflict lookup, or
 authority-validation path needs them.
 
-Ordered pagination over current projections is a storage-planning requirement,
-not a host-language filtering problem. Hot top-N queries should compile to
-`ORDER BY ... LIMIT/OFFSET` plans backed by indexes matching the predicate and
-order key. A large current table should not require materializing the full
-matching set in Rust just to return the first or last page.
-
 Storage compression should target whole SQLite pages or larger ordered ranges,
 not individual row payloads. Per-row history payload compression has too little
 compression window for the expected complexity. History table ordering and

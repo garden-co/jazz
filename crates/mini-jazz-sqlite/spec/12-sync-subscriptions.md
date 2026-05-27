@@ -98,16 +98,6 @@ One-shot queries and live subscriptions share query semantics.
 A subscription is a long-lived query interest that keeps previous semantic rows
 and observed facts so later changes can be delivered as semantic diffs.
 
-Public subscriptions are push/callback APIs. Rerun queues, dirty flags, and
-projection-diff effects may exist inside the runtime, but they are scheduling
-mechanisms rather than the product-facing subscription contract.
-
-The first delivery of a subscription is the current semantic result for the same
-query and tier as a one-shot query. Later deliveries publish the current
-semantic result plus a deterministic diff from the previous delivered result.
-This keeps simple consumers able to replace their full local view while letting
-incremental consumers apply row-level changes.
-
 The baseline implementation reruns the query and diffs full semantic rows.
 Projection-diff effects may be used as an internal scheduling/invalidation
 artifact, but subscription callbacks expose semantic row diffs.
