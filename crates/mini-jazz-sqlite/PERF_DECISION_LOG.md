@@ -222,3 +222,16 @@ move the main numbers: cold export is still about 87 ms and refresh export about
 98 ms. That makes sense because these scoped bundles only include 2-3 tx records.
 Keep the change because it removes an obvious N+1 shape for larger scoped tx
 sets, but the current bottleneck is elsewhere.
+
+## 2026-05-26 21:57 PDT
+
+Tried ref/policy indexing. One early run with an explicit `documents.org` index
+looked dramatically better, but after turning it into an automatic ref index and
+rerunning, export and seed times regressed badly and repeated runs confirmed the
+regression. I reverted the automatic index and benchmark-only explicit index.
+
+Learning: policy/ref indexing is definitely important, but blind `is_deleted,
+ref` indexes are not safe to add yet. We need EXPLAIN QUERY PLAN output for the
+policy export SQL and probably more targeted composite indexes that match the
+actual predicates: branch, deletion, owner/order page index, and parent ref
+checks. Treat this as a concrete derisking topic, not a settled decision.
