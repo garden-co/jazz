@@ -378,3 +378,17 @@ page-50 bundle with 100 history rows and 2 tx rows in the 42-table schema takes
 about 19 ms, essentially the same as the narrower schema. This validates the
 direction: current apply cost is dominated by rows actually synced, not by total
 schema width.
+
+## 2026-05-26 22:25 PDT
+
+Tried caching physical row num -> public row id conversion while exporting
+history records. This targets ref-heavy schemas where many rows point at the
+same parent, such as document pages with repeated org/project refs. The
+query-scope test suite passes.
+
+Result: no visible win in the current benchmark; cold export remains around
+71-72 ms and mixed refresh export around 18 ms. This means public ref id lookup
+is not the current dominant export cost for page-sized bundles. I am keeping the
+cache because it is local, simple, and should protect more ref-dense pages, but
+future profiling should focus on policy dependency SQL and history row
+materialization.

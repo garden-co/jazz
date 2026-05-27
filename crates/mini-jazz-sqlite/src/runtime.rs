@@ -5420,6 +5420,7 @@ fn export_visible_table_history(
         Some(row_nums) => stmt.query(params_from_iter(row_nums.iter()))?,
         None => stmt.query([])?,
     };
+    let mut public_row_id_cache = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let row = (0..row_width)
             .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -5428,7 +5429,7 @@ fn export_visible_table_history(
         for (idx, field) in table.fields.iter().enumerate() {
             values.insert(
                 field.name.clone(),
-                sql_value_to_json(conn, field, &row[idx + 4])?,
+                sql_value_to_json_cached(conn, field, &row[idx + 4], &mut public_row_id_cache)?,
             );
         }
         let sys = 4 + table.fields.len();
@@ -5495,6 +5496,7 @@ fn export_history_versions_for_rows(
         None => stmt.query([])?,
     };
     let mut records = Vec::new();
+    let mut public_row_id_cache = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let row = (0..row_width)
             .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -5503,7 +5505,7 @@ fn export_history_versions_for_rows(
         for (idx, field) in table.fields.iter().enumerate() {
             values.insert(
                 field.name.clone(),
-                sql_value_to_json(conn, field, &row[idx + 4])?,
+                sql_value_to_json_cached(conn, field, &row[idx + 4], &mut public_row_id_cache)?,
             );
         }
         let sys = 4 + table.fields.len();
@@ -5606,6 +5608,16 @@ fn sql_value_to_json(
     field: &FieldDef,
     value: &rusqlite::types::Value,
 ) -> Result<JsonValue> {
+    let mut public_row_id_cache = BTreeMap::new();
+    sql_value_to_json_cached(conn, field, value, &mut public_row_id_cache)
+}
+
+fn sql_value_to_json_cached(
+    conn: &Connection,
+    field: &FieldDef,
+    value: &rusqlite::types::Value,
+    public_row_id_cache: &mut BTreeMap<i64, String>,
+) -> Result<JsonValue> {
     match (&field.kind, value) {
         (_, rusqlite::types::Value::Null) if field.nullable => Ok(JsonValue::Null),
         (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
@@ -5614,14 +5626,27 @@ fn sql_value_to_json(
         (FieldKind::Bool, rusqlite::types::Value::Integer(value)) => {
             Ok(JsonValue::Bool(*value != 0))
         }
-        (FieldKind::Ref { .. }, rusqlite::types::Value::Integer(row_num)) => {
-            Ok(JsonValue::String(public_row_id(conn, *row_num)?))
-        }
+        (FieldKind::Ref { .. }, rusqlite::types::Value::Integer(row_num)) => Ok(JsonValue::String(
+            cached_public_row_id(conn, public_row_id_cache, *row_num)?,
+        )),
         _ => Err(crate::Error::new(format!(
             "unexpected SQL value for field {}",
             field.name
         ))),
     }
+}
+
+fn cached_public_row_id(
+    conn: &Connection,
+    cache: &mut BTreeMap<i64, String>,
+    row_num: i64,
+) -> Result<String> {
+    if let Some(row_id) = cache.get(&row_num) {
+        return Ok(row_id.clone());
+    }
+    let row_id = public_row_id(conn, row_num)?;
+    cache.insert(row_num, row_id.clone());
+    Ok(row_id)
 }
 
 fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<String> {
