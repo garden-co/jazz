@@ -35,6 +35,7 @@ export type CatalogueEvent =
   | { type: "permissions-published"; schemaHash: string; version?: number }
   | { type: "permissions-skipped"; reason: "missing-permissions-file" }
   | { type: "migration-published"; fromHash: string; toHash: string; filePath?: string }
+  | { type: "migration-skipped"; reason: "already-connected"; fromHash: string; toHash: string }
   | { type: "warning"; message: string };
 
 export interface CatalogueProjectOptions {
@@ -50,9 +51,17 @@ export interface PushSchemaOptions extends CatalogueProjectOptions {}
 export interface PushSchemaResult {
   hash: string;
   schemaFile: string;
-  status: "published" | "already-stored";
+  status: "published";
   objectId?: string;
 }
+
+export type DeploySchemaResult =
+  | PushSchemaResult
+  | {
+      hash: string;
+      schemaFile: string;
+      status: "already-stored";
+    };
 
 export interface PushPermissionsOptions extends CatalogueProjectOptions {
   schemaHash: string;
@@ -90,7 +99,7 @@ export interface PushMigrationResult {
 }
 
 export interface DeployResult {
-  schema: PushSchemaResult;
+  schema: DeploySchemaResult;
   migration?:
     | PushMigrationResult
     | { status: "already-connected"; fromHash: string; toHash: string };
@@ -965,7 +974,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     compiled.wasmSchema,
   );
 
-  let schema: PushSchemaResult;
+  let schema: DeploySchemaResult;
   if (storedSchemaHash) {
     emit(options, {
       type: "schema-skipped",
@@ -1019,6 +1028,12 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       });
 
       if (connected) {
+        emit(options, {
+          type: "migration-skipped",
+          reason: "already-connected",
+          fromHash: previousHead.schemaHash,
+          toHash: schema.hash,
+        });
         migration = {
           status: "already-connected",
           fromHash: previousHead.schemaHash,

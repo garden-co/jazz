@@ -13,6 +13,7 @@ export {
   type CatalogueEvent,
   type DeployOptions,
   type DeployResult,
+  type DeploySchemaResult,
   type PushMigrationOptions,
   type PushMigrationResult,
   type PushPermissionsOptions,

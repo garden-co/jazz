@@ -232,6 +232,91 @@ describe("dev catalogue push behavior", () => {
     });
   });
 
+  it("deploy reports an already-connected migration when retargeting connected schemas", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), schemaSource());
+    await writeFile(join(root, "permissions.ts"), permissionsSource());
+
+    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const storedSchema = s.defineApp({
+      todos: s.table({
+        title: s.string(),
+        ownerId: s.string(),
+      }),
+    }).wasmSchema;
+    const previousHead = {
+      schemaHash: previousSchemaHash,
+      version: 4,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+    const nextHead = {
+      schemaHash: nextSchemaHash,
+      version: 5,
+      parentBundleObjectId: previousHead.bundleObjectId,
+      bundleObjectId: "33333333-3333-3333-3333-333333333333",
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [nextSchemaHash] }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
+          return new Response(JSON.stringify({ schema: storedSchema, publishedAt: 0 }), {
+            status: 200,
+          });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+          return new Response(JSON.stringify({ head: previousHead }), { status: 200 });
+        }
+        if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
+          const url = new URL(input);
+          expect(url.searchParams.get("fromHash")).toBe(previousSchemaHash);
+          expect(url.searchParams.get("toHash")).toBe(nextSchemaHash);
+          return new Response(JSON.stringify({ connected: true }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+          const body = JSON.parse(String(init?.body));
+          expect(body.schemaHash).toBe(nextSchemaHash);
+          expect(body.expectedParentBundleObjectId).toBe(previousHead.bundleObjectId);
+          return new Response(JSON.stringify({ head: nextHead }), { status: 201 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+          throw new Error("deploy() should not push a migration when schemas are connected.");
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    const events: unknown[] = [];
+    const { deploy } = await import("./index.js");
+    const result = await deploy({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result.migration).toEqual({
+      status: "already-connected",
+      fromHash: previousSchemaHash,
+      toHash: nextSchemaHash,
+    });
+    expect(result.permissions?.previousHead).toEqual(previousHead);
+    expect(result.permissions?.head).toEqual(nextHead);
+    expect(events).toContainEqual({
+      type: "migration-skipped",
+      reason: "already-connected",
+      fromHash: previousSchemaHash,
+      toHash: nextSchemaHash,
+    });
+  });
+
   it("pushMigration publishes an inferred empty migration and emits a catalogue event", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
