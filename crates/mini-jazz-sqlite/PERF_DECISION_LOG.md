@@ -105,3 +105,16 @@ about 4.1 MB, 10k history rows, 100 tx records, and 5.7 s api-to-first-result to
 per hop dropped to roughly 10-12 ms. This is the strongest evidence so far that
 the embedded-DB shape can support the small-page-over-large-scope workload if
 query scopes encode observed page boundaries precisely.
+
+## 2026-05-26 21:30 PDT
+
+Extended the perf example with a cached-page reconnect/update phase: after the
+initial page is synced through core -> edge -> worker -> tab, core inserts 50
+newer owner rows and each tier refreshes observed query reads downstream.
+
+On the 100k-row / 10k-owner-row / page-50 profile, the refresh phase shipped 100
+history records from core: 50 new visible page rows plus 50 previously observed
+repair rows. It used 2 transaction records, 49 KB of bundle JSON, and about 103
+ms api-to-updated-result through all three hops. This confirms the repair shape
+is bounded by page size plus previously observed page size, not by matching
+predicate cardinality.

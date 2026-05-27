@@ -24,6 +24,7 @@ struct Config {
     target_owner_rows: usize,
     page_size: usize,
     seed_batch_size: usize,
+    refresh_new_top_rows: usize,
     durable_intermediaries: bool,
 }
 
@@ -34,6 +35,7 @@ impl Config {
             target_owner_rows: env_usize("MINI_JAZZ_PERF_TARGET_OWNER_ROWS", 10_000),
             page_size: env_usize("MINI_JAZZ_PERF_PAGE_SIZE", 50),
             seed_batch_size: env_usize("MINI_JAZZ_PERF_SEED_BATCH_SIZE", 100),
+            refresh_new_top_rows: env_usize("MINI_JAZZ_PERF_REFRESH_NEW_TOP_ROWS", 50),
             durable_intermediaries: env_bool("MINI_JAZZ_PERF_DURABLE_INTERMEDIARIES", true),
         }
     }
@@ -63,6 +65,23 @@ struct ScenarioReport {
     worker_to_tab_apply_ms: f64,
     tab_query_ms: f64,
     api_to_first_result_ms: f64,
+    refresh_after_new_top_rows: RefreshReport,
+}
+
+#[derive(Serialize)]
+struct RefreshReport {
+    inserted_rows: usize,
+    visible_rows_returned: usize,
+    history_rows_synced: usize,
+    transaction_rows_synced: usize,
+    observed_facts_synced: usize,
+    bundle_bytes: usize,
+    export_ms: f64,
+    core_to_edge_apply_ms: f64,
+    edge_to_worker_apply_ms: f64,
+    worker_to_tab_apply_ms: f64,
+    tab_query_ms: f64,
+    api_to_updated_result_ms: f64,
 }
 
 fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
@@ -134,6 +153,8 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         config.page_size,
     )?;
     let tab_query_elapsed = query_started.elapsed();
+    let refresh_after_new_top_rows =
+        run_refresh_after_new_top_rows(config, &mut core, &mut edge, &mut worker, &mut tab)?;
 
     let mut seed_rows_by_table = BTreeMap::new();
     seed_rows_by_table.insert("documents", config.total_rows);
@@ -172,6 +193,62 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
             + worker_apply_elapsed
             + tab_apply_elapsed
             + tab_query_elapsed),
+        refresh_after_new_top_rows,
+    })
+}
+
+fn run_refresh_after_new_top_rows(
+    config: &Config,
+    core: &mut Runtime,
+    edge: &mut Runtime,
+    worker: &mut Runtime,
+    tab: &mut Runtime,
+) -> BenchResult<RefreshReport> {
+    insert_new_top_documents(
+        core,
+        config.total_rows,
+        config.target_owner_rows,
+        config.refresh_new_top_rows,
+    )?;
+
+    let export_started = Instant::now();
+    let core_bundles = core.export_query_read_refreshes(&edge.observed_query_reads()?)?;
+    let export_elapsed = export_started.elapsed();
+    let core_summary = BundleBatchSummary::from(&core_bundles)?;
+
+    let edge_apply_elapsed = timed_apply_bundles(edge, core_bundles)?;
+    let edge_bundles = edge.export_query_read_refreshes(&worker.observed_query_reads()?)?;
+    let worker_apply_elapsed = timed_apply_bundles(worker, edge_bundles)?;
+    let worker_bundles = worker.export_query_read_refreshes(&tab.observed_query_reads()?)?;
+    let tab_apply_elapsed = timed_apply_bundles(tab, worker_bundles)?;
+
+    let query_started = Instant::now();
+    let rows = tab.read_rows_where_eq_top_field_desc(
+        "documents",
+        "owner_id",
+        json!(OWNER),
+        "updated_at",
+        config.page_size,
+    )?;
+    let tab_query_elapsed = query_started.elapsed();
+
+    Ok(RefreshReport {
+        inserted_rows: config.refresh_new_top_rows,
+        visible_rows_returned: rows.len(),
+        history_rows_synced: core_summary.history_rows,
+        transaction_rows_synced: core_summary.transaction_rows,
+        observed_facts_synced: core_summary.observed_facts,
+        bundle_bytes: core_summary.bytes,
+        export_ms: ms(export_elapsed),
+        core_to_edge_apply_ms: ms(edge_apply_elapsed),
+        edge_to_worker_apply_ms: ms(worker_apply_elapsed),
+        worker_to_tab_apply_ms: ms(tab_apply_elapsed),
+        tab_query_ms: ms(tab_query_elapsed),
+        api_to_updated_result_ms: ms(export_elapsed
+            + edge_apply_elapsed
+            + worker_apply_elapsed
+            + tab_apply_elapsed
+            + tab_query_elapsed),
     })
 }
 
@@ -204,6 +281,23 @@ fn seed_documents(
         }
         tx.commit()?;
     }
+    Ok(())
+}
+
+fn insert_new_top_documents(
+    runtime: &mut Runtime,
+    total_rows: usize,
+    target_owner_rows: usize,
+    count: usize,
+) -> Result<()> {
+    let mut tx = runtime.transaction();
+    for index in 0..count {
+        let row_index = total_rows + index;
+        let mut values = document_values(row_index, target_owner_rows);
+        values.insert("owner_id".to_owned(), json!(OWNER));
+        tx = tx.insert_row("documents", &format!("doc-refresh-new-{index}"), values);
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -248,10 +342,47 @@ impl BundleSummary {
     }
 }
 
+struct BundleBatchSummary {
+    bytes: usize,
+    history_rows: usize,
+    transaction_rows: usize,
+    observed_facts: usize,
+}
+
+impl BundleBatchSummary {
+    fn from(bundles: &[Bundle]) -> BenchResult<Self> {
+        let mut bytes = 0;
+        let mut history_rows = 0;
+        let mut transaction_rows = 0;
+        let mut observed_facts = 0;
+        for bundle in bundles {
+            bytes += serde_json::to_vec(bundle)?.len();
+            history_rows += bundle.history.len();
+            transaction_rows += bundle.txs.len();
+            observed_facts += bundle.query_reads.len();
+        }
+        Ok(Self {
+            bytes,
+            history_rows,
+            transaction_rows,
+            observed_facts,
+        })
+    }
+}
+
 fn timed(f: impl FnOnce() -> Result<()>) -> Result<Duration> {
     let started = Instant::now();
     f()?;
     Ok(started.elapsed())
+}
+
+fn timed_apply_bundles(runtime: &mut Runtime, bundles: Vec<Bundle>) -> Result<Duration> {
+    timed(|| {
+        for bundle in bundles {
+            runtime.apply_bundle(&bundle)?;
+        }
+        Ok(())
+    })
 }
 
 fn ms(duration: Duration) -> f64 {
