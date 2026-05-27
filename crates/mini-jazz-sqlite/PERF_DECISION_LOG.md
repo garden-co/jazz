@@ -1601,3 +1601,21 @@ Learning: the visible-row traversal is a rescue path for broad recursive reads,
 not a universal replacement. For tiny subtrees, the SQL CTE is clearly better.
 The likely product strategy is adaptive: use SQL CTE for narrow subtrees, use
 visible-row traversal or a closure/descendant index for broad observed trees.
+
+## 2026-05-27 02:13 PDT
+
+Added an opt-in `MINI_JAZZ_SQLITE_POLICY_FIRST_INDEXES=1` layout experiment
+that prefixes declared current-table indexes with
+`j_branch_num, is_deleted, j_created_by`.
+
+2k-node tree from root `folder-0`, default recursive SQL CTE:
+
+- default index shape direct read: ~741 ms
+- policy-first direct read: ~679 ms
+- default export: ~765 ms
+- policy-first export: ~696 ms
+- database size: ~528 KiB -> ~532 KiB
+
+Learning: policy-first indexes help a little, but only by roughly 8-9% in this
+shape. They are not the explanation for the 700 ms recursive CTE. The larger
+issue is still the recursive SQL/materialization strategy.

@@ -582,7 +582,9 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
             .map(|column| storage_column_name(column))
             .collect::<Vec<_>>()
             .join(", ");
-        let index_prefix = if env_bool("MINI_JAZZ_SQLITE_BRANCH_FIRST_INDEXES") {
+        let index_prefix = if env_bool("MINI_JAZZ_SQLITE_POLICY_FIRST_INDEXES") {
+            "j_branch_num, is_deleted, j_created_by"
+        } else if env_bool("MINI_JAZZ_SQLITE_BRANCH_FIRST_INDEXES") {
             "j_branch_num, is_deleted"
         } else {
             "is_deleted"
