@@ -1977,3 +1977,26 @@ The no-op poll cost is dominated by rerunning the recursive read over ~10k rows,
 not by constructing the semantic diff. Large-query subscriptions need an
 invalidation/version signal that can avoid rerunning the query at all when no
 possibly relevant transactions arrived.
+
+## 2026-05-27 03:11 PDT
+
+Ran a final default release harness after the overnight optimization slices.
+
+Selected default-scale numbers:
+
+- dashboard 50k / 48 owner-page queries: initial export ~21.8 ms, refresh export
+  ~26.1 ms, tab apply ~6.8 ms, refresh apply ~4.0 ms
+- recursive tree 2k: initial read ~5.3 ms, initial export ~23.5 ms, initial
+  apply ~28.7 ms
+- recursive tree 2k refresh: export ~24.1 ms, apply ~10.2 ms, poll ~6.2 ms
+- recursive tree 2k no-op refresh: export ~25.5 ms, apply ~9.8 ms, poll
+  ~5.7 ms
+- recursive topology 2k, core -> edge -> worker -> tab: initial apply per tier
+  ~27-31 ms; refresh apply per tier ~10-11 ms
+- process RSS over the full benchmark run: ~1.7 MiB start, ~64.3 MiB end
+
+Learning: the current prototype is now plausibly fast at the default synthetic
+scales, including whole-topology propagation. The remaining uncomfortable
+pattern is not ordinary page refresh or cold apply anymore; it is broad
+unchanged recursive scopes, where every tier still re-exports, re-applies, and
+re-polls thousands of rows to discover nothing changed.
