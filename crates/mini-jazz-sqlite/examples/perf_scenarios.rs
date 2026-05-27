@@ -304,6 +304,7 @@ struct BranchOverlayProbe {
     branch_bundle_bytes: usize,
     branch_history_rows: usize,
     branch_transaction_rows: usize,
+    export_profile: QueryExportProfile,
 }
 
 #[derive(Serialize)]
@@ -319,6 +320,7 @@ struct PinnedBranchSnapshotProbe {
     branch_bundle_bytes: usize,
     branch_history_rows: usize,
     branch_transaction_rows: usize,
+    export_profile: QueryExportProfile,
 }
 
 #[derive(Serialize)]
@@ -1157,7 +1159,13 @@ fn run_branch_overlay_probe() -> BenchResult<BranchOverlayProbe> {
     let branch_rows = read_top_owner_page(&runtime, page_size)?;
     let branch_query_elapsed = branch_query_started.elapsed();
     let branch_export_started = Instant::now();
-    let branch_bundle = export_top_owner_page(&mut runtime, page_size)?;
+    let (branch_bundle, export_profile) = runtime.profile_export_query_where_eq_top_field_desc(
+        "documents",
+        "owner_id",
+        json!(OWNER),
+        "updated_at",
+        page_size,
+    )?;
     let branch_export_elapsed = branch_export_started.elapsed();
     let branch_summary = BundleSummary::from(&branch_bundle)?;
 
@@ -1174,6 +1182,7 @@ fn run_branch_overlay_probe() -> BenchResult<BranchOverlayProbe> {
         branch_bundle_bytes: branch_summary.bytes,
         branch_history_rows: branch_bundle.history.len(),
         branch_transaction_rows: branch_bundle.txs.len(),
+        export_profile,
     })
 }
 
@@ -1246,7 +1255,13 @@ fn run_pinned_branch_snapshot_probe() -> BenchResult<PinnedBranchSnapshotProbe> 
     let branch_rows = read_top_owner_page(&runtime, page_size)?;
     let branch_query_elapsed = branch_query_started.elapsed();
     let branch_export_started = Instant::now();
-    let branch_bundle = export_top_owner_page(&mut runtime, page_size)?;
+    let (branch_bundle, export_profile) = runtime.profile_export_query_where_eq_top_field_desc(
+        "documents",
+        "owner_id",
+        json!(OWNER),
+        "updated_at",
+        page_size,
+    )?;
     let branch_export_elapsed = branch_export_started.elapsed();
     let branch_summary = BundleSummary::from(&branch_bundle)?;
 
@@ -1262,6 +1277,7 @@ fn run_pinned_branch_snapshot_probe() -> BenchResult<PinnedBranchSnapshotProbe> 
         branch_bundle_bytes: branch_summary.bytes,
         branch_history_rows: branch_bundle.history.len(),
         branch_transaction_rows: branch_bundle.txs.len(),
+        export_profile,
     })
 }
 

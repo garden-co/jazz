@@ -620,3 +620,23 @@ existing `(row_num, j_branch_num)` primary-key order. It saves disk for cached
 subsets without meaningful latency cost in the page workload. Keep branch-first
 current indexes and branch-first primary-key order as env experiments for now;
 they are not clearly better.
+
+## 2026-05-26 23:36 PDT
+
+Profiled pinned branch export and found a worse sync amplification than the
+history count alone suggested. A 50-row pinned page exported 150 history rows
+but 10,150 read rows because one globally accepted base transaction inserted
+10k rows, and exporting any writes from that tx pulled the whole transaction
+read set. That made the bundle about 1 MB even after history was scoped.
+
+Changed read-set export to keep absent-row reads only for `(tx, table, row)`
+keys that are also present in the exported history, while preserving non-absent
+reads. This keeps policy/update evidence but avoids unrelated create-absence
+reads from the same large transaction. The full whole-system suite remains
+green.
+
+Result: the pinned branch profiled bundle drops from about 1.0 MB / 10,150 read
+rows to about 57 KB / 150 read rows. Export time is still about 131 ms because
+the pinned branch query itself takes about 107 ms and `export_reads_for_history`
+still scans then filters the broad tx read set in Rust. The next pinned-branch
+work is SQL-lowered snapshot top-K plus SQL-filtered read-set export.

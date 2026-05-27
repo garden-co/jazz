@@ -4791,6 +4791,16 @@ fn export_reads_for_history(
     conn: &Connection,
     history: &[HistoryRecord],
 ) -> Result<Vec<ReadRecord>> {
+    let history_keys = history
+        .iter()
+        .map(|record| {
+            (
+                record.tx_id.as_str(),
+                record.table.as_str(),
+                record.row_id.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
     let mut tx_ids = history
         .iter()
         .map(|record| record.tx_id.clone())
@@ -4822,9 +4832,19 @@ fn export_reads_for_history(
             observed_tx_id: row.get(4)?,
         })
     })?;
-    records
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    let records = records
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|record| {
+            record.reason != read_set::REASON_ABSENT
+                || history_keys.contains(&(
+                    record.tx_id.as_str(),
+                    record.table.as_str(),
+                    record.row_id.as_str(),
+                ))
+        })
+        .collect();
+    Ok(records)
 }
 
 fn export_branch_records_for_history(
