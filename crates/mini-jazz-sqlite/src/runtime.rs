@@ -4249,10 +4249,59 @@ fn export_txs_for_query_scope(
     for tx_id in &rejected_tx_ids {
         needed_tx_ids.insert(tx_id.as_str());
     }
-    Ok(export_txs(conn)?
-        .into_iter()
-        .filter(|record| needed_tx_ids.contains(record.tx_id.as_str()))
-        .collect())
+    export_txs_by_ids(conn, needed_tx_ids)
+}
+
+fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<TxRecord>> {
+    if tx_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tx_ids = tx_ids.into_iter().collect::<Vec<_>>();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
+         FROM jazz_tx tx
+         JOIN jazz_node node ON node.node_num = tx.node_num
+         LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
+         WHERE tx.tx_id IN ({placeholders})
+         ORDER BY tx.tx_num",
+        placeholders = (0..tx_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))?;
+    let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
+        let tx_id = row.get::<_, String>(0)?;
+        let mut receipt_stmt = conn.prepare(
+            "SELECT receipt.tier
+             FROM jazz_tx_receipt receipt
+             JOIN jazz_tx tx ON tx.tx_num = receipt.tx_num
+             WHERE tx.tx_id = ?
+             ORDER BY receipt.tier",
+        )?;
+        let receipt_tiers = receipt_stmt
+            .query_map(params![tx_id], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(TxRecord {
+            tx_id,
+            node_id: row.get(1)?,
+            local_epoch: row.get(2)?,
+            global_epoch: row.get(3)?,
+            conflict_mode: row.get(4)?,
+            outcome: row.get(5)?,
+            auth_user: parse_tx_auth_user_for_sqlite(&row.get::<_, String>(9)?, 9)?,
+            rejection_code: row.get(6)?,
+            rejection_detail: row
+                .get::<_, Option<String>>(7)?
+                .map(|detail_json| parse_rejection_detail_for_sqlite(&detail_json, 7))
+                .transpose()?
+                .flatten(),
+            receipt_tiers,
+            created_at: row.get(8)?,
+        })
+    })?;
+    records
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {

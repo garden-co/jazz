@@ -158,3 +158,19 @@ policy-scoped 100k document + 100 org profile, raw serialized user values are
 about 9.9 MB and the core SQLite database is about 38 MB, roughly 3.8x raw JSON
 payload. This includes current projection, history tables, tx/read/query/system
 metadata, ids, indexes, and SQLite page overhead.
+
+## 2026-05-26 21:44 PDT
+
+Starting the autonomous overnight performance sprint. Timebox target is
+2026-05-27 03:44 PDT, six hours from the current timestamp. I will keep checking
+clock time with `date`, continue even at good stopping points, prefer concrete
+benchmark/implementation discoveries, and commit coherent green slices as I go.
+
+## 2026-05-26 21:45 PDT
+
+First export hot-path patch: query-scope tx export now fetches only tx ids needed
+by the scoped history/read set instead of exporting every local transaction and
+filtering in Rust. On the policy-scoped 100k/10k/page-50 profile, cold export
+moved from about 98 ms to about 88-90 ms in one run, with no bundle shape change.
+This is a modest win because the seed batch size is 100 (about 1k tx rows), but
+it should matter much more for workloads with one write call per row.
