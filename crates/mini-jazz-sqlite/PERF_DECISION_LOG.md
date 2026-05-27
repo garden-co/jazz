@@ -1529,3 +1529,31 @@ reopens the worker, then queries again.
 Learning: for the normal indexed page path, SQLite page-cache coldness and
 worker reopen are not scary at this scale. The dangerous path remains recursive
 tree reads/subscriptions, not ordinary durable restart.
+
+## 2026-05-27 02:04 PDT
+
+Ran the expanded full release harness after adding dashboard full-topology
+refresh, recursive tree subscriptions, raw closure comparison, and cold/reopen
+profiling.
+
+Key all-up sample:
+
+- primary 100k-row first page: ~10.3 ms
+- primary refresh: ~14.6 ms
+- dashboard initial core export: ~4.9 ms
+- dashboard full-topology refresh hop costs: core export ~6.3 ms, edge apply
+  ~7.4 ms, edge export ~5.5 ms, worker apply ~7.9 ms, worker export ~5.7 ms,
+  tab apply ~6.9 ms
+- recursive tree direct read: ~740 ms
+- recursive tree initial export: ~764 ms
+- recursive tree refresh export: ~780 ms
+- recursive tree subscription poll: ~766 ms
+- raw recursive CTE count: ~0.74 ms
+- raw closure query count: ~0.08 ms
+- cold/reopen ordinary page query: ~0.26 ms after worker reopen
+
+Learning: this is now a very clear split. The relational SQLite approach looks
+healthy for indexed page subscriptions and durable topology refresh. Recursive
+tree subscriptions are the one severe product-shaped gap, and the raw CTE
+comparison says the issue is in Jazz's full query/materialization/export shape,
+not in SQLite recursion as a primitive.
