@@ -2187,3 +2187,34 @@ Unsafe OFF/OFF:
 Learning: disabling SQLite durability only improved this workload by a few
 milliseconds. The hot costs are CPU/query/application mechanics, not fsync or WAL
 overhead. This is good news for keeping normal durable settings on edges/core.
+
+## 2026-05-27 03:22 PDT
+
+Re-read the final default harness storage-footprint probes.
+
+User id interning / row metadata:
+
+- 20k rows across 100 users with short user ids: DB ~6.63 MiB
+- same shape with long user ids: DB ~11.45 MiB
+- implied extra footprint from long ids: ~241 bytes/row
+
+Current projection tradeoff:
+
+- 100k rows + 10k updates with current projection: DB ~24.03 MiB, page query
+  ~0.062 ms
+- same logical shape history-only: DB ~13.41 MiB, page query ~0.087 ms
+- saved bytes without current projection: ~10.63 MiB
+- history-only page query slowdown in this synthetic case: ~1.4x, but still
+  sub-millisecond
+
+Raw recursive closure comparison at 2k rows:
+
+- edge-only adjacency table: ~90 KiB
+- closure table: ~344 KiB and ~11k closure rows
+- recursive CTE query ~0.72 ms; closure query ~0.08 ms
+
+Learning: interned identities matter a lot for disk when user ids are long.
+Current projection has real space cost, but the speed tradeoff still looks worth
+keeping for main-branch current reads. Closure tables are very fast but multiply
+storage; they should stay as targeted/derived acceleration, not the default
+recursive representation.
