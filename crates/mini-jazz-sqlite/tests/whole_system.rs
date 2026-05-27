@@ -14,6 +14,8 @@ mod branches;
 mod connection;
 #[path = "whole_system/generic_schema.rs"]
 mod generic_schema;
+#[path = "whole_system/group_visibility.rs"]
+mod group_visibility;
 #[path = "whole_system/invariant_coverage.rs"]
 mod invariant_coverage;
 #[path = "whole_system/policies.rs"]

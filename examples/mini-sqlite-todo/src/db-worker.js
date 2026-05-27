@@ -1,13 +1,75 @@
 import init, { MiniJazzRuntime } from "./generated/mini-jazz-sqlite-wasm/mini_jazz_sqlite_wasm.js";
 
-const PROJECT_ID = "todo-list";
 const PAGE_SIZE = 10;
+const GENERATED_PROJECT_COUNT = 240;
 const GENERATED_LABELS = ["work", "home", "urgent", "later", "bug", "idea", "docs", "release"];
 const SORT_COLUMNS = {
   date: "$createdAt",
   name: "title",
 };
+
+const USERS = [
+  { id: "user-alice", name: "Alice" },
+  { id: "user-bob", name: "Bob" },
+  { id: "user-cara", name: "Cara" },
+];
+
+const GROUPS = [
+  { id: "group-engineering", name: "Engineering" },
+  { id: "group-design", name: "Design" },
+  { id: "group-support", name: "Support" },
+];
+
+const GROUP_MEMBERS = [
+  { id: "group-member-alice-engineering", user: "user-alice", group: "group-engineering" },
+  { id: "group-member-alice-design", user: "user-alice", group: "group-design" },
+  { id: "group-member-bob-engineering", user: "user-bob", group: "group-engineering" },
+  { id: "group-member-cara-support", user: "user-cara", group: "group-support" },
+];
+
+const BASE_PROJECTS = [
+  {
+    id: "todo-list",
+    title: "Alice inbox",
+    members: ["user:user-alice"],
+  },
+  {
+    id: "project-launch-plan",
+    title: "Launch plan",
+    members: ["group:group-engineering"],
+  },
+  {
+    id: "project-design-polish",
+    title: "Design polish",
+    members: ["group:group-design"],
+  },
+  {
+    id: "project-bob-private",
+    title: "Bob private",
+    members: ["user:user-bob"],
+  },
+  {
+    id: "project-support-rotation",
+    title: "Support rotation",
+    members: ["group:group-support"],
+  },
+];
+
+const GENERATED_MEMBERS = [
+  "group:group-engineering",
+  "group:group-design",
+  "group:group-support",
+  "user:user-alice",
+  "user:user-bob",
+  "user:user-cara",
+];
+
+const SEED_USER_ID = "seed";
 let db;
+let dbName;
+let nodeId;
+let activeUserId = USERS[0].id;
+let selectedProjectId = null;
 let labelsById = new Map();
 let filters = {
   search: "",
@@ -20,17 +82,32 @@ self.onmessage = async ({ data }) => {
   try {
     if (data.type === "init") {
       await init();
-      db = await MiniJazzRuntime.openOpfs(data.dbName, data.nodeId, data.user);
-      if (!db.readRows("projects").some((row) => row.id === PROJECT_ID)) {
-        db.insertRow("projects", PROJECT_ID, { title: "Todo list" });
-      }
+      dbName = data.dbName;
+      nodeId = data.nodeId;
+      activeUserId = data.user ?? activeUserId;
+      await openDbAs(SEED_USER_ID, { trusted: true });
+      seedDirectory();
+      await openDbAs(activeUserId);
       refreshLabelCache();
+    } else if (data.type === "setUser") {
+      activeUserId = data.user;
+      selectedProjectId = null;
+      await openDbAs(activeUserId);
+      refreshLabelCache();
+      filters = sanitizeFilters(filters);
+    } else if (data.type === "setProject") {
+      selectedProjectId = data.projectId;
     } else if (data.type === "add") {
+      const scope = visibleScope();
+      const projectId = visibleProjectId(data.projectId ?? selectedProjectId, scope);
+      if (!projectId) {
+        throw new Error("No visible project selected");
+      }
       const id = `todo-${crypto.randomUUID()}`;
       db.insertRow("todos", id, {
         title: data.title,
         done: false,
-        project: PROJECT_ID,
+        project: projectId,
       });
       addTodoLabels(id, data.labels);
     } else if (data.type === "setFilters") {
@@ -38,13 +115,15 @@ self.onmessage = async ({ data }) => {
     } else if (data.type === "generate") {
       const startedAt = performance.now();
       ensureLabels(GENERATED_LABELS);
+      const projects = ensureGeneratedProjects();
       for (let i = 0; i < data.count; i++) {
-        const todoId = `todo-${crypto.randomUUID()}`;
+        const project = projects[i % projects.length];
+        const todoId = `todo-generated-${crypto.randomUUID()}`;
         const todoLabels = labelsForGeneratedTodo(i);
         db.insertRow("todos", todoId, {
           title: generatedTitle(i, todoLabels),
           done: false,
-          project: PROJECT_ID,
+          project: project.id,
         });
         addTodoLabels(todoId, todoLabels);
         if ((i + 1) % 1000 === 0) {
@@ -55,10 +134,14 @@ self.onmessage = async ({ data }) => {
       postState(performance.now() - startedAt);
       return;
     } else if (data.type === "toggle") {
-      db.updateRow("todos", data.id, { done: data.done });
+      if (visibleTodo(data.id)) {
+        db.updateRow("todos", data.id, { done: data.done });
+      }
     } else if (data.type === "delete") {
-      deleteTodoLabels(data.id);
-      db.deleteRow("todos", data.id);
+      if (visibleTodo(data.id)) {
+        deleteTodoLabels(data.id);
+        db.deleteRow("todos", data.id);
+      }
     }
     postState();
   } catch (error) {
@@ -66,28 +149,151 @@ self.onmessage = async ({ data }) => {
   }
 };
 
-function postState(generateMs) {
-  const startedAt = performance.now();
-  const todoIds = todoIdsForSelectedLabels(filters.labelIds);
-  let rows = [];
+async function openDbAs(userId, { trusted = false } = {}) {
+  db?.free?.();
+  db = trusted
+    ? await MiniJazzRuntime.openTrustedTodoOpfs(dbName, nodeId)
+    : await MiniJazzRuntime.openTodoOpfs(dbName, nodeId, userId);
+}
 
-  if (!todoIds || todoIds.length > 0) {
-    rows = db.query(buildTodoQuery(todoIds));
+function seedDirectory() {
+  refreshLabelCache();
+  const userIds = rowIds("users");
+  for (const user of USERS) {
+    insertMissing("users", user.id, { name: user.name }, userIds);
   }
-  const queryMs = performance.now() - startedAt;
 
+  const groupIds = rowIds("groups");
+  for (const group of GROUPS) {
+    insertMissing("groups", group.id, { name: group.name }, groupIds);
+  }
+
+  const groupMemberIds = rowIds("group_members");
+  for (const member of GROUP_MEMBERS) {
+    insertMissing(
+      "group_members",
+      member.id,
+      { user: member.user, group: member.group },
+      groupMemberIds,
+    );
+  }
+
+  const projectIds = rowIds("projects");
+  const projectMemberIds = rowIds("project_members");
+  for (const project of [...BASE_PROJECTS, ...generatedProjects()]) {
+    insertMissing("projects", project.id, { title: project.title }, projectIds);
+    ensureProjectMembers(project, projectMemberIds);
+  }
+
+  ensureLabels(GENERATED_LABELS);
+}
+
+function ensureGeneratedProjects() {
+  return generatedProjects();
+}
+
+function generatedProjects() {
+  const projects = [];
+  for (let i = 0; i < GENERATED_PROJECT_COUNT; i++) {
+    const member = GENERATED_MEMBERS[i % GENERATED_MEMBERS.length];
+    projects.push({
+      id: `project-generated-${String(i + 1).padStart(3, "0")}`,
+      title: `Generated ${String(i + 1).padStart(3, "0")}`,
+      members: [member],
+    });
+  }
+  return projects;
+}
+
+function ensureProjectMembers(project, projectMemberIds) {
+  for (const member of project.members) {
+    insertMissing(
+      "project_members",
+      `project-member-${project.id}-${slug(member)}`,
+      { project: project.id, member },
+      projectMemberIds,
+    );
+  }
+}
+
+function insertMissing(table, id, values, ids) {
+  if (ids.has(id)) return;
+  db.insertRow(table, id, values);
+  ids.add(id);
+}
+
+function rowIds(table) {
+  return new Set(db.readRows(table).map((row) => row.id));
+}
+
+function visibleScope() {
+  const startedAt = performance.now();
+  const projects = db
+    .query({
+      table: "projects",
+      orderBy: [["title", "asc"]],
+    })
+    .map((row) => ({ id: row.id, title: row.values.title }));
+  const groups = db
+    .query({
+      table: "groups",
+      orderBy: [["name", "asc"]],
+    })
+    .map((row) => ({ id: row.id, name: row.values.name }));
+  const projectIds = projects.map((project) => project.id);
+
+  return {
+    groups,
+    projects,
+    projectIds,
+    projectIdSet: new Set(projectIds),
+    visibilityMs: performance.now() - startedAt,
+  };
+}
+
+function visibleProjectId(candidate, scope) {
+  if (candidate && scope.projectIdSet.has(candidate)) return candidate;
+  return scope.projects[0]?.id ?? null;
+}
+
+function visibleTodo(id) {
+  return db.one({
+    table: "todos",
+    conditions: [{ column: "id", op: "eq", value: id }],
+  });
+}
+
+function postState(generateMs) {
+  const scope = visibleScope();
+  selectedProjectId = visibleProjectId(selectedProjectId, scope);
+
+  const todoStartedAt = performance.now();
+  const selectedTodoIds = todoIdsForSelectedLabels(filters.labelIds);
+  const rows = selectedTodoIds?.length === 0 ? [] : db.query(buildTodoQuery(selectedTodoIds));
+  const projectTitles = new Map(scope.projects.map((project) => [project.id, project.title]));
+  const todoLabels = labelsByTodoId(rows.map((row) => row.id));
   const todos = rows.map((row) => ({
     id: row.id,
     title: row.values.title,
     done: row.values.done,
+    projectId: row.values.project,
+    projectTitle: projectTitles.get(row.values.project) ?? row.values.project,
+    labels: todoLabels.get(row.id) ?? [],
     txId: row.tx_id,
   }));
+  const queryMs = performance.now() - todoStartedAt;
 
   postMessage({
     type: "state",
+    activeUserId,
+    users: USERS,
+    groups: scope.groups,
+    projects: scope.projects,
+    selectedProjectId,
     filters,
     labels: sortedLabels(),
     todos,
+    visibilityMs: scope.visibilityMs,
     queryMs,
     currentRows: db.storageStats().current_rows,
     generateMs,
@@ -95,7 +301,7 @@ function postState(generateMs) {
 }
 
 function buildTodoQuery(todoIds) {
-  const conditions = [];
+  const conditions = [{ column: "done", op: "eq", value: false }];
   const search = filters.search.trim();
 
   if (search) {
@@ -141,12 +347,10 @@ function ensureLabels(labelNames) {
   return labels;
 }
 
-function labelRow(row) {
-  return [row.id, { id: row.id, name: row.values.name }];
-}
-
 function refreshLabelCache() {
-  labelsById = new Map(db.readRows("labels").map(labelRow));
+  labelsById = new Map(
+    db.readRows("labels").map((row) => [row.id, { id: row.id, name: row.values.name }]),
+  );
 }
 
 function sortedLabels() {
@@ -161,6 +365,27 @@ function deleteTodoLabels(todoId) {
   })) {
     db.deleteRow("todo_labels", row.id);
   }
+}
+
+function labelsByTodoId(todoIds) {
+  const labels = new Map();
+  if (todoIds.length === 0) return labels;
+  const rows = db.query({
+    table: "todo_labels",
+    conditions: [{ column: "todo", op: "in", value: todoIds }],
+    includes: {},
+  });
+  for (const row of rows) {
+    const label = labelsById.get(row.values.label);
+    if (!label) continue;
+    const todoLabels = labels.get(row.values.todo) ?? [];
+    todoLabels.push(label);
+    labels.set(row.values.todo, todoLabels);
+  }
+  for (const todoLabels of labels.values()) {
+    todoLabels.sort((left, right) => left.name.localeCompare(right.name));
+  }
+  return labels;
 }
 
 function todoIdsForSelectedLabels(labelIds) {
@@ -226,4 +451,11 @@ function normalizeLabelName(value) {
 
 function labelIdForName(name) {
   return `label-${name}`;
+}
+
+function slug(value) {
+  return value
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
 }

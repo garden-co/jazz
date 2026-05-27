@@ -140,6 +140,17 @@ impl ReadVisibility<'_> {
                 "{alias}.j_created_by = (SELECT user_num FROM jazz_user WHERE user_id = '{}')",
                 self.user.replace('\'', "''")
             )),
+            PolicyDef::RowIdEqualsUser
+            | PolicyDef::UserRefEqualsSession { .. }
+            | PolicyDef::GroupMember
+            | PolicyDef::ProjectMember
+            | PolicyDef::ProjectRefMember { .. } => policy::branch_read_policy_sql_for_alias(
+                self.schema,
+                table,
+                alias,
+                self.user,
+                self.branch_num,
+            ),
             PolicyDef::RefReadable { field } => {
                 let field = table
                     .fields

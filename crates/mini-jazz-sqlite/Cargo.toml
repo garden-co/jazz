@@ -15,7 +15,10 @@ rusqlite = { version = "0.40", features = ["bundled", "limits"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
-rusqlite = { version = "0.40", default-features = false, features = ["ffi-sqlite-wasm-rs"] }
+rusqlite = { version = "0.40", default-features = false, features = [
+  "cache",
+  "ffi-sqlite-wasm-rs",
+] }
 
 [dev-dependencies]
 tempfile = "3"

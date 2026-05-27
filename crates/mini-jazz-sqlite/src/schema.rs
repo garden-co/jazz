@@ -18,8 +18,24 @@ impl SchemaDef {
 
     pub fn attempt3_fixture() -> Self {
         Self::new()
+            .table("users", |table| {
+                table.text("name");
+            })
+            .table("groups", |table| {
+                table.text("name");
+            })
+            .table("group_members", |table| {
+                table.ref_("user", "users");
+                table.ref_("group", "groups");
+                table.index("by_user", ["user", "group"]);
+            })
             .table("projects", |table| {
                 table.text("title");
+            })
+            .table("project_members", |table| {
+                table.ref_("project", "projects");
+                table.text("member");
+                table.index("by_member", ["member", "project"]);
             })
             .table("todos", |table| {
                 table.text("title");
@@ -28,6 +44,7 @@ impl SchemaDef {
                 table.index("open_created", ["done", "$createdAt"]);
                 table.index("created", ["$createdAt"]);
                 table.index("by_title", ["title"]);
+                table.index("open_visible", ["done", "project", "$createdAt"]);
             })
             .table("labels", |table| {
                 table.text("name");
@@ -38,6 +55,55 @@ impl SchemaDef {
                 table.ref_("label", "labels");
                 table.index("by_todo", ["todo"]);
                 table.index("by_label", ["label"]);
+            })
+    }
+
+    pub fn mini_sqlite_todo_fixture() -> Self {
+        Self::new()
+            .table("users", |table| {
+                table.text("name");
+                table.read_if_row_id_equals_user();
+            })
+            .table("groups", |table| {
+                table.text("name");
+                table.read_if_group_member();
+            })
+            .table("group_members", |table| {
+                table.ref_("user", "users");
+                table.ref_("group", "groups");
+                table.index("by_user", ["user", "group"]);
+                table.read_if_user_ref_equals_session("user");
+            })
+            .table("projects", |table| {
+                table.text("title");
+                table.read_if_project_member();
+            })
+            .table("project_members", |table| {
+                table.ref_("project", "projects");
+                table.text("member");
+                table.index("by_member", ["member", "project"]);
+                table.read_if_project_ref_member("project");
+            })
+            .table("todos", |table| {
+                table.text("title");
+                table.bool("done");
+                table.ref_("project", "projects");
+                table.index("open_created", ["done", "$createdAt"]);
+                table.index("created", ["$createdAt"]);
+                table.index("by_title", ["title"]);
+                table.index("open_visible", ["done", "project", "$createdAt"]);
+                table.read_if_ref_readable("project");
+            })
+            .table("labels", |table| {
+                table.text("name");
+                table.index("by_name", ["name"]);
+            })
+            .table("todo_labels", |table| {
+                table.ref_("todo", "todos");
+                table.ref_("label", "labels");
+                table.index("by_todo", ["todo"]);
+                table.index("by_label", ["label"]);
+                table.read_if_ref_readable("todo");
             })
     }
 
@@ -149,6 +215,15 @@ pub(crate) enum PolicyDef {
     #[default]
     AllowAll,
     CreatedByUser,
+    RowIdEqualsUser,
+    UserRefEqualsSession {
+        field: String,
+    },
+    GroupMember,
+    ProjectMember,
+    ProjectRefMember {
+        field: String,
+    },
     RefReadable {
         field: String,
     },
@@ -159,17 +234,32 @@ impl PolicyDef {
         match self {
             PolicyDef::AllowAll => "allow_all".to_owned(),
             PolicyDef::CreatedByUser => "created_by_user".to_owned(),
+            PolicyDef::RowIdEqualsUser => "row_id_equals_user".to_owned(),
+            PolicyDef::UserRefEqualsSession { field } => {
+                format!(
+                    "user_ref_equals_session:{}",
+                    storage_field_name(table, field)
+                )
+            }
+            PolicyDef::GroupMember => "group_member".to_owned(),
+            PolicyDef::ProjectMember => "project_member".to_owned(),
+            PolicyDef::ProjectRefMember { field } => {
+                format!("project_ref_member:{}", storage_field_name(table, field))
+            }
             PolicyDef::RefReadable { field } => {
-                let storage_field = table
-                    .fields
-                    .iter()
-                    .find(|candidate| candidate.name == *field)
-                    .map(|field| field.storage_name.as_str())
-                    .unwrap_or(field);
-                format!("ref_readable:{storage_field}")
+                format!("ref_readable:{}", storage_field_name(table, field))
             }
         }
     }
+}
+
+fn storage_field_name<'a>(table: &'a TableDef, field: &'a str) -> &'a str {
+    table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field)
+        .map(|field| field.storage_name.as_str())
+        .unwrap_or(field)
 }
 
 pub struct TableBuilder {
@@ -294,6 +384,30 @@ impl TableBuilder {
 
     pub fn read_if_created_by_user(&mut self) {
         self.table.read_policy = PolicyDef::CreatedByUser;
+    }
+
+    pub fn read_if_row_id_equals_user(&mut self) {
+        self.table.read_policy = PolicyDef::RowIdEqualsUser;
+    }
+
+    pub fn read_if_user_ref_equals_session(&mut self, field: &str) {
+        self.table.read_policy = PolicyDef::UserRefEqualsSession {
+            field: field.to_owned(),
+        };
+    }
+
+    pub fn read_if_group_member(&mut self) {
+        self.table.read_policy = PolicyDef::GroupMember;
+    }
+
+    pub fn read_if_project_member(&mut self) {
+        self.table.read_policy = PolicyDef::ProjectMember;
+    }
+
+    pub fn read_if_project_ref_member(&mut self, field: &str) {
+        self.table.read_policy = PolicyDef::ProjectRefMember {
+            field: field.to_owned(),
+        };
     }
 
     pub fn write_if_created_by_user(&mut self) {
@@ -498,8 +612,21 @@ fn validate_policy_cycle(
     policy: &PolicyDef,
     seen: &mut BTreeSet<String>,
 ) -> Result<()> {
-    let PolicyDef::RefReadable { field } = policy else {
-        return Ok(());
+    let field = match policy {
+        PolicyDef::RefReadable { field } => field,
+        PolicyDef::UserRefEqualsSession { field } => {
+            validate_policy_ref_field(schema, table, field, Some("users"))?;
+            return Ok(());
+        }
+        PolicyDef::ProjectRefMember { field } => {
+            validate_policy_ref_field(schema, table, field, Some("projects"))?;
+            return Ok(());
+        }
+        PolicyDef::AllowAll
+        | PolicyDef::CreatedByUser
+        | PolicyDef::RowIdEqualsUser
+        | PolicyDef::GroupMember
+        | PolicyDef::ProjectMember => return Ok(()),
     };
     if !seen.insert(table.name.clone()) {
         return Err(crate::Error::new(format!(
@@ -529,6 +656,40 @@ fn validate_policy_cycle(
     let result = validate_policy_cycle(schema, parent_table, &parent_table.read_policy, seen);
     seen.remove(&table.name);
     result
+}
+
+fn validate_policy_ref_field(
+    schema: &SchemaDef,
+    table: &TableDef,
+    field_name: &str,
+    expected_table: Option<&str>,
+) -> Result<()> {
+    let Some(field) = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field_name)
+    else {
+        return Err(crate::Error::new(format!(
+            "policy on {} references unknown field {}",
+            table.name, field_name
+        )));
+    };
+    let FieldKind::Ref { table: parent } = &field.kind else {
+        return Err(crate::Error::new(format!(
+            "policy on {} references non-ref field {}",
+            table.name, field.name
+        )));
+    };
+    schema.table_def(parent)?;
+    if let Some(expected_table) = expected_table {
+        if parent != expected_table {
+            return Err(crate::Error::new(format!(
+                "policy on {} expected {} to reference {}",
+                table.name, field.name, expected_table
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {

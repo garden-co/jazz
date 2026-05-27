@@ -2778,6 +2778,13 @@ impl Runtime {
             .read_rows_where_eq(table_name, field_name, value)
     }
 
+    pub(crate) fn debug_sql_for_built_query(
+        &self,
+        query: &BuiltQuery,
+    ) -> Result<query::SqliteQueryDebug> {
+        self.query_context().debug_sql_for_built_query(query)
+    }
+
     pub fn read_rows_where_contains(
         &self,
         table_name: &str,
@@ -6482,71 +6489,280 @@ fn export_policy_dependency_history(
     let conn = visibility.conn;
     let schema = visibility.schema;
     let table = schema.table_def(args.table_name)?;
-    let PolicyDef::RefReadable { field } = args.policy else {
-        return Ok(Vec::new());
-    };
-    let field = table
-        .fields
-        .iter()
-        .find(|candidate| candidate.name == *field)
-        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
-    let FieldKind::Ref {
-        table: parent_table,
-    } = &field.kind
-    else {
-        return Err(crate::Error::new(format!(
-            "policy field {} is not a ref",
-            field.name
-        )));
-    };
-    let policy_sql = if args.child_row_nums.is_some() {
-        "1 = 1".to_owned()
-    } else {
-        visibility.current_policy_sql(table, "current")?
-    };
-    let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    let row_nums = if let Some(child_row_nums) = args.child_row_nums {
-        scoped_policy_parent_row_nums(
-            conn,
-            args.table_name,
-            &ref_column,
-            args.branch_nums,
-            child_row_nums,
-        )?
-    } else {
-        let sql = format!(
-            "SELECT DISTINCT current.{ref_column}
-             FROM {} current
-             JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
-             WHERE current.is_deleted = 0
-               AND {}
-               AND current_tx.outcome != {}
-               AND {policy_sql}",
-            crate::schema::current_table(args.table_name),
-            branch_filter_sql("current", args.branch_nums),
-            tx::OUTCOME_REJECTED,
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, i64>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        rows
-    };
-    let mut records = if args.child_row_nums.is_some() {
-        export_history_versions_for_rows(conn, schema, parent_table, Some(&row_nums), None)?
-    } else {
-        export_visible_table_history(visibility, parent_table, args.branch_nums, Some(&row_nums))?
-    };
-    records.extend(export_policy_dependency_history(
+    match args.policy {
+        PolicyDef::AllowAll
+        | PolicyDef::CreatedByUser
+        | PolicyDef::RowIdEqualsUser
+        | PolicyDef::UserRefEqualsSession { .. } => Ok(Vec::new()),
+        PolicyDef::GroupMember => export_group_membership_policy_dependencies(visibility, args),
+        PolicyDef::ProjectMember => {
+            let project_row_nums = args.child_row_nums.map(|rows| rows.to_vec());
+            export_project_membership_policy_dependencies(visibility, args, project_row_nums)
+        }
+        PolicyDef::ProjectRefMember { field } => {
+            let field = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == *field)
+                .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+            let FieldKind::Ref {
+                table: parent_table,
+            } = &field.kind
+            else {
+                return Err(crate::Error::new(format!(
+                    "policy field {} is not a ref",
+                    field.name
+                )));
+            };
+            if parent_table != "projects" {
+                return Err(crate::Error::new(format!(
+                    "policy field {} must reference projects",
+                    field.name
+                )));
+            }
+            let project_row_nums = current_ref_row_nums_for_children(
+                conn,
+                args.table_name,
+                field,
+                args.branch_nums,
+                args.child_row_nums,
+            )?;
+            export_project_membership_policy_dependencies(visibility, args, Some(project_row_nums))
+        }
+        PolicyDef::RefReadable { field } => {
+            let field = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == *field)
+                .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+            let FieldKind::Ref {
+                table: parent_table,
+            } = &field.kind
+            else {
+                return Err(crate::Error::new(format!(
+                    "policy field {} is not a ref",
+                    field.name
+                )));
+            };
+            let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+            let policy_sql = if args.child_row_nums.is_some() {
+                "1 = 1".to_owned()
+            } else {
+                visibility.current_policy_sql(table, "current")?
+            };
+            let row_nums = if let Some(child_row_nums) = args.child_row_nums {
+                scoped_policy_parent_row_nums(
+                    conn,
+                    args.table_name,
+                    &ref_column,
+                    args.branch_nums,
+                    child_row_nums,
+                )?
+            } else {
+                let sql = format!(
+                    "SELECT DISTINCT current.{ref_column}
+                     FROM {} current
+                     JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+                     WHERE current.is_deleted = 0
+                       AND {}
+                       AND current_tx.outcome != {}
+                       AND {policy_sql}",
+                    crate::schema::current_table(args.table_name),
+                    branch_filter_sql("current", args.branch_nums),
+                    tx::OUTCOME_REJECTED,
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, i64>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                rows
+            };
+            let mut records = if args.child_row_nums.is_some() {
+                export_history_versions_for_rows(conn, schema, parent_table, Some(&row_nums), None)?
+            } else {
+                export_visible_table_history(
+                    visibility,
+                    parent_table,
+                    args.branch_nums,
+                    Some(&row_nums),
+                )?
+            };
+            records.extend(export_policy_dependency_history(
+                visibility,
+                PolicyDependencyExport {
+                    table_name: parent_table,
+                    policy: &schema.table_def(parent_table)?.read_policy,
+                    branch_nums: args.branch_nums,
+                    child_row_nums: Some(&row_nums),
+                },
+            )?);
+            Ok(records)
+        }
+    }
+}
+
+fn export_group_membership_policy_dependencies(
+    visibility: &ReadVisibility<'_>,
+    args: PolicyDependencyExport<'_>,
+) -> Result<Vec<HistoryRecord>> {
+    let member_row_nums = current_group_member_row_nums_for_groups(
+        visibility.conn,
+        visibility.user,
+        args.branch_nums,
+        args.child_row_nums,
+    )?;
+    export_visible_table_history(
         visibility,
-        PolicyDependencyExport {
-            table_name: parent_table,
-            policy: &schema.table_def(parent_table)?.read_policy,
-            branch_nums: args.branch_nums,
-            child_row_nums: Some(&row_nums),
-        },
+        "group_members",
+        args.branch_nums,
+        Some(&member_row_nums),
+    )
+}
+
+fn export_project_membership_policy_dependencies(
+    visibility: &ReadVisibility<'_>,
+    args: PolicyDependencyExport<'_>,
+    project_row_nums: Option<Vec<i64>>,
+) -> Result<Vec<HistoryRecord>> {
+    let project_row_nums_ref = project_row_nums.as_deref();
+    let project_member_row_nums = current_project_member_row_nums_for_projects(
+        visibility.conn,
+        args.branch_nums,
+        project_row_nums_ref,
+    )?;
+    let mut records = export_visible_table_history(
+        visibility,
+        "project_members",
+        args.branch_nums,
+        Some(&project_member_row_nums),
+    )?;
+    let group_member_row_nums =
+        current_group_member_row_nums_for_user(visibility.conn, visibility.user, args.branch_nums)?;
+    records.extend(export_visible_table_history(
+        visibility,
+        "group_members",
+        args.branch_nums,
+        Some(&group_member_row_nums),
     )?);
     Ok(records)
+}
+
+fn current_ref_row_nums_for_children(
+    conn: &Connection,
+    table_name: &str,
+    field: &FieldDef,
+    branch_nums: &[i64],
+    child_row_nums: Option<&[i64]>,
+) -> Result<Vec<i64>> {
+    let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let sql = format!(
+        "SELECT DISTINCT current.{ref_column}
+         FROM {} current
+         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+         WHERE current.is_deleted = 0
+           AND {}
+           AND {}
+           AND tx.outcome != {}",
+        crate::schema::current_table(table_name),
+        branch_filter_sql("current", branch_nums),
+        row_num_filter_sql("current", child_row_nums),
+        tx::OUTCOME_REJECTED,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_nums = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(row_nums)
+}
+
+fn current_group_member_row_nums_for_groups(
+    conn: &Connection,
+    user: &str,
+    branch_nums: &[i64],
+    group_row_nums: Option<&[i64]>,
+) -> Result<Vec<i64>> {
+    if matches!(group_row_nums, Some([])) {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT DISTINCT current.row_num
+         FROM {} current
+         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+         WHERE current.is_deleted = 0
+           AND {}
+           AND {}
+           AND current.user_row_num = (
+             SELECT row_num FROM jazz_row_id WHERE row_id = ?
+           )
+           AND tx.outcome != {}",
+        crate::schema::current_table("group_members"),
+        branch_filter_sql("current", branch_nums),
+        group_row_nums
+            .map(|row_nums| {
+                format!(
+                    "current.group_row_num IN ({})",
+                    row_nums
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .unwrap_or_else(|| "1 = 1".to_owned()),
+        tx::OUTCOME_REJECTED,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_nums = stmt
+        .query_map(params![user], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(row_nums)
+}
+
+fn current_group_member_row_nums_for_user(
+    conn: &Connection,
+    user: &str,
+    branch_nums: &[i64],
+) -> Result<Vec<i64>> {
+    current_group_member_row_nums_for_groups(conn, user, branch_nums, None)
+}
+
+fn current_project_member_row_nums_for_projects(
+    conn: &Connection,
+    branch_nums: &[i64],
+    project_row_nums: Option<&[i64]>,
+) -> Result<Vec<i64>> {
+    if matches!(project_row_nums, Some([])) {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT DISTINCT current.row_num
+         FROM {} current
+         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+         WHERE current.is_deleted = 0
+           AND {}
+           AND {}
+           AND tx.outcome != {}",
+        crate::schema::current_table("project_members"),
+        branch_filter_sql("current", branch_nums),
+        project_row_nums
+            .map(|row_nums| {
+                format!(
+                    "current.project_row_num IN ({})",
+                    row_nums
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .unwrap_or_else(|| "1 = 1".to_owned()),
+        tx::OUTCOME_REJECTED,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_nums = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(row_nums)
 }
 
 fn export_policy_dependency_history_for_query_scope(
@@ -7729,6 +7945,10 @@ fn history_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
         Some(row_nums) => format!("{alias}.row_num IN ({})", integer_list_sql(row_nums)),
         None => "1 = 1".to_owned(),
     }
+}
+
+fn row_num_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
+    history_row_filter_sql(alias, row_nums)
 }
 
 fn history_branch_filter_sql(alias: &str, branch_nums: Option<&[i64]>) -> String {

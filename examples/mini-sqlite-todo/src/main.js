@@ -3,6 +3,11 @@ const worker = new Worker(new URL("./db-worker.js", import.meta.url), { type: "m
 const state = {
   ready: false,
   generating: false,
+  users: [],
+  groups: [],
+  projects: [],
+  activeUserId: "user-alice",
+  selectedProjectId: null,
   todos: [],
   labels: [],
   filters: {
@@ -16,6 +21,7 @@ const state = {
   totalToGenerate: 100000,
   generateMs: 0,
   queryMs: 0,
+  visibilityMs: 0,
   currentRows: 0,
 };
 let searchTimer = 0;
@@ -25,10 +31,21 @@ app.innerHTML = `
     <header class="app-header">
       <div>
         <p class="eyebrow">mini-jazz-sqlite WASM</p>
-        <h1>Todos</h1>
+        <h1>Group-scoped todos</h1>
       </div>
       <p id="status" class="status" role="status"></p>
     </header>
+    <div class="scope-controls">
+      <label class="field">
+        <span>User</span>
+        <select id="user-select"></select>
+      </label>
+      <label class="field">
+        <span>Project</span>
+        <select id="project-select"></select>
+      </label>
+      <div id="group-list" class="group-list" aria-label="Groups"></div>
+    </div>
     <form id="todo-form" class="todo-form">
       <input id="todo-title" name="title" type="text" autocomplete="off" placeholder="Add a task" required />
       <input id="todo-labels" name="labels" type="text" autocomplete="off" placeholder="labels: work, urgent" />
@@ -52,10 +69,10 @@ app.innerHTML = `
       </label>
     </div>
     <div id="label-filters" class="label-filters" aria-label="Label filters"></div>
-    <button id="generate" class="generate" type="button">Generate 100k todos</button>
+    <button id="generate" class="generate" type="button">Generate 100k scoped todos</button>
     <p id="error-message" class="error-message" role="alert" hidden></p>
     <ul id="todo-list" class="todo-list"></ul>
-    <p id="empty-state" class="empty-state">No matching todos.</p>
+    <p id="empty-state" class="empty-state">No visible open todos.</p>
     <p id="summary" class="summary"></p>
   </section>
 `;
@@ -69,12 +86,19 @@ const sortDir = app.querySelector("#sort-dir");
 const labelFilters = app.querySelector("#label-filters");
 const list = app.querySelector("#todo-list");
 const generate = app.querySelector("#generate");
+const userSelect = app.querySelector("#user-select");
+const projectSelect = app.querySelector("#project-select");
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   const title = titleInput.value.trim();
-  if (!title || !state.ready) return;
-  worker.postMessage({ type: "add", title, labels: parseLabels(labelsInput.value) });
+  if (!title || !state.ready || !state.selectedProjectId) return;
+  worker.postMessage({
+    type: "add",
+    title,
+    labels: parseLabels(labelsInput.value),
+    projectId: state.selectedProjectId,
+  });
   titleInput.value = "";
   labelsInput.value = "";
 });
@@ -115,6 +139,16 @@ labelFilters.addEventListener("click", (event) => {
   setFilters({ labelIds: [...labelIds] });
 });
 
+userSelect.addEventListener("change", () => {
+  if (!state.ready || state.generating) return;
+  worker.postMessage({ type: "setUser", user: userSelect.value });
+});
+
+projectSelect.addEventListener("change", () => {
+  if (!state.ready || state.generating) return;
+  worker.postMessage({ type: "setProject", projectId: projectSelect.value });
+});
+
 list.addEventListener("change", (event) => {
   const target = event.target;
   if (target.dataset.role !== "toggle") return;
@@ -130,9 +164,15 @@ list.addEventListener("click", (event) => {
 worker.onmessage = ({ data }) => {
   if (data.type === "state") {
     state.ready = true;
+    state.users = data.users;
+    state.groups = data.groups;
+    state.projects = data.projects;
+    state.activeUserId = data.activeUserId;
+    state.selectedProjectId = data.selectedProjectId;
     state.todos = data.todos;
     state.labels = data.labels;
     state.filters = data.filters;
+    state.visibilityMs = data.visibilityMs;
     state.queryMs = data.queryMs;
     state.currentRows = data.currentRows;
     state.generateMs = data.generateMs ?? state.generateMs;
@@ -153,9 +193,9 @@ addEventListener("pagehide", () => worker.terminate());
 
 worker.postMessage({
   type: "init",
-  dbName: "mini-jazz-sqlite-labeled-todos.sqlite3",
+  dbName: "mini-jazz-sqlite-group-label-todos.sqlite3",
   nodeId: "browser-worker",
-  user: "alice",
+  user: "user-alice",
 });
 render();
 
@@ -170,10 +210,23 @@ function render() {
   app.querySelector("#status").textContent = state.ready ? statusText() : "Opening OPFS worker...";
 
   for (const control of [titleInput, labelsInput, searchInput, sortField, sortDir]) {
-    control.disabled = !state.ready || state.generating;
+    control.disabled =
+      !state.ready || state.generating || (control === titleInput && !state.selectedProjectId);
   }
-  form.querySelector("button").disabled = !state.ready || state.generating;
+  labelsInput.disabled = !state.ready || state.generating || !state.selectedProjectId;
+  form.querySelector("button").disabled =
+    !state.ready || state.generating || !state.selectedProjectId;
   generate.disabled = !state.ready || state.generating;
+  userSelect.disabled = !state.ready || state.generating;
+  projectSelect.disabled = !state.ready || state.generating || state.projects.length === 0;
+
+  userSelect.innerHTML = state.users.map(userOptionHtml).join("");
+  userSelect.value = state.activeUserId;
+
+  projectSelect.innerHTML = state.projects.map(projectOptionHtml).join("");
+  projectSelect.value = state.selectedProjectId ?? "";
+
+  app.querySelector("#group-list").innerHTML = groupListHtml();
   searchInput.value = state.filters.search;
   sortField.value = state.filters.sortField;
   sortDir.value = state.filters.sortDir;
@@ -186,13 +239,13 @@ function render() {
   list.innerHTML = state.todos.map(todoHtml).join("");
   app.querySelector("#empty-state").hidden = state.todos.length > 0;
 
-  const done = state.todos.filter((todo) => todo.done).length;
-  const filters = filterSummary();
   app.querySelector("#summary").textContent =
-    `${state.todos.length - done} open / ${done} done shown. ` +
+    `${state.todos.length} open todos shown. ` +
+    `${state.projects.length.toLocaleString()} visible projects. ` +
     `${state.currentRows.toLocaleString()} current rows. ` +
+    `Access: ${state.visibilityMs.toFixed(2)} ms. ` +
     `Top-10 query: ${state.queryMs.toFixed(2)} ms. ` +
-    `${filters}` +
+    `${filterSummary()}` +
     (state.generateMs ? ` Generate: ${(state.generateMs / 1000).toFixed(2)} s.` : "");
 }
 
@@ -210,6 +263,21 @@ function filterSummary() {
   return `Filters: ${parts.join(", ")}.`;
 }
 
+function userOptionHtml(user) {
+  return `<option value="${escapeAttr(user.id)}">${escapeHtml(user.name)}</option>`;
+}
+
+function projectOptionHtml(project) {
+  return `<option value="${escapeAttr(project.id)}">${escapeHtml(project.title)}</option>`;
+}
+
+function groupListHtml() {
+  if (!state.groups.length) return `<span class="group-chip muted">No groups</span>`;
+  return state.groups
+    .map((group) => `<span class="group-chip">${escapeHtml(group.name)}</span>`)
+    .join("");
+}
+
 function labelFilterHtml(label) {
   const selected = state.filters.labelIds.includes(label.id);
   return `
@@ -220,11 +288,18 @@ function labelFilterHtml(label) {
 }
 
 function todoHtml(todo) {
+  const labelHtml = todo.labels.length
+    ? `<span class="todo-tags">${todo.labels.map((label) => `<span>${escapeHtml(label.name)}</span>`).join("")}</span>`
+    : "";
   return `
     <li class="todo-item ${todo.done ? "done" : ""}">
       <label class="todo-label">
         <input type="checkbox" data-role="toggle" data-id="${escapeAttr(todo.id)}" ${todo.done ? "checked" : ""}>
-        <span>${escapeHtml(todo.title)}</span>
+        <span>
+          <strong>${escapeHtml(todo.title)}</strong>
+          <small>${escapeHtml(todo.projectTitle)}</small>
+          ${labelHtml}
+        </span>
       </label>
       <button type="button" data-role="delete" data-id="${escapeAttr(todo.id)}">Delete</button>
     </li>

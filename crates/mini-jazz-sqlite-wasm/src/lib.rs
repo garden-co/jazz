@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, Storage};
+use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, SchemaDef, Storage};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 #[wasm_bindgen(start)]
 pub fn install_panic_hook() {
@@ -55,6 +56,29 @@ impl MiniJazzRuntime {
             .map_err(to_js_error)
     }
 
+    #[wasm_bindgen(js_name = openTodoMemory)]
+    pub fn open_todo_memory(node_id: &str, user: &str) -> Result<MiniJazzRuntime, JsValue> {
+        Runtime::open_with_schema(
+            Storage::Memory,
+            node_id,
+            user,
+            SchemaDef::mini_sqlite_todo_fixture(),
+        )
+        .map(MiniJazzRuntime::new)
+        .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = openTrustedTodoMemory)]
+    pub fn open_trusted_todo_memory(node_id: &str) -> Result<MiniJazzRuntime, JsValue> {
+        Runtime::open_trusted_with_schema(
+            Storage::Memory,
+            node_id,
+            SchemaDef::mini_sqlite_todo_fixture(),
+        )
+        .map(MiniJazzRuntime::new)
+        .map_err(to_js_error)
+    }
+
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openOpfs)]
     pub async fn open_opfs(
@@ -62,19 +86,47 @@ impl MiniJazzRuntime {
         node_id: &str,
         user: &str,
     ) -> Result<MiniJazzRuntime, JsValue> {
-        let pool_name = opfs_pool_name(db_name);
-        let pool_directory = format!(".{pool_name}");
-        let config = sqlite_wasm_vfs::sahpool::OpfsSAHPoolCfgBuilder::new()
-            .vfs_name(&pool_name)
-            .directory(&pool_directory)
-            .build();
-        sqlite_wasm_vfs::sahpool::install::<sqlite_wasm_rs::WasmOsCallback>(&config, true)
-            .await
-            .map_err(|error| JsValue::from_str(&format!("install OPFS SQLite VFS: {error}")))?;
+        install_opfs_vfs(db_name).await?;
 
         Runtime::open(Storage::File(db_name.into()), node_id, user)
             .map(MiniJazzRuntime::new)
             .map_err(to_js_error)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openTodoOpfs)]
+    pub async fn open_todo_opfs(
+        db_name: &str,
+        node_id: &str,
+        user: &str,
+    ) -> Result<MiniJazzRuntime, JsValue> {
+        install_opfs_vfs(db_name).await?;
+
+        Runtime::open_with_schema(
+            Storage::File(db_name.into()),
+            node_id,
+            user,
+            SchemaDef::mini_sqlite_todo_fixture(),
+        )
+        .map(MiniJazzRuntime::new)
+        .map_err(to_js_error)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openTrustedTodoOpfs)]
+    pub async fn open_trusted_todo_opfs(
+        db_name: &str,
+        node_id: &str,
+    ) -> Result<MiniJazzRuntime, JsValue> {
+        install_opfs_vfs(db_name).await?;
+
+        Runtime::open_trusted_with_schema(
+            Storage::File(db_name.into()),
+            node_id,
+            SchemaDef::mini_sqlite_todo_fixture(),
+        )
+        .map(MiniJazzRuntime::new)
+        .map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = insertRow)]
@@ -119,20 +171,16 @@ impl MiniJazzRuntime {
 
     #[wasm_bindgen(js_name = query)]
     pub fn query(&self, query: JsValue) -> Result<JsValue, JsValue> {
-        to_js_value(
-            self.runtime
-                .query(parse_built_query(query)?)
-                .map_err(to_js_error)?,
-        )
+        let query = parse_built_query(query)?;
+        log_sqlite_query("query", self.runtime.debug_query_sql(&query).ok());
+        to_js_value(self.runtime.query(query).map_err(to_js_error)?)
     }
 
     #[wasm_bindgen(js_name = one)]
     pub fn one(&self, query: JsValue) -> Result<JsValue, JsValue> {
-        to_js_value(
-            self.runtime
-                .one(parse_built_query(query)?)
-                .map_err(to_js_error)?,
-        )
+        let query = parse_built_query(query)?;
+        log_sqlite_query("one", self.runtime.debug_query_sql(&query).ok());
+        to_js_value(self.runtime.one(query).map_err(to_js_error)?)
     }
 
     #[wasm_bindgen(js_name = subscribe)]
@@ -141,10 +189,9 @@ impl MiniJazzRuntime {
         query: JsValue,
         callback: js_sys::Function,
     ) -> Result<u32, JsValue> {
-        let subscription = self
-            .runtime
-            .subscribe_query(parse_built_query(query)?)
-            .map_err(to_js_error)?;
+        let query = parse_built_query(query)?;
+        log_sqlite_query("subscribe", self.runtime.debug_query_sql(&query).ok());
+        let subscription = self.runtime.subscribe_query(query).map_err(to_js_error)?;
         let initial = subscription.initial_delta();
         let initial = to_js_value(initial)?;
         let id = self.next_subscription_id;
@@ -292,6 +339,32 @@ impl MiniJazzRuntime {
             None => Ok(()),
         }
     }
+}
+
+fn log_sqlite_query(operation: &str, debug: Option<mini_jazz_sqlite::SqliteQueryDebug>) {
+    let Some(debug) = debug else {
+        return;
+    };
+    let Ok(value) = to_js_value(debug) else {
+        return;
+    };
+    let global = js_sys::global();
+    let Ok(console) = js_sys::Reflect::get(&global, &JsValue::from_str("console")) else {
+        return;
+    };
+    let method = js_sys::Reflect::get(&console, &JsValue::from_str("debug"))
+        .or_else(|_| js_sys::Reflect::get(&console, &JsValue::from_str("log")));
+    let Ok(method) = method else {
+        return;
+    };
+    let Ok(method) = method.dyn_into::<js_sys::Function>() else {
+        return;
+    };
+    let _ = method.call2(
+        &console,
+        &JsValue::from_str(&format!("[mini-jazz-sqlite] {operation} SQL")),
+        &value,
+    );
 }
 
 fn parse_values(value: JsValue) -> Result<BTreeMap<String, JsonValue>, JsValue> {
@@ -660,6 +733,20 @@ mod tests {
         let rows: js_sys::Array = runtime.read_rows("projects").unwrap().dyn_into().unwrap();
         assert_eq!(rows.length(), 2);
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn install_opfs_vfs(db_name: &str) -> Result<(), JsValue> {
+    let pool_name = opfs_pool_name(db_name);
+    let pool_directory = format!(".{pool_name}");
+    let config = sqlite_wasm_vfs::sahpool::OpfsSAHPoolCfgBuilder::new()
+        .vfs_name(&pool_name)
+        .directory(&pool_directory)
+        .build();
+    sqlite_wasm_vfs::sahpool::install::<sqlite_wasm_rs::WasmOsCallback>(&config, true)
+        .await
+        .map_err(|error| JsValue::from_str(&format!("install OPFS SQLite VFS: {error}")))?;
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -35,6 +35,138 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
             )?;
             Ok(count > 0)
         }
+        PolicyDef::RowIdEqualsUser => {
+            Ok(crate::rows::public_row_id(check.db, check.row_num)? == check.user)
+        }
+        PolicyDef::UserRefEqualsSession { field } => {
+            let field_def = check
+                .table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == *field)
+                .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+            let FieldKind::Ref { table } = &field_def.kind else {
+                return Err(crate::Error::new(format!(
+                    "policy field {} is not a ref",
+                    field_def.name
+                )));
+            };
+            if table != "users" {
+                return Err(crate::Error::new(format!(
+                    "policy field {} must reference users",
+                    field_def.name
+                )));
+            }
+            Ok(check
+                .values
+                .get(field)
+                .or_else(|| check.values.get(&field_def.storage_name))
+                .and_then(JsonValue::as_str)
+                == Some(check.user))
+        }
+        PolicyDef::GroupMember => {
+            let policy_sql = current_group_member_policy_sql(
+                "current.row_num",
+                check.user,
+                Some(check.branch_num),
+                0,
+            );
+            let count: i64 = check.db.query_row(
+                &format!(
+                    "SELECT COUNT(*)
+                     FROM {} current
+                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                     WHERE current.row_num = ?
+                       AND {}
+                       AND current.is_deleted = 0
+                       AND tx.outcome != {}
+                       AND {policy_sql}",
+                    crate::schema::current_table(&check.table.name),
+                    effective_branch_sql("current", &check.table.name, check.branch_num),
+                    tx::OUTCOME_REJECTED,
+                ),
+                params![check.row_num],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        }
+        PolicyDef::ProjectMember => {
+            let policy_sql = current_project_member_policy_sql(
+                "current.row_num",
+                check.user,
+                Some(check.branch_num),
+                0,
+            );
+            let count: i64 = check.db.query_row(
+                &format!(
+                    "SELECT COUNT(*)
+                     FROM {} current
+                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                     WHERE current.row_num = ?
+                       AND {}
+                       AND current.is_deleted = 0
+                       AND tx.outcome != {}
+                       AND {policy_sql}",
+                    crate::schema::current_table(&check.table.name),
+                    effective_branch_sql("current", &check.table.name, check.branch_num),
+                    tx::OUTCOME_REJECTED,
+                ),
+                params![check.row_num],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        }
+        PolicyDef::ProjectRefMember { field } => {
+            let field_def = check
+                .table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == *field)
+                .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+            let FieldKind::Ref { table } = &field_def.kind else {
+                return Err(crate::Error::new(format!(
+                    "policy field {} is not a ref",
+                    field_def.name
+                )));
+            };
+            if table != "projects" {
+                return Err(crate::Error::new(format!(
+                    "policy field {} must reference projects",
+                    field_def.name
+                )));
+            }
+            let project_id = check
+                .values
+                .get(field)
+                .or_else(|| check.values.get(&field_def.storage_name))
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| crate::Error::new(format!("expected ref id for {field}")))?;
+            let project_row_num = crate::rows::row_num(check.db, project_id)?;
+            let policy_sql = current_project_member_policy_sql(
+                "current.row_num",
+                check.user,
+                Some(check.branch_num),
+                0,
+            );
+            let count: i64 = check.db.query_row(
+                &format!(
+                    "SELECT COUNT(*)
+                     FROM {} current
+                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                     WHERE current.row_num = ?
+                       AND {}
+                       AND current.is_deleted = 0
+                       AND tx.outcome != {}
+                       AND {policy_sql}",
+                    crate::schema::current_table("projects"),
+                    effective_branch_sql("current", "projects", check.branch_num),
+                    tx::OUTCOME_REJECTED,
+                ),
+                params![project_row_num],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        }
         PolicyDef::RefReadable { field } => {
             let field_def = check
                 .table
@@ -192,6 +324,184 @@ fn effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> Strin
     )
 }
 
+fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn user_row_num_subquery(user: &str) -> String {
+    format!(
+        "SELECT row_num FROM jazz_row_id WHERE row_id = {}",
+        sql_literal(user)
+    )
+}
+
+fn row_id_equals_user_sql(alias: &str, user: &str) -> String {
+    format!("{alias}.row_num = ({})", user_row_num_subquery(user))
+}
+
+fn current_user_ref_equals_session_sql(
+    table: &TableDef,
+    alias: &str,
+    field_name: &str,
+    user: &str,
+) -> Result<String> {
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field_name)
+        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field_name}")))?;
+    let FieldKind::Ref { table } = &field.kind else {
+        return Err(crate::Error::new(format!(
+            "policy field {} is not a ref",
+            field.name
+        )));
+    };
+    if table != "users" {
+        return Err(crate::Error::new(format!(
+            "policy field {} must reference users",
+            field.name
+        )));
+    }
+    Ok(format!(
+        "{alias}.{} = ({})",
+        crate::schema::quote_ident(&crate::schema::storage_column(field)),
+        user_row_num_subquery(user)
+    ))
+}
+
+fn current_project_ref_member_sql(
+    table: &TableDef,
+    alias: &str,
+    field_name: &str,
+    user: &str,
+    branch_num: Option<i64>,
+    depth: usize,
+) -> Result<String> {
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field_name)
+        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field_name}")))?;
+    let FieldKind::Ref { table } = &field.kind else {
+        return Err(crate::Error::new(format!(
+            "policy field {} is not a ref",
+            field.name
+        )));
+    };
+    if table != "projects" {
+        return Err(crate::Error::new(format!(
+            "policy field {} must reference projects",
+            field.name
+        )));
+    }
+    Ok(current_project_member_policy_sql(
+        &format!(
+            "{alias}.{}",
+            crate::schema::quote_ident(&crate::schema::storage_column(field))
+        ),
+        user,
+        branch_num,
+        depth,
+    ))
+}
+
+fn current_group_member_policy_sql(
+    group_row_expr: &str,
+    user: &str,
+    branch_num: Option<i64>,
+    depth: usize,
+) -> String {
+    let member_alias = format!("policy_group_member_{depth}");
+    let member_tx_alias = format!("policy_group_member_tx_{depth}");
+    let branch_filter = branch_num
+        .map(|branch_num| {
+            format!(
+                "AND {}",
+                effective_branch_sql(&member_alias, "group_members", branch_num)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "EXISTS (
+           SELECT 1
+           FROM {} {member_alias}
+           JOIN jazz_tx {member_tx_alias}
+             ON {member_tx_alias}.tx_num = {member_alias}.visible_tx_num
+           WHERE {member_alias}.group_row_num = {group_row_expr}
+             AND {member_alias}.user_row_num = ({})
+             {branch_filter}
+             AND {member_alias}.is_deleted = 0
+             AND {member_tx_alias}.outcome != {}
+         )",
+        crate::schema::current_table("group_members"),
+        user_row_num_subquery(user),
+        tx::OUTCOME_REJECTED,
+    )
+}
+
+fn current_project_member_policy_sql(
+    project_row_expr: &str,
+    user: &str,
+    branch_num: Option<i64>,
+    depth: usize,
+) -> String {
+    let project_member_alias = format!("policy_project_member_{depth}");
+    let project_member_tx_alias = format!("policy_project_member_tx_{depth}");
+    let group_member_alias = format!("policy_project_group_member_{depth}");
+    let group_member_tx_alias = format!("policy_project_group_member_tx_{depth}");
+    let group_ids_alias = format!("policy_project_group_ids_{depth}");
+    let project_member_branch_filter = branch_num
+        .map(|branch_num| {
+            format!(
+                "AND {}",
+                effective_branch_sql(&project_member_alias, "project_members", branch_num)
+            )
+        })
+        .unwrap_or_default();
+    let group_member_branch_filter = branch_num
+        .map(|branch_num| {
+            format!(
+                "AND {}",
+                effective_branch_sql(&group_member_alias, "group_members", branch_num)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "EXISTS (
+           SELECT 1
+           FROM {} {project_member_alias}
+           JOIN jazz_tx {project_member_tx_alias}
+             ON {project_member_tx_alias}.tx_num = {project_member_alias}.visible_tx_num
+           WHERE {project_member_alias}.project_row_num = {project_row_expr}
+             {project_member_branch_filter}
+             AND {project_member_alias}.is_deleted = 0
+             AND {project_member_tx_alias}.outcome != {}
+             AND (
+               {project_member_alias}.member = {}
+               OR EXISTS (
+                 SELECT 1
+                 FROM {} {group_member_alias}
+                 JOIN jazz_tx {group_member_tx_alias}
+                   ON {group_member_tx_alias}.tx_num = {group_member_alias}.visible_tx_num
+                 JOIN jazz_row_id {group_ids_alias}
+                   ON {group_ids_alias}.row_num = {group_member_alias}.group_row_num
+                 WHERE {group_member_alias}.user_row_num = ({})
+                   {group_member_branch_filter}
+                   AND {group_member_alias}.is_deleted = 0
+                   AND {group_member_tx_alias}.outcome != {}
+                   AND {project_member_alias}.member = ('group:' || {group_ids_alias}.row_id)
+               )
+             )
+         )",
+        crate::schema::current_table("project_members"),
+        tx::OUTCOME_REJECTED,
+        sql_literal(&format!("user:{user}")),
+        crate::schema::current_table("group_members"),
+        user_row_num_subquery(user),
+        tx::OUTCOME_REJECTED,
+    )
+}
+
 pub(crate) fn branch_read_policy_sql_for_alias(
     schema: &SchemaDef,
     table: &TableDef,
@@ -246,6 +556,25 @@ fn lower_policy(
             "{alias}.j_created_by = (SELECT user_num FROM jazz_user WHERE user_id = '{}')",
             user.replace('\'', "''")
         )),
+        PolicyDef::RowIdEqualsUser => Ok(row_id_equals_user_sql(alias, user)),
+        PolicyDef::UserRefEqualsSession { field } => {
+            current_user_ref_equals_session_sql(table, alias, field, user)
+        }
+        PolicyDef::GroupMember => Ok(current_group_member_policy_sql(
+            &format!("{alias}.row_num"),
+            user,
+            branch_num,
+            depth,
+        )),
+        PolicyDef::ProjectMember => Ok(current_project_member_policy_sql(
+            &format!("{alias}.row_num"),
+            user,
+            branch_num,
+            depth,
+        )),
+        PolicyDef::ProjectRefMember { field } => {
+            current_project_ref_member_sql(table, alias, field, user, branch_num, depth)
+        }
         PolicyDef::RefReadable { field } => {
             let field = table
                 .fields
@@ -321,6 +650,25 @@ fn lower_snapshot_policy(
             "{alias}.j_created_by = (SELECT user_num FROM jazz_user WHERE user_id = '{}')",
             user.replace('\'', "''")
         )),
+        PolicyDef::RowIdEqualsUser => Ok(row_id_equals_user_sql(alias, user)),
+        PolicyDef::UserRefEqualsSession { field } => {
+            current_user_ref_equals_session_sql(table, alias, field, user)
+        }
+        PolicyDef::GroupMember => Ok(current_group_member_policy_sql(
+            &format!("{alias}.row_num"),
+            user,
+            None,
+            depth,
+        )),
+        PolicyDef::ProjectMember => Ok(current_project_member_policy_sql(
+            &format!("{alias}.row_num"),
+            user,
+            None,
+            depth,
+        )),
+        PolicyDef::ProjectRefMember { field } => {
+            current_project_ref_member_sql(table, alias, field, user, None, depth)
+        }
         PolicyDef::RefReadable { field } => {
             let field = table
                 .fields
