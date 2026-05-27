@@ -354,193 +354,27 @@ git commit -m "feat: expose dev catalogue push helpers"
 
 ---
 
-### Task 3: Add Programmatic Push Result Tests
+### Task 3: Programmatic Push Result Tests Checkpoint
 
-**Files:**
+**Status:** Complete.
 
-- Modify: `packages/jazz-tools/src/dev/catalogue.test.ts`
+The black-box catalogue push tests are already present in `packages/jazz-tools/src/dev/catalogue.test.ts`.
+They cover:
 
-- [ ] **Step 1: Add fixture helpers using public APIs**
+- `pushSchema` publishing the local structural schema and returning `{ hash, schemaFile, status: "published", objectId }`.
+- `pushPermissions` publishing permissions with an explicit `schemaHash` and using the current permissions head as `expectedParentBundleObjectId`.
+- `pushSchemaCatalogue` publishing permissions when `permissions.ts` exists, preserving the compatibility path.
+- `pushMigration` and `deploy` rejecting with their current "not implemented yet" stub errors.
 
-Append to `catalogue.test.ts`:
-
-```ts
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { afterEach, vi } from "vitest";
-
-const tempRoots: string[] = [];
-const APP_ID = "test-app";
-const SERVER_URL = "http://localhost:1625";
-const ADMIN_SECRET = "admin-secret";
-
-afterEach(async () => {
-  vi.unstubAllGlobals();
-  await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function createWorkspace(): Promise<{ root: string }> {
-  const root = await mkdtemp(join(import.meta.dirname, ".catalogue-test-"));
-  tempRoots.push(root);
-  await mkdir(root, { recursive: true });
-  await writeFile(join(root, "package.json"), '{ "type": "module" }\n');
-  return { root };
-}
-
-function schemaSource(indexImportPath: string = "../index.ts"): string {
-  return `
-import { schema as s } from ${JSON.stringify(new URL(indexImportPath, import.meta.url).pathname)};
-
-const schema = {
-  todos: s.table({
-    title: s.string(),
-    ownerId: s.string(),
-  }),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
-`;
-}
-
-function permissionsSource(indexImportPath: string = "../index.ts"): string {
-  return `
-import { schema as s } from ${JSON.stringify(new URL(indexImportPath, import.meta.url).pathname)};
-import { app } from "./schema.ts";
-
-export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user_id }),
-]);
-`;
-}
-```
-
-- [ ] **Step 2: Add `pushSchema` result test**
-
-Append:
-
-```ts
-it("pushSchema publishes the local structural schema and returns a structured result", async () => {
-  const { root } = await createWorkspace();
-  await writeFile(join(root, "schema.ts"), schemaSource());
-
-  let publishBody: any;
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
-        publishBody = JSON.parse(String(init?.body));
-        return new Response(
-          JSON.stringify({
-            objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            hash: "1234123412341234123412341234123412341234123412341234123412341234",
-          }),
-          { status: 201 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${input}`);
-    }),
-  );
-
-  const events: unknown[] = [];
-  const { pushSchema } = await import("./index.js");
-  const result = await pushSchema({
-    appId: APP_ID,
-    serverUrl: SERVER_URL,
-    adminSecret: ADMIN_SECRET,
-    schemaDir: root,
-    onEvent: (event) => events.push(event),
-  });
-
-  expect(result).toMatchObject({
-    hash: "1234123412341234123412341234123412341234123412341234123412341234",
-    status: "published",
-    objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-  });
-  expect(publishBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
-    "title",
-    "ownerId",
-  ]);
-  expect(events).toContainEqual({ type: "schema-loaded", schemaFile: join(root, "schema.ts") });
-});
-```
-
-- [ ] **Step 3: Add `pushPermissions` result test**
-
-Append:
-
-```ts
-it("pushPermissions publishes permissions against an explicit schema hash", async () => {
-  const { root } = await createWorkspace();
-  await writeFile(join(root, "schema.ts"), schemaSource());
-  await writeFile(join(root, "permissions.ts"), permissionsSource());
-
-  const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
-  const previousHead = {
-    schemaHash,
-    version: 2,
-    parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
-    bundleObjectId: "22222222-2222-2222-2222-222222222222",
-  };
-  let permissionsBody: any;
-
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
-        return new Response(JSON.stringify({ head: previousHead }), { status: 200 });
-      }
-      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
-        permissionsBody = JSON.parse(String(init?.body));
-        return new Response(
-          JSON.stringify({
-            head: {
-              schemaHash,
-              version: 3,
-              parentBundleObjectId: previousHead.bundleObjectId,
-              bundleObjectId: "33333333-3333-3333-3333-333333333333",
-            },
-          }),
-          { status: 201 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${input}`);
-    }),
-  );
-
-  const { pushPermissions } = await import("./index.js");
-  const result = await pushPermissions({
-    appId: APP_ID,
-    serverUrl: SERVER_URL,
-    adminSecret: ADMIN_SECRET,
-    schemaDir: root,
-    schemaHash,
-  });
-
-  expect(result.previousHead).toEqual(previousHead);
-  expect(result.head?.version).toBe(3);
-  expect(permissionsBody.schemaHash).toBe(schemaHash);
-  expect(permissionsBody.expectedParentBundleObjectId).toBe(previousHead.bundleObjectId);
-  expect(Object.keys(permissionsBody.permissions)).toContain("todos");
-});
-```
-
-- [ ] **Step 4: Run tests and commit**
-
-Run:
+Verification already passed with:
 
 ```bash
-pnpm --filter jazz-tools exec vitest run --config vitest.config.ts src/dev/catalogue.test.ts
+pnpm --filter jazz-tools exec vitest run --config vitest.config.ts src/dev/catalogue.test.ts src/dev/dev-server.test.ts src/testing/index.test.ts
 ```
 
-Expected: PASS.
+Result: 3 test files passed, 29 tests passed.
 
-Commit:
-
-```bash
-git add packages/jazz-tools/src/dev/catalogue.test.ts
-git commit -m "test: cover dev schema and permissions push results"
-```
+The next active implementation task is Task 4: Move Migration Push Logic Into Dev Catalogue.
 
 ---
 
