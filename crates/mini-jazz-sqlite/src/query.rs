@@ -105,18 +105,14 @@ impl QueryContext<'_> {
         let table = self.schema.table_def(&query.table)?;
         let (condition_sql, mut params) =
             self.lower_query_conditions(table, &query.conditions, "h", "ids")?;
-        let mut query_params = vec![
-            SqlValue::Text(table.name.clone()),
-            SqlValue::Integer(tx::OUTCOME_REJECTED),
-        ];
+        let mut query_params = vec![SqlValue::Integer(tx::OUTCOME_REJECTED)];
         query_params.append(&mut params);
         let sql = format!(
             "SELECT DISTINCT h.row_num
              FROM {} h
              JOIN jazz_row_id ids ON ids.row_num = h.row_num
              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-             WHERE ids.table_name = ?
-               AND tx.outcome != ?
+             WHERE tx.outcome != ?
                AND {condition_sql}
              ORDER BY h.row_num",
             crate::schema::history_table(&query.table),
@@ -2293,8 +2289,8 @@ mod tests {
             params![tx::KIND_DATA, tx::MODE_MERGEABLE, tx::OUTCOME_ACCEPTED],
         )?;
         conn.execute(
-            "INSERT INTO jazz_row_id (row_num, table_name, row_id)
-             VALUES (1, 'projects', 'project-1')",
+            "INSERT INTO jazz_row_id (row_num, row_id)
+             VALUES (1, 'project-1')",
             [],
         )?;
         conn.execute(
@@ -2307,8 +2303,8 @@ mod tests {
             let row_num = index + 1;
             let row_id = format!("todo-{index}");
             conn.execute(
-                "INSERT INTO jazz_row_id (row_num, table_name, row_id)
-                 VALUES (?, 'todos', ?)",
+                "INSERT INTO jazz_row_id (row_num, row_id)
+                 VALUES (?, ?)",
                 params![row_num, row_id],
             )?;
             conn.execute(

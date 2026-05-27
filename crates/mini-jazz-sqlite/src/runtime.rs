@@ -632,7 +632,7 @@ impl Runtime {
         let mut row_nums_by_id = BTreeMap::new();
         let mut row_nums_created_in_apply = BTreeSet::new();
         let mut user_nums_by_id = BTreeMap::new();
-        let mut insert_read_stmt = db.prepare_cached(
+        let mut insert_read_stmt = db.prepare(
             "INSERT OR REPLACE INTO jazz_tx_read
              (tx_num, table_num, row_num, reason, observed_tx_num)
              VALUES (?, ?, ?, ?, ?)",
@@ -4504,7 +4504,7 @@ fn record_tx_write_num(
     row_num: i64,
     op: i64,
 ) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare(
         "INSERT OR REPLACE INTO jazz_tx_write (tx_num, table_num, row_num, op)
          VALUES (?, ?, ?, ?)",
     )?;
@@ -4987,7 +4987,7 @@ fn current_visible_tx_num(
     row_num: i64,
     branch_num: i64,
 ) -> Result<Option<i64>> {
-    let mut stmt = conn.prepare_cached(&format!(
+    let mut stmt = conn.prepare(&format!(
         "SELECT visible_tx_num
          FROM {}
          WHERE row_num = ?
@@ -5007,7 +5007,7 @@ fn history_record_exists(
     row_num: i64,
     tx_num: i64,
 ) -> Result<bool> {
-    let mut stmt = conn.prepare_cached(&format!(
+    let mut stmt = conn.prepare(&format!(
         "SELECT 1
          FROM {}
          WHERE row_num = ?
@@ -5345,8 +5345,8 @@ fn export_reads_for_history_with_temp_scope(
     )?;
     {
         let mut tx_stmt =
-            conn.prepare_cached("INSERT OR IGNORE INTO jazz_export_tx_scope (tx_id) VALUES (?)")?;
-        let mut scope_stmt = conn.prepare_cached(
+            conn.prepare("INSERT OR IGNORE INTO jazz_export_tx_scope (tx_id) VALUES (?)")?;
+        let mut scope_stmt = conn.prepare(
             "INSERT OR IGNORE INTO jazz_export_history_scope (tx_id, table_name, row_id)
              VALUES (?, ?, ?)",
         )?;
@@ -6013,10 +6013,11 @@ fn ordered_page_eq_predicate(
             .value
             .as_str()
             .ok_or_else(|| crate::Error::new("$createdBy equality expects a string value"))?;
+        let created_by_num = users::user_num(db, created_by).unwrap_or(-1);
         return Ok(OrderedPageEqPredicate {
             outer_sql: "j_created_by = ?".to_owned(),
             inner_sql: "current.j_created_by = ?".to_owned(),
-            value: rusqlite::types::Value::Text(created_by.to_owned()),
+            value: rusqlite::types::Value::Integer(created_by_num),
         });
     }
 
@@ -7053,7 +7054,7 @@ fn insert_dynamic(
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(", ");
-    let mut stmt = conn.prepare_cached(&format!(
+    let mut stmt = conn.prepare(&format!(
         "INSERT OR REPLACE INTO {table} ({}) VALUES ({placeholders})",
         columns.join(", ")
     ))?;
