@@ -1,5 +1,7 @@
 use mini_jazz_sqlite::sync::{merge_bundles, Bundle};
-use mini_jazz_sqlite::{Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage};
+use mini_jazz_sqlite::{
+    QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage,
+};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -25,6 +27,7 @@ fn main() -> BenchResult<()> {
         multi_query_refresh_probe: run_multi_query_refresh_probe()?,
         subscription_storm_probe: run_subscription_storm_probe()?,
         branch_overlay_probe: run_branch_overlay_probe()?,
+        export_profile_probe: run_export_profile_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -66,6 +69,7 @@ struct BenchmarkReport {
     multi_query_refresh_probe: MultiQueryRefreshProbe,
     subscription_storm_probe: SubscriptionStormProbe,
     branch_overlay_probe: BranchOverlayProbe,
+    export_profile_probe: ExportProfileProbe,
 }
 
 #[derive(Serialize)]
@@ -281,6 +285,15 @@ struct BranchOverlayProbe {
     branch_bundle_bytes: usize,
     branch_history_rows: usize,
     branch_transaction_rows: usize,
+}
+
+#[derive(Serialize)]
+struct ExportProfileProbe {
+    total_rows: usize,
+    target_owner_rows: usize,
+    page_size: usize,
+    bundle_bytes: usize,
+    profile: QueryExportProfile,
 }
 
 #[derive(Serialize)]
@@ -1065,6 +1078,37 @@ fn run_branch_overlay_probe() -> BenchResult<BranchOverlayProbe> {
         branch_bundle_bytes: branch_summary.bytes,
         branch_history_rows: branch_bundle.history.len(),
         branch_transaction_rows: branch_bundle.txs.len(),
+    })
+}
+
+fn run_export_profile_probe() -> BenchResult<ExportProfileProbe> {
+    let total_rows = 100_000;
+    let target_owner_rows = 10_000;
+    let page_size = 50;
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema,
+    )?;
+    seed_documents(&mut core, total_rows, target_owner_rows, 100)?;
+    let (bundle, profile) = core.run_as_user(OWNER, |core| {
+        core.profile_export_query_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!(OWNER),
+            "updated_at",
+            page_size,
+        )
+    })?;
+    let summary = BundleSummary::from(&bundle)?;
+    Ok(ExportProfileProbe {
+        total_rows,
+        target_owner_rows,
+        page_size,
+        bundle_bytes: summary.bytes,
+        profile,
     })
 }
 

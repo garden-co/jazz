@@ -21,4 +21,6 @@ pub use runtime::Runtime;
 pub use schema::SchemaDef;
 pub use storage::Storage;
 pub use subscription::RowsSubscription;
-pub use types::{RejectionInfo, RowDiff, RowView, StorageStats, TransactionInfo};
+pub use types::{
+    QueryExportProfile, RejectionInfo, RowDiff, RowView, StorageStats, TransactionInfo,
+};

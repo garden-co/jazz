@@ -5,7 +5,9 @@ use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
 };
-use crate::types::{BranchInfo, RejectionInfo, RowView, StorageStats, TransactionInfo};
+use crate::types::{
+    BranchInfo, QueryExportProfile, RejectionInfo, RowView, StorageStats, TransactionInfo,
+};
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
     storage, tx, Result, Storage,
@@ -13,7 +15,7 @@ use crate::{
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Runtime {
     conn: Connection,
@@ -2483,6 +2485,199 @@ impl Runtime {
         )
     }
 
+    pub fn profile_export_query_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<(Bundle, QueryExportProfile)> {
+        let total_started = Instant::now();
+        let read_started = Instant::now();
+        let rows = self.read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            order_field_name,
+            limit,
+        )?;
+        let read_rows_ms = duration_ms(read_started.elapsed());
+
+        let table = self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+
+        let resolve_started = Instant::now();
+        let visible_row_nums = rows
+            .iter()
+            .map(|row| row_num(&self.conn, &row.id))
+            .collect::<Result<Vec<_>>>()?;
+        let resolve_visible_row_nums_ms = duration_ms(resolve_started.elapsed());
+
+        let repair_started = Instant::now();
+        let query_value = json!({
+            "eq": value.clone(),
+            "order_field": order_field_name,
+            "limit": limit,
+            "observed_ids": observed_row_ids(&rows),
+        });
+        let mut repair_row_nums = query_scope_repair_row_nums(
+            &self.conn,
+            table,
+            field_name,
+            "eq_top_field_desc",
+            &query_value,
+        )?;
+        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
+        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
+        repair_row_nums.sort();
+        repair_row_nums.dedup();
+        let repair_row_nums_ms = duration_ms(repair_started.elapsed());
+
+        let mut row_nums = visible_row_nums.clone();
+        row_nums.extend(repair_row_nums.iter());
+        row_nums.sort();
+        row_nums.dedup();
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+
+        let visible_history_started = Instant::now();
+        let mut history = export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            table_name,
+            Some(&visible_row_nums),
+            None,
+        )?;
+        let visible_history_ms = duration_ms(visible_history_started.elapsed());
+
+        let repair_visible_started = Instant::now();
+        if !repair_row_nums.is_empty() {
+            history.extend(export_visible_table_history(
+                &self.conn,
+                &self.schema,
+                table_name,
+                user,
+                bypass_policy,
+                &branch_nums,
+                Some(&repair_row_nums),
+            )?);
+        }
+        let repair_visible_history_ms = duration_ms(repair_visible_started.elapsed());
+
+        let repair_all_started = Instant::now();
+        if !repair_row_nums.is_empty() {
+            history.extend(export_history_versions_for_rows(
+                &self.conn,
+                &self.schema,
+                table_name,
+                Some(&repair_row_nums),
+                None,
+            )?);
+        }
+        let repair_all_history_ms = duration_ms(repair_all_started.elapsed());
+
+        let policy_started = Instant::now();
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            PolicyDependencyExport {
+                table_name,
+                policy: &self.schema.table_def(table_name)?.read_policy,
+                user,
+                bypass_policy,
+                branch_nums: &branch_nums,
+                child_row_nums: Some(&row_nums),
+            },
+        )?);
+        let policy_dependency_history_ms = duration_ms(policy_started.elapsed());
+
+        let snapshot_started = Instant::now();
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
+                history.extend(export_history_versions_for_rows(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    Some(&row_nums),
+                    Some(base_epoch),
+                )?);
+                history.extend(export_snapshot_policy_dependency_history(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    user,
+                    bypass_policy,
+                    base_epoch,
+                    Some(&row_nums),
+                )?);
+            }
+        }
+        let branch_snapshot_history_ms = duration_ms(snapshot_started.elapsed());
+
+        let dedupe_started = Instant::now();
+        dedupe_history_records(&mut history);
+        let dedupe_history_ms = duration_ms(dedupe_started.elapsed());
+
+        let reads_started = Instant::now();
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let reads_ms = duration_ms(reads_started.elapsed());
+
+        let rejected_started = Instant::now();
+        let rejected_tx_ids = query_scope_rejected_tx_ids(
+            &self.conn,
+            table,
+            field_name,
+            "eq_top_field_desc",
+            &query_value,
+        )?;
+        let rejected_tx_ids_ms = duration_ms(rejected_started.elapsed());
+
+        let txs_started = Instant::now();
+        let txs =
+            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
+        let txs_ms = duration_ms(txs_started.elapsed());
+
+        let branches_started = Instant::now();
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        let branches_ms = duration_ms(branches_started.elapsed());
+
+        let make_started = Instant::now();
+        let query_reads = vec![QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: table_name.to_owned(),
+            field: field_name.to_owned(),
+            op: "eq_top_field_desc".to_owned(),
+            value: query_value,
+        }];
+        let bundle = make_bundle(&self.schema, branches, txs, reads, query_reads, history);
+        let make_bundle_ms = duration_ms(make_started.elapsed());
+
+        let profile = QueryExportProfile {
+            total_ms: duration_ms(total_started.elapsed()),
+            read_rows_ms,
+            resolve_visible_row_nums_ms,
+            repair_row_nums_ms,
+            visible_history_ms,
+            repair_visible_history_ms,
+            repair_all_history_ms,
+            policy_dependency_history_ms,
+            branch_snapshot_history_ms,
+            dedupe_history_ms,
+            reads_ms,
+            rejected_tx_ids_ms,
+            txs_ms,
+            branches_ms,
+            make_bundle_ms,
+            history_rows: bundle.history.len(),
+            read_rows: bundle.reads.len(),
+            tx_rows: bundle.txs.len(),
+            branch_rows: bundle.branches.len(),
+        };
+        Ok((bundle, profile))
+    }
+
     fn export_query_scope(
         &self,
         table_name: &str,
@@ -4892,35 +5087,52 @@ fn export_policy_dependency_history(
             field.name
         )));
     };
-    let policy_sql = export_read_policy_sql(schema, table, args.user, args.bypass_policy)?;
+    let policy_sql = if args.child_row_nums.is_some() {
+        "1 = 1".to_owned()
+    } else {
+        export_read_policy_sql(schema, table, args.user, args.bypass_policy)?
+    };
     let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    let sql = format!(
-        "SELECT DISTINCT current.{ref_column}
-         FROM {} current
-         JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
-         WHERE current.is_deleted = 0
-           AND {row_filter}
-           AND {}
-           AND current_tx.outcome != {}
-           AND {policy_sql}",
-        crate::schema::current_table(args.table_name),
-        branch_filter_sql("current", args.branch_nums),
-        tx::OUTCOME_REJECTED,
-        row_filter = current_row_filter_sql("current", args.child_row_nums),
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let row_nums = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut records = export_visible_table_history(
-        conn,
-        schema,
-        parent_table,
-        args.user,
-        args.bypass_policy,
-        args.branch_nums,
-        Some(&row_nums),
-    )?;
+    let row_nums = if let Some(child_row_nums) = args.child_row_nums {
+        scoped_policy_parent_row_nums(
+            conn,
+            args.table_name,
+            &ref_column,
+            args.branch_nums,
+            child_row_nums,
+        )?
+    } else {
+        let sql = format!(
+            "SELECT DISTINCT current.{ref_column}
+             FROM {} current
+             JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+             WHERE current.is_deleted = 0
+               AND {}
+               AND current_tx.outcome != {}
+               AND {policy_sql}",
+            crate::schema::current_table(args.table_name),
+            branch_filter_sql("current", args.branch_nums),
+            tx::OUTCOME_REJECTED,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut records = if args.child_row_nums.is_some() {
+        export_history_versions_for_rows(conn, schema, parent_table, Some(&row_nums), None)?
+    } else {
+        export_visible_table_history(
+            conn,
+            schema,
+            parent_table,
+            args.user,
+            args.bypass_policy,
+            args.branch_nums,
+            Some(&row_nums),
+        )?
+    };
     records.extend(export_policy_dependency_history(
         conn,
         schema,
@@ -4934,6 +5146,36 @@ fn export_policy_dependency_history(
         },
     )?);
     Ok(records)
+}
+
+fn scoped_policy_parent_row_nums(
+    conn: &Connection,
+    table_name: &str,
+    ref_column: &str,
+    branch_nums: &[i64],
+    child_row_nums: &[i64],
+) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT current.{ref_column}
+         FROM {} current
+         JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+         WHERE current.row_num = ?
+           AND current.is_deleted = 0
+           AND {}
+           AND current_tx.outcome != ?",
+        crate::schema::current_table(table_name),
+        branch_filter_sql("current", branch_nums),
+    ))?;
+    let mut parent_row_nums = BTreeSet::new();
+    for child_row_num in child_row_nums {
+        let rows = stmt.query_map(params![child_row_num, tx::OUTCOME_REJECTED], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        for row in rows {
+            parent_row_nums.insert(row?);
+        }
+    }
+    Ok(parent_row_nums.into_iter().collect())
 }
 
 fn export_deleted_table_history(
@@ -5576,21 +5818,6 @@ fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
     }
 }
 
-fn current_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
-    match row_nums {
-        Some([]) => "0 = 1".to_owned(),
-        Some(row_nums) => format!(
-            "{alias}.row_num IN ({})",
-            row_nums
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        None => "1 = 1".to_owned(),
-    }
-}
-
 fn history_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
     match row_nums {
         Some([]) => "0 = 1".to_owned(),
@@ -5713,6 +5940,10 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn observed_row_ids(rows: &[RowView]) -> Vec<String> {

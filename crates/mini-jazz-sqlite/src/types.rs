@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +54,29 @@ pub struct RejectionInfo {
     pub tx_id: String,
     pub code: String,
     pub detail: Option<JsonValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct QueryExportProfile {
+    pub total_ms: f64,
+    pub read_rows_ms: f64,
+    pub resolve_visible_row_nums_ms: f64,
+    pub repair_row_nums_ms: f64,
+    pub visible_history_ms: f64,
+    pub repair_visible_history_ms: f64,
+    pub repair_all_history_ms: f64,
+    pub policy_dependency_history_ms: f64,
+    pub branch_snapshot_history_ms: f64,
+    pub dedupe_history_ms: f64,
+    pub reads_ms: f64,
+    pub rejected_tx_ids_ms: f64,
+    pub txs_ms: f64,
+    pub branches_ms: f64,
+    pub make_bundle_ms: f64,
+    pub history_rows: usize,
+    pub read_rows: usize,
+    pub tx_rows: usize,
+    pub branch_rows: usize,
 }
 
 impl StorageStats {

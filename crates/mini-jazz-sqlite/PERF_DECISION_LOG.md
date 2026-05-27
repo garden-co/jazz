@@ -495,3 +495,28 @@ Result: the branch overlay probe improves from about 26 ms query / 45 ms export
 to about 1.5 ms query / 16 ms export, with the full `whole_system` suite green.
 This substantially derisks the common sparse branch overlay case while leaving
 pinned snapshots and multi-source merge branches as explicit future work.
+
+## 2026-05-26 22:58 PDT
+
+Added a profiling export path for the canonical owner-scoped top page. It breaks
+export time into query, row-id resolution, repair rows, visible history, policy
+dependency history, reads, transactions, branch records, and bundle creation.
+
+The first profile showed that policy dependency export dominated the cold page:
+it was about 67 ms out of a roughly 70 ms export because it rescanned all visible
+children for a referenced parent table even when the query was already scoped to
+50 child rows. I changed scoped policy dependency export to derive parent row
+ids from the concrete child row ids by point lookup, then export just those
+parent versions.
+
+Result: primary cold export is now about 4.8 ms, API-to-first-result about
+46 ms, refresh export about 7.2 ms, and the profile shows policy dependency
+history at about 0.7 ms. Many-user sampled exports average about 2.35 ms.
+Recursive policy export is about 4.9 ms and branch overlay export about 6.3 ms.
+The full `mini-jazz-sqlite --test whole_system` suite is green.
+
+This optimization is semantics-sensitive but currently matches the intended
+scoped-sync rule: once a query has selected concrete child rows, dependency
+export may use those child rows to find the referenced parents instead of
+rediscovering all readable children. Future deeper policy cases should keep
+testing for no leakage from hidden/unrelated repair rows.
