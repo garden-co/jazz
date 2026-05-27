@@ -965,3 +965,34 @@ Learning: the whole-topology subscription side looks cheap once data is scoped,
 but recursive-policy export across many query descriptors is now a visible
 server-side cost. This is a good benchmark for future policy-dependency and
 multi-query export dedupe work.
+
+## 2026-05-27 00:50 PDT
+
+Tried replacing SQL scalar user-id materialization with Rust-side lookup: select
+integer `j_created_by`/`j_updated_by` values and turn them back into strings at
+row/history materialization time.
+
+Result: not better in the current shape. The full test suite stayed green, but
+the 100k release sample was slightly slower again (first result ~13.0 ms,
+refresh ~18.2 ms, dashboard export ~89-95 ms). The likely cause is that the
+naive Rust path did many tiny lookup queries without a shared cache, while the
+SQL scalar subqueries stay inside one SQLite statement.
+
+Decision: reverted the uncommitted Rust lookup experiment. If we optimize this
+later, use explicit joins or a per-query user cache, not per-row lookup queries.
+
+## 2026-05-27 00:52 PDT
+
+Tried replacing recursive policy dependency parent lookup from one prepared query
+per child row with a single `IN (...)` query per policy level.
+
+Result: major regression on the permissioned dashboard release sample. Initial
+core export for 24 recursive-policy pages went from ~87 ms to ~382 ms, and
+refresh export similarly went to ~388 ms. The targeted recursive single-query
+probe stayed fine, which means the regression is specific to the many-query
+policy export shape and SQLite's plan for this `IN` + branch filter query.
+
+Decision: reverted the uncommitted batched-`IN` change. The simple prepared
+point lookup is not pretty, but it is currently the faster path. Future work
+should inspect `EXPLAIN QUERY PLAN` before changing this again; a temp table of
+child row nums or a different composite index may be a better batched shape.
