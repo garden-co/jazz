@@ -19,7 +19,7 @@ Coverage labels:
 | Group                      | Current status        | Notes                                                                                                                                                                                                                                              |
 | -------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | D.1 Identity               | covered for prototype | Public row ids, physical id locality, replica-local physical ids, and one user writing from multiple nodes are tested.                                                                                                                             |
-| D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                    |
+| D.2 Transactions           | partial               | Sealing, explicit transaction isolation, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                            |
 | D.3 History/projection     | partial               | Append-only ordinary deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Hard delete/truncate and full merge/conflict projection semantics remain partial.                               |
 | D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                      |
 | D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                     |
@@ -60,6 +60,10 @@ Coverage labels:
 - `generic_transaction_delete_records_previous_row_read_set`: D.9, D.11
 - `exclusive_transaction_rejects_same_row_conflict`: D.11, D.12
 - `generic_transaction_delete_shadows_pinned_base_row`: D.5, D.3
+- `transaction_reads_are_fixed_to_start_snapshot`: D.2
+- `transaction_does_not_see_rows_committed_after_it_starts`: D.2
+- `transaction_reads_include_own_staged_writes`: D.2
+- `transactions_do_not_see_each_others_staged_writes`: D.2
 - `global_epoch_can_accept_multiple_transactions`: D.2, D.3
 
 #### `sync_fate.rs`
@@ -240,6 +244,8 @@ them concrete:
   user user
 - transaction-info APIs must propagate receipts, global epochs, and rejection
   details consistently after sync
+- explicit transaction reads use a start snapshot, include their own staged
+  writes, and exclude other transactions' staged writes and later commits
 
 ### E.4 Largest Untested Gaps
 

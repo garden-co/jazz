@@ -1182,3 +1182,346 @@ fn rejecting_update_restores_previous_visible_version() {
     assert_eq!(rows[0].values["body"], json!("Accepted base"));
     assert_eq!(rows[0].values["pinned"], json!(false));
 }
+
+#[test]
+fn transaction_reads_are_fixed_to_start_snapshot() {
+    let schema = SchemaDef::new()
+        .table("notes", |table| {
+            table.text("body");
+            table.bool("pinned");
+        })
+        .table("labels", |table| {
+            table.text("name");
+        });
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("snapshot.sqlite");
+    let mut alice = Runtime::open_with_schema(
+        Storage::File(path.clone()),
+        "alice-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-before",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Before transaction")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "labels",
+            "label-before",
+            BTreeMap::from([("name".to_owned(), json!("Before transaction"))]),
+        )
+        .unwrap();
+
+    let tx = alice.transaction();
+
+    let mut bob =
+        Runtime::open_with_schema(Storage::File(path), "bob-node", "bob", schema).unwrap();
+    bob.insert_row(
+        "notes",
+        "note-after",
+        BTreeMap::from([
+            ("body".to_owned(), json!("After transaction started")),
+            ("pinned".to_owned(), json!(true)),
+        ]),
+    )
+    .unwrap();
+    bob.insert_row(
+        "labels",
+        "label-after",
+        BTreeMap::from([("name".to_owned(), json!("After transaction started"))]),
+    )
+    .unwrap();
+
+    let notes = tx.read_rows("notes").unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].id, "note-before");
+    let labels = tx.read_rows("labels").unwrap();
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0].id, "label-before");
+}
+
+#[test]
+fn transaction_does_not_see_rows_committed_after_it_starts() {
+    let schema = support::notes_schema();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("later-commits.sqlite");
+    let mut alice = Runtime::open_with_schema(
+        Storage::File(path.clone()),
+        "alice-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-before",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Before transaction")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let tx = alice.transaction();
+
+    let mut bob =
+        Runtime::open_with_schema(Storage::File(path), "bob-node", "bob", schema).unwrap();
+    bob.insert_row(
+        "notes",
+        "note-after",
+        BTreeMap::from([
+            ("body".to_owned(), json!("After transaction started")),
+            ("pinned".to_owned(), json!(true)),
+        ]),
+    )
+    .unwrap();
+
+    let tx_rows = tx.read_rows("notes").unwrap();
+    assert_eq!(tx_rows.len(), 1);
+    assert_eq!(tx_rows[0].id, "note-before");
+
+    let bob_rows = bob.read_rows("notes").unwrap();
+    assert_eq!(bob_rows.len(), 2);
+}
+
+#[test]
+fn transaction_writes_are_applied_to_start_snapshot() {
+    let schema = support::notes_schema();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("patch-base.sqlite");
+    let mut alice = Runtime::open_with_schema(
+        Storage::File(path.clone()),
+        "alice-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("A")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let tx = alice.transaction();
+
+    let mut bob =
+        Runtime::open_with_schema(Storage::File(path), "bob-node", "bob", schema).unwrap();
+    bob.update_row(
+        "notes",
+        "note-1",
+        BTreeMap::from([("pinned".to_owned(), json!(true))]),
+    )
+    .unwrap();
+
+    tx.update_row(
+        "notes",
+        "note-1",
+        BTreeMap::from([("body".to_owned(), json!("B"))]),
+    )
+    .commit()
+    .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("B"));
+    assert_eq!(rows[0].values["pinned"], json!(false));
+}
+
+#[test]
+fn transaction_reads_preserve_branch_conflict_candidates() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let rows = alice.transaction().read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.id == "task-1"));
+    let titles = rows
+        .iter()
+        .map(|row| row.values["title"].clone())
+        .collect::<Vec<_>>();
+    assert!(titles.contains(&json!("Left title")));
+    assert!(titles.contains(&json!("Right title")));
+}
+
+#[test]
+fn transaction_update_rejects_ambiguous_branch_conflict() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let err = alice
+        .transaction()
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("title".to_owned(), json!("Implicit resolution"))]),
+        )
+        .commit()
+        .unwrap_err();
+    assert!(err.to_string().contains("ambiguous branch row"));
+}
+
+#[test]
+fn transaction_reads_include_own_staged_writes() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Original")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-delete",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Delete me")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let tx = alice
+        .transaction()
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("Staged update"))]),
+        )
+        .delete_row("notes", "note-delete")
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Staged insert")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        );
+
+    let rows = tx.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .any(|row| row.id == "note-1" && row.values["body"] == json!("Staged update")));
+    assert!(rows
+        .iter()
+        .any(|row| row.id == "note-2" && row.values["body"] == json!("Staged insert")));
+    assert!(!rows.iter().any(|row| row.id == "note-delete"));
+}
+
+#[test]
+fn transactions_do_not_see_each_others_staged_writes() {
+    let schema = support::notes_schema();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("staged.sqlite");
+    let mut alice = Runtime::open_with_schema(
+        Storage::File(path.clone()),
+        "alice-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::File(path), "bob-node", "bob", schema).unwrap();
+
+    let alice_tx = alice.transaction().insert_row(
+        "notes",
+        "alice-private",
+        BTreeMap::from([
+            ("body".to_owned(), json!("Alice staged")),
+            ("pinned".to_owned(), json!(false)),
+        ]),
+    );
+
+    let bob_tx = bob.transaction();
+
+    assert_eq!(alice_tx.read_rows("notes").unwrap().len(), 1);
+    assert!(bob_tx.read_rows("notes").unwrap().is_empty());
+}

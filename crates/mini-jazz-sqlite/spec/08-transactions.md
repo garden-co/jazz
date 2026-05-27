@@ -61,6 +61,22 @@ The local write path:
 7. commits the embedded database transaction
 8. publishes local subscription diffs
 
+Transaction isolation:
+
+- A transaction reads from a consistent semantic snapshot of the whole database
+  captured when the transaction starts.
+- Reads inside the transaction include the transaction's own staged writes,
+  layered over the start snapshot.
+- Reads inside the transaction do not include staged writes from any other
+  transaction.
+- Writes committed by other transactions after the transaction starts are not
+  visible inside the transaction; starting a new transaction is the way to read
+  a later current view.
+- Sealing publishes all staged mutations as one transaction. The implementation
+  may lower staged state through SQLite transactions, in-memory overlays, or
+  another embedded-database mechanism, but the public semantics are the
+  start-snapshot plus own-staged-writes view.
+
 Patch updates preserve omitted fields from the effective visible row. The
 effective base may be a current branch row, a row inherited from branch sources,
 or a pinned historical base snapshot. Unknown user fields fail closed before
