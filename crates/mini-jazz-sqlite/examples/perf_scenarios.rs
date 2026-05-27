@@ -1537,16 +1537,16 @@ fn run_mixed_mutation_refresh_probe() -> BenchResult<MixedMutationRefreshProbe> 
     let current_page_deletes = 5;
     let off_page_owner_updates = 100;
     let unrelated_owner_updates = 100;
-    apply_mixed_mutations(
-        &mut core,
-        config.total_rows,
-        config.target_owner_rows,
+    let mutation_mix = MixedMutationConfig {
+        total_rows: config.total_rows,
+        target_owner_rows: config.target_owner_rows,
         top_inserts,
         current_page_updates,
         current_page_deletes,
         off_page_owner_updates,
         unrelated_owner_updates,
-    )?;
+    };
+    apply_mixed_mutations(&mut core, mutation_mix)?;
 
     let export_started = Instant::now();
     let bundles = core.run_as_user(OWNER, |core| {
@@ -2852,8 +2852,7 @@ fn insert_new_top_recursive_documents_for_owners(
     Ok(())
 }
 
-fn apply_mixed_mutations(
-    runtime: &mut Runtime,
+struct MixedMutationConfig {
     total_rows: usize,
     target_owner_rows: usize,
     top_inserts: usize,
@@ -2861,16 +2860,18 @@ fn apply_mixed_mutations(
     current_page_deletes: usize,
     off_page_owner_updates: usize,
     unrelated_owner_updates: usize,
-) -> Result<()> {
+}
+
+fn apply_mixed_mutations(runtime: &mut Runtime, config: MixedMutationConfig) -> Result<()> {
     let mut tx = runtime.transaction();
-    for index in 0..top_inserts {
-        let row_index = total_rows + index;
-        let mut values = document_values(row_index, target_owner_rows);
+    for index in 0..config.top_inserts {
+        let row_index = config.total_rows + index;
+        let mut values = document_values(row_index, config.target_owner_rows);
         values.insert("owner_id".to_owned(), json!(OWNER));
         tx = tx.insert_row("documents", &format!("doc-mixed-new-top-{index}"), values);
     }
-    for index in 0..current_page_updates {
-        let row_index = target_owner_rows.saturating_sub(1 + index);
+    for index in 0..config.current_page_updates {
+        let row_index = config.target_owner_rows.saturating_sub(1 + index);
         tx = tx.update_row(
             "documents",
             &format!("doc-{row_index}"),
@@ -2880,12 +2881,14 @@ fn apply_mixed_mutations(
             )]),
         );
     }
-    for index in 0..current_page_deletes {
-        let row_index = target_owner_rows.saturating_sub(1 + current_page_updates + index);
+    for index in 0..config.current_page_deletes {
+        let row_index = config
+            .target_owner_rows
+            .saturating_sub(1 + config.current_page_updates + index);
         tx = tx.delete_row("documents", &format!("doc-{row_index}"));
     }
-    for index in 0..off_page_owner_updates {
-        let row_index = index.min(target_owner_rows.saturating_sub(1));
+    for index in 0..config.off_page_owner_updates {
+        let row_index = index.min(config.target_owner_rows.saturating_sub(1));
         tx = tx.update_row(
             "documents",
             &format!("doc-{row_index}"),
@@ -2895,8 +2898,8 @@ fn apply_mixed_mutations(
             )]),
         );
     }
-    for index in 0..unrelated_owner_updates {
-        let row_index = target_owner_rows + index;
+    for index in 0..config.unrelated_owner_updates {
+        let row_index = config.target_owner_rows + index;
         tx = tx.update_row(
             "documents",
             &format!("doc-{row_index}"),
