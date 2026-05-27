@@ -1719,3 +1719,28 @@ Learning: topology multiplication matters. Even after fixing local recursive
 read time, a cold recursive scope pays full export/apply costs at each tier.
 This makes bundle delta/scoping and apply throughput at intermediaries at least
 as important as local query speed for broad subscriptions.
+
+## 2026-05-27 02:29 PDT
+
+Ran the recursive full-topology probe at 10k nodes.
+
+- initial core export: ~125.7 ms
+- initial edge apply: ~249.1 ms
+- initial edge export: ~130.0 ms
+- initial worker apply: ~236.1 ms
+- initial worker export: ~114.9 ms
+- initial tab apply: ~237.5 ms
+- refresh core export: ~126.9 ms
+- refresh edge apply: ~198.9 ms
+- refresh edge export: ~134.1 ms
+- refresh worker apply: ~163.7 ms
+- refresh worker export: ~118.5 ms
+- refresh tab apply: ~161.8 ms
+- subscription poll on tab: ~34.1 ms
+- bundle size: ~3.37 MiB initial, ~3.40 MiB refresh
+
+Learning: the system no longer falls off the 20s CTE cliff, but 10k broad
+recursive subscriptions still imply roughly one second of cumulative
+export/apply work across core, edge, worker, and tab. This is probably not a
+"make SQLite query faster" problem anymore; it is a scope delta, apply
+throughput, and topology forwarding problem.
