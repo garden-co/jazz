@@ -288,3 +288,14 @@ policy-scoped 100k/10k/page-50 benchmark, cold export improved from roughly
 86-87 ms to about 73 ms, and refresh export from roughly 95 ms to about 81 ms.
 This confirms whole-table rejected fate scanning was one real cold-core cost,
 but not the only one.
+
+## 2026-05-26 22:10 PDT
+
+Tried skipping policy rechecks for rows returned by the immediately preceding
+query: visible result rows now export their row history directly, while repair
+rows still use policy-aware visible export plus history fallback. This preserved
+the query-scope test suite.
+
+The benchmark did not materially move beyond the rejected-fate narrowing: cold
+export remains about 72 ms and refresh export about 81 ms. So repeated policy
+checks for the 50 result rows are not the remaining dominant cost.

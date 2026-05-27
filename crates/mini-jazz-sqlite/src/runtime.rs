@@ -2473,20 +2473,29 @@ impl Runtime {
         repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
         repair_row_nums.sort();
         repair_row_nums.dedup();
-        let mut row_nums = visible_row_nums;
+        let mut row_nums = visible_row_nums.clone();
         row_nums.extend(repair_row_nums.iter());
         row_nums.sort();
         row_nums.dedup();
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let mut history = export_visible_table_history(
+        let mut history = export_history_versions_for_rows(
             &self.conn,
             &self.schema,
             table_name,
-            user,
-            bypass_policy,
-            &branch_nums,
-            Some(&row_nums),
+            Some(&visible_row_nums),
+            None,
         )?;
+        if !repair_row_nums.is_empty() {
+            history.extend(export_visible_table_history(
+                &self.conn,
+                &self.schema,
+                table_name,
+                user,
+                bypass_policy,
+                &branch_nums,
+                Some(&repair_row_nums),
+            )?);
+        }
         if !repair_row_nums.is_empty() {
             history.extend(export_history_versions_for_rows(
                 &self.conn,
