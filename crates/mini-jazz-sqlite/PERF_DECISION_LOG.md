@@ -2136,3 +2136,34 @@ warm refresh apply by about 15-17%, while still slightly hurting cold initial
 apply. That suggests a real optimization opportunity if peers can know a scope is
 warm, but it is still not a substitute for avoiding unchanged full-scope
 refreshes.
+
+## 2026-05-27 03:20 PDT
+
+Used the focused recursive mode to compare SQLite page sizes on the 10k recursive
+topology probe.
+
+Default page size from the previous focused run:
+
+- core DB ~2.15 MiB
+- edge DB ~2.12 MiB
+- initial edge apply ~162.6 ms
+- refresh edge apply ~71.2 ms
+
+`MINI_JAZZ_SQLITE_PAGE_SIZE=8192`:
+
+- core DB ~2.24 MiB
+- edge DB ~2.20 MiB
+- initial edge apply ~154.6 ms
+- refresh edge apply ~79.0 ms
+
+`MINI_JAZZ_SQLITE_PAGE_SIZE=16384`:
+
+- core DB ~2.46 MiB
+- edge DB ~2.42 MiB
+- initial edge apply ~162.7 ms
+- refresh edge apply ~89.7 ms
+
+Learning: larger SQLite page sizes did not reduce disk footprint for this
+history-heavy recursive workload and did not clearly improve speed. The default
+page size looks at least competitive here; page-size tuning is not an obvious
+early win.
