@@ -769,3 +769,19 @@ layout of `jazz_tx_read` and `jazz_tx_write` from table names to table numbers.
 The storage-format tests now assert version 5 and reject future version 6. This
 keeps durable spike databases honest while we are still free to break format
 compatibility between experiments.
+
+## 2026-05-27 00:17 PDT
+
+Repeated the key perf sample three times after adaptive read-set export:
+
+- default temp store: first result ~43.0 / 38.5 / 39.5 ms, refresh ~60.2 /
+  58.5 / 58.6 ms, pinned export ~18.9 / 19.7 / 19.6 ms, apply ~38.0 / 40.1 /
+  38.4 ms
+- `MINI_JAZZ_SQLITE_TEMP_STORE=MEMORY`: first result ~41.1 / 38.7 / 38.6 ms,
+  refresh ~58.2 / 60.3 / 58.4 ms, pinned export ~19.2 / 19.5 / 19.6 ms, apply
+  ~38.5 / 39.2 / 38.7 ms
+
+Learning: the scary ~136 ms refresh sample was noise. Adaptive read-set export
+looks stable around the earlier baseline for ordinary top-page work while
+keeping the pinned branch broad-read fix. `temp_store=MEMORY` does not matter
+enough to default.
