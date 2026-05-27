@@ -1365,3 +1365,20 @@ Learning: the 200k recursive-policy dashboard path is still usable but no longer
 from cache shape and shared policy dependency reuse. Apply scales more
 predictably with history rows. Repeats/medians and explain plans are now worth
 adding for this probe.
+
+## 2026-05-27 01:38 PDT
+
+Added `MINI_JAZZ_PERF_REPEAT_DASHBOARD_SCALING=N`, an early-exit repeat/median
+mode for the dashboard query-count scaling probe.
+
+Two-sample 50k-row median smoke run:
+
+- 1 query: refresh export ~1.0 ms, apply ~1.1 ms
+- 4 queries: refresh export ~4.7 ms, apply ~1.6 ms
+- 12 queries: refresh export ~6.3 ms, apply ~3.1 ms
+- 24 queries: refresh export ~6.1 ms, apply ~4.9 ms
+- 48 queries: refresh export ~10.8 ms, apply ~8.3 ms
+
+Learning: even tiny repeats make this probe much easier to reason about. The
+next useful refinement is probably explain-plan capture for the cases where
+export timing jumps with only a modest increase in delivered rows.

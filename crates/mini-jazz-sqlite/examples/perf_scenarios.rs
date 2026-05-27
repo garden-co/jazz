@@ -23,6 +23,11 @@ fn main() -> BenchResult<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
+    if let Some(repeat) = env_optional_usize("MINI_JAZZ_PERF_REPEAT_DASHBOARD_SCALING") {
+        let report = run_dashboard_query_scaling_repeat(repeat.max(1))?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     let process_rss_start_bytes = process_rss_bytes();
     let report = BenchmarkReport {
         process_rss_start_bytes,
@@ -341,7 +346,7 @@ struct DashboardQueryScalingProbe {
     cases: Vec<DashboardQueryScalingCase>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct DashboardQueryScalingCase {
     query_count: usize,
     initial_export_ms: f64,
@@ -354,6 +359,13 @@ struct DashboardQueryScalingCase {
     refresh_bundle_bytes: usize,
     refresh_history_rows: usize,
     refresh_apply_ms: f64,
+}
+
+#[derive(Serialize)]
+struct DashboardQueryScalingRepeatReport {
+    repeat: usize,
+    samples: Vec<DashboardQueryScalingProbe>,
+    median: DashboardQueryScalingProbe,
 }
 
 #[derive(Serialize)]
@@ -1368,6 +1380,68 @@ fn run_dashboard_query_scaling_probe() -> BenchResult<DashboardQueryScalingProbe
         target_owner_rows,
         page_size,
         cases,
+    })
+}
+
+fn run_dashboard_query_scaling_repeat(
+    repeat: usize,
+) -> BenchResult<DashboardQueryScalingRepeatReport> {
+    let mut samples = Vec::new();
+    for _ in 0..repeat {
+        samples.push(run_dashboard_query_scaling_probe()?);
+    }
+    let first = samples
+        .first()
+        .ok_or_else(|| "dashboard scaling repeat needs at least one sample".to_owned())?;
+    let mut median_cases = Vec::new();
+    for case_index in 0..first.cases.len() {
+        let cases = samples
+            .iter()
+            .map(|sample| sample.cases[case_index].clone())
+            .collect::<Vec<_>>();
+        median_cases.push(DashboardQueryScalingCase {
+            query_count: cases[0].query_count,
+            initial_export_ms: median_f64(
+                cases.iter().map(|case| case.initial_export_ms).collect(),
+            ),
+            initial_bundle_bytes: median_usize(
+                cases.iter().map(|case| case.initial_bundle_bytes).collect(),
+            ),
+            initial_history_rows: median_usize(
+                cases.iter().map(|case| case.initial_history_rows).collect(),
+            ),
+            initial_transaction_rows: median_usize(
+                cases
+                    .iter()
+                    .map(|case| case.initial_transaction_rows)
+                    .collect(),
+            ),
+            tab_apply_ms: median_f64(cases.iter().map(|case| case.tab_apply_ms).collect()),
+            refresh_export_ms: median_f64(
+                cases.iter().map(|case| case.refresh_export_ms).collect(),
+            ),
+            refresh_bundle_count: median_usize(
+                cases.iter().map(|case| case.refresh_bundle_count).collect(),
+            ),
+            refresh_bundle_bytes: median_usize(
+                cases.iter().map(|case| case.refresh_bundle_bytes).collect(),
+            ),
+            refresh_history_rows: median_usize(
+                cases.iter().map(|case| case.refresh_history_rows).collect(),
+            ),
+            refresh_apply_ms: median_f64(cases.iter().map(|case| case.refresh_apply_ms).collect()),
+        });
+    }
+
+    Ok(DashboardQueryScalingRepeatReport {
+        repeat,
+        median: DashboardQueryScalingProbe {
+            total_rows: first.total_rows,
+            target_owner_rows: first.target_owner_rows,
+            page_size: first.page_size,
+            cases: median_cases,
+        },
+        samples,
     })
 }
 
