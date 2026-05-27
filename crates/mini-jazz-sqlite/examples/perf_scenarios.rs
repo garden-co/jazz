@@ -13,7 +13,10 @@ type BenchResult<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn main() -> BenchResult<()> {
     let config = Config::from_env();
-    let report = run_core_only_scoped_page(&config)?;
+    let report = BenchmarkReport {
+        primary: run_core_only_scoped_page(&config)?,
+        tx_granularity_probe: run_tx_granularity_probe()?,
+    };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
@@ -39,6 +42,12 @@ impl Config {
             durable_intermediaries: env_bool("MINI_JAZZ_PERF_DURABLE_INTERMEDIARIES", true),
         }
     }
+}
+
+#[derive(Serialize)]
+struct BenchmarkReport {
+    primary: ScenarioReport,
+    tx_granularity_probe: TxGranularityProbe,
 }
 
 #[derive(Serialize)]
@@ -71,6 +80,25 @@ struct ScenarioReport {
     edge_warm_worker_cold: WarmBootReport,
     worker_warm_tab_cold: WarmBootReport,
     refresh_after_new_top_rows: RefreshReport,
+}
+
+#[derive(Serialize)]
+struct TxGranularityProbe {
+    batched_100: TxGranularityCase,
+    one_write_per_row: TxGranularityCase,
+}
+
+#[derive(Serialize)]
+struct TxGranularityCase {
+    total_rows: usize,
+    target_owner_rows: usize,
+    seed_batch_size: usize,
+    seed_ms: f64,
+    export_ms: f64,
+    bundle_bytes: usize,
+    history_rows_synced: usize,
+    transaction_rows_synced: usize,
+    core_database_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -236,6 +264,57 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         edge_warm_worker_cold,
         worker_warm_tab_cold,
         refresh_after_new_top_rows,
+    })
+}
+
+fn run_tx_granularity_probe() -> BenchResult<TxGranularityProbe> {
+    Ok(TxGranularityProbe {
+        batched_100: run_tx_granularity_case(100)?,
+        one_write_per_row: run_tx_granularity_case(1)?,
+    })
+}
+
+fn run_tx_granularity_case(seed_batch_size: usize) -> BenchResult<TxGranularityCase> {
+    let config = Config {
+        total_rows: 5_000,
+        target_owner_rows: 500,
+        page_size: 50,
+        seed_batch_size,
+        refresh_new_top_rows: 0,
+        durable_intermediaries: true,
+    };
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema,
+    )?;
+
+    let seed_started = Instant::now();
+    seed_documents(
+        &mut core,
+        config.total_rows,
+        config.target_owner_rows,
+        config.seed_batch_size,
+    )?;
+    let seed_elapsed = seed_started.elapsed();
+
+    let export_started = Instant::now();
+    let bundle = export_top_owner_page(&mut core, config.page_size)?;
+    let export_elapsed = export_started.elapsed();
+    let summary = BundleSummary::from(&bundle)?;
+
+    Ok(TxGranularityCase {
+        total_rows: config.total_rows,
+        target_owner_rows: config.target_owner_rows,
+        seed_batch_size,
+        seed_ms: ms(seed_elapsed),
+        export_ms: ms(export_elapsed),
+        bundle_bytes: summary.bytes,
+        history_rows_synced: bundle.history.len(),
+        transaction_rows_synced: bundle.txs.len(),
+        core_database_bytes: core.storage_stats()?.database_bytes,
     })
 }
 

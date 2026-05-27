@@ -235,3 +235,16 @@ ref` indexes are not safe to add yet. We need EXPLAIN QUERY PLAN output for the
 policy export SQL and probably more targeted composite indexes that match the
 actual predicates: branch, deletion, owner/order page index, and parent ref
 checks. Treat this as a concrete derisking topic, not a settled decision.
+
+## 2026-05-26 21:59 PDT
+
+Added a small tx-granularity probe to the perf runner. It compares a 5k document
+/ 500 owner-row profile seeded in batches of 100 vs one transaction per row. Both
+export the same page-50 policy-scoped query.
+
+Result: one-write-per-row seeding is about 4.1 s vs 0.47 s batched, database size
+is 2.34 MB vs 1.95 MB, and the page bundle grows from 45 KB / 2 tx records to 52
+KB / 51 tx records. Export time stays close (5.9 ms vs 5.2 ms) because scoped tx
+metadata now only exports the transactions touched by the page/policy rows. This
+supports the transaction model for read-time scope, while making write/seeding
+cost and tx table size a separate concern.
