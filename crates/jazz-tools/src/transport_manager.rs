@@ -515,7 +515,6 @@ pub(crate) fn frame_decode(data: &[u8]) -> Option<Vec<u8>> {
 /// larger than `max_decompressed` — used on the pre-auth handshake path so a
 /// decompression bomb can't be expanded before the peer is authenticated.
 pub(crate) fn frame_decode_capped(data: &[u8], max_decompressed: usize) -> Option<Vec<u8>> {
-    let _ = max_decompressed; // TODO(green): enforce the declared-size cap
     if data.len() < 4 {
         return None;
     }
@@ -523,7 +522,17 @@ pub(crate) fn frame_decode_capped(data: &[u8], max_decompressed: usize) -> Optio
     if data.len() < 4 + len {
         return None;
     }
-    lz4_flex::decompress_size_prepended(&data[4..4 + len]).ok()
+    let compressed = &data[4..4 + len];
+    if compressed.len() < 4 {
+        return None;
+    }
+    // lz4_flex prepends the uncompressed size as a little-endian u32. Reject an
+    // oversized declaration before it can size the output buffer.
+    let declared = u32::from_le_bytes(compressed[0..4].try_into().unwrap()) as usize;
+    if declared > max_decompressed {
+        return None;
+    }
+    lz4_flex::decompress_size_prepended(compressed).ok()
 }
 
 /// Outcome of the auth handshake.
