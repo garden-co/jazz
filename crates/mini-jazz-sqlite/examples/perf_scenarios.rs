@@ -3810,10 +3810,10 @@ fn query_raw_recursive_cte(conn: &Connection) -> rusqlite::Result<usize> {
            SELECT child.row_num
            FROM folder_current child
            JOIN subtree ON child.parent_num = subtree.row_num
-         )
+        )
          SELECT COUNT(*) FROM subtree",
         [],
-        |row| row.get(0),
+        |row| row.get::<_, i64>(0).map(|count| count as usize),
     )
 }
 
@@ -3824,7 +3824,7 @@ fn query_raw_closure(conn: &Connection) -> rusqlite::Result<usize> {
          JOIN folder_current current ON current.row_num = closure.descendant_num
          WHERE closure.ancestor_num = 0",
         [],
-        |row| row.get(0),
+        |row| row.get::<_, i64>(0).map(|count| count as usize),
     )
 }
 

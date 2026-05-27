@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RowView {
     pub table: String,
     pub id: String,
@@ -13,7 +13,7 @@ pub struct RowView {
     pub conflict_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum RowDiff {
     Added(RowView),
     Updated {
@@ -28,7 +28,7 @@ pub enum RowDiff {
     Removed(RowView),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BranchInfo {
     pub id: String,
     pub base_global_epoch: Option<i64>,
@@ -64,7 +64,7 @@ pub(crate) struct StoragePageBytes {
     pub object_bytes: BTreeMap<String, i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TransactionInfo {
     pub tx_id: String,
     pub global_epoch: Option<i64>,
@@ -75,7 +75,7 @@ pub struct TransactionInfo {
     pub rejection_detail: Option<JsonValue>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RejectionInfo {
     pub tx_id: String,
     pub code: String,

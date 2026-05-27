@@ -5,6 +5,7 @@ use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
 };
+use crate::time::now_ms;
 use crate::types::{
     ApplyBundleProfile, BranchInfo, QueryExportProfile, RejectionInfo, RowView, StorageStats,
     TransactionInfo,
@@ -16,7 +17,7 @@ use crate::{
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub struct Runtime {
     conn: Connection,
@@ -6652,13 +6653,6 @@ fn integer_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
         rusqlite::types::Value::Integer(value) => Ok(*value),
         _ => Err(crate::Error::new(format!("expected integer {name}"))),
     }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 fn duration_ms(duration: Duration) -> f64 {

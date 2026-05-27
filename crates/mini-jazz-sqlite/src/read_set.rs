@@ -1,9 +1,9 @@
 use crate::rows::ensure_row_id;
 use crate::sync::Bundle;
+use crate::time::now_ms;
 use crate::{branch, schema, tx, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const REASON_ABSENT: i64 = 3;
 
@@ -242,11 +242,4 @@ fn tx_id_for_num(conn: &Connection, tx_num: i64) -> Result<String> {
         params![tx_num],
         |row| row.get(0),
     )?)
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
