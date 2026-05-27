@@ -96,6 +96,13 @@ Bindings must agree on:
 - conflict metadata shape
 - error/rejection shape
 
+Binding APIs may be idiomatic, but they must remain thin over the core semantic
+operations. A binding can wrap query descriptors in a fluent DSL, generated
+types, callbacks, promises, or framework hooks; it should not introduce
+host-specific query helpers that cannot be expressed as the same core query
+descriptor. The cross-binding contract is limited to descriptors supported by
+the core query language.
+
 Higher-level language bindings should expose idiomatic values while preserving
 the same database semantics. TypeScript/JavaScript bindings are the concrete
 compatibility example: `BYTEA` values become `Uint8Array`, timestamps become

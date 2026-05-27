@@ -176,6 +176,11 @@ feature exists.
   reasons.
 - Recursive query-scope export includes deleted descendant subtrees, not only
   direct deleted children.
+- Public query APIs expose generic semantic descriptors rather than
+  app-specific query helper methods.
+- Native, WASM, and higher-level bindings execute the same supported query
+  descriptor with the same semantic result.
+- Cross-binding query semantics cover supported query descriptor features.
 
 ### D.7 Sync Invariants
 
@@ -202,10 +207,16 @@ feature exists.
 
 - Subscription first delivery equals the corresponding one-shot query at the
   same tier.
+- Public subscriptions are push/callback APIs; rerun scheduling is internal,
+  not the application-facing contract.
+- Subscription deliveries include the current semantic result and deterministic
+  row-level changes from the previous delivered result.
 - Subscription updates are semantic row diffs.
 - Ordered subscriptions emit deterministic moved diffs for order-only changes.
 - Subscription diff ordering is deterministic and follows the same effective
   ordering as the corresponding query result.
+- Subscription row changes identify public row ids, change kind, and stable
+  result positions; added and updated changes carry the new semantic item.
 - Dependency-only changes can update parent semantic rows.
 - Every subscription update is tier-gated.
 - Rows may arrive before query settlement without being published.
@@ -379,6 +390,10 @@ feature exists.
   columns according to stable JS boundary rules.
 - Generated row/result layout follows declared schema order plus requested
   includes and subscription deltas.
+- Browser WASM exposes the same supported query and subscription semantics as
+  the native runtime.
+- Browser storage and worker topology affect persistence and latency, not row,
+  query, subscription, transaction, or sync meaning.
 
 ### D.15 File/Blob Invariants
 

@@ -381,7 +381,7 @@ Core verbs:
 - `apply_bundle`
 - `validate_at_authority`
 - `repair_projection`
-- `poll_subscription`
+- `deliver_subscription_update`
 
 Suggested slices:
 

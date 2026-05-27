@@ -40,11 +40,22 @@ The semantic runtime roles are:
 Runtime topology changes where storage lives and where queries settle. It must
 not change query, write, policy, branch, or sync meaning.
 
+The Rust runtime is the semantic boundary for one-shot query execution and live
+subscriptions. Platform bindings should expose generic query/subscription entry
+points over the runtime's semantic descriptor shape instead of duplicating query
+semantics in each host language.
+
 Browser durable mode may use:
 
 - main-thread in-memory runtime
 - durable worker runtime
 - SharedWorker or tab broker
+
+Browser WASM is a binding and storage topology, not a separate product model.
+It may run against memory-only SQLite or browser-durable storage such as OPFS,
+and it may live on the main thread or inside a worker. Those choices affect
+latency, persistence, and crash behavior, but not row semantics, query results,
+subscription diffs, transaction outcomes, or sync facts.
 
 The main thread may run queries directly against an in-memory core. In durable
 browser topology, each tab may have its own in-memory SQLite node connected to a
