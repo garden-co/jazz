@@ -462,6 +462,78 @@ fn recursive_query_read_refresh_delivers_later_descendant_and_subscription_diff(
 }
 
 #[test]
+fn recursive_query_read_refresh_batches_same_shape_roots() {
+    let schema = support::folders_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    for (id, name) in [("root-a", "Root A"), ("root-b", "Root B")] {
+        alice
+            .insert_row(
+                "folders",
+                id,
+                BTreeMap::from([
+                    ("name".to_owned(), json!(name)),
+                    ("parent".to_owned(), json!(id)),
+                ]),
+            )
+            .unwrap();
+        peer.apply_bundle(
+            &alice
+                .export_recursive_refs("folders", id, "parent")
+                .unwrap(),
+        )
+        .unwrap();
+    }
+    assert_eq!(peer.observed_query_reads().unwrap().len(), 2);
+
+    alice
+        .insert_row(
+            "folders",
+            "child-a",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Child A")),
+                ("parent".to_owned(), json!("root-a")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "child-b",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Child B")),
+                ("parent".to_owned(), json!("root-b")),
+            ]),
+        )
+        .unwrap();
+
+    let refreshes = alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap();
+    assert_eq!(refreshes.len(), 1);
+    assert_eq!(refreshes[0].query_reads.len(), 2);
+    peer.apply_bundle(&refreshes[0]).unwrap();
+
+    let root_a_ids = peer
+        .read_recursive_refs("folders", "root-a", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    let root_b_ids = peer
+        .read_recursive_refs("folders", "root-b", "parent")
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(root_a_ids, vec!["root-a", "child-a"]);
+    assert_eq!(root_b_ids, vec!["root-b", "child-b"]);
+}
+
+#[test]
 fn durable_recursive_query_read_refreshes_after_restart() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("recursive-worker.sqlite");
