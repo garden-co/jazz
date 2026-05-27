@@ -748,3 +748,16 @@ code keeps the temp-table path as the default because it fixes the worst
 observed broad-transaction read-set case, keeps whole-system tests green, and
 the next step is to collect more scenario-specific numbers before deciding
 whether to gate it by scope size or broad-read detection.
+
+## 2026-05-27 00:12 PDT
+
+Made read-set export adaptive instead of always using temp scope tables. It now
+counts candidate read rows for the exported transactions and uses the simple
+query/Rust filter for ordinary small read sets, switching to temp scope tables
+only when candidate reads are much larger than exported history.
+
+Result: ordinary export profile stays cheap (`reads_ms` ~0.6 ms for 100 reads),
+while the pinned broad-read case keeps most of the temp-table win (`reads_ms`
+~9.3 ms, total export ~19.1 ms). Full whole-system tests remain green. The
+primary refresh sample was still noisy/high in one run, so more repeated
+scenario sampling is needed before calling the heuristic final.

@@ -4895,6 +4895,97 @@ fn export_reads_for_history(
     conn: &Connection,
     history: &[HistoryRecord],
 ) -> Result<Vec<ReadRecord>> {
+    let mut tx_ids = history
+        .iter()
+        .map(|record| record.tx_id.clone())
+        .collect::<Vec<_>>();
+    tx_ids.sort();
+    tx_ids.dedup();
+    if tx_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let candidate_read_count = count_read_rows_for_tx_ids(conn, &tx_ids)?;
+    if candidate_read_count <= (history.len() * 4).max(256) {
+        return export_reads_for_history_simple(conn, history, &tx_ids);
+    }
+    export_reads_for_history_with_temp_scope(conn, history)
+}
+
+fn export_reads_for_history_simple(
+    conn: &Connection,
+    history: &[HistoryRecord],
+    tx_ids: &[String],
+) -> Result<Vec<ReadRecord>> {
+    let history_keys = history
+        .iter()
+        .map(|record| {
+            (
+                record.tx_id.as_str(),
+                record.table.as_str(),
+                record.row_id.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
+         FROM jazz_tx_read reads
+         JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+         JOIN jazz_table tables ON tables.table_num = reads.table_num
+         LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
+         JOIN jazz_row_id ids ON ids.row_num = reads.row_num
+         WHERE tx.tx_id IN ({placeholders})
+         ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
+        placeholders = (0..tx_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))?;
+    let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
+        Ok(ReadRecord {
+            tx_id: row.get(0)?,
+            table: row.get(1)?,
+            row_id: row.get(2)?,
+            reason: row.get(3)?,
+            observed_tx_id: row.get(4)?,
+        })
+    })?;
+    let records = records
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|record| {
+            record.reason != read_set::REASON_ABSENT
+                || history_keys.contains(&(
+                    record.tx_id.as_str(),
+                    record.table.as_str(),
+                    record.row_id.as_str(),
+                ))
+        })
+        .collect();
+    Ok(records)
+}
+
+fn count_read_rows_for_tx_ids(conn: &Connection, tx_ids: &[String]) -> Result<usize> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM jazz_tx_read reads
+             JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             WHERE tx.tx_id IN ({placeholders})",
+            placeholders = (0..tx_ids.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        params_from_iter(tx_ids.iter()),
+        |row| row.get(0),
+    )?;
+    Ok(count as usize)
+}
+
+fn export_reads_for_history_with_temp_scope(
+    conn: &Connection,
+    history: &[HistoryRecord],
+) -> Result<Vec<ReadRecord>> {
     if history.is_empty() {
         return Ok(Vec::new());
     }
