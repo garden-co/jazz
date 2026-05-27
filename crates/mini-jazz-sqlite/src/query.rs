@@ -6,6 +6,8 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
+const RECURSIVE_VISIBLE_ROWS_TABLE_SCAN_THRESHOLD: i64 = 50_000;
+
 pub(crate) struct QueryContext<'a> {
     pub(crate) conn: &'a Connection,
     pub(crate) schema: &'a SchemaDef,
@@ -721,9 +723,7 @@ impl QueryContext<'_> {
                 parent_field.name, table_name
             )));
         }
-        if std::env::var("MINI_JAZZ_SQLITE_RECURSIVE_VISIBLE_ROWS").is_ok()
-            || (self.branch_num != 1
-                && branch::base_global_epoch(self.conn, self.branch_num)?.is_some())
+        if self.branch_num != 1 && branch::base_global_epoch(self.conn, self.branch_num)?.is_some()
         {
             return self.read_recursive_refs_from_visible_rows(table_name, root_id, parent_field);
         }
@@ -820,13 +820,9 @@ impl QueryContext<'_> {
         parent_column: &str,
         root_num: i64,
     ) -> Result<bool> {
-        let threshold = std::env::var("MINI_JAZZ_SQLITE_RECURSIVE_VISIBLE_ROWS_MAX_TABLE_ROWS")
-            .ok()
-            .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(50_000);
-        if threshold <= 0 {
-            return Ok(false);
-        }
+        // TODO: replace this broad-table heuristic with a planned recursive query
+        // strategy, likely a better SQL plan or an optional derived closure index.
+        let threshold = RECURSIVE_VISIBLE_ROWS_TABLE_SCAN_THRESHOLD;
         let current_table = crate::schema::current_table(table_name);
         let current_rows = self.conn.query_row(
             &format!(

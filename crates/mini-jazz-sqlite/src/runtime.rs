@@ -646,7 +646,6 @@ impl Runtime {
         let reads_started = Instant::now();
         let mut row_nums_by_id = BTreeMap::new();
         let mut row_nums_created_in_apply = BTreeSet::new();
-        preload_bundle_row_nums(&db, &mut row_nums_by_id, bundle)?;
         let mut user_nums_by_id = BTreeMap::new();
         let mut insert_read_stmt = db.prepare_cached(
             "INSERT OR REPLACE INTO jazz_tx_read
@@ -6626,70 +6625,6 @@ fn cached_ensure_row_id_with_status(
     }
     cache.insert(key, row_num);
     Ok(row_num)
-}
-
-fn preload_bundle_row_nums(
-    conn: &Connection,
-    cache: &mut BTreeMap<(String, String), i64>,
-    bundle: &Bundle,
-) -> Result<()> {
-    if std::env::var("MINI_JAZZ_SQLITE_PRELOAD_ROW_IDS").is_err() {
-        return Ok(());
-    }
-    let mut table_row_ids = BTreeSet::new();
-    for read in &bundle.reads {
-        table_row_ids.insert((read.table.clone(), read.row_id.clone()));
-    }
-    for record in &bundle.history {
-        table_row_ids.insert((record.table.clone(), record.row_id.clone()));
-    }
-    if table_row_ids.is_empty() {
-        return Ok(());
-    }
-    let row_ids = table_row_ids
-        .iter()
-        .map(|(_, row_id)| row_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let sample_size = row_ids.len().min(200);
-    if count_existing_row_ids(conn, &row_ids[..sample_size])? == 0 {
-        return Ok(());
-    }
-    let mut row_nums_by_public_id = BTreeMap::new();
-    for chunk in row_ids.chunks(400) {
-        let placeholders = sql_placeholders(chunk.len());
-        let mut stmt = conn.prepare(&format!(
-            "SELECT row_id, row_num
-             FROM jazz_row_id
-             WHERE row_id IN ({placeholders})"
-        ))?;
-        let rows = stmt.query_map(params_from_iter(chunk.iter()), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        for row in rows {
-            let (row_id, row_num) = row?;
-            row_nums_by_public_id.insert(row_id, row_num);
-        }
-    }
-    for (table, row_id) in table_row_ids {
-        if let Some(row_num) = row_nums_by_public_id.get(&row_id) {
-            cache.insert((table, row_id), *row_num);
-        }
-    }
-    Ok(())
-}
-
-fn count_existing_row_ids(conn: &Connection, row_ids: &[String]) -> Result<i64> {
-    if row_ids.is_empty() {
-        return Ok(0);
-    }
-    let placeholders = sql_placeholders(row_ids.len());
-    Ok(conn.query_row(
-        &format!("SELECT COUNT(*) FROM jazz_row_id WHERE row_id IN ({placeholders})"),
-        params_from_iter(row_ids.iter()),
-        |row| row.get(0),
-    )?)
 }
 
 fn cached_ensure_user(
