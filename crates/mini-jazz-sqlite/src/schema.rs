@@ -342,6 +342,13 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           detail_json TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS jazz_tx_awaiting_dependency (
+          tx_num INTEGER PRIMARY KEY,
+          auth_user TEXT NOT NULL,
+          detail_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS jazz_tx_write (
           tx_num INTEGER NOT NULL,
           table_name TEXT NOT NULL,

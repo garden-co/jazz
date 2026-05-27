@@ -43,6 +43,7 @@ pub struct TransactionInfo {
     pub global_epoch: Option<i64>,
     pub conflict_mode: String,
     pub receipt_tiers: Vec<String>,
+    pub awaiting_dependency: Option<JsonValue>,
     pub rejection_code: Option<String>,
     pub rejection_detail: Option<JsonValue>,
 }

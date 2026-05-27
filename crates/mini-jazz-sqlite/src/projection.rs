@@ -45,6 +45,12 @@ fn rebuild_table(
          FROM {} h
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
          WHERE tx.outcome != ?
+           AND NOT (tx.outcome = ? AND tx.conflict_mode = ?)
+           AND NOT EXISTS (
+             SELECT 1
+             FROM jazz_tx_awaiting_dependency awaiting
+             WHERE awaiting.tx_num = tx.tx_num
+           )
          ORDER BY h.row_num,
                   h.j_branch_num,
                   CASE
@@ -62,6 +68,8 @@ fn rebuild_table(
     let rows = stmt.query_map(
         params![
             tx::OUTCOME_REJECTED,
+            tx::OUTCOME_PENDING,
+            tx::MODE_EXCLUSIVE,
             tx::OUTCOME_PENDING,
             local_node_num,
             tx::OUTCOME_ACCEPTED

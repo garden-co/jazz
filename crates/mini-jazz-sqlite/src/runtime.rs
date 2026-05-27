@@ -24,6 +24,12 @@ pub struct Runtime {
     branch_num: i64,
 }
 
+struct AwaitingDependencyTx {
+    tx_num: i64,
+    tx_id: String,
+    auth_user: String,
+}
+
 pub const ADMIN_SYSTEM_USER: &str = "@system/admin";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -330,16 +336,34 @@ impl Runtime {
         auth_user: &str,
     ) -> Result<Bundle> {
         let mut bundle = self.export_table_history(table_name)?;
+        if !bundle.history.iter().any(|record| record.tx_id == tx_id) {
+            let tx_num = tx::tx_num(&self.conn, tx_id)?;
+            let history = history_records_for_tx(&self.conn, &self.schema, tx_num, tx_id)?
+                .into_iter()
+                .filter(|record| record.table == table_name)
+                .collect::<Vec<_>>();
+            if history.is_empty() {
+                return Err(crate::Error::new(format!(
+                    "transaction {tx_id} has no exported history"
+                )));
+            }
+            let reads = export_reads_for_history(&self.conn, &history)?;
+            let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+            include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+            bundle = make_bundle(
+                &self.schema,
+                branches,
+                export_txs(&self.conn)?,
+                reads,
+                Vec::new(),
+                history,
+            );
+        }
         let tx_record = bundle
             .txs
             .iter_mut()
             .find(|record| record.tx_id == tx_id)
             .ok_or_else(|| crate::Error::new(format!("transaction {tx_id} is not in bundle")))?;
-        if !bundle.history.iter().any(|record| record.tx_id == tx_id) {
-            return Err(crate::Error::new(format!(
-                "transaction {tx_id} has no exported history"
-            )));
-        }
         tx_record.conflict_mode = tx::MODE_EXCLUSIVE;
         tx_record.outcome = tx::OUTCOME_PENDING;
         tx_record.global_epoch = None;
@@ -597,6 +621,7 @@ impl Runtime {
             Self::apply_query_scope_repair(&schema, &db, query_read)?;
         }
         db.commit()?;
+        self.revalidate_awaiting_dependencies()?;
         Ok(())
     }
 
@@ -774,6 +799,23 @@ impl Runtime {
         self.apply_untrusted_bundle_with_auth_user(bundle, Some(user))
     }
 
+    pub fn stage_exclusive_bundle_for_forwarding(&mut self, bundle: &Bundle) -> Result<()> {
+        for tx_record in &bundle.txs {
+            if tx_record.conflict_mode == tx::MODE_EXCLUSIVE
+                && tx_record.outcome == tx::OUTCOME_PENDING
+                && tx_record.auth_user.is_none()
+            {
+                return Err(crate::Error::new(format!(
+                    "exclusive transaction {} is missing forwarded auth user",
+                    tx_record.tx_id
+                )));
+            }
+        }
+        self.apply_bundle_inner(bundle, false)?;
+        projection::rebuild(&self.conn, &self.schema, self.node_num)?;
+        Ok(())
+    }
+
     fn apply_untrusted_bundle_with_auth_user(
         &mut self,
         bundle: &Bundle,
@@ -793,6 +835,7 @@ impl Runtime {
             .collect::<BTreeMap<_, _>>();
         self.apply_bundle_inner(bundle, false)?;
         let mut rejected = BTreeSet::new();
+        let mut exclusive_to_accept = BTreeSet::new();
         for tx_id in stale_exclusive_tx_ids {
             self.reject_transaction_with_detail(
                 &tx_id,
@@ -854,22 +897,126 @@ impl Runtime {
                 rejected.insert(record.tx_id.clone());
                 continue;
             }
+            let auth_user = auth_user.expect("auth user checked above");
             let allowed = write_allowed_for_history_record(
                 &self.conn,
                 &self.schema,
                 table,
                 row_num,
                 record,
-                auth_user,
+                Some(auth_user),
             )?;
             if !allowed {
                 let detail =
                     policy_denial_detail_for_history_record(&self.conn, table, record, tx_num)?;
+                if is_policy_dependency_unavailable(&detail) {
+                    if conflict_mode == tx::MODE_EXCLUSIVE {
+                        self.reject_transaction_with_detail(
+                            &record.tx_id,
+                            "policy_denied",
+                            detail,
+                        )?;
+                        rejected.insert(record.tx_id.clone());
+                        continue;
+                    }
+                    mark_transaction_awaiting_dependency(&self.conn, tx_num, auth_user, &detail)?;
+                    remove_current_for_awaiting_dependency(&self.conn, record, row_num)?;
+                    rejected.insert(record.tx_id.clone());
+                    continue;
+                }
                 self.reject_transaction_with_detail(&record.tx_id, "policy_denied", detail)?;
                 rejected.insert(record.tx_id.clone());
+            } else {
+                clear_transaction_awaiting_dependency(&self.conn, tx_num)?;
+                if conflict_mode == tx::MODE_EXCLUSIVE {
+                    exclusive_to_accept.insert(record.tx_id.clone());
+                }
             }
         }
-        if !rejected.is_empty() {
+        let mut accepted_exclusive = false;
+        for tx_id in exclusive_to_accept {
+            let tx_num = tx::tx_num(&self.conn, &tx_id)?;
+            if !rejected.contains(&tx_id) && tx_outcome(&self.conn, tx_num)? == tx::OUTCOME_PENDING
+            {
+                tx::accept_global(&self.conn, &tx_id, next_global_epoch(&self.conn)?)?;
+                accepted_exclusive = true;
+            }
+        }
+        if !rejected.is_empty() || accepted_exclusive {
+            projection::rebuild(&self.conn, &self.schema, self.node_num)?;
+        }
+        self.revalidate_awaiting_dependencies()?;
+        Ok(())
+    }
+
+    fn revalidate_awaiting_dependencies(&mut self) -> Result<()> {
+        let awaiting = awaiting_dependency_transactions(&self.conn)?;
+        let mut changed = false;
+        for awaiting in awaiting {
+            if tx_outcome(&self.conn, awaiting.tx_num)? != tx::OUTCOME_PENDING {
+                clear_transaction_awaiting_dependency(&self.conn, awaiting.tx_num)?;
+                changed = true;
+                continue;
+            }
+            let records =
+                history_records_for_tx(&self.conn, &self.schema, awaiting.tx_num, &awaiting.tx_id)?;
+            if records.is_empty() {
+                continue;
+            }
+            let mut still_waiting = None;
+            let mut denied = None;
+            for record in records {
+                let table = self.schema.table_def(&record.table)?;
+                let row_num = row_num(&self.conn, &record.row_id)?;
+                let allowed = write_allowed_for_history_record(
+                    &self.conn,
+                    &self.schema,
+                    table,
+                    row_num,
+                    &record,
+                    Some(awaiting.auth_user.as_str()),
+                )?;
+                if !allowed {
+                    let detail = policy_denial_detail_for_history_record(
+                        &self.conn,
+                        table,
+                        &record,
+                        awaiting.tx_num,
+                    )?;
+                    if is_policy_dependency_unavailable(&detail) {
+                        still_waiting = Some(detail);
+                    } else {
+                        denied = Some(detail);
+                    }
+                    break;
+                }
+            }
+            if let Some(detail) = denied {
+                clear_transaction_awaiting_dependency(&self.conn, awaiting.tx_num)?;
+                tx::reject_with_detail_json(
+                    &self.conn,
+                    &awaiting.tx_id,
+                    "policy_denied",
+                    &serde_json::to_string(&detail)
+                        .map_err(|err| crate::Error::new(err.to_string()))?,
+                )?;
+                changed = true;
+            } else if let Some(detail) = still_waiting {
+                mark_transaction_awaiting_dependency(
+                    &self.conn,
+                    awaiting.tx_num,
+                    &awaiting.auth_user,
+                    &detail,
+                )?;
+            } else {
+                clear_transaction_awaiting_dependency(&self.conn, awaiting.tx_num)?;
+                if tx_conflict_mode(&self.conn, awaiting.tx_num)? == tx::MODE_MERGEABLE {
+                    tx::accept_edge(&self.conn, &awaiting.tx_id, now_ms())?;
+                }
+                changed = true;
+            }
+        }
+        if changed {
             projection::rebuild(&self.conn, &self.schema, self.node_num)?;
         }
         Ok(())
@@ -1245,6 +1392,9 @@ impl Runtime {
         record_tx_write(db, tx_num, &record.table, row_num, record.op)?;
 
         let outcome = tx_outcome(db, tx_num)?;
+        if outcome == tx::OUTCOME_PENDING && tx_conflict_mode(db, tx_num)? == tx::MODE_EXCLUSIVE {
+            return Ok(());
+        }
         if tx_is_remote_pending(db, tx_num, local_node_num)?
             && durable_version_exists_for_row(db, &record.table, row_num, branch_num)?
         {
@@ -1332,6 +1482,7 @@ impl Runtime {
         let detail_json = encode_optional_json(detail.as_ref())?;
         let db = self.conn.transaction()?;
         let tx_num = tx::reject_with_detail_json(&db, tx_id, code, &detail_json)?;
+        clear_transaction_awaiting_dependency(&db, tx_num)?;
         for table in self.schema.tables() {
             db.execute(
                 &format!(
@@ -1347,13 +1498,16 @@ impl Runtime {
     }
 
     pub fn accept_transaction_at_global(&mut self, tx_id: &str, global_epoch: i64) -> Result<()> {
-        tx::accept_global(&self.conn, tx_id, global_epoch)?;
+        let tx_num = tx::accept_global(&self.conn, tx_id, global_epoch)?;
+        clear_transaction_awaiting_dependency(&self.conn, tx_num)?;
         projection::rebuild(&self.conn, &self.schema, self.node_num)?;
         Ok(())
     }
 
     pub fn accept_transaction_at_edge(&mut self, tx_id: &str) -> Result<()> {
-        tx::accept_edge(&self.conn, tx_id, now_ms())?;
+        let tx_num = tx::accept_edge(&self.conn, tx_id, now_ms())?;
+        clear_transaction_awaiting_dependency(&self.conn, tx_num)?;
+        projection::rebuild(&self.conn, &self.schema, self.node_num)?;
         Ok(())
     }
 
@@ -1396,11 +1550,26 @@ impl Runtime {
             }
             None => (None, None),
         };
+        let awaiting_dependency = self
+            .conn
+            .query_row(
+                "SELECT awaiting.detail_json
+                 FROM jazz_tx_awaiting_dependency awaiting
+                 JOIN jazz_tx tx ON tx.tx_num = awaiting.tx_num
+                 WHERE tx.tx_id = ?",
+                params![tx_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|detail_json| parse_rejection_detail(&detail_json))
+            .transpose()?
+            .flatten();
         Ok(TransactionInfo {
             tx_id,
             global_epoch,
             conflict_mode,
             receipt_tiers,
+            awaiting_dependency,
             rejection_code,
             rejection_detail,
         })
@@ -2809,6 +2978,136 @@ fn policy_denial_detail_for_history_record(
     }))
 }
 
+fn is_policy_dependency_unavailable(detail: &JsonValue) -> bool {
+    detail.get("reason").and_then(JsonValue::as_str) == Some("policy_dependency_unavailable")
+}
+
+fn mark_transaction_awaiting_dependency(
+    conn: &Connection,
+    tx_num: i64,
+    auth_user: &str,
+    detail: &JsonValue,
+) -> Result<()> {
+    let detail_json =
+        serde_json::to_string(detail).map_err(|err| crate::Error::new(err.to_string()))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO jazz_tx_awaiting_dependency
+         (tx_num, auth_user, detail_json, updated_at)
+         VALUES (?, ?, ?, ?)",
+        params![tx_num, auth_user, detail_json, now_ms()],
+    )?;
+    Ok(())
+}
+
+fn remove_current_for_awaiting_dependency(
+    conn: &Connection,
+    record: &HistoryRecord,
+    row_num: i64,
+) -> Result<()> {
+    let branch_num = branch::ensure(conn, &record.branch_id, None, now_ms())?;
+    conn.execute(
+        &format!(
+            "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
+            crate::schema::current_table(&record.table)
+        ),
+        params![row_num, branch_num],
+    )?;
+    Ok(())
+}
+
+fn clear_transaction_awaiting_dependency(conn: &Connection, tx_num: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM jazz_tx_awaiting_dependency WHERE tx_num = ?",
+        params![tx_num],
+    )?;
+    Ok(())
+}
+
+fn awaiting_dependency_transactions(conn: &Connection) -> Result<Vec<AwaitingDependencyTx>> {
+    let mut stmt = conn.prepare(
+        "SELECT tx.tx_num, tx.tx_id, awaiting.auth_user
+         FROM jazz_tx_awaiting_dependency awaiting
+         JOIN jazz_tx tx ON tx.tx_num = awaiting.tx_num
+         ORDER BY tx.tx_num",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(AwaitingDependencyTx {
+            tx_num: row.get(0)?,
+            tx_id: row.get(1)?,
+            auth_user: row.get(2)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn history_records_for_tx(
+    conn: &Connection,
+    schema: &SchemaDef,
+    tx_num: i64,
+    tx_id: &str,
+) -> Result<Vec<HistoryRecord>> {
+    let mut records = Vec::new();
+    for table in schema.tables() {
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec![
+            "ids.row_id".to_owned(),
+            "branch.branch_id".to_owned(),
+            "h.op".to_owned(),
+        ];
+        select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+        select_columns.extend([
+            "h.j_created_at".to_owned(),
+            "h.j_updated_at".to_owned(),
+            "h.j_created_by".to_owned(),
+            "h.j_updated_by".to_owned(),
+        ]);
+        let sql = format!(
+            "SELECT {}
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
+             WHERE h.tx_num = ?
+             ORDER BY h.row_num",
+            select_columns.join(", "),
+            crate::schema::history_table(&table.name)
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let row_width = 3 + table.fields.len() + 4;
+        let mut rows = stmt.query(params![tx_num])?;
+        while let Some(row) = rows.next()? {
+            let raw = (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut values = BTreeMap::new();
+            for (idx, field) in table.fields.iter().enumerate() {
+                values.insert(
+                    field.name.clone(),
+                    sql_value_to_json(conn, field, &raw[idx + 3])?,
+                );
+            }
+            let sys = 3 + table.fields.len();
+            records.push(HistoryRecord {
+                table: table.name.clone(),
+                row_id: text_value(&raw[0], "row_id")?,
+                branch_id: text_value(&raw[1], "branch_id")?,
+                tx_id: tx_id.to_owned(),
+                op: integer_value(&raw[2], "op")?,
+                values,
+                created_at: integer_value(&raw[sys], "j_created_at")?,
+                updated_at: integer_value(&raw[sys + 1], "j_updated_at")?,
+                created_by: text_value(&raw[sys + 2], "j_created_by")?,
+                updated_by: text_value(&raw[sys + 3], "j_updated_by")?,
+            });
+        }
+    }
+    Ok(records)
+}
+
 fn unavailable_recorded_policy_dependency(
     conn: &Connection,
     tx_num: i64,
@@ -2844,8 +3143,11 @@ fn unavailable_recorded_policy_dependency(
             params![row_num, branch_num],
             |row| row.get(0),
         )?;
-        if visible_count == 0 || observed_tx_num.is_none() {
+        if visible_count == 0 {
             return Ok(Some((table_name, row_id)));
+        }
+        if observed_tx_num.is_none() {
+            repair_missing_observed_policy_read(conn, tx_num, &table_name, row_num, branch_num)?;
         }
     }
     Ok(None)
@@ -2902,10 +3204,50 @@ fn unavailable_policy_dependency(
         |row| row.get(0),
     )?;
     if missing_observed_read_count > 0 {
-        Ok(Some((ref_table_name.clone(), row_id.to_owned())))
-    } else {
-        Ok(None)
+        repair_missing_observed_policy_read(
+            conn,
+            tx_num,
+            ref_table_name,
+            dependency_row_num,
+            branch_num,
+        )?;
     }
+    Ok(None)
+}
+
+fn repair_missing_observed_policy_read(
+    conn: &Connection,
+    tx_num: i64,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<()> {
+    let observed_tx_num: Option<i64> = conn
+        .query_row(
+            &format!(
+                "SELECT visible_tx_num
+                 FROM {}
+                 WHERE row_num = ?
+                   AND j_branch_num = ?
+                   AND is_deleted = 0",
+                crate::schema::current_table(table_name)
+            ),
+            params![row_num, branch_num],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(observed_tx_num) = observed_tx_num {
+        conn.execute(
+            "UPDATE jazz_tx_read
+             SET observed_tx_num = ?
+             WHERE tx_num = ?
+               AND table_name = ?
+               AND row_num = ?
+               AND observed_tx_num IS NULL",
+            params![observed_tx_num, tx_num, table_name, row_num],
+        )?;
+    }
+    Ok(())
 }
 
 fn current_creation_metadata(
@@ -3507,6 +3849,14 @@ fn tx_conflict_mode(conn: &Connection, tx_num: i64) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT conflict_mode FROM jazz_tx WHERE tx_num = ?",
         params![tx_num],
+        |row| row.get(0),
+    )?)
+}
+
+fn next_global_epoch(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(global_epoch), 0) + 1 FROM jazz_tx",
+        [],
         |row| row.get(0),
     )?)
 }

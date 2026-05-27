@@ -508,11 +508,13 @@ trusted peer does not know the authenticated user for a pending mergeable
 transaction, it must reject or await auth context rather than infer authority
 from history rows.
 
-Exclusive transactions require final fate from the global authority. If an edge
-or other intermediary forwards an exclusive transaction instead of deciding it
-locally, it must forward enough authenticated session context for the global
-authority to evaluate the transaction under the same user, admin/trust role, and
-policy context as the initiating session.
+Exclusive transactions require final fate from the global authority. Edges and
+other intermediaries forward them upstream immediately instead of waiting for
+local policy dependencies. Until global fate returns, intermediaries may store
+the pending exclusive transaction and its history for retry, but ordinary reads
+must not show it as accepted state. The forwarded transaction must carry enough
+authenticated session context for the global authority to evaluate it under the
+same user, admin/trust role, and policy context as the initiating session.
 
 The Rust prototype currently carries only an optional forwarded authenticated
 user for this authority validation path. Forwarding rewrites only the selected
@@ -839,6 +841,12 @@ global
 For v0, the hot transaction row may store the current outcome and global epoch
 mutably. Rejection details should live in a side table keyed by transaction id
 or physical transaction id, not as a wide field on the hot transaction row.
+The Rust prototype currently represents `awaiting_deps` as a side-table marker
+while leaving the hot outcome `pending`; this keeps outcome ordering simple
+while still making dependency waits durable and queryable.
+That marker must persist the auth user context that the authority used for the
+original validation attempt. Dependency arrival must not require the client to
+resend the original write bundle.
 
 The local write path:
 
@@ -862,12 +870,29 @@ public transaction id.
 Authority rejection keeps the transaction and history rows. Visibility and
 projection repair make rejected versions disappear from ordinary reads.
 
-An edge that cannot validate a transaction because required policy-influencing
-facts are missing should mark it `awaiting_deps`, request or subscribe to the
-missing facts, and re-evaluate after they arrive. `awaiting_deps` is not
-acceptance and must not make an authority-accepted version visible. Globally
-consistent exclusive transactions must always receive final `accepted` or
-`rejected` fate from the global authority.
+An edge that cannot validate a mergeable transaction because required
+policy-influencing facts are missing should mark it `awaiting_deps`, request or
+subscribe to the missing facts, and re-evaluate after they arrive.
+`awaiting_deps` is not acceptance and must not make an authority-accepted
+version visible. Globally consistent exclusive transactions do not use
+`awaiting_deps` for ordinary policy-dependency cache misses; they are forwarded
+to the global authority and must always receive final `accepted` or `rejected`
+fate there.
+
+An `awaiting_deps` transaction keeps its public transaction id and history rows.
+It is not reported as rejected, and ordinary current projections must exclude
+its row versions. When the missing facts arrive, the same sealed transaction is
+re-evaluated. If validation succeeds, the edge clears the awaiting marker and
+accepts/receipts the original mergeable transaction. If validation fails for a
+reason other than missing dependencies, including a dependency row arriving but
+still not being readable by the transaction's auth user, the edge rejects the
+original mergeable transaction.
+
+When a previously missing policy dependency becomes visible, the authority
+should repair any stored observed-read facts that were recorded as missing so
+future sync exports describe the dependency version that allowed validation to
+complete. This repair enriches the read set for the same transaction; it does
+not create a replacement transaction.
 
 Edge acceptance of mergeable transactions sets the transaction outcome to
 accepted and records an edge receipt without a global epoch. Global acceptance
@@ -892,6 +917,10 @@ Open issues:
 - exact durability receipt layout
 - explicit fate partial order and merge rules for all incoming-sync cases
 - timeout/retry behavior for transactions that remain `awaiting_deps`
+- dependency request/subscription protocol for proactively fetching missing
+  policy facts
+- forwarded exclusive transaction retry, offline storage, auth-context
+  preservation, and global fate propagation
 - audit-grade append-only fate/receipt history
 
 ## 12. Row History And Current Projection
@@ -1991,10 +2020,20 @@ CREATE TABLE jazz_tx_rejection (
   code INTEGER NOT NULL,
   detail_blob BLOB NOT NULL
 );
+
+CREATE TABLE jazz_tx_awaiting_dependency (
+  tx_num INTEGER PRIMARY KEY,
+  auth_user TEXT NOT NULL,
+  detail_blob BLOB NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 ```
 
 This sketch encodes the v2 split between outcome, durability receipt, and
-rejection detail.
+rejection detail. `jazz_tx_awaiting_dependency` is the selected prototype
+lowering for `awaiting_deps`: the hot transaction outcome remains `pending`,
+while the side table records the durable wait reason and the user context needed
+to re-run authority policy validation after missing facts arrive.
 
 `global_epoch` is intentionally not unique. Multiple transactions may share one
 authority epoch. Indexes should support lookup/order by `(global_epoch, tx_num)`
@@ -2782,6 +2821,8 @@ feature exists.
 - Edge-accepted mergeable transactions produce replayable receipt state.
 - Edge-accepted mergeable transactions are accepted and visible without a
   global epoch.
+- Awaiting-dependency state is durable, not visible in ordinary current reads,
+  and clears on successful revalidation of the same public transaction id.
 - Later global acceptance enriches the same public transaction id.
 - Rejected outcome is terminal for ordinary visibility.
 - Stale incoming fate cannot downgrade accepted/global or rejected state.
@@ -3447,8 +3488,8 @@ The largest gaps between Appendix D and the current prototype tests are:
   rejection detail storage outside the hot transaction row
 - explicit wait behavior for exclusive transactions at local, edge, and global
   tiers
-- awaiting-dependencies state for edges that need missing policy facts before
-  deciding or forwarding transactions
+- forwarded exclusive transaction retry/offline transport and proactive
+  dependency request/subscription mechanics for mergeable `awaiting_deps`
 - compact reconnect summaries and active query-descriptor replay protocol
 - range and catalogue observed facts
 - cache eviction policy for retained out-of-scope rows
