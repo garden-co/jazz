@@ -20,7 +20,7 @@ impl QueryContext<'_> {
             if let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? {
                 let mut rows = self.read_rows_from_current(table_name, false)?;
                 rows.extend(self.read_main_snapshot_rows(table_name, base_epoch)?);
-                return self.filter_rows_by_effective_branch_policy(table_name, rows);
+                return self.filter_pinned_base_rows_by_main_policy_route(table_name, rows);
             }
         }
         self.read_rows_from_current(table_name, true)
@@ -69,7 +69,7 @@ impl QueryContext<'_> {
                         .into_iter()
                         .filter(|row| row.values.get(field_name) == Some(&value)),
                 );
-                return self.filter_rows_by_effective_branch_policy(table_name, rows);
+                return self.filter_pinned_base_rows_by_main_policy_route(table_name, rows);
             }
         }
         self.read_rows_from_current_where_eq(table_name, field, &value, true)
@@ -152,7 +152,7 @@ impl QueryContext<'_> {
                                 .is_some_and(|value| value.contains(needle))
                         }),
                 );
-                return self.filter_rows_by_effective_branch_policy(table_name, rows);
+                return self.filter_pinned_base_rows_by_main_policy_route(table_name, rows);
             }
         }
         self.read_rows_from_current_where_contains(table_name, field, needle, true)
@@ -397,7 +397,7 @@ impl QueryContext<'_> {
         }
     }
 
-    fn filter_rows_by_effective_branch_policy(
+    fn filter_pinned_base_rows_by_main_policy_route(
         &self,
         table_name: &str,
         rows: Vec<RowView>,
@@ -406,6 +406,9 @@ impl QueryContext<'_> {
             return Ok(rows);
         }
         let table = self.schema.table_def(table_name)?;
+        if !policy::PolicyRoute::for_table(table, self.branch_num).uses_main_policy() {
+            return Ok(rows);
+        }
         let PolicyDef::RefReadable { field } = &table.read_policy else {
             return Ok(rows);
         };

@@ -1859,6 +1859,199 @@ fn for_branch_write_can_inherit_main_policy() {
 }
 
 #[test]
+fn branch_export_uses_for_branch_read_policy() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+            table.write_for_branch_allow_all("branches");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-b",
+            BTreeMap::from([("title".to_owned(), json!("Project B"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "branches",
+            "draft",
+            BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+        )
+        .unwrap();
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-visible",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-hidden",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Hidden")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    let exported_todos = bundle
+        .history
+        .iter()
+        .filter(|record| record.table == "todos")
+        .map(|record| record.row_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(exported_todos.contains(&"todo-visible"));
+    assert!(!exported_todos.contains(&"todo-hidden"));
+}
+
+#[test]
+fn created_by_insert_shortcut_does_not_bypass_for_branch_write_policy() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_created_by_user();
+            table.write_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-b",
+            BTreeMap::from([("title".to_owned(), json!("Project B"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "branches",
+            "draft",
+            BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+        )
+        .unwrap();
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let denied = alice
+        .insert_row(
+            "todos",
+            "todo-wrong-project",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Wrong project")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        alice.transaction_info(&denied).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
+fn pinned_base_branch_read_does_not_reapply_main_ref_policy_after_branch_policy() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut db = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    let project_tx = support::run_attributing_to_user(&mut db, "bob", |db| {
+        db.insert_row(
+            "projects",
+            "project-b",
+            BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+        )
+    })
+    .unwrap();
+    db.accept_transaction_at_global(&project_tx, 1).unwrap();
+    let todo_tx = support::run_attributing_to_user(&mut db, "bob", |db| {
+        db.insert_row(
+            "todos",
+            "todo-branch-visible",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Branch-visible base row")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )
+    })
+    .unwrap();
+    db.accept_transaction_at_global(&todo_tx, 2).unwrap();
+    support::run_attributing_to_user(&mut db, "alice", |db| {
+        db.insert_row(
+            "branches",
+            "draft",
+            BTreeMap::from([("project".to_owned(), json!("project-b"))]),
+        )
+    })
+    .unwrap();
+    db.create_branch("draft", Some(2)).unwrap();
+
+    let rows = support::run_as_user(&mut db, "alice", |db| {
+        db.read_rows_on_branch("draft", "todos")
+    })
+    .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["todo-branch-visible"]
+    );
+}
+
+#[test]
 fn branch_write_policy_uses_parent_visible_from_pinned_base() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

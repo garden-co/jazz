@@ -35,17 +35,60 @@ struct BranchReadSqlContext<'a> {
     depth: usize,
 }
 
+pub(crate) enum PolicyRoute<'a> {
+    Main,
+    Branch {
+        branch_num: i64,
+        branch_table: &'a str,
+        branch_policy: &'a BranchPolicyDef,
+    },
+}
+
+impl<'a> PolicyRoute<'a> {
+    pub(crate) fn for_table(table: &'a TableDef, branch_num: i64) -> Self {
+        if let Some((branch_table, branch_policy)) = active_branch_policy(table, branch_num) {
+            Self::Branch {
+                branch_num,
+                branch_table,
+                branch_policy,
+            }
+        } else {
+            Self::Main
+        }
+    }
+
+    pub(crate) fn uses_main_policy(&self) -> bool {
+        matches!(self, Self::Main)
+    }
+
+    fn branch_context(&self) -> Option<BranchPolicyContext<'a>> {
+        match self {
+            Self::Main => None,
+            Self::Branch {
+                branch_num,
+                branch_table,
+                ..
+            } => Some(BranchPolicyContext {
+                branch_num: *branch_num,
+                branch_table,
+            }),
+        }
+    }
+}
+
 pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
-    if let Some((branch_table, branch_policy)) = active_branch_policy(check.table, check.branch_num)
-    {
-        let Some(write_policy) = branch_policy.write_policy.as_ref() else {
-            return Ok(false);
+    let route = PolicyRoute::for_table(check.table, check.branch_num);
+    if let PolicyRoute::Branch { branch_policy, .. } = &route {
+        return match branch_policy.write_policy.as_ref() {
+            Some(write_policy) => branch_write_allowed(
+                &check,
+                write_policy,
+                route
+                    .branch_context()
+                    .expect("branch route has branch context"),
+            ),
+            None => Ok(false),
         };
-        let context = BranchPolicyContext {
-            branch_num: check.branch_num,
-            branch_table,
-        };
-        return branch_write_allowed(&check, write_policy, context);
     }
     write_policy_allowed(&check, &check.table.write_policy)
 }
@@ -421,10 +464,6 @@ fn effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> Strin
     )
 }
 
-pub(crate) fn read_policy_sql(schema: &SchemaDef, table: &TableDef, user: &str) -> Result<String> {
-    lower_policy(schema, table, "current", &table.read_policy, user, None, 0)
-}
-
 pub(crate) fn branch_read_policy_sql_for_alias(
     schema: &SchemaDef,
     table: &TableDef,
@@ -432,19 +471,20 @@ pub(crate) fn branch_read_policy_sql_for_alias(
     user: &str,
     branch_num: i64,
 ) -> Result<String> {
-    if let Some((branch_table, branch_policy)) = active_branch_policy(table, branch_num) {
+    let route = PolicyRoute::for_table(table, branch_num);
+    if let PolicyRoute::Branch { branch_policy, .. } = &route {
         let Some(read_policy) = branch_policy.read_policy.as_ref() else {
             return Ok("0 = 1".to_owned());
         };
+        let branch = route
+            .branch_context()
+            .expect("branch route has branch context");
         let context = BranchReadSqlContext {
             schema,
             table,
             alias,
             user,
-            branch: BranchPolicyContext {
-                branch_num,
-                branch_table,
-            },
+            branch,
             depth: 0,
         };
         return branch_read_rule_sql(context, read_policy, |depth| {
@@ -478,20 +518,21 @@ pub(crate) fn branch_snapshot_read_policy_sql_for_alias(
     branch_num: i64,
     base_epoch: i64,
 ) -> Result<String> {
-    if let Some((branch_table, branch_policy)) = active_branch_policy(table, branch_num) {
+    let route = PolicyRoute::for_table(table, branch_num);
+    if let PolicyRoute::Branch { branch_policy, .. } = &route {
         let Some(read_policy) = branch_policy.read_policy.as_ref() else {
             return Ok("0 = 1".to_owned());
         };
+        let branch = route
+            .branch_context()
+            .expect("branch route has branch context");
         return branch_read_rule_sql(
             BranchReadSqlContext {
                 schema,
                 table,
                 alias,
                 user,
-                branch: BranchPolicyContext {
-                    branch_num,
-                    branch_table,
-                },
+                branch,
                 depth: 0,
             },
             read_policy,
