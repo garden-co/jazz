@@ -38,6 +38,9 @@ struct QueryScopeOptions<'a> {
     extra_row_ids: &'a [String],
 }
 
+type TopFieldRefreshKey = (String, String, String, String, usize);
+type TopFieldRefreshValue = (JsonValue, Vec<String>);
+
 impl QueryScopeOptions<'_> {
     fn empty() -> Self {
         Self {
@@ -791,10 +794,54 @@ impl Runtime {
     }
 
     pub fn export_query_read_refreshes(&self, reads: &[QueryReadRecord]) -> Result<Vec<Bundle>> {
-        reads
-            .iter()
-            .map(|read| self.export_query_read_refresh(read))
-            .collect()
+        let current_branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
+        let mut top_field_groups: BTreeMap<TopFieldRefreshKey, Vec<TopFieldRefreshValue>> =
+            BTreeMap::new();
+        let mut bundles = Vec::new();
+
+        for read in reads {
+            if read.branch_id == current_branch_id && read.op == "eq_top_field_desc" {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+                let order_field = read
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+                top_field_groups
+                    .entry((
+                        read.table.clone(),
+                        read.field.clone(),
+                        read.branch_id.clone(),
+                        order_field.to_owned(),
+                        limit as usize,
+                    ))
+                    .or_default()
+                    .push((value.clone(), observed_ids_from_query_value(&read.value)?));
+                continue;
+            }
+            bundles.push(self.export_query_read_refresh(read)?);
+        }
+
+        for ((table, field, _branch, order_field, limit), values) in top_field_groups {
+            bundles.push(
+                self.export_many_query_where_eq_top_field_desc_with_previous_observed(
+                    &table,
+                    &field,
+                    values,
+                    &order_field,
+                    limit,
+                )?,
+            );
+        }
+        Ok(bundles)
     }
 
     pub fn forget_observed_query_read(&mut self, read: &QueryReadRecord) -> Result<()> {
@@ -2611,7 +2658,10 @@ impl Runtime {
         self.export_many_query_where_eq_top_field_desc_inner(
             table_name,
             field_name,
-            values,
+            values
+                .into_iter()
+                .map(|value| (value, Vec::new()))
+                .collect(),
             order_field_name,
             limit,
             &[],
@@ -2630,10 +2680,31 @@ impl Runtime {
         self.export_many_query_where_eq_top_field_desc_inner(
             table_name,
             field_name,
-            values,
+            values
+                .into_iter()
+                .map(|value| (value, Vec::new()))
+                .collect(),
             order_field_name,
             limit,
             &[ref_field_name],
+        )
+    }
+
+    fn export_many_query_where_eq_top_field_desc_with_previous_observed(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<(JsonValue, Vec<String>)>,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Bundle> {
+        self.export_many_query_where_eq_top_field_desc_inner(
+            table_name,
+            field_name,
+            values,
+            order_field_name,
+            limit,
+            &[],
         )
     }
 
@@ -2641,7 +2712,7 @@ impl Runtime {
         &self,
         table_name: &str,
         field_name: &str,
-        values: Vec<JsonValue>,
+        values: Vec<(JsonValue, Vec<String>)>,
         order_field_name: &str,
         limit: usize,
         ref_include_fields: &[&str],
@@ -2656,7 +2727,7 @@ impl Runtime {
         let mut query_reads = Vec::new();
         let mut rejected_tx_ids = Vec::new();
 
-        for value in values {
+        for (value, previous_observed_ids) in values {
             let rows = self.read_rows_where_eq_top_field_desc(
                 table_name,
                 field_name,
@@ -2674,6 +2745,9 @@ impl Runtime {
                 "limit": limit,
                 "observed_ids": observed_row_ids(&rows),
             });
+            for row_id in previous_observed_ids {
+                repair_row_nums.push(row_num(&self.conn, &row_id)?);
+            }
             repair_row_nums.extend(query_scope_repair_row_nums(
                 &self.conn,
                 table,

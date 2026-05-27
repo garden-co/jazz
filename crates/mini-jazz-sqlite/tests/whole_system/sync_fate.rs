@@ -1,6 +1,6 @@
 use super::*;
 use mini_jazz_sqlite::sync::merge_bundles;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
 fn query_scoped_sync_converges_memory_and_durable_nodes() {
@@ -1552,6 +1552,69 @@ fn batched_top_field_query_matches_individual_exports_without_include() {
         individual_peer.open_todos().unwrap()
     );
     assert_eq!(batch.query_reads.len(), 2);
+}
+
+#[test]
+fn top_field_query_read_refresh_batches_same_shape_queries() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-open-a", "A open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-open-z", "Z open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-a", "A done", true, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-z", "Z done", true, "project-1")
+        .unwrap();
+
+    let initial = alice
+        .export_many_query_where_eq_top_field_desc(
+            "todos",
+            "done",
+            vec![json!(false), json!(true)],
+            "title",
+            1,
+        )
+        .unwrap();
+    peer.apply_bundle(&initial).unwrap();
+    assert_eq!(peer.observed_query_reads().unwrap().len(), 2);
+
+    alice
+        .transaction()
+        .update_row(
+            "todos",
+            "todo-open-a",
+            BTreeMap::from([("title".to_owned(), json!("ZZZ open"))]),
+        )
+        .commit()
+        .unwrap();
+    alice
+        .transaction()
+        .update_row(
+            "todos",
+            "todo-done-a",
+            BTreeMap::from([("title".to_owned(), json!("ZZZ done"))]),
+        )
+        .commit()
+        .unwrap();
+
+    let refreshes = alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap();
+    assert_eq!(refreshes.len(), 1);
+    peer.apply_bundle(&refreshes[0]).unwrap();
+
+    let rows = peer.read_rows("todos").unwrap();
+    assert!(rows.iter().any(|row| row.id == "todo-open-a"));
+    assert!(rows.iter().any(|row| row.id == "todo-done-a"));
+    assert!(!rows.iter().any(|row| row.id == "todo-open-z"));
+    assert!(!rows.iter().any(|row| row.id == "todo-done-z"));
 }
 
 #[test]

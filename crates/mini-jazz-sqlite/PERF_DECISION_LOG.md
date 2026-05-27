@@ -1266,3 +1266,21 @@ Learning: the old dashboard initial export number was dominated by per-query
 export/finalization overhead rather than SQLite row lookup. Batching same-shape
 query descriptors is a core primitive, not merely a benchmark trick. The next
 visible dashboard bottleneck is refresh over persisted observed query reads.
+
+## 2026-05-27 01:29 PDT
+
+Made `export_query_read_refreshes` batch compatible observed
+`eq_top_field_desc` reads by table/field/order/limit and carry each read's
+previous observed row IDs into the batched repair set. Added a whole-system test
+that proves two same-shape observed page queries refresh as a single bundle and
+still remove displaced old page rows.
+
+Release sample for the same 50k-row / 24-query dashboard probe:
+
+- initial core export: ~5.0 ms
+- refresh export after subscribed mutations: ~87.8 ms -> ~6.6 ms
+- refresh apply: ~6.4 ms
+
+Learning: observed query refresh must be a batched operation. Replaying each
+query descriptor independently reproduces the exact perf trap that hurt initial
+sync, just later in the reconnect/subscription lifecycle.
