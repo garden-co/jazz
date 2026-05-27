@@ -1127,3 +1127,34 @@ work.
 
 Quick release validation with 20k rows x 3 repeats produced stable medians around
 ~10.9 ms first result and ~15.7 ms refresh on the WAL default path.
+
+## 2026-05-27 01:12 PDT
+
+Ran a current full 100k-row release profile after system-user interning, batched
+board export, branch fan-in probe, and WAL defaults.
+
+Primary scoped-page profile:
+
+- raw synthetic JSON payload estimate: ~9.93 MB
+- SQLite main database bytes: ~29.31 MB (~2.95x raw)
+- total core files including WAL/SHM: ~33.18 MB
+- seed: ~2.49 s
+- first result across core -> edge -> worker -> tab: ~11.34 ms
+- refresh after new top rows: ~16.29 ms
+
+Largest page users in the core database:
+
+- documents current: ~8.91 MB
+- documents history: ~8.91 MB
+- current owner/updated index: ~4.45 MB
+- row-id unique index: ~1.95 MB
+- row-id table: ~1.79 MB
+- tx read set: ~1.68 MB
+- tx write set: ~1.45 MB
+
+Learning: after the easy metadata wins, the dominant overhead is exactly where
+expected: current/history duplication plus the app index. Read/write-set and id
+catalog overhead is now secondary. Further large storage wins require either
+compressing/co-locating SQLite pages below SQLite, changing projection strategy,
+or reducing duplicated app/system columns in current/history, not shaving small
+system tables.
