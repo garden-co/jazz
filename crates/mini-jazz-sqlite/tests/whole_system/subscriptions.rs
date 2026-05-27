@@ -195,7 +195,7 @@ fn subscription_initial_snapshot_matches_query_then_diffs_semantic_rows() {
     let mut update = BTreeMap::new();
     update.insert("title".to_owned(), json!("Renamed"));
     update.insert("done".to_owned(), json!(false));
-    alice.insert_row("tasks", "task-1", update).unwrap();
+    alice.update_row("tasks", "task-1", update).unwrap();
     let diffs = alice.poll_subscription(&mut subscription).unwrap();
     assert!(matches!(
         &diffs[..],

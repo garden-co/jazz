@@ -244,7 +244,7 @@ impl QueryContext<'_> {
                  {created_by} AS j_created_by,
                  row_number() OVER (
                    PARTITION BY query_values.value_index
-                   ORDER BY current.j_created_at DESC, current.row_num
+                   ORDER BY current.j_created_at DESC, ids.row_id
                  ) AS query_rank
                FROM query_values
                JOIN {current_table} current
@@ -394,7 +394,7 @@ impl QueryContext<'_> {
                AND tx.outcome != ?
                AND current.{predicate_column} = ?
                AND {policy_sql}
-             ORDER BY current.{order_column} DESC, current.row_num
+             ORDER BY current.{order_column} DESC, ids.row_id
              LIMIT ?",
             select_columns.join(", "),
             crate::schema::current_table(table_name),
@@ -496,7 +496,7 @@ impl QueryContext<'_> {
                  {created_by} AS j_created_by,
                  row_number() OVER (
                    PARTITION BY query_values.value_index
-                   ORDER BY current.{order_column} DESC, current.row_num
+                   ORDER BY current.{order_column} DESC, ids.row_id
                  ) AS query_rank
                FROM query_values
                JOIN {current_table} current
@@ -616,12 +616,12 @@ impl QueryContext<'_> {
                 })
             })?;
         let current_row_columns = format!(
-            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, {} AS j_created_by, current.{order_column} AS sort_value, current.row_num AS sort_row_num",
+            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, {} AS j_created_by, current.{order_column} AS sort_value, ids.row_id AS sort_row_id",
             current_field_columns.join(", "),
             users::user_id_expr("current", "j_created_by")
         );
         let history_row_columns = format!(
-            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, {} AS j_created_by, h.{order_column} AS sort_value, h.row_num AS sort_row_num",
+            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, {} AS j_created_by, h.{order_column} AS sort_value, ids.row_id AS sort_row_id",
             history_field_columns.join(", "),
             users::user_id_expr("h", "j_created_by")
         );
@@ -652,7 +652,7 @@ impl QueryContext<'_> {
                  AND tx.outcome != ?
                  AND current.{predicate_column} = ?
                  AND {current_policy_sql}
-               ORDER BY current.{order_column} DESC, current.row_num
+               ORDER BY current.{order_column} DESC, ids.row_id
                LIMIT ?
              ),
              base_rows AS (
@@ -684,19 +684,19 @@ impl QueryContext<'_> {
                      AND shadow.j_branch_num = ?
                  )
                  AND {snapshot_policy_sql}
-               ORDER BY h.{order_column} DESC, h.row_num
+               ORDER BY h.{order_column} DESC, ids.row_id
                LIMIT ?
              ),
              merged AS (
                SELECT * FROM overlay_rows
                UNION ALL
                SELECT * FROM base_rows
-               ORDER BY sort_value DESC, sort_row_num
+               ORDER BY sort_value DESC, sort_row_id
                LIMIT ?
              )
              SELECT {outer_columns}
              FROM merged
-             ORDER BY sort_value DESC, sort_row_num"
+             ORDER BY sort_value DESC, sort_row_id"
         );
         let params = vec![
             rusqlite::types::Value::Integer(self.branch_num),
@@ -777,7 +777,7 @@ impl QueryContext<'_> {
                 })
             })?;
         let row_columns = format!(
-            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, {} AS j_created_by, current.{order_column} AS sort_value, current.row_num AS sort_row_num",
+            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, {} AS j_created_by, current.{order_column} AS sort_value, ids.row_id AS sort_row_id",
             cte_field_columns.join(", "),
             users::user_id_expr("current", "j_created_by")
         );
@@ -799,7 +799,7 @@ impl QueryContext<'_> {
                  AND tx.outcome != ?
                  AND current.{predicate_column} = ?
                  AND {policy_sql}
-               ORDER BY current.{order_column} DESC, current.row_num
+               ORDER BY current.{order_column} DESC, ids.row_id
                LIMIT ?
              ),
              main_rows AS (
@@ -818,19 +818,19 @@ impl QueryContext<'_> {
                      AND shadow.j_branch_num = ?
                  )
                  AND {policy_sql}
-               ORDER BY current.{order_column} DESC, current.row_num
+               ORDER BY current.{order_column} DESC, ids.row_id
                LIMIT ?
              ),
              merged AS (
                SELECT * FROM overlay_rows
                UNION ALL
                SELECT * FROM main_rows
-               ORDER BY sort_value DESC, sort_row_num
+               ORDER BY sort_value DESC, sort_row_id
                LIMIT ?
              )
              SELECT {outer_columns}
              FROM merged
-             ORDER BY sort_value DESC, sort_row_num"
+             ORDER BY sort_value DESC, sort_row_id"
         );
         let params = vec![
             rusqlite::types::Value::Integer(self.branch_num),
@@ -1394,7 +1394,7 @@ impl QueryContext<'_> {
                  )
                )
                AND {policy_sql}
-             ORDER BY current.j_created_at DESC, current.row_num",
+             ORDER BY ids.row_id",
             select_columns.join(", "),
             crate::schema::current_table(table_name),
             current_table = crate::schema::current_table(table_name),
@@ -1523,7 +1523,7 @@ impl QueryContext<'_> {
                )
                AND current.{predicate_column} {predicate_sql}
                AND {policy_sql}
-             ORDER BY current.j_created_at DESC, current.row_num",
+             ORDER BY ids.row_id",
             select_columns.join(", "),
             crate::schema::current_table(table_name),
             current_table = crate::schema::current_table(table_name),
@@ -1710,7 +1710,7 @@ impl QueryContext<'_> {
                )
                AND {predicate_sql}
                AND {policy_sql}
-             ORDER BY current.j_created_at DESC, current.row_num",
+             ORDER BY ids.row_id",
             select_columns.join(", "),
             crate::schema::current_table(table_name),
             current_table = crate::schema::current_table(table_name),
@@ -1834,7 +1834,7 @@ impl QueryContext<'_> {
                )
                AND instr(current.{predicate_column}, ?) > 0
                AND {policy_sql}
-             ORDER BY current.j_created_at DESC, current.row_num",
+             ORDER BY ids.row_id",
             select_columns.join(", "),
             crate::schema::current_table(table_name),
             current_table = crate::schema::current_table(table_name),
@@ -1963,7 +1963,7 @@ impl QueryContext<'_> {
                  WHERE branch_current.row_num = h.row_num
                    AND branch_current.j_branch_num = ?
                )
-             ORDER BY h.j_created_at DESC, h.row_num",
+             ORDER BY h.j_created_at DESC, ids.row_id",
             select_columns.join(", "),
             crate::schema::history_table(table_name),
             history_table = crate::schema::history_table(table_name),

@@ -290,6 +290,20 @@ impl Runtime {
         self.write_row(table_name, id, values, 2)
     }
 
+    pub fn upsert_row(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        values: BTreeMap<String, JsonValue>,
+    ) -> Result<String> {
+        let op = if self.row_has_current_branch_value(table_name, id)? {
+            2
+        } else {
+            1
+        };
+        self.write_row(table_name, id, values, op)
+    }
+
     pub fn resolve_row_conflict(
         &mut self,
         table_name: &str,
@@ -724,7 +738,11 @@ impl Runtime {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(tx_id) DO UPDATE SET
                    outcome = MAX(jazz_tx.outcome, excluded.outcome),
-                   global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
+                   global_epoch = CASE
+                     WHEN jazz_tx.global_epoch IS NULL THEN excluded.global_epoch
+                     WHEN excluded.global_epoch IS NULL THEN jazz_tx.global_epoch
+                     ELSE MAX(jazz_tx.global_epoch, excluded.global_epoch)
+                   END,
                    conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
                    metadata_json = CASE
                      WHEN excluded.metadata_json != '{}' THEN excluded.metadata_json
@@ -749,8 +767,14 @@ impl Runtime {
                 if let Some(code) = &tx_record.rejection_code {
                     let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
                     db.execute(
-                        "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
-                         VALUES (?, ?, ?)",
+                        "INSERT INTO jazz_tx_rejection (tx_num, code, detail_json)
+                         VALUES (?, ?, ?)
+                         ON CONFLICT(tx_num) DO UPDATE SET
+                           code = excluded.code,
+                           detail_json = CASE
+                             WHEN excluded.detail_json = 'null' AND jazz_tx_rejection.detail_json != 'null' THEN jazz_tx_rejection.detail_json
+                             ELSE excluded.detail_json
+                           END",
                         params![tx_num, code, detail_json],
                     )?;
                 }
@@ -1810,6 +1834,12 @@ impl Runtime {
             &record.table,
             &record.row_id,
         )?;
+        if row_id_used_by_other_table(context.db, context.schema, &record.table, row_num)? {
+            return Err(crate::Error::new(format!(
+                "row id {} is already used by another table",
+                record.row_id
+            )));
+        }
         let tx_num = context
             .tx_nums_by_id
             .get(&record.tx_id)
@@ -3842,7 +3872,9 @@ impl Runtime {
 
     fn row_has_current_branch_value(&self, table_name: &str, id: &str) -> Result<bool> {
         self.schema.table_def(table_name)?;
-        let row_num = row_num(&self.conn, id)?;
+        let Ok(row_num) = row_num(&self.conn, id) else {
+            return Ok(false);
+        };
         let count: i64 = self.conn.query_row(
             &format!(
                 "SELECT COUNT(*)
@@ -4041,6 +4073,20 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     validate_write_fields(table, args.values)?;
     let (row_num, row_id_created) = ensure_row_id_with_status(args.db, args.id)?;
+    if args.op == 1 && !row_id_created {
+        if row_id_used_by_other_table(args.db, args.schema, args.table_name, row_num)? {
+            return Err(crate::Error::new(format!(
+                "row id {} is already used by another table",
+                args.id
+            )));
+        }
+        if row_has_current_branch_value(args.db, args.table_name, row_num, args.branch_num)? {
+            return Err(crate::Error::new(format!(
+                "row id {} already exists in table {}",
+                args.id, args.table_name
+            )));
+        }
+    }
     let effective_values = effective_write_values(EffectiveWriteValues {
         db: args.db,
         schema: args.schema,
@@ -4171,6 +4217,61 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         )?;
     }
     Ok(allowed)
+}
+
+fn row_has_current_branch_value(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {}
+             WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn row_id_used_by_other_table(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    row_num: i64,
+) -> Result<bool> {
+    for table in schema.tables() {
+        if table.name == table_name {
+            continue;
+        }
+        let history_sql = format!(
+            "SELECT 1 FROM {} WHERE row_num = ? LIMIT 1",
+            crate::schema::history_table(&table.name)
+        );
+        if conn
+            .query_row(&history_sql, params![row_num], |_| Ok(()))
+            .optional()?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let current_sql = format!(
+            "SELECT 1 FROM {} WHERE row_num = ? LIMIT 1",
+            crate::schema::current_table(&table.name)
+        );
+        if conn
+            .query_row(&current_sql, params![row_num], |_| Ok(()))
+            .optional()?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn validate_write_fields(
@@ -4844,6 +4945,50 @@ enum Mutation {
     },
 }
 
+fn normalize_mutations(mutations: Vec<Mutation>) -> Vec<Mutation> {
+    let mut normalized: Vec<Mutation> = Vec::new();
+    for mutation in mutations {
+        let (table, id) = match &mutation {
+            Mutation::Row { table, id, .. } | Mutation::DeleteRow { table, id } => {
+                (table.as_str(), id.as_str())
+            }
+        };
+        let Some(existing) = normalized.iter_mut().find(|existing| match existing {
+            Mutation::Row {
+                table: existing_table,
+                id: existing_id,
+                ..
+            }
+            | Mutation::DeleteRow {
+                table: existing_table,
+                id: existing_id,
+            } => existing_table == table && existing_id == id,
+        }) else {
+            normalized.push(mutation);
+            continue;
+        };
+        match (existing, mutation) {
+            (
+                Mutation::Row {
+                    values: existing_values,
+                    op: existing_op,
+                    ..
+                },
+                Mutation::Row { values, op, .. },
+            ) => {
+                existing_values.extend(values);
+                if *existing_op != 1 {
+                    *existing_op = op;
+                }
+            }
+            (existing_slot, later) => {
+                *existing_slot = later;
+            }
+        }
+    }
+    normalized
+}
+
 impl<'a> TransactionBuilder<'a> {
     pub fn exclusive(mut self) -> Self {
         self.mode = TransactionMode::Exclusive { global_epoch: None };
@@ -4887,6 +5032,25 @@ impl<'a> TransactionBuilder<'a> {
         self
     }
 
+    pub fn upsert_row(
+        mut self,
+        table: &str,
+        id: &str,
+        values: BTreeMap<String, JsonValue>,
+    ) -> Self {
+        let op = match self.runtime.row_has_current_branch_value(table, id) {
+            Ok(true) => 2,
+            Ok(false) | Err(_) => 1,
+        };
+        self.mutations.push(Mutation::Row {
+            table: table.to_owned(),
+            id: id.to_owned(),
+            values,
+            op,
+        });
+        self
+    }
+
     pub fn delete_row(mut self, table: &str, id: &str) -> Self {
         self.mutations.push(Mutation::DeleteRow {
             table: table.to_owned(),
@@ -4896,7 +5060,10 @@ impl<'a> TransactionBuilder<'a> {
     }
 
     pub fn commit(self) -> Result<String> {
-        let mutations = self.mutations;
+        let mutations = normalize_mutations(self.mutations);
+        if mutations.is_empty() {
+            return Ok(String::new());
+        }
         let user = self.runtime.attribution_user().to_owned();
         let bypass_policy = self.runtime.bypasses_policy();
         let mut delete_snapshots = BTreeMap::new();

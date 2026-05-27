@@ -109,8 +109,14 @@ pub(crate) fn reject_with_detail_json(
         params![OUTCOME_REJECTED, tx_num],
     )?;
     conn.execute(
-        "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
-         VALUES (?, ?, ?)",
+        "INSERT INTO jazz_tx_rejection (tx_num, code, detail_json)
+         VALUES (?, ?, ?)
+         ON CONFLICT(tx_num) DO UPDATE SET
+           code = excluded.code,
+           detail_json = CASE
+             WHEN excluded.detail_json = 'null' AND jazz_tx_rejection.detail_json != 'null' THEN jazz_tx_rejection.detail_json
+             ELSE excluded.detail_json
+           END",
         params![tx_num, code, detail_json],
     )?;
     Ok(tx_num)
@@ -119,8 +125,14 @@ pub(crate) fn reject_with_detail_json(
 pub(crate) fn accept_global(conn: &Connection, tx_id: &str, global_epoch: i64) -> Result<i64> {
     let tx_num = tx_num(conn, tx_id)?;
     conn.execute(
-        "UPDATE jazz_tx SET outcome = MAX(outcome, ?), global_epoch = ? WHERE tx_num = ?",
-        params![OUTCOME_ACCEPTED, global_epoch, tx_num],
+        "UPDATE jazz_tx
+         SET outcome = MAX(outcome, ?),
+             global_epoch = CASE
+               WHEN global_epoch IS NULL THEN ?
+               ELSE MAX(global_epoch, ?)
+             END
+         WHERE tx_num = ?",
+        params![OUTCOME_ACCEPTED, global_epoch, global_epoch, tx_num],
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO jazz_tx_receipt

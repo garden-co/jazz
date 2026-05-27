@@ -123,6 +123,13 @@ the same semantic value but changes position in the ordered result. This matters
 for ordered pages and subscriptions whose user-visible state is the sequence,
 not only the set of rows.
 
+Diff ordering is deterministic and follows the corresponding query's effective
+semantic order. The product contract should promise deterministic semantic
+diffs, but should avoid freezing incidental internal variant choices beyond the
+observable categories. For example, an order-only change should be representable
+as `moved`, while the exact internal scheduling path that discovered it remains
+an implementation detail.
+
 Tiered delivery:
 
 - `tier: "local"` may publish local durable state plus local optimistic
@@ -194,6 +201,11 @@ Incoming transaction fate is merged monotonically. A stale pending or accepted
 bundle must not downgrade a rejected transaction; a stale pending bundle must
 not downgrade an accepted/global transaction; late global metadata enriches the
 same transaction rather than replacing it.
+This monotonic merge applies to global epochs, edge/global receipts, and
+rejection detail. A repeated or stale bundle may add information, but must not
+lower a transaction's global epoch, remove receipt tiers, erase rejection
+detail, resurrect rejected rows, or publish duplicate rejection events to a
+subscription baseline.
 
 The prototype authority path currently applies an untrusted bundle, validates
 pending transactions, rejects invalid ones, and repairs projection. Tests cover
@@ -211,6 +223,18 @@ Downstream runtimes replay active query descriptors to upstream peers after
 disconnects and upstream restarts. This replay should trickle upward through
 workers, edges, and global services. Queries are not durable disk state; app
 restart normally recreates them by resubscribing from application code.
+Until the resubscribe/query-settlement protocol is explicit, durable
+intermediaries may keep implementation-local descriptor state as a correctness
+scaffold. That state must not become product data: active interest is derived
+from downstream replay, and retained rows outside active query results are cache
+state.
+
+Descriptor replay must distinguish retained local facts from the authoritative
+current result of a reissued query. A durable cache may retain rows learned from
+old scopes, but after reconnect or resubscribe the newly settled query result is
+defined by the current descriptor replay and repair bundle, not by every cached
+row that happens to still exist locally. This is why removing persisted
+descriptor state is a protocol change, not a storage-layout-only cleanup.
 
 Open issues:
 
