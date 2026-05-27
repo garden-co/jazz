@@ -134,3 +134,19 @@ through core -> edge -> worker -> tab. Refresh after 50 newer rows ships 200
 history records, 3 transaction records, 79 KB, and takes about 206 ms
 api-to-updated-result. Policy dependencies are visible in the cost model but
 still scale with observed page size, not with the 10k matching owner rows.
+
+## 2026-05-26 21:33 PDT
+
+Ran the same policy-scoped 100k/10k/page-50 benchmark with edge and worker as
+in-memory SQLite nodes instead of file-backed durable nodes. Results were very
+close: about 158 ms cold api-to-first-result and 202 ms refresh
+api-to-updated-result. For these page-sized bundles, intermediate durable writes
+are not the dominant cost; export and logical apply/rebuild work matter more.
+
+## 2026-05-26 21:34 PDT
+
+Added a direct core query timing to the perf report. On the policy-scoped
+100k/10k/page-50 profile, the SQLite top-page read itself is about 0.86 ms while
+bundle export is about 98 ms. That strongly points at our export/policy/history
+materialization path, not SQLite query planning for the page query, as the next
+optimization target.

@@ -59,6 +59,7 @@ struct ScenarioReport {
     worker_database_bytes: i64,
     tab_database_bytes: i64,
     seed_ms: f64,
+    core_query_ms: f64,
     export_ms: f64,
     core_to_edge_apply_ms: f64,
     edge_to_worker_apply_ms: f64,
@@ -114,6 +115,19 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
     )?;
     let seed_elapsed = seed_started.elapsed();
 
+    let core_query_started = Instant::now();
+    let core_rows = core.run_as_user(OWNER, |core| {
+        core.read_rows_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!(OWNER),
+            "updated_at",
+            config.page_size,
+        )
+    })?;
+    let core_query_elapsed = core_query_started.elapsed();
+    assert_eq!(core_rows.len(), config.page_size);
+
     let export_started = Instant::now();
     let core_bundle = export_top_owner_page(&mut core, config.page_size)?;
     let export_elapsed = export_started.elapsed();
@@ -166,6 +180,7 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         worker_database_bytes: worker.storage_stats()?.database_bytes,
         tab_database_bytes: tab.storage_stats()?.database_bytes,
         seed_ms: ms(seed_elapsed),
+        core_query_ms: ms(core_query_elapsed),
         export_ms: ms(export_elapsed),
         core_to_edge_apply_ms: ms(edge_apply_elapsed),
         edge_to_worker_apply_ms: ms(worker_apply_elapsed),
