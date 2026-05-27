@@ -1304,3 +1304,28 @@ Learning: after batching, dashboard perf scales with delivered rows/history and
 not catastrophically with the number of logical page subscriptions. The
 non-monotonic export timings suggest cache/planner noise at this size, so this
 probe should eventually gain repeats/medians.
+
+## 2026-05-27 01:34 PDT
+
+Ran a larger release sample with `MINI_JAZZ_PERF_TOTAL_ROWS=200000` and
+`MINI_JAZZ_PERF_TARGET_OWNER_ROWS=20000`. Important caveat: the primary scenario
+honors those env vars, while the dashboard/project-board probes currently use
+fixed local sizes.
+
+Primary result at 200k rows:
+
+- seed: ~5.38 s
+- first client-visible page: ~10.6 ms
+- refresh after new top rows: ~13.9 ms
+- core main DB: ~59.0 MB; core files including WAL: ~63.8 MB
+
+The fixed-size dashboard numbers stayed near the previous run:
+
+- 24-query dashboard initial export: ~4.6 ms
+- 24-query dashboard refresh export: ~6.6 ms
+- 48-query scaling refresh export: ~10.5 ms
+
+Learning: the primary current-projection indexed page path remains stable at
+200k rows. The fixed-size dashboard probes should grow env knobs or a separate
+large-dashboard mode before we claim anything about 200k-row recursive-policy
+dashboard behavior.
