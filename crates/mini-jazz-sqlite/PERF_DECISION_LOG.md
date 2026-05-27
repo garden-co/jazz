@@ -853,3 +853,24 @@ layout.
 Learning: for our hot lookup directions we need both public-row-id -> row-num
 and row-num -> public-row-id. SQLite's ordinary integer primary key table is the
 right primitive here for now.
+
+## 2026-05-27 00:34 PDT
+
+Added a user-id footprint probe to quantify the cost of storing repeated user ids
+as text in both user-visible fields and row system columns before implementing a
+user-id interning table.
+
+Release sample with 100 users x 200 rows:
+
+- short ids (`user-0` shape, representative 6 bytes): ~7.68 MB core database,
+  current table ~2.48 MB, history table ~2.48 MB
+- long ids (representative 74 bytes): ~12.45 MB core database, current table
+  ~4.08 MB, history table ~4.08 MB
+- delta: ~238 additional database bytes per logical row for +68 bytes of user-id
+  payload, because each id is repeated through app owner fields and row system
+  metadata in both current and history
+
+Learning: user-id interning is likely a real storage win for production-shaped
+JWT/account ids, but it will touch query lowering, policy SQL, sync encoding, row
+materialization, and the current/history write paths. This is worth trying with
+tests rather than assuming text ids are good enough.

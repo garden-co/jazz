@@ -25,6 +25,7 @@ fn main() -> BenchResult<()> {
         recursive_policy_probe: run_recursive_policy_probe()?,
         multi_tab_fanout_probe: run_multi_tab_fanout_probe()?,
         many_user_page_probe: run_many_user_page_probe()?,
+        user_id_footprint_probe: run_user_id_footprint_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
         wide_schema_apply_probe: run_wide_schema_apply_probe()?,
         storage_topology_probe: run_storage_topology_probe()?,
@@ -71,6 +72,7 @@ struct BenchmarkReport {
     recursive_policy_probe: RecursivePolicyProbe,
     multi_tab_fanout_probe: MultiTabFanoutProbe,
     many_user_page_probe: ManyUserPageProbe,
+    user_id_footprint_probe: UserIdFootprintProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
     wide_schema_apply_probe: WideSchemaApplyProbe,
     storage_topology_probe: StorageTopologyProbe,
@@ -190,6 +192,25 @@ struct ManyUserPageProbe {
     total_transaction_rows_synced: usize,
     average_transaction_rows_synced: f64,
     core_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct UserIdFootprintProbe {
+    short_user_ids: UserIdFootprintCase,
+    long_user_ids: UserIdFootprintCase,
+    additional_bytes_per_row_for_long_ids: f64,
+}
+
+#[derive(Serialize)]
+struct UserIdFootprintCase {
+    user_count: usize,
+    rows_per_user: usize,
+    representative_user_id_bytes: usize,
+    seed_ms: f64,
+    core_database_bytes: i64,
+    current_page_bytes: i64,
+    history_page_bytes: i64,
+    tx_page_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -730,6 +751,65 @@ fn run_many_user_page_probe() -> BenchResult<ManyUserPageProbe> {
         average_transaction_rows_synced: total_transaction_rows_synced as f64
             / sampled_users as f64,
         core_database_bytes: core.storage_stats()?.database_bytes,
+    })
+}
+
+fn run_user_id_footprint_probe() -> BenchResult<UserIdFootprintProbe> {
+    let user_count = 100;
+    let rows_per_user = 200;
+    let short_user_ids = run_user_id_footprint_case(user_count, rows_per_user, false)?;
+    let long_user_ids = run_user_id_footprint_case(user_count, rows_per_user, true)?;
+    let total_rows = user_count * rows_per_user;
+    Ok(UserIdFootprintProbe {
+        additional_bytes_per_row_for_long_ids: (long_user_ids.core_database_bytes
+            - short_user_ids.core_database_bytes)
+            as f64
+            / total_rows as f64,
+        short_user_ids,
+        long_user_ids,
+    })
+}
+
+fn run_user_id_footprint_case(
+    user_count: usize,
+    rows_per_user: usize,
+    long_user_ids: bool,
+) -> BenchResult<UserIdFootprintCase> {
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema,
+    )?;
+    let representative_user = synthetic_user_id(0, long_user_ids);
+
+    let seed_started = Instant::now();
+    seed_many_user_documents_with_id_shape(
+        &mut core,
+        user_count,
+        rows_per_user,
+        100,
+        long_user_ids,
+    )?;
+    let seed_elapsed = seed_started.elapsed();
+
+    let stats = core.storage_stats()?;
+    Ok(UserIdFootprintCase {
+        user_count,
+        rows_per_user,
+        representative_user_id_bytes: representative_user.len(),
+        seed_ms: ms(seed_elapsed),
+        core_database_bytes: stats.database_bytes,
+        current_page_bytes: *stats
+            .table_page_bytes
+            .get("documents__schema_v1_current")
+            .unwrap_or(&0),
+        history_page_bytes: *stats
+            .table_page_bytes
+            .get("documents__schema_v1_history")
+            .unwrap_or(&0),
+        tx_page_bytes: *stats.table_page_bytes.get("jazz_tx").unwrap_or(&0),
     })
 }
 
@@ -1637,8 +1717,24 @@ fn seed_many_user_documents(
     rows_per_user: usize,
     seed_batch_size: usize,
 ) -> Result<()> {
+    seed_many_user_documents_with_id_shape(
+        runtime,
+        user_count,
+        rows_per_user,
+        seed_batch_size,
+        false,
+    )
+}
+
+fn seed_many_user_documents_with_id_shape(
+    runtime: &mut Runtime,
+    user_count: usize,
+    rows_per_user: usize,
+    seed_batch_size: usize,
+    long_user_ids: bool,
+) -> Result<()> {
     for user_index in 0..user_count {
-        let user = format!("user-{user_index}");
+        let user = synthetic_user_id(user_index, long_user_ids);
         runtime.run_attributing_to_user(&user, |runtime| {
             runtime
                 .transaction()
@@ -1662,7 +1758,7 @@ fn seed_many_user_documents(
         let mut tx = runtime.transaction();
         for row_index in chunk_start..chunk_end {
             let user_index = row_index / rows_per_user;
-            let owner_id = format!("user-{user_index}");
+            let owner_id = synthetic_user_id(user_index, long_user_ids);
             tx = tx.insert_row(
                 "documents",
                 &format!("many-user-doc-{row_index}"),
@@ -1680,6 +1776,14 @@ fn seed_many_user_documents(
         tx.commit()?;
     }
     Ok(())
+}
+
+fn synthetic_user_id(user_index: usize, long_user_ids: bool) -> String {
+    if long_user_ids {
+        format!("acct_01JAZZSQLITEPERF_{user_index:08}_tenant_01JAZZSQLITEPERF_LONG_STABLE_USER_ID")
+    } else {
+        format!("user-{user_index}")
+    }
 }
 
 fn seed_shared_readable_owner_documents(
