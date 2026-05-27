@@ -1744,3 +1744,19 @@ recursive subscriptions still imply roughly one second of cumulative
 export/apply work across core, edge, worker, and tab. This is probably not a
 "make SQLite query faster" problem anymore; it is a scope delta, apply
 throughput, and topology forwarding problem.
+
+## 2026-05-27 02:32 PDT
+
+Added optional gzip-size reporting for recursive topology bundles using the
+system `gzip` command when available.
+
+10k-node recursive topology:
+
+- initial JSON bundle: ~3.37 MiB
+- initial gzip bundle: ~101.9 KiB
+- refresh JSON bundle: ~3.40 MiB
+- refresh gzip bundle: ~104.7 KiB
+
+Learning: transport stream compression should make broad recursive JSON bundles
+much less scary on the wire. The remaining hard problem is CPU and SQLite write
+work at every forwarding tier, not raw transport bytes.

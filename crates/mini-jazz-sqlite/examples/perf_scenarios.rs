@@ -9,7 +9,9 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
+use std::io::Write;
 use std::process::Command;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
@@ -437,7 +439,9 @@ struct RecursiveTreeTopologyProbe {
     subscription_removed: usize,
     tab_visible_rows_after_refresh: usize,
     initial_core_bundle_bytes: usize,
+    initial_core_bundle_gzip_bytes: Option<usize>,
     refresh_core_bundle_bytes: usize,
+    refresh_core_bundle_gzip_bytes: Option<usize>,
     core_database_bytes: i64,
     edge_database_bytes: i64,
     worker_database_bytes: i64,
@@ -1709,6 +1713,7 @@ fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe
     })?;
     let initial_core_export_elapsed = initial_core_export_started.elapsed();
     let initial_core_summary = BundleSummary::from(&initial_core_bundle)?;
+    let initial_core_bundle_gzip_bytes = gzip_json_bytes(&initial_core_bundle)?;
     let initial_edge_apply = edge.profile_apply_bundle(&initial_core_bundle)?;
 
     let initial_edge_export_started = Instant::now();
@@ -1737,6 +1742,7 @@ fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe
     let refresh_core_export_elapsed = refresh_core_export_started.elapsed();
     let refresh_core_bundle = merge_bundles(&refresh_core_bundles)?;
     let refresh_core_summary = BundleSummary::from(&refresh_core_bundle)?;
+    let refresh_core_bundle_gzip_bytes = gzip_json_bytes(&refresh_core_bundle)?;
     let refresh_edge_apply = edge.profile_apply_bundle(&refresh_core_bundle)?;
 
     let refresh_edge_export_started = Instant::now();
@@ -1784,7 +1790,9 @@ fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe
         subscription_removed: diff_counts.removed,
         tab_visible_rows_after_refresh,
         initial_core_bundle_bytes: initial_core_summary.bytes,
+        initial_core_bundle_gzip_bytes,
         refresh_core_bundle_bytes: refresh_core_summary.bytes,
+        refresh_core_bundle_gzip_bytes,
         core_database_bytes: core.storage_stats()?.database_bytes,
         edge_database_bytes: edge.storage_stats()?.database_bytes,
         worker_database_bytes: worker.storage_stats()?.database_bytes,
@@ -3803,6 +3811,28 @@ impl BundleSummary {
         Ok(Self {
             bytes: serde_json::to_vec(bundle)?.len(),
         })
+    }
+}
+
+fn gzip_json_bytes(bundle: &Bundle) -> BenchResult<Option<usize>> {
+    let mut child = match Command::new("gzip")
+        .arg("-c")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Ok(None),
+    };
+    let payload = serde_json::to_vec(bundle)?;
+    let mut stdin = child.stdin.take().ok_or("gzip stdin was not piped")?;
+    stdin.write_all(&payload)?;
+    drop(stdin);
+    let output = child.wait_with_output()?;
+    if output.status.success() {
+        Ok(Some(output.stdout.len()))
+    } else {
+        Ok(None)
     }
 }
 
