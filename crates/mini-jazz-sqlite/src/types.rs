@@ -16,7 +16,15 @@ pub struct RowView {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum RowDiff {
     Added(RowView),
-    Updated { before: RowView, after: RowView },
+    Updated {
+        before: RowView,
+        after: RowView,
+    },
+    Moved {
+        row: RowView,
+        before_index: usize,
+        after_index: usize,
+    },
     Removed(RowView),
 }
 
@@ -35,7 +43,25 @@ pub struct StorageStats {
     pub page_count: i64,
     pub page_size: i64,
     pub database_bytes: i64,
+    pub main_file_bytes: i64,
+    pub wal_file_bytes: i64,
+    pub shm_file_bytes: i64,
+    pub total_file_bytes: i64,
+    pub table_page_bytes: BTreeMap<String, i64>,
+    #[serde(skip)]
     tx_nums_by_id: BTreeMap<String, i64>,
+}
+
+pub(crate) struct StorageFileBytes {
+    pub main: i64,
+    pub wal: i64,
+    pub shm: i64,
+}
+
+pub(crate) struct StoragePageBytes {
+    pub count: i64,
+    pub size: i64,
+    pub object_bytes: BTreeMap<String, i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -56,22 +82,72 @@ pub struct RejectionInfo {
     pub detail: Option<JsonValue>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct QueryExportProfile {
+    pub total_ms: f64,
+    pub read_rows_ms: f64,
+    pub resolve_visible_row_nums_ms: f64,
+    pub repair_row_nums_ms: f64,
+    pub visible_history_ms: f64,
+    pub repair_visible_history_ms: f64,
+    pub repair_all_history_ms: f64,
+    pub policy_dependency_history_ms: f64,
+    pub branch_snapshot_history_ms: f64,
+    pub dedupe_history_ms: f64,
+    pub reads_ms: f64,
+    pub rejected_tx_ids_ms: f64,
+    pub txs_ms: f64,
+    pub branches_ms: f64,
+    pub make_bundle_ms: f64,
+    pub history_rows: usize,
+    pub read_rows: usize,
+    pub tx_rows: usize,
+    pub branch_rows: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ApplyBundleProfile {
+    pub total_ms: f64,
+    pub validation_ms: f64,
+    pub begin_tx_ms: f64,
+    pub branches_ms: f64,
+    pub txs_ms: f64,
+    pub reads_ms: f64,
+    pub rejected_cleanup_ms: f64,
+    pub query_reads_ms: f64,
+    pub history_ms: f64,
+    pub query_scope_repair_ms: f64,
+    pub commit_ms: f64,
+    pub revalidate_awaiting_ms: f64,
+    pub branch_rows: usize,
+    pub tx_rows: usize,
+    pub read_rows: usize,
+    pub query_read_rows: usize,
+    pub history_rows: usize,
+}
+
 impl StorageStats {
     pub(crate) fn new(
         history_rows: i64,
         current_rows: i64,
         rejected_transactions: i64,
-        page_count: i64,
-        page_size: i64,
+        page_bytes: StoragePageBytes,
+        file_bytes: StorageFileBytes,
         tx_nums_by_id: BTreeMap<String, i64>,
     ) -> Self {
+        let total_file_bytes = file_bytes.main + file_bytes.wal + file_bytes.shm;
         Self {
             history_rows,
             current_rows,
             rejected_transactions,
-            page_count,
-            page_size,
-            database_bytes: page_count * page_size,
+            page_count: page_bytes.count,
+            page_size: page_bytes.size,
+            database_bytes: page_bytes.count * page_bytes.size,
+            main_file_bytes: file_bytes.main,
+            wal_file_bytes: file_bytes.wal,
+            shm_file_bytes: file_bytes.shm,
+            total_file_bytes,
+            table_page_bytes: page_bytes.object_bytes,
             tx_nums_by_id,
         }
     }

@@ -4,7 +4,7 @@ use super::*;
 fn memory_runtime_writes_through_sqlite_current_projection() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
-    assert_eq!(alice.storage_format_version().unwrap(), 4);
+    assert_eq!(alice.storage_format_version().unwrap(), 7);
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -38,7 +38,7 @@ fn durable_storage_is_tagged_with_format_version() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 7);
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn future_storage_format_versions_fail_before_opening_runtime() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("future.sqlite");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 5).unwrap();
+    conn.pragma_update(None, "user_version", 8).unwrap();
     drop(conn);
 
     let err = match Runtime::open(Storage::File(path), "worker", "alice") {
@@ -56,7 +56,78 @@ fn future_storage_format_versions_fail_before_opening_runtime() {
 
     assert!(err
         .to_string()
-        .contains("unsupported storage format version 5"));
+        .contains("unsupported storage format version 8"));
+}
+
+#[test]
+fn system_user_metadata_is_interned_but_app_user_fields_stay_text() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("interned-users.sqlite");
+    let schema = SchemaDef::new().table("docs", |table| {
+        table.text("owner_id");
+        table.text("title");
+    });
+
+    {
+        let mut alice =
+            Runtime::open_with_schema(Storage::File(path.clone()), "alice-node", "alice", schema)
+                .unwrap();
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!("user-visible-owner")),
+                    ("title".to_owned(), json!("Intern system users")),
+                ]),
+            )
+            .unwrap();
+        let row = alice.read_rows("docs").unwrap().remove(0);
+        assert_eq!(row.created_by, "alice");
+        assert_eq!(row.values["owner_id"], json!("user-visible-owner"));
+    }
+
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let created_by_type: String = conn
+        .query_row(
+            "SELECT type FROM pragma_table_info('docs__schema_v1_history') WHERE name = 'j_created_by'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let owner_type: String = conn
+        .query_row(
+            "SELECT type FROM pragma_table_info('docs__schema_v1_history') WHERE name = 'owner_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored_created_by: i64 = conn
+        .query_row(
+            "SELECT j_created_by FROM docs__schema_v1_history WHERE row_num = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored_owner_id: String = conn
+        .query_row(
+            "SELECT owner_id FROM docs__schema_v1_history WHERE row_num = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored_user_id: String = conn
+        .query_row(
+            "SELECT user_id FROM jazz_user WHERE user_num = ?",
+            [stored_created_by],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(created_by_type, "INTEGER");
+    assert_eq!(owner_type, "TEXT");
+    assert_eq!(stored_user_id, "alice");
+    assert_eq!(stored_owner_id, "user-visible-owner");
 }
 
 #[test]

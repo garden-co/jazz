@@ -132,6 +132,212 @@ Open issues:
 - benchmark thresholds for launch readiness
 - how to retain query-plan regressions in CI without excessive noise
 
+## 33. Optimization Recommendations And Performance Baselines
+
+This section is non-normative. It records performance evidence and recommended
+optimization priorities from the current SQLite-core prototype. These numbers
+are not semantic guarantees, but they are design pressure and regression
+context.
+
+### 33.1 Primary Fast Path: Bounded Policy-Scoped Pages
+
+The primary fast path should be indexed, policy-scoped page reads over large
+shared relations:
+
+- user or policy predicate
+- stable ordering
+- small page result
+- query-scoped sync
+- full topology propagation
+- local subscription diffing
+
+Observed baseline in the current prototype:
+
+- `100k` documents, `10k` visible to the user, page `50`: full-topology
+  first result in roughly `33 ms`
+- `200k` documents, `20k` visible to the user, page `50`: full-topology
+  first result in roughly `63 ms`
+- client-side apply, query, and subscription poll work usually remain small for
+  bounded pages; export and read-set/policy-dependency collection dominate
+
+The target product shape is not whole-table replication. Bundle size and
+client work should scale with observed rows and required dependencies, not with
+the full source table.
+
+For ordered pages, observed page-boundary state is part of the optimization
+model. Refresh should be bounded by the new visible page, previously observed
+page rows that may need repair or removal, dependencies, and metadata. It
+should not widen to every row matching the page predicate merely because the
+ordered scope is large.
+
+### 33.2 Export And Read-Set Collection
+
+SQLite query planning solves local result selection, but Jazz export has a
+larger job. A query-scoped export must collect:
+
+- visible result rows
+- dependency/include rows
+- policy dependencies
+- read-set and observed-fact records
+- transaction metadata and outcomes
+- repair rows and tombstones needed for scope contraction
+- branch/base/source provenance when applicable
+
+Export/read-set collection is therefore a first-class hot path. Implementations
+should optimize it as carefully as SQL query execution. In the current
+prototype, policy-dependency history collection is often the dominant part of a
+bounded page export even when the actual SQLite current read is sub-millisecond.
+
+Same-shape query descriptors for one downstream peer should be batchable before
+bundle assembly. Dashboards often contain many similar page queries that share
+table, policy, branch, ordering, and dependency structure. Batching at export
+time can avoid repeated dependency, read-set, transaction, and branch
+collection that cannot be recovered by merging already-assembled bundles.
+
+### 33.3 Recursive Scopes
+
+Recursive queries and recursive policies are product-relevant and first-class.
+They also produce the most expensive observed workload shapes.
+
+Broad recursive subscriptions are viable, but expensive through a full
+topology. At `10k` tree nodes, the current prototype showed full-scope export,
+apply, re-export, and subscription polling costs on every hop. Repeated no-op
+refresh over a broad recursive scope is especially wasteful: the system can
+spend significant time re-exporting, re-applying, and re-diffing in order to
+discover no semantic change.
+
+The mechanism for optimizing no-op or near-no-op refresh is intentionally open.
+Candidates include narrower invalidation facts, observed-set versioning,
+dependency fingerprints, or more precise per-query change clocks. The spec
+should not choose one prematurely.
+
+Materialized transitive closure tables or other recursive derived indexes are a
+future optimization candidate. Early measurements show much faster recursive
+reads at meaningful storage and write-maintenance cost. They are not part of
+the baseline storage contract.
+
+### 33.4 Current Projection
+
+Main-branch current projection is recommended for hot current reads. It costs
+disk space, but keeps ordinary current reads predictable and indexable.
+
+The prototype's current-projection tradeoff benchmark showed that history-only
+reads can be surprisingly competitive for small synthetic cases, but the main
+product workload is repeated current reads over bounded, indexed pages. The
+recommended baseline remains:
+
+- maintain main current projection tables
+- optimize current projection indexes first
+- allow slower query-time visibility for arbitrary historical snapshots and
+  pinned branch-base reads until a derived projection is justified
+
+### 33.5 Topology
+
+Benchmarking isolated core queries is not enough. Jazz performance is
+product-perceived through a topology:
+
+```text
+memory tab -> durable worker/broker -> edge -> core/global authority
+```
+
+Memory-only runtimes should still use in-memory SQLite. Durability is a storage
+mode, not a different semantic runtime. Product-shaped benchmarks should keep
+measuring full-topology latency, including intermediary export/apply and local
+subscription diffing.
+
+Current measurements suggest durable intermediaries are acceptable for bounded
+page queries: the file-backed edge/worker path added about `1 ms` compared with
+all-memory intermediaries in the primary page-flow probe. This is encouraging
+for browser-worker and cloud-edge deployments, but broad recursive scopes still
+make every hop visible.
+
+### 33.6 Subscriptions And Diffs
+
+Subscription performance should be measured at the semantic callback boundary.
+The observed update path includes incoming apply, local rerun/diff or poll/diff
+work, and deterministic diff production.
+
+Semantic diff categories include `added`, `updated`, `moved`, and `removed`.
+`moved` is important for ordered pages because an order-only change is visible
+to the product even when row values are otherwise unchanged.
+
+The current bounded page probes show local diffing is small for page-sized
+results. Broad recursive subscriptions remain the stress case.
+
+Incoming sync application should remain idempotent as both a correctness and
+performance invariant. Reapplying already-known history should be cheap enough
+for reconnect and broad refresh paths, especially while refresh bundles may
+include repair rows or previously observed recursive-scope rows.
+
+### 33.7 Query Lowering
+
+Supported indexable current-query forms should lower to SQL over current
+projection tables. Fallback filtering over all visible rows should be explicit
+optimization debt, not an accidental implementation shortcut.
+
+Current-query lowerings that should stay covered include:
+
+- equality predicates
+- `IN` predicates
+- selected semantic system-field predicates
+- ordered top-N/page queries
+- declared user-field indexes
+- ref predicates through physical row surrogates
+
+Slower fallback paths are acceptable for historical pinned-base snapshots,
+arbitrary time-travel reads, and other query-time visibility baselines, but they
+should be named in benchmarks and revisited when they become product-hot.
+
+Index order should be generated from the query being served, not from a blanket
+policy-first rule. Early measurements showed that prefixing ordinary
+user-declared current indexes with policy columns can badly regress
+owner/page-style queries, while only modestly helping some recursive policy
+cases. Policy-specific acceleration should be explicit, targeted, and checked
+against the SQL plan it is meant to serve.
+
+Local integer interning for system user fields is a recommended storage
+optimization. Public user ids still exist at API, auth, and sync boundaries,
+and ordinary app user fields remain ordinary schema fields. The storage layer
+may use local integer surrogates for row system metadata such as creator/updater
+to reduce repeated long-id footprint and keep policy/query lowering compact.
+
+SQLite tuning knobs are secondary to query/export/apply mechanics. Default page
+size is a reasonable baseline; larger pages did not clearly improve the tested
+workloads. Larger SQLite page caches may help some file-backed broad refreshes,
+but do not fix CPU-bound recursive refresh. WAL and synchronous settings are
+deployment choices rather than semantic requirements. Compression should remain
+stream-level for transport and page/range-level for future storage work, not
+per-row payload compression by default.
+
+### 33.8 Benchmark Families
+
+The benchmark suite should remain product-shaped and topology-aware. The
+current important families are:
+
+- large owner-scoped page over a shared table
+- permissioned dashboard with many page queries
+- dashboard query-count scaling
+- recursive tree subscription
+- recursive full-topology propagation
+- recursive closure-table comparison
+- cold reopen of durable intermediaries
+- project-board app shape
+- mixed mutation refresh with semantic page diffs
+- subscription storm
+- branch sparse overlay
+- pinned branch snapshot
+- branch fan-in/source traversal
+- storage topology comparison
+- current projection versus history-only tradeoff
+- transaction granularity
+- multi-tenant many-user pages
+- wide-schema/narrow-sync path
+
+Detailed scenario descriptions and numeric runs belong in benchmark reports,
+PR descriptions, and decision logs rather than in the normative spec. The spec
+should capture the product-shaped design pressure and the optimization
+recommendations that survive those experiments.
+
 ## Appendix A: Working Prototype Status And Strategy
 
 The SQLite core spike is no longer throwaway. It should remain the working

@@ -1,3 +1,4 @@
+use crate::Result;
 use serde::{Deserialize, Serialize};
 
 use serde_json::Value as JsonValue;
@@ -19,6 +20,62 @@ pub struct Bundle {
     #[serde(default)]
     pub query_reads: Vec<QueryReadRecord>,
     pub history: Vec<HistoryRecord>,
+}
+
+pub fn merge_bundles(bundles: &[Bundle]) -> Result<Bundle> {
+    let Some(first) = bundles.first() else {
+        return Err(crate::Error::new("cannot merge empty bundle list"));
+    };
+    let mut merged = Bundle {
+        protocol_version: first.protocol_version,
+        schema_fingerprint: first.schema_fingerprint.clone(),
+        policy_fingerprint: first.policy_fingerprint.clone(),
+        branches: Vec::new(),
+        txs: Vec::new(),
+        reads: Vec::new(),
+        query_reads: Vec::new(),
+        history: Vec::new(),
+    };
+    let mut branches = BTreeMap::new();
+    let mut txs = BTreeMap::new();
+    let mut reads = BTreeMap::new();
+    let mut query_reads = BTreeMap::new();
+    let mut history = BTreeMap::new();
+    for bundle in bundles {
+        if bundle.protocol_version != merged.protocol_version
+            || bundle.schema_fingerprint != merged.schema_fingerprint
+            || bundle.policy_fingerprint != merged.policy_fingerprint
+        {
+            return Err(crate::Error::new(
+                "cannot merge bundles with different metadata",
+            ));
+        }
+        for record in &bundle.branches {
+            branches.insert(record.branch_id.clone(), record.clone());
+        }
+        for record in &bundle.txs {
+            txs.insert(record.tx_id.clone(), record.clone());
+        }
+        for record in &bundle.reads {
+            reads.insert(stable_key(record)?, record.clone());
+        }
+        for record in &bundle.query_reads {
+            query_reads.insert(stable_key(record)?, record.clone());
+        }
+        for record in &bundle.history {
+            history.insert(stable_key(record)?, record.clone());
+        }
+    }
+    merged.branches = branches.into_values().collect();
+    merged.txs = txs.into_values().collect();
+    merged.reads = reads.into_values().collect();
+    merged.query_reads = query_reads.into_values().collect();
+    merged.history = history.into_values().collect();
+    Ok(merged)
+}
+
+fn stable_key<T: Serialize>(value: &T) -> Result<String> {
+    serde_json::to_string(value).map_err(|err| crate::Error::new(err.to_string()))
 }
 
 fn default_bundle_protocol_version() -> i64 {

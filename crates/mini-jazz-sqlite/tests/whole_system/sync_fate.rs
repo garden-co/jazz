@@ -1,4 +1,6 @@
 use super::*;
+use mini_jazz_sqlite::sync::merge_bundles;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
 fn query_scoped_sync_converges_memory_and_durable_nodes() {
@@ -22,6 +24,39 @@ fn query_scoped_sync_converges_memory_and_durable_nodes() {
         .durable("worker.sqlite", "alice-worker", "alice")
         .unwrap();
     assert_eq!(reopened.open_todos().unwrap(), alice.open_todos().unwrap());
+}
+
+#[test]
+fn merged_query_refresh_bundle_applies_like_individual_bundles() {
+    let harness = support::Harness::new();
+    let mut upstream = harness.memory("upstream", "alice").unwrap();
+    let mut separate_peer = harness.memory("separate-peer", "alice").unwrap();
+    let mut merged_peer = harness.memory("merged-peer", "alice").unwrap();
+
+    upstream.create_project("project-1", "Spec work").unwrap();
+    upstream
+        .create_todo("todo-1", "First", false, "project-1")
+        .unwrap();
+    upstream
+        .create_todo("todo-2", "Second", false, "project-1")
+        .unwrap();
+
+    let bundles = vec![
+        upstream.export_query_scope_open_todos().unwrap(),
+        upstream.export_query_scope_newest_open_todos(1).unwrap(),
+    ];
+    for bundle in &bundles {
+        separate_peer.apply_bundle(bundle).unwrap();
+    }
+    let merged = merge_bundles(&bundles).unwrap();
+    merged_peer.apply_bundle(&merged).unwrap();
+
+    assert_eq!(merged.query_reads.len(), 2);
+    assert!(merged.txs.len() < bundles.iter().map(|bundle| bundle.txs.len()).sum());
+    assert_eq!(
+        merged_peer.open_todos().unwrap(),
+        separate_peer.open_todos().unwrap()
+    );
 }
 
 #[test]
@@ -144,6 +179,293 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
             .map(|row| row.id.as_str())
             .collect::<Vec<_>>(),
         vec!["note-new", "note-middle"]
+    );
+}
+
+#[test]
+fn durable_user_column_ordered_query_read_refreshes_page_boundary_after_restart() {
+    let harness = support::Harness::new();
+    let schema = SchemaDef::new().table("documents", |table| {
+        table.text("owner_id");
+        table.text("updated_at");
+        table.text("title");
+        table.index("owner_updated", ["owner_id", "updated_at"]);
+    });
+    let mut upstream = harness
+        .memory_with_schema("upstream", "alice", schema.clone())
+        .unwrap();
+
+    for (id, updated_at) in [
+        ("doc-old", "0001"),
+        ("doc-middle", "0002"),
+        ("doc-bob", "9999"),
+    ] {
+        upstream
+            .insert_row(
+                "documents",
+                id,
+                BTreeMap::from([
+                    (
+                        "owner_id".to_owned(),
+                        json!(if id == "doc-bob" { "bob" } else { "alice" }),
+                    ),
+                    ("updated_at".to_owned(), json!(updated_at)),
+                    ("title".to_owned(), json!(id)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    {
+        let mut worker = harness
+            .durable_with_schema(
+                "ordered-field-worker.sqlite",
+                "worker",
+                "alice",
+                schema.clone(),
+            )
+            .unwrap();
+        support::apply(
+            upstream
+                .export_query_where_eq_top_field_desc(
+                    "documents",
+                    "owner_id",
+                    json!("alice"),
+                    "updated_at",
+                    2,
+                )
+                .unwrap(),
+            &mut worker,
+        )
+        .unwrap();
+        assert_eq!(
+            worker
+                .read_rows_where_eq_top_field_desc(
+                    "documents",
+                    "owner_id",
+                    json!("alice"),
+                    "updated_at",
+                    2,
+                )
+                .unwrap()
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["doc-middle", "doc-old"]
+        );
+    }
+
+    upstream
+        .insert_row(
+            "documents",
+            "doc-new",
+            BTreeMap::from([
+                ("owner_id".to_owned(), json!("alice")),
+                ("updated_at".to_owned(), json!("0003")),
+                ("title".to_owned(), json!("new")),
+            ]),
+        )
+        .unwrap();
+
+    let mut reopened = harness
+        .durable_with_schema(
+            "ordered-field-worker.sqlite",
+            "worker-reopened",
+            "alice",
+            schema,
+        )
+        .unwrap();
+    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
+
+    assert_eq!(
+        reopened
+            .read_rows_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!("alice"),
+                "updated_at",
+                3,
+            )
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["doc-new", "doc-middle"]
+    );
+}
+
+#[test]
+fn ordered_page_export_is_scoped_to_observed_page_rows() {
+    let harness = support::Harness::new();
+    let schema = SchemaDef::new().table("documents", |table| {
+        table.text("owner_id");
+        table.text("updated_at");
+        table.text("title");
+        table.index("owner_updated", ["owner_id", "updated_at"]);
+    });
+    let mut upstream = harness
+        .memory_with_schema("upstream", "alice", schema)
+        .unwrap();
+
+    for index in 0..5 {
+        upstream
+            .insert_row(
+                "documents",
+                &format!("alice-doc-{index}"),
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!("alice")),
+                    ("updated_at".to_owned(), json!(format!("{index:04}"))),
+                    ("title".to_owned(), json!(format!("Alice doc {index}"))),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let bundle = upstream
+        .export_query_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!("alice"),
+            "updated_at",
+            2,
+        )
+        .unwrap();
+    let exported_doc_ids = bundle
+        .history
+        .iter()
+        .filter(|record| record.table == "documents")
+        .map(|record| record.row_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        exported_doc_ids,
+        BTreeSet::from(["alice-doc-4", "alice-doc-3"])
+    );
+    assert_eq!(
+        bundle.query_reads[0].value["observed_ids"],
+        json!(["alice-doc-4", "alice-doc-3"])
+    );
+}
+
+#[test]
+fn ordered_page_refresh_repairs_previously_observed_deleted_rows() {
+    let harness = support::Harness::new();
+    let schema = SchemaDef::new().table("documents", |table| {
+        table.text("owner_id");
+        table.text("updated_at");
+        table.text("title");
+        table.index("owner_updated", ["owner_id", "updated_at"]);
+    });
+    let mut upstream = harness
+        .memory_with_schema("upstream", "alice", schema.clone())
+        .unwrap();
+
+    for (id, updated_at) in [
+        ("doc-old", "0001"),
+        ("doc-middle", "0002"),
+        ("doc-new", "0003"),
+    ] {
+        upstream
+            .insert_row(
+                "documents",
+                id,
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!("alice")),
+                    ("updated_at".to_owned(), json!(updated_at)),
+                    ("title".to_owned(), json!(id)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    {
+        let mut worker = harness
+            .durable_with_schema(
+                "ordered-page-delete-worker.sqlite",
+                "worker",
+                "alice",
+                schema.clone(),
+            )
+            .unwrap();
+        support::apply(
+            upstream
+                .export_query_where_eq_top_field_desc(
+                    "documents",
+                    "owner_id",
+                    json!("alice"),
+                    "updated_at",
+                    2,
+                )
+                .unwrap(),
+            &mut worker,
+        )
+        .unwrap();
+        assert_eq!(
+            worker
+                .read_rows_where_eq_top_field_desc(
+                    "documents",
+                    "owner_id",
+                    json!("alice"),
+                    "updated_at",
+                    2,
+                )
+                .unwrap()
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["doc-new", "doc-middle"]
+        );
+    }
+
+    upstream.delete_row("documents", "doc-new").unwrap();
+
+    let mut reopened = harness
+        .durable_with_schema(
+            "ordered-page-delete-worker.sqlite",
+            "worker-reopened",
+            "alice",
+            schema,
+        )
+        .unwrap();
+    let refresh_bundles = upstream
+        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
+        .unwrap();
+    let exported_doc_ids = refresh_bundles[0]
+        .history
+        .iter()
+        .filter(|record| record.table == "documents")
+        .map(|record| record.row_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        exported_doc_ids,
+        BTreeSet::from(["doc-middle", "doc-old", "doc-new"])
+    );
+    assert_eq!(
+        refresh_bundles[0]
+            .history
+            .iter()
+            .filter(|record| record.table == "documents")
+            .count(),
+        4
+    );
+
+    for bundle in refresh_bundles {
+        support::apply(bundle, &mut reopened).unwrap();
+    }
+    assert_eq!(
+        reopened
+            .read_rows_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!("alice"),
+                "updated_at",
+                3,
+            )
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["doc-middle", "doc-old"]
     );
 }
 
@@ -1096,6 +1418,203 @@ fn stale_pending_bundle_does_not_resurrect_rejected_fate_after_reconnect() {
         worker.transaction_info(&tx).unwrap().rejection_detail,
         Some(json!({"reason": "authority"}))
     );
+}
+
+#[test]
+fn top_field_query_with_ref_include_syncs_page_and_dependency() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-a", "A older", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-z", "Z newer", false, "project-1")
+        .unwrap();
+
+    let bundle = alice
+        .export_query_where_eq_top_field_desc_with_ref_include(
+            "todos",
+            "done",
+            json!(false),
+            "title",
+            1,
+            "project",
+        )
+        .unwrap();
+    peer.apply_bundle(&bundle).unwrap();
+
+    let todos = peer.open_todos_require_project().unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].id, "todo-z");
+    assert_eq!(todos[0].project_title.as_deref(), Some("Spec work"));
+}
+
+#[test]
+fn batched_top_field_ref_include_matches_individual_exports() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut individual_peer = Runtime::open(Storage::Memory, "individual-peer", "alice").unwrap();
+    let mut batch_peer = Runtime::open(Storage::Memory, "batch-peer", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-open-a", "A open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-open-z", "Z open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-z", "Z done", true, "project-1")
+        .unwrap();
+
+    let open = alice
+        .export_query_where_eq_top_field_desc_with_ref_include(
+            "todos",
+            "done",
+            json!(false),
+            "title",
+            1,
+            "project",
+        )
+        .unwrap();
+    let done = alice
+        .export_query_where_eq_top_field_desc_with_ref_include(
+            "todos",
+            "done",
+            json!(true),
+            "title",
+            1,
+            "project",
+        )
+        .unwrap();
+    individual_peer.apply_bundle(&open).unwrap();
+    individual_peer.apply_bundle(&done).unwrap();
+
+    let batch = alice
+        .export_many_query_where_eq_top_field_desc_with_ref_include(
+            "todos",
+            "done",
+            vec![json!(false), json!(true)],
+            "title",
+            1,
+            "project",
+        )
+        .unwrap();
+    batch_peer.apply_bundle(&batch).unwrap();
+
+    assert_eq!(
+        batch_peer.open_todos_require_project().unwrap(),
+        individual_peer.open_todos_require_project().unwrap()
+    );
+    assert_eq!(batch.query_reads.len(), 2);
+}
+
+#[test]
+fn batched_top_field_query_matches_individual_exports_without_include() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut individual_peer = Runtime::open(Storage::Memory, "individual-peer", "alice").unwrap();
+    let mut batch_peer = Runtime::open(Storage::Memory, "batch-peer", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-open-a", "A open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-open-z", "Z open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-z", "Z done", true, "project-1")
+        .unwrap();
+
+    let open = alice
+        .export_query_where_eq_top_field_desc("todos", "done", json!(false), "title", 1)
+        .unwrap();
+    let done = alice
+        .export_query_where_eq_top_field_desc("todos", "done", json!(true), "title", 1)
+        .unwrap();
+    individual_peer.apply_bundle(&open).unwrap();
+    individual_peer.apply_bundle(&done).unwrap();
+
+    let batch = alice
+        .export_many_query_where_eq_top_field_desc(
+            "todos",
+            "done",
+            vec![json!(false), json!(true)],
+            "title",
+            1,
+        )
+        .unwrap();
+    batch_peer.apply_bundle(&batch).unwrap();
+
+    assert_eq!(
+        batch_peer.open_todos().unwrap(),
+        individual_peer.open_todos().unwrap()
+    );
+    assert_eq!(batch.query_reads.len(), 2);
+}
+
+#[test]
+fn top_field_query_read_refresh_batches_same_shape_queries() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-open-a", "A open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-open-z", "Z open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-a", "A done", true, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-z", "Z done", true, "project-1")
+        .unwrap();
+
+    let initial = alice
+        .export_many_query_where_eq_top_field_desc(
+            "todos",
+            "done",
+            vec![json!(false), json!(true)],
+            "title",
+            1,
+        )
+        .unwrap();
+    peer.apply_bundle(&initial).unwrap();
+    assert_eq!(peer.observed_query_reads().unwrap().len(), 2);
+
+    alice
+        .transaction()
+        .update_row(
+            "todos",
+            "todo-open-a",
+            BTreeMap::from([("title".to_owned(), json!("ZZZ open"))]),
+        )
+        .commit()
+        .unwrap();
+    alice
+        .transaction()
+        .update_row(
+            "todos",
+            "todo-done-a",
+            BTreeMap::from([("title".to_owned(), json!("ZZZ done"))]),
+        )
+        .commit()
+        .unwrap();
+
+    let refreshes = alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap();
+    assert_eq!(refreshes.len(), 1);
+    peer.apply_bundle(&refreshes[0]).unwrap();
+
+    let rows = peer.read_rows("todos").unwrap();
+    assert!(rows.iter().any(|row| row.id == "todo-open-a"));
+    assert!(rows.iter().any(|row| row.id == "todo-done-a"));
+    assert!(!rows.iter().any(|row| row.id == "todo-open-z"));
+    assert!(!rows.iter().any(|row| row.id == "todo-done-z"));
 }
 
 #[test]

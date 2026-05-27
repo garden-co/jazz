@@ -16,10 +16,14 @@ pub mod sync;
 mod time;
 mod tx;
 mod types;
+mod users;
 
 pub use error::{Error, Result};
 pub use runtime::Runtime;
 pub use schema::SchemaDef;
 pub use storage::Storage;
 pub use subscription::RowsSubscription;
-pub use types::{RejectionInfo, RowDiff, RowView, StorageStats, TransactionInfo};
+pub use types::{
+    ApplyBundleProfile, QueryExportProfile, RejectionInfo, RowDiff, RowView, StorageStats,
+    TransactionInfo,
+};

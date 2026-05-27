@@ -17,6 +17,12 @@ Physical storage baseline:
   experiment
 - query-time visibility for historical and branch correctness baselines
 
+Main-branch current projection is the recommended hot-read surface. It carries
+real disk overhead, but gives predictable indexed reads for ordinary product
+screens. Historical snapshots, arbitrary time travel, and pinned branch base
+views may initially use slower query-time visibility unless measurements justify
+promoting a derived projection or specialized historical index.
+
 ### 26.1 Transaction Tables
 
 Sketch:
@@ -229,6 +235,12 @@ history indexes must be maintained in the same embedded-database transaction as
 the history append or incoming-sync apply, and should be driven by explicit
 schema/query intent or measured hot paths rather than generated for every
 JSONB payload field.
+
+Current-projection lowering should cover ordinary supported indexable query
+forms, including equality, `IN`, selected semantic system-field predicates, and
+ordered top-N pages. Historical and branch snapshot fallbacks may be slower, but
+current reads should not silently degrade into full visible-row filtering when a
+declared indexable predicate is available.
 
 Performance risks:
 

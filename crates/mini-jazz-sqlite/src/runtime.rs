@@ -1,4 +1,4 @@
-use crate::rows::{ensure_row_id, public_row_id, row_num};
+use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
@@ -6,14 +6,18 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::time::now_ms;
-use crate::types::{BranchInfo, RejectionInfo, RowView, StorageStats, TransactionInfo};
+use crate::types::{
+    ApplyBundleProfile, BranchInfo, QueryExportProfile, RejectionInfo, RowView, StorageStats,
+    TransactionInfo,
+};
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
-    storage, tx, Result, Storage,
+    storage, tx, users, Result, Storage,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 pub struct Runtime {
     conn: Connection,
@@ -28,6 +32,23 @@ struct AwaitingDependencyTx {
     tx_num: i64,
     tx_id: String,
     auth_user: String,
+}
+
+struct QueryScopeOptions<'a> {
+    ref_include_fields: &'a [&'a str],
+    extra_row_ids: &'a [String],
+}
+
+type TopFieldRefreshKey = (String, String, String, String, usize);
+type TopFieldRefreshValue = (JsonValue, Vec<String>);
+
+impl QueryScopeOptions<'_> {
+    fn empty() -> Self {
+        Self {
+            ref_include_fields: &[],
+            extra_row_ids: &[],
+        }
+    }
 }
 
 pub const ADMIN_SYSTEM_USER: &str = "@system/admin";
@@ -303,6 +324,23 @@ impl Runtime {
         Ok(rows)
     }
 
+    pub fn read_rows_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        self.query_context().read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value,
+            order_field_name,
+            limit,
+        )
+    }
+
     pub fn export_table_history(&self, table_name: &str) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
         let user = self.policy_user();
@@ -387,7 +425,6 @@ impl Runtime {
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let txs = export_txs(&self.conn)?;
         let mut history = export_visible_table_history(
             &self.conn,
             &self.schema,
@@ -447,6 +484,7 @@ impl Runtime {
         }
         dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
+        let txs = export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &[])?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         let query_reads = vec![QueryReadRecord {
@@ -467,6 +505,10 @@ impl Runtime {
     }
 
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
+        self.apply_bundle_inner(bundle, true).map(|_| ())
+    }
+
+    pub fn profile_apply_bundle(&mut self, bundle: &Bundle) -> Result<ApplyBundleProfile> {
         self.apply_bundle_inner(bundle, true)
     }
 
@@ -474,7 +516,9 @@ impl Runtime {
         &mut self,
         bundle: &Bundle,
         check_policy_fingerprint: bool,
-    ) -> Result<()> {
+    ) -> Result<ApplyBundleProfile> {
+        let total_started = Instant::now();
+        let validation_started = Instant::now();
         if bundle.protocol_version != BUNDLE_PROTOCOL_VERSION {
             return Err(crate::Error::new(format!(
                 "unsupported bundle protocol version {}",
@@ -503,8 +547,13 @@ impl Runtime {
                 }
             }
         }
+        let validation_ms = duration_ms(validation_started.elapsed());
         let schema = self.schema.clone();
+        let begin_tx_started = Instant::now();
         let db = self.conn.transaction()?;
+        let begin_tx_ms = duration_ms(begin_tx_started.elapsed());
+
+        let branches_started = Instant::now();
         for branch_record in &bundle.branches {
             let branch_num = branch::ensure(
                 &db,
@@ -519,6 +568,18 @@ impl Runtime {
                 branch_record.source_version,
             )?;
         }
+        let mut branch_nums_by_id = BTreeMap::new();
+        for branch_record in &bundle.branches {
+            let branch_num = branch::checkout(&db, &branch_record.branch_id)?;
+            branch_nums_by_id.insert(branch_record.branch_id.clone(), branch_num);
+        }
+        let branches_ms = duration_ms(branches_started.elapsed());
+
+        let table_nums_by_name = crate::schema::table_nums(&db)?;
+
+        let txs_started = Instant::now();
+        let mut tx_nums_by_id = BTreeMap::new();
+        let mut tx_info_by_num = BTreeMap::new();
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
             let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
@@ -546,9 +607,11 @@ impl Runtime {
                     metadata_json
                 ],
             )?;
+            let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
+            tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
+            tx_info_by_num.insert(tx_num, tx_apply_info(&db, tx_num)?);
             if tx_record.outcome == tx::OUTCOME_REJECTED {
                 if let Some(code) = &tx_record.rejection_code {
-                    let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
                     let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
                     db.execute(
                         "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
@@ -558,7 +621,6 @@ impl Runtime {
                 }
             }
             if let Some(global_epoch) = tx_record.global_epoch {
-                let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
                 db.execute(
                     "INSERT OR REPLACE INTO jazz_tx_receipt
                      (tx_num, tier, observed_at, receipt_json)
@@ -567,7 +629,6 @@ impl Runtime {
                 )?;
             }
             for tier in &tx_record.receipt_tiers {
-                let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
                 let observed_at = if *tier == tx::TIER_GLOBAL {
                     tx_record.global_epoch.unwrap_or(tx_record.created_at)
                 } else {
@@ -581,48 +642,132 @@ impl Runtime {
                 )?;
             }
         }
+        let txs_ms = duration_ms(txs_started.elapsed());
+
+        let reads_started = Instant::now();
+        let mut row_nums_by_id = BTreeMap::new();
+        let mut row_nums_created_in_apply = BTreeSet::new();
+        let mut user_nums_by_id = BTreeMap::new();
+        let mut insert_read_stmt = db.prepare_cached(
+            "INSERT OR REPLACE INTO jazz_tx_read
+             (tx_num, table_num, row_num, reason, observed_tx_num)
+             VALUES (?, ?, ?, ?, ?)",
+        )?;
         for read_record in &bundle.reads {
-            let tx_num = tx::tx_num(&db, &read_record.tx_id)?;
-            let row_num = ensure_row_id(&db, &read_record.table, &read_record.row_id)?;
+            let tx_num = tx_nums_by_id
+                .get(&read_record.tx_id)
+                .copied()
+                .ok_or_else(|| crate::Error::new("bundle read references missing tx"))?;
+            let row_num = cached_ensure_row_id_with_status(
+                &db,
+                &mut row_nums_by_id,
+                &mut row_nums_created_in_apply,
+                &read_record.table,
+                &read_record.row_id,
+            )?;
+            let table_num = table_nums_by_name
+                .get(&read_record.table)
+                .copied()
+                .ok_or_else(|| crate::Error::new("bundle read references missing table"))?;
             let observed_tx_num = read_record
                 .observed_tx_id
                 .as_deref()
-                .map(|observed_tx_id| tx::tx_num(&db, observed_tx_id))
+                .map(|observed_tx_id| {
+                    tx_nums_by_id.get(observed_tx_id).copied().ok_or_else(|| {
+                        crate::Error::new("bundle read references missing observed tx")
+                    })
+                })
                 .transpose()?;
-            read_set::record_tx_read_with_observed(
-                &db,
+            insert_read_stmt.execute(params![
                 tx_num,
-                &read_record.table,
+                table_num,
                 row_num,
                 read_record.reason,
-                observed_tx_num,
-            )?;
+                observed_tx_num
+            ])?;
         }
-        for table in schema.tables() {
-            db.execute(
-                &format!(
-                    "DELETE FROM {}
-                     WHERE visible_tx_num IN (
-                       SELECT tx_num FROM jazz_tx WHERE outcome = ?
-                     )",
-                    crate::schema::current_table(&table.name)
-                ),
-                params![tx::OUTCOME_REJECTED],
-            )?;
+        drop(insert_read_stmt);
+        let reads_ms = duration_ms(reads_started.elapsed());
+
+        let rejected_cleanup_started = Instant::now();
+        if bundle
+            .txs
+            .iter()
+            .any(|tx| tx.outcome == tx::OUTCOME_REJECTED)
+        {
+            for table_name in bundle_touched_tables(bundle) {
+                schema.table_def(&table_name)?;
+                db.execute(
+                    &format!(
+                        "DELETE FROM {}
+                         WHERE visible_tx_num IN (
+                           SELECT tx_num FROM jazz_tx WHERE outcome = ?
+                         )",
+                        crate::schema::current_table(&table_name)
+                    ),
+                    params![tx::OUTCOME_REJECTED],
+                )?;
+            }
         }
+        let rejected_cleanup_ms = duration_ms(rejected_cleanup_started.elapsed());
+
+        let query_reads_started = Instant::now();
         for query_read in &bundle.query_reads {
             Self::record_query_read(&db, query_read)?;
-            Self::apply_query_scope_repair(&schema, &db, query_read)?;
         }
+        let query_reads_ms = duration_ms(query_reads_started.elapsed());
+
+        let history_started = Instant::now();
+        let mut history_context = ApplyHistoryContext {
+            schema: &schema,
+            db: &db,
+            local_node_num: self.node_num,
+            tx_nums_by_id: &tx_nums_by_id,
+            tx_info_by_num: &tx_info_by_num,
+            branch_nums_by_id: &branch_nums_by_id,
+            table_nums_by_name: &table_nums_by_name,
+            row_nums_by_id: &mut row_nums_by_id,
+            row_nums_created_in_apply: &mut row_nums_created_in_apply,
+            user_nums_by_id: &mut user_nums_by_id,
+        };
         for record in &bundle.history {
-            Self::apply_history_record(&schema, &db, self.node_num, record)?;
+            Self::apply_history_record(&mut history_context, record)?;
         }
+        let history_ms = duration_ms(history_started.elapsed());
+
+        let query_scope_repair_started = Instant::now();
         for query_read in &bundle.query_reads {
             Self::apply_query_scope_repair(&schema, &db, query_read)?;
         }
+        let query_scope_repair_ms = duration_ms(query_scope_repair_started.elapsed());
+
+        let commit_started = Instant::now();
         db.commit()?;
+        let commit_ms = duration_ms(commit_started.elapsed());
+
+        let revalidate_started = Instant::now();
         self.revalidate_awaiting_dependencies()?;
-        Ok(())
+        let revalidate_awaiting_ms = duration_ms(revalidate_started.elapsed());
+
+        Ok(ApplyBundleProfile {
+            total_ms: duration_ms(total_started.elapsed()),
+            validation_ms,
+            begin_tx_ms,
+            branches_ms,
+            txs_ms,
+            reads_ms,
+            rejected_cleanup_ms,
+            query_reads_ms,
+            history_ms,
+            query_scope_repair_ms,
+            commit_ms,
+            revalidate_awaiting_ms,
+            branch_rows: bundle.branches.len(),
+            tx_rows: bundle.txs.len(),
+            read_rows: bundle.reads.len(),
+            query_read_rows: bundle.query_reads.len(),
+            history_rows: bundle.history.len(),
+        })
     }
 
     pub fn observed_query_reads(&self) -> Result<Vec<QueryReadRecord>> {
@@ -658,10 +803,54 @@ impl Runtime {
     }
 
     pub fn export_query_read_refreshes(&self, reads: &[QueryReadRecord]) -> Result<Vec<Bundle>> {
-        reads
-            .iter()
-            .map(|read| self.export_query_read_refresh(read))
-            .collect()
+        let current_branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
+        let mut top_field_groups: BTreeMap<TopFieldRefreshKey, Vec<TopFieldRefreshValue>> =
+            BTreeMap::new();
+        let mut bundles = Vec::new();
+
+        for read in reads {
+            if read.branch_id == current_branch_id && read.op == "eq_top_field_desc" {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+                let order_field = read
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+                top_field_groups
+                    .entry((
+                        read.table.clone(),
+                        read.field.clone(),
+                        read.branch_id.clone(),
+                        order_field.to_owned(),
+                        limit as usize,
+                    ))
+                    .or_default()
+                    .push((value.clone(), observed_ids_from_query_value(&read.value)?));
+                continue;
+            }
+            bundles.push(self.export_query_read_refresh(read)?);
+        }
+
+        for ((table, field, _branch, order_field, limit), values) in top_field_groups {
+            bundles.push(
+                self.export_many_query_where_eq_top_field_desc_with_previous_observed(
+                    &table,
+                    &field,
+                    values,
+                    &order_field,
+                    limit,
+                )?,
+            );
+        }
+        Ok(bundles)
     }
 
     pub fn forget_observed_query_read(&mut self, read: &QueryReadRecord) -> Result<()> {
@@ -719,11 +908,36 @@ impl Runtime {
                     .get("limit")
                     .and_then(JsonValue::as_u64)
                     .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-                self.export_query_where_eq_top_created_at_desc(
+                self.export_query_where_eq_top_created_at_desc_with_previous_observed(
                     &read.table,
                     &read.field,
                     value.clone(),
                     limit as usize,
+                    observed_ids_from_query_value(&read.value)?,
+                )
+            }
+            "eq_top_field_desc" => {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+                let order_field = read
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+                self.export_query_where_eq_top_field_desc_with_previous_observed(
+                    &read.table,
+                    &read.field,
+                    value.clone(),
+                    order_field,
+                    limit as usize,
+                    observed_ids_from_query_value(&read.value)?,
                 )
             }
             "absent" => {
@@ -1118,6 +1332,76 @@ impl Runtime {
             )?;
             return Ok(());
         }
+        if query_read.op == "eq_top_field_desc" {
+            let value = query_read
+                .value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+            let order_field_name = query_read
+                .value
+                .get("order_field")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+            let limit = query_read
+                .value
+                .get("limit")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+            let table = schema.table_def(&query_read.table)?;
+            let field = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == query_read.field)
+                .ok_or_else(|| {
+                    crate::Error::new(format!("unknown query field {}", query_read.field))
+                })?;
+            let order_field = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == order_field_name)
+                .ok_or_else(|| {
+                    crate::Error::new(format!("unknown order field {order_field_name}"))
+                })?;
+            let branch_num = branch::checkout(db, &query_read.branch_id)?;
+            let predicate_column =
+                crate::schema::quote_ident(&crate::schema::storage_column(field));
+            let order_column =
+                crate::schema::quote_ident(&crate::schema::storage_column(order_field));
+            let predicate_sql = query_predicate::sql(field, &predicate_column, "eq")?;
+            let predicate_value = query_predicate::value(field, "eq", value, db)?;
+            db.execute(
+                &format!(
+                    "DELETE FROM {}
+                     WHERE j_branch_num = ?
+                       AND is_deleted = 0
+                       AND {predicate_sql}
+                       AND row_num NOT IN (
+                         SELECT current.row_num
+                         FROM {current_table} current
+                         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                         WHERE current.j_branch_num = ?
+                           AND current.is_deleted = 0
+                           AND tx.outcome != ?
+                           AND {current_predicate_sql}
+                         ORDER BY current.{order_column} DESC, current.row_num
+                         LIMIT ?
+                       )",
+                    crate::schema::current_table(&query_read.table),
+                    current_table = crate::schema::current_table(&query_read.table),
+                    current_predicate_sql =
+                        query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
+                ),
+                params![
+                    branch_num,
+                    predicate_value.clone(),
+                    branch_num,
+                    tx::OUTCOME_REJECTED,
+                    predicate_value,
+                    limit as i64
+                ],
+            )?;
+            return Ok(());
+        }
         if query_read.op == "in" && query_read.field != "id" {
             for value in query_read
                 .value
@@ -1146,17 +1430,13 @@ impl Runtime {
                     &format!(
                         "DELETE FROM {current_table}
                          WHERE j_branch_num = ?
-                           AND row_num IN (
-                             SELECT row_num FROM jazz_row_id
-                             WHERE table_name = ? AND row_id != ?
-                           )
+                           AND row_num != (SELECT row_num FROM jazz_row_id WHERE row_id = ?)
                            AND row_num NOT IN (
                              SELECT h.row_num
                              FROM {history_table} h
                              JOIN jazz_row_id ids ON ids.row_num = h.row_num
                              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-                             WHERE ids.table_name = ?
-                               AND ids.row_id != ?
+                             WHERE ids.row_id != ?
                                AND h.j_branch_num = ?
                                AND h.op != 3
                                AND tx.outcome != ?
@@ -1166,9 +1446,7 @@ impl Runtime {
                     ),
                     params![
                         branch_num,
-                        query_read.table,
                         excluded_id,
-                        query_read.table,
                         excluded_id,
                         branch_num,
                         tx::OUTCOME_REJECTED
@@ -1213,6 +1491,7 @@ impl Runtime {
                     "$createdBy predicate expects a string value",
                 ));
             };
+            let created_by_num = users::ensure_user(db, created_by)?;
             let created_by_sql = match query_read.op.as_str() {
                 "eq" => "j_created_by = ?",
                 "ne" => "j_created_by != ?",
@@ -1247,9 +1526,9 @@ impl Runtime {
                 ),
                 params![
                     branch_num,
-                    created_by,
+                    created_by_num,
                     branch_num,
-                    created_by,
+                    created_by_num,
                     tx::OUTCOME_REJECTED
                 ],
             )?;
@@ -1310,8 +1589,7 @@ impl Runtime {
                      FROM jazz_row_id ids
                      JOIN {history_table} h ON h.row_num = ids.row_num
                      JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-                     WHERE ids.table_name = ?
-                       AND h.j_branch_num = ?
+                     WHERE h.j_branch_num = ?
                        AND h.op != 3
                        AND tx.outcome != ?
                        AND {history_predicate_sql}
@@ -1324,7 +1602,6 @@ impl Runtime {
             params![
                 branch_num,
                 predicate_value.clone(),
-                query_read.table,
                 branch_num,
                 tx::OUTCOME_REJECTED,
                 predicate_value
@@ -1334,15 +1611,43 @@ impl Runtime {
     }
 
     fn apply_history_record(
-        schema: &SchemaDef,
-        db: &Connection,
-        local_node_num: i64,
+        context: &mut ApplyHistoryContext<'_>,
         record: &HistoryRecord,
     ) -> Result<()> {
-        let table = schema.table_def(&record.table)?;
-        let row_num = ensure_row_id(db, &record.table, &record.row_id)?;
-        let tx_num = tx::tx_num(db, &record.tx_id)?;
-        let branch_num = branch::ensure(db, &record.branch_id, None, now_ms())?;
+        let table = context.schema.table_def(&record.table)?;
+        let row_num = cached_ensure_row_id_with_status(
+            context.db,
+            context.row_nums_by_id,
+            context.row_nums_created_in_apply,
+            &record.table,
+            &record.row_id,
+        )?;
+        let tx_num = context
+            .tx_nums_by_id
+            .get(&record.tx_id)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| tx::tx_num(context.db, &record.tx_id))?;
+        let branch_num = context
+            .branch_nums_by_id
+            .get(&record.branch_id)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| branch::ensure(context.db, &record.branch_id, None, now_ms()))?;
+        let tx_info = context
+            .tx_info_by_num
+            .get(&tx_num)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| tx_apply_info(context.db, tx_num))?;
+        let outcome = tx_info.outcome;
+        let history_exists = history_record_exists(context.db, &record.table, row_num, tx_num)?;
+        if history_exists
+            && current_visible_tx_num(context.db, &record.table, row_num, branch_num)?
+                .is_none_or(|current_tx_num| current_tx_num == tx_num)
+        {
+            return Ok(());
+        }
 
         let mut columns = vec![
             "row_num".to_owned(),
@@ -1368,7 +1673,9 @@ impl Runtime {
             values.push(crate::schema::field_sql_value(
                 field,
                 value,
-                |ref_table, row_id| ensure_row_id(db, ref_table, row_id),
+                |ref_table, row_id| {
+                    cached_ensure_row_id(context.db, context.row_nums_by_id, ref_table, row_id)
+                },
             )?);
         }
         columns.extend([
@@ -1377,36 +1684,74 @@ impl Runtime {
             "j_created_by".to_owned(),
             "j_updated_by".to_owned(),
         ]);
+        let created_by_num =
+            cached_ensure_user(context.db, context.user_nums_by_id, &record.created_by)?;
+        let updated_by_num =
+            cached_ensure_user(context.db, context.user_nums_by_id, &record.updated_by)?;
         values.extend([
             rusqlite::types::Value::Integer(record.created_at),
             rusqlite::types::Value::Integer(record.updated_at),
-            rusqlite::types::Value::Text(record.created_by.clone()),
-            rusqlite::types::Value::Text(record.updated_by.clone()),
+            rusqlite::types::Value::Integer(created_by_num),
+            rusqlite::types::Value::Integer(updated_by_num),
         ]);
-        insert_dynamic(
-            db,
-            &crate::schema::history_table(&record.table),
-            &columns,
-            &values,
-        )?;
-        record_tx_write(db, tx_num, &record.table, row_num, record.op)?;
-
-        let outcome = tx_outcome(db, tx_num)?;
-        if outcome == tx::OUTCOME_PENDING && tx_conflict_mode(db, tx_num)? == tx::MODE_EXCLUSIVE {
+        if !history_exists {
+            insert_dynamic(
+                context.db,
+                &crate::schema::history_table(&record.table),
+                &columns,
+                &values,
+            )?;
+        }
+        let table_num = context
+            .table_nums_by_name
+            .get(&record.table)
+            .copied()
+            .ok_or_else(|| crate::Error::new("history record references missing table"))?;
+        if !history_exists {
+            record_tx_write_num(context.db, tx_num, table_num, row_num, record.op)?;
+        }
+        if outcome == tx::OUTCOME_PENDING && tx_info.conflict_mode == tx::MODE_EXCLUSIVE {
             return Ok(());
         }
-        if tx_is_remote_pending(db, tx_num, local_node_num)?
-            && durable_version_exists_for_row(db, &record.table, row_num, branch_num)?
+        if tx_info.outcome == tx::OUTCOME_PENDING
+            && tx_info.node_num != context.local_node_num
+            && durable_version_exists_for_row(context.db, &record.table, row_num, branch_num)?
         {
             return Ok(());
         }
-        if outcome != tx::OUTCOME_REJECTED
-            && !is_newest_version_for_current(db, &record.table, row_num, branch_num, tx_num)?
-        {
-            return Ok(());
+        if outcome != tx::OUTCOME_REJECTED {
+            if let Some(current_tx_num) =
+                current_visible_tx_num(context.db, &record.table, row_num, branch_num)?
+            {
+                if let Some(is_newer) =
+                    tx_is_newer_than_current_fast_path(context.db, tx_num, current_tx_num)?
+                {
+                    if !is_newer {
+                        return Ok(());
+                    }
+                } else if !is_newest_version_for_current(
+                    context.db,
+                    &record.table,
+                    row_num,
+                    branch_num,
+                    tx_num,
+                )? {
+                    return Ok(());
+                }
+            } else if !context.row_nums_created_in_apply.contains(&row_num)
+                && !is_newest_version_for_current(
+                    context.db,
+                    &record.table,
+                    row_num,
+                    branch_num,
+                    tx_num,
+                )?
+            {
+                return Ok(());
+            }
         }
         if outcome != tx::OUTCOME_REJECTED && record.op == 3 {
-            db.execute(
+            context.db.execute(
                 &format!(
                     "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
                     crate::schema::current_table(&record.table)
@@ -1429,7 +1774,7 @@ impl Runtime {
                 current_columns.extend(columns.iter().skip(4).cloned());
                 current_values.extend(values.iter().skip(4).cloned());
                 insert_dynamic(
-                    db,
+                    context.db,
                     &crate::schema::current_table(&record.table),
                     &current_columns,
                     &current_values,
@@ -1451,7 +1796,7 @@ impl Runtime {
             current_columns.extend(columns.iter().skip(4).cloned());
             current_values.extend(values.iter().skip(4).cloned());
             insert_dynamic(
-                db,
+                context.db,
                 &crate::schema::current_table(&record.table),
                 &current_columns,
                 &current_values,
@@ -1600,12 +1945,13 @@ impl Runtime {
 
     pub fn transaction_write_rows(&self, tx_id: &str) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT writes.table_name, ids.row_id
+            "SELECT tables.table_name, ids.row_id
              FROM jazz_tx_write writes
              JOIN jazz_tx tx ON tx.tx_num = writes.tx_num
+             JOIN jazz_table tables ON tables.table_num = writes.table_num
              JOIN jazz_row_id ids ON ids.row_num = writes.row_num
              WHERE tx.tx_id = ?
-             ORDER BY writes.table_name, ids.row_id",
+             ORDER BY tables.table_name, ids.row_id",
         )?;
         let rows = stmt.query_map(params![tx_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1627,13 +1973,14 @@ impl Runtime {
         tx_id: &str,
     ) -> Result<Vec<(String, String, Option<String>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT reads.table_name, ids.row_id, observed.tx_id
+            "SELECT tables.table_name, ids.row_id, observed.tx_id
              FROM jazz_tx_read reads
              JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             JOIN jazz_table tables ON tables.table_num = reads.table_num
              JOIN jazz_row_id ids ON ids.row_num = reads.row_num
              LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
              WHERE tx.tx_id = ?
-             ORDER BY reads.table_name, ids.row_id",
+             ORDER BY tables.table_name, ids.row_id",
         )?;
         let rows = stmt.query_map(params![tx_id], |row| {
             Ok((
@@ -1652,13 +1999,14 @@ impl Runtime {
         reason: i64,
     ) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT reads.table_name, ids.row_id
+            "SELECT tables.table_name, ids.row_id
              FROM jazz_tx_read reads
              JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             JOIN jazz_table tables ON tables.table_num = reads.table_num
              JOIN jazz_row_id ids ON ids.row_num = reads.row_num
              WHERE tx.tx_id = ?
                AND reads.reason = ?
-             ORDER BY reads.table_name, ids.row_id",
+             ORDER BY tables.table_name, ids.row_id",
         )?;
         let rows = stmt.query_map(params![tx_id, reason], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1853,6 +2201,7 @@ impl Runtime {
             "j_created_by".to_owned(),
             "?".to_owned(),
         ]);
+        let user_num = users::ensure_user(&db, &user)?;
         let inserted = db.execute(
             &format!(
                 "INSERT OR IGNORE INTO {} ({})
@@ -1864,7 +2213,7 @@ impl Runtime {
                 select_columns.join(", "),
                 crate::schema::current_table(&table.name),
             ),
-            params![tx_num, now, user, row_num, self.branch_num],
+            params![tx_num, now, user_num, row_num, self.branch_num],
         )?;
         if inserted == 0 {
             let mut values = vec![
@@ -1887,8 +2236,8 @@ impl Runtime {
             values.extend([
                 rusqlite::types::Value::Integer(now),
                 rusqlite::types::Value::Integer(now),
-                rusqlite::types::Value::Text(user.to_owned()),
-                rusqlite::types::Value::Text(user.to_owned()),
+                rusqlite::types::Value::Integer(user_num),
+                rusqlite::types::Value::Integer(user_num),
             ]);
             insert_dynamic(
                 &db,
@@ -1938,8 +2287,8 @@ impl Runtime {
             current_values.extend([
                 rusqlite::types::Value::Integer(now),
                 rusqlite::types::Value::Integer(now),
-                rusqlite::types::Value::Text(user.to_owned()),
-                rusqlite::types::Value::Text(user.to_owned()),
+                rusqlite::types::Value::Integer(user_num),
+                rusqlite::types::Value::Integer(user_num),
             ]);
             insert_dynamic(
                 &db,
@@ -2118,7 +2467,7 @@ impl Runtime {
             "eq",
             value.clone(),
             self.read_rows_where_eq(table_name, field_name, value)?,
-            &[],
+            QueryScopeOptions::empty(),
         )
     }
 
@@ -2135,7 +2484,10 @@ impl Runtime {
             "eq",
             value.clone(),
             self.read_rows_where_eq(table_name, field_name, value)?,
-            &[ref_field_name],
+            QueryScopeOptions {
+                ref_include_fields: &[ref_field_name],
+                extra_row_ids: &[],
+            },
         )
     }
 
@@ -2151,7 +2503,7 @@ impl Runtime {
             "contains",
             JsonValue::String(needle.to_owned()),
             self.read_rows_where_contains(table_name, field_name, needle)?,
-            &[],
+            QueryScopeOptions::empty(),
         )
     }
 
@@ -2167,7 +2519,7 @@ impl Runtime {
             "in",
             JsonValue::Array(values.clone()),
             self.read_rows_where_in(table_name, field_name, values)?,
-            &[],
+            QueryScopeOptions::empty(),
         )
     }
 
@@ -2183,7 +2535,7 @@ impl Runtime {
             "ne",
             value.clone(),
             self.read_rows_where_ne(table_name, field_name, value)?,
-            &[],
+            QueryScopeOptions::empty(),
         )
     }
 
@@ -2194,6 +2546,29 @@ impl Runtime {
         value: JsonValue,
         limit: usize,
     ) -> Result<Bundle> {
+        self.export_query_where_eq_top_created_at_desc_with_previous_observed(
+            table_name,
+            field_name,
+            value,
+            limit,
+            Vec::new(),
+        )
+    }
+
+    fn export_query_where_eq_top_created_at_desc_with_previous_observed(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+        previous_observed_ids: Vec<String>,
+    ) -> Result<Bundle> {
+        let rows = self.read_rows_where_eq_top_created_at_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            limit,
+        )?;
         self.export_query_scope(
             table_name,
             field_name,
@@ -2201,9 +2576,13 @@ impl Runtime {
             json!({
                 "eq": value.clone(),
                 "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
             }),
-            self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
-            &[],
+            rows,
+            QueryScopeOptions {
+                ref_include_fields: &[],
+                extra_row_ids: &previous_observed_ids,
+            },
         )
     }
 
@@ -2215,6 +2594,12 @@ impl Runtime {
         limit: usize,
         ref_field_name: &str,
     ) -> Result<Bundle> {
+        let rows = self.read_rows_where_eq_top_created_at_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            limit,
+        )?;
         self.export_query_scope(
             table_name,
             field_name,
@@ -2222,51 +2607,395 @@ impl Runtime {
             json!({
                 "eq": value.clone(),
                 "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
             }),
-            self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
+            rows,
+            QueryScopeOptions {
+                ref_include_fields: &[ref_field_name],
+                extra_row_ids: &[],
+            },
+        )
+    }
+
+    pub fn export_query_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Bundle> {
+        self.export_query_where_eq_top_field_desc_with_previous_observed(
+            table_name,
+            field_name,
+            value,
+            order_field_name,
+            limit,
+            Vec::new(),
+        )
+    }
+
+    pub fn export_query_where_eq_top_field_desc_with_ref_include(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+        ref_field_name: &str,
+    ) -> Result<Bundle> {
+        let rows = self.read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            order_field_name,
+            limit,
+        )?;
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "eq_top_field_desc",
+            json!({
+                "eq": value.clone(),
+                "order_field": order_field_name,
+                "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
+            }),
+            rows,
+            QueryScopeOptions {
+                ref_include_fields: &[ref_field_name],
+                extra_row_ids: &[],
+            },
+        )
+    }
+
+    pub fn export_many_query_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Bundle> {
+        self.export_many_query_where_eq_top_field_desc_inner(
+            table_name,
+            field_name,
+            values
+                .into_iter()
+                .map(|value| (value, Vec::new()))
+                .collect(),
+            order_field_name,
+            limit,
+            &[],
+        )
+    }
+
+    pub fn export_many_query_where_eq_top_field_desc_with_ref_include(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+        order_field_name: &str,
+        limit: usize,
+        ref_field_name: &str,
+    ) -> Result<Bundle> {
+        self.export_many_query_where_eq_top_field_desc_inner(
+            table_name,
+            field_name,
+            values
+                .into_iter()
+                .map(|value| (value, Vec::new()))
+                .collect(),
+            order_field_name,
+            limit,
             &[ref_field_name],
         )
     }
 
-    fn export_query_scope(
+    fn export_many_query_where_eq_top_field_desc_with_previous_observed(
         &self,
         table_name: &str,
         field_name: &str,
-        op: &str,
-        value: JsonValue,
-        rows: Vec<RowView>,
+        values: Vec<(JsonValue, Vec<String>)>,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Bundle> {
+        self.export_many_query_where_eq_top_field_desc_inner(
+            table_name,
+            field_name,
+            values,
+            order_field_name,
+            limit,
+            &[],
+        )
+    }
+
+    fn export_many_query_where_eq_top_field_desc_inner(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<(JsonValue, Vec<String>)>,
+        order_field_name: &str,
+        limit: usize,
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
         let table = self.schema.table_def(table_name)?;
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
-        let mut row_nums = rows
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let mut all_rows = Vec::new();
+        let mut visible_row_nums = Vec::new();
+        let mut repair_row_nums = Vec::new();
+        let mut query_reads = Vec::new();
+        let mut rejected_tx_ids = Vec::new();
+
+        for (value, previous_observed_ids) in values {
+            let rows = self.read_rows_where_eq_top_field_desc(
+                table_name,
+                field_name,
+                value.clone(),
+                order_field_name,
+                limit,
+            )?;
+            let row_nums = rows
+                .iter()
+                .map(|row| row_num(&self.conn, &row.id))
+                .collect::<Result<Vec<_>>>()?;
+            let query_value = json!({
+                "eq": value.clone(),
+                "order_field": order_field_name,
+                "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
+            });
+            for row_id in previous_observed_ids {
+                repair_row_nums.push(row_num(&self.conn, &row_id)?);
+            }
+            repair_row_nums.extend(query_scope_repair_row_nums(
+                &self.conn,
+                table,
+                field_name,
+                "eq_top_field_desc",
+                &query_value,
+            )?);
+            rejected_tx_ids.extend(query_scope_rejected_tx_ids(
+                &self.conn,
+                table,
+                field_name,
+                "eq_top_field_desc",
+                &query_value,
+            )?);
+            query_reads.push(QueryReadRecord {
+                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+                table: table_name.to_owned(),
+                field: field_name.to_owned(),
+                op: "eq_top_field_desc".to_owned(),
+                value: query_value,
+            });
+            visible_row_nums.extend(row_nums);
+            all_rows.extend(rows);
+        }
+
+        visible_row_nums.sort();
+        visible_row_nums.dedup();
+        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
+        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
+        repair_row_nums.sort();
+        repair_row_nums.dedup();
+        let mut row_nums = visible_row_nums.clone();
+        row_nums.extend(repair_row_nums.iter());
+        row_nums.sort();
+        row_nums.dedup();
+        rejected_tx_ids.sort();
+        rejected_tx_ids.dedup();
+
+        let mut history = export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            table_name,
+            Some(&visible_row_nums),
+            None,
+        )?;
+        if !repair_row_nums.is_empty() {
+            history.extend(export_visible_table_history(
+                &self.conn,
+                &self.schema,
+                table_name,
+                user,
+                bypass_policy,
+                &branch_nums,
+                Some(&repair_row_nums),
+            )?);
+            history.extend(export_history_versions_for_rows(
+                &self.conn,
+                &self.schema,
+                table_name,
+                Some(&repair_row_nums),
+                None,
+            )?);
+        }
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            PolicyDependencyExport {
+                table_name,
+                policy: &table.read_policy,
+                user,
+                bypass_policy,
+                branch_nums: &branch_nums,
+                child_row_nums: Some(&row_nums),
+            },
+        )?);
+        for ref_field_name in ref_include_fields {
+            history.extend(self.export_ref_include_history(
+                table,
+                &all_rows,
+                ref_field_name,
+                &branch_nums,
+            )?);
+        }
+        dedupe_history_records(&mut history);
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let txs =
+            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        Ok(make_bundle(
+            &self.schema,
+            branches,
+            txs,
+            reads,
+            query_reads,
+            history,
+        ))
+    }
+
+    fn export_query_where_eq_top_field_desc_with_previous_observed(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+        previous_observed_ids: Vec<String>,
+    ) -> Result<Bundle> {
+        let rows = self.read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            order_field_name,
+            limit,
+        )?;
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "eq_top_field_desc",
+            json!({
+                "eq": value.clone(),
+                "order_field": order_field_name,
+                "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
+            }),
+            rows,
+            QueryScopeOptions {
+                ref_include_fields: &[],
+                extra_row_ids: &previous_observed_ids,
+            },
+        )
+    }
+
+    pub fn profile_export_query_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<(Bundle, QueryExportProfile)> {
+        let total_started = Instant::now();
+        let read_started = Instant::now();
+        let rows = self.read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            order_field_name,
+            limit,
+        )?;
+        let read_rows_ms = duration_ms(read_started.elapsed());
+
+        let table = self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+
+        let resolve_started = Instant::now();
+        let visible_row_nums = rows
             .iter()
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
-        row_nums.extend(query_scope_repair_row_nums(
-            &self.conn, table, field_name, op, &value,
-        )?);
+        let resolve_visible_row_nums_ms = duration_ms(resolve_started.elapsed());
+
+        let repair_started = Instant::now();
+        let query_value = json!({
+            "eq": value.clone(),
+            "order_field": order_field_name,
+            "limit": limit,
+            "observed_ids": observed_row_ids(&rows),
+        });
+        let mut repair_row_nums = query_scope_repair_row_nums(
+            &self.conn,
+            table,
+            field_name,
+            "eq_top_field_desc",
+            &query_value,
+        )?;
+        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
+        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
+        repair_row_nums.sort();
+        repair_row_nums.dedup();
+        let repair_row_nums_ms = duration_ms(repair_started.elapsed());
+
+        let mut row_nums = visible_row_nums.clone();
+        row_nums.extend(repair_row_nums.iter());
         row_nums.sort();
         row_nums.dedup();
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let txs = export_txs(&self.conn)?;
-        let mut history = export_visible_table_history(
+
+        let visible_history_started = Instant::now();
+        let mut history = export_history_versions_for_rows(
             &self.conn,
             &self.schema,
             table_name,
-            user,
-            bypass_policy,
-            &branch_nums,
-            Some(&row_nums),
-        )?;
-        history.extend(export_history_versions_for_rows(
-            &self.conn,
-            &self.schema,
-            table_name,
-            Some(&row_nums),
+            Some(&visible_row_nums),
             None,
-        )?);
+        )?;
+        let visible_history_ms = duration_ms(visible_history_started.elapsed());
+
+        let repair_visible_started = Instant::now();
+        if !repair_row_nums.is_empty() {
+            history.extend(export_visible_table_history(
+                &self.conn,
+                &self.schema,
+                table_name,
+                user,
+                bypass_policy,
+                &branch_nums,
+                Some(&repair_row_nums),
+            )?);
+        }
+        let repair_visible_history_ms = duration_ms(repair_visible_started.elapsed());
+
+        let repair_all_started = Instant::now();
+        if !repair_row_nums.is_empty() {
+            history.extend(export_history_versions_for_rows(
+                &self.conn,
+                &self.schema,
+                table_name,
+                Some(&repair_row_nums),
+                None,
+            )?);
+        }
+        let repair_all_history_ms = duration_ms(repair_all_started.elapsed());
+
+        let policy_started = Instant::now();
         history.extend(export_policy_dependency_history(
             &self.conn,
             &self.schema,
@@ -2279,7 +3008,166 @@ impl Runtime {
                 child_row_nums: Some(&row_nums),
             },
         )?);
-        for ref_field_name in ref_include_fields {
+        let policy_dependency_history_ms = duration_ms(policy_started.elapsed());
+
+        let snapshot_started = Instant::now();
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
+                history.extend(export_history_versions_for_rows(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    Some(&row_nums),
+                    Some(base_epoch),
+                )?);
+                history.extend(export_snapshot_policy_dependency_history(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    user,
+                    bypass_policy,
+                    base_epoch,
+                    Some(&row_nums),
+                )?);
+            }
+        }
+        let branch_snapshot_history_ms = duration_ms(snapshot_started.elapsed());
+
+        let dedupe_started = Instant::now();
+        dedupe_history_records(&mut history);
+        let dedupe_history_ms = duration_ms(dedupe_started.elapsed());
+
+        let reads_started = Instant::now();
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let reads_ms = duration_ms(reads_started.elapsed());
+
+        let rejected_started = Instant::now();
+        let rejected_tx_ids = query_scope_rejected_tx_ids(
+            &self.conn,
+            table,
+            field_name,
+            "eq_top_field_desc",
+            &query_value,
+        )?;
+        let rejected_tx_ids_ms = duration_ms(rejected_started.elapsed());
+
+        let txs_started = Instant::now();
+        let txs =
+            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
+        let txs_ms = duration_ms(txs_started.elapsed());
+
+        let branches_started = Instant::now();
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        let branches_ms = duration_ms(branches_started.elapsed());
+
+        let make_started = Instant::now();
+        let query_reads = vec![QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: table_name.to_owned(),
+            field: field_name.to_owned(),
+            op: "eq_top_field_desc".to_owned(),
+            value: query_value,
+        }];
+        let bundle = make_bundle(&self.schema, branches, txs, reads, query_reads, history);
+        let make_bundle_ms = duration_ms(make_started.elapsed());
+
+        let profile = QueryExportProfile {
+            total_ms: duration_ms(total_started.elapsed()),
+            read_rows_ms,
+            resolve_visible_row_nums_ms,
+            repair_row_nums_ms,
+            visible_history_ms,
+            repair_visible_history_ms,
+            repair_all_history_ms,
+            policy_dependency_history_ms,
+            branch_snapshot_history_ms,
+            dedupe_history_ms,
+            reads_ms,
+            rejected_tx_ids_ms,
+            txs_ms,
+            branches_ms,
+            make_bundle_ms,
+            history_rows: bundle.history.len(),
+            read_rows: bundle.reads.len(),
+            tx_rows: bundle.txs.len(),
+            branch_rows: bundle.branches.len(),
+        };
+        Ok((bundle, profile))
+    }
+
+    fn export_query_scope(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        op: &str,
+        value: JsonValue,
+        rows: Vec<RowView>,
+        options: QueryScopeOptions<'_>,
+    ) -> Result<Bundle> {
+        let table = self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+        let visible_row_nums = rows
+            .iter()
+            .map(|row| row_num(&self.conn, &row.id))
+            .collect::<Result<Vec<_>>>()?;
+        let mut repair_row_nums = Vec::new();
+        for row_id in options.extra_row_ids {
+            repair_row_nums.push(row_num(&self.conn, row_id)?);
+        }
+        repair_row_nums.extend(query_scope_repair_row_nums(
+            &self.conn, table, field_name, op, &value,
+        )?);
+        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
+        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
+        repair_row_nums.sort();
+        repair_row_nums.dedup();
+        let mut row_nums = visible_row_nums.clone();
+        row_nums.extend(repair_row_nums.iter());
+        row_nums.sort();
+        row_nums.dedup();
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let mut history = export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            table_name,
+            Some(&visible_row_nums),
+            None,
+        )?;
+        if !repair_row_nums.is_empty() {
+            history.extend(export_visible_table_history(
+                &self.conn,
+                &self.schema,
+                table_name,
+                user,
+                bypass_policy,
+                &branch_nums,
+                Some(&repair_row_nums),
+            )?);
+        }
+        if !repair_row_nums.is_empty() {
+            history.extend(export_history_versions_for_rows(
+                &self.conn,
+                &self.schema,
+                table_name,
+                Some(&repair_row_nums),
+                None,
+            )?);
+        }
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            PolicyDependencyExport {
+                table_name,
+                policy: &self.schema.table_def(table_name)?.read_policy,
+                user,
+                bypass_policy,
+                branch_nums: &branch_nums,
+                child_row_nums: Some(&row_nums),
+            },
+        )?);
+        for ref_field_name in options.ref_include_fields {
             history.extend(self.export_ref_include_history(
                 table,
                 &rows,
@@ -2309,6 +3197,10 @@ impl Runtime {
         }
         dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
+        let rejected_tx_ids =
+            query_scope_rejected_tx_ids(&self.conn, table, field_name, op, &value)?;
+        let txs =
+            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         let query_reads = vec![QueryReadRecord {
@@ -2485,6 +3377,30 @@ impl Runtime {
         ))
     }
 
+    pub fn subscribe_rows_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            order_field_name,
+            limit,
+            self.read_rows_where_eq_top_field_desc(
+                table_name,
+                field_name,
+                value,
+                order_field_name,
+                limit,
+            )?,
+        ))
+    }
+
     pub fn subscribe_observed_query(&self, read: &QueryReadRecord) -> Result<RowsSubscription> {
         if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
             return Err(crate::Error::new(
@@ -2531,6 +3447,29 @@ impl Runtime {
                     &read.table,
                     &read.field,
                     value.clone(),
+                    limit as usize,
+                )
+            }
+            "eq_top_field_desc" => {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+                let order_field = read
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+                self.subscribe_rows_where_eq_top_field_desc(
+                    &read.table,
+                    &read.field,
+                    value.clone(),
+                    order_field,
                     limit as usize,
                 )
             }
@@ -2677,6 +3616,29 @@ impl Runtime {
                     limit as usize,
                 )?
             }
+            RowsSubscriptionQuery::Predicate(query) if query.op == "eq_top_field_desc" => {
+                let value = query
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+                let order_field = query
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+                let limit = query
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+                self.read_rows_where_eq_top_field_desc(
+                    &query.table,
+                    &query.field,
+                    value.clone(),
+                    order_field,
+                    limit as usize,
+                )?
+            }
             RowsSubscriptionQuery::Predicate(query) => {
                 return Err(crate::Error::new(format!(
                     "unsupported subscription query {}",
@@ -2770,7 +3732,7 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
 fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     validate_write_fields(table, args.values)?;
-    let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
+    let (row_num, row_id_created) = ensure_row_id_with_status(args.db, args.id)?;
     let effective_values = effective_write_values(EffectiveWriteValues {
         db: args.db,
         schema: args.schema,
@@ -2782,13 +3744,17 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         op: args.op,
     })?;
     if args.op == 1 {
-        read_set::record_tx_create_read(
-            args.db,
-            args.tx_num,
-            args.table_name,
-            row_num,
-            args.branch_num,
-        )?;
+        if row_id_created {
+            read_set::record_tx_absent_read(args.db, args.tx_num, args.table_name, row_num)?;
+        } else {
+            read_set::record_tx_create_read(
+                args.db,
+                args.tx_num,
+                args.table_name,
+                row_num,
+                args.branch_num,
+            )?;
+        }
     } else {
         read_set::record_tx_read(
             args.db,
@@ -2858,11 +3824,13 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         current_creation_metadata(args.db, &table.name, row_num, args.branch_num)?
             .unwrap_or((args.now, args.user.to_owned()))
     };
+    let created_by_num = users::ensure_user(args.db, &created_by)?;
+    let updated_by_num = users::ensure_user(args.db, args.user)?;
     sql_values.extend([
         rusqlite::types::Value::Integer(created_at),
         rusqlite::types::Value::Integer(args.now),
-        rusqlite::types::Value::Text(created_by),
-        rusqlite::types::Value::Text(args.user.to_owned()),
+        rusqlite::types::Value::Integer(created_by_num),
+        rusqlite::types::Value::Integer(updated_by_num),
     ]);
     insert_dynamic(
         args.db,
@@ -3063,8 +4031,14 @@ fn history_records_for_tx(
         select_columns.extend([
             "h.j_created_at".to_owned(),
             "h.j_updated_at".to_owned(),
-            "h.j_created_by".to_owned(),
-            "h.j_updated_by".to_owned(),
+            format!(
+                "{} AS j_created_by",
+                users::user_id_expr("h", "j_created_by")
+            ),
+            format!(
+                "{} AS j_updated_by",
+                users::user_id_expr("h", "j_updated_by")
+            ),
         ]);
         let sql = format!(
             "SELECT {}
@@ -3114,12 +4088,13 @@ fn unavailable_recorded_policy_dependency(
     branch_num: i64,
 ) -> Result<Option<(String, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT reads.table_name, ids.row_id, reads.row_num, reads.observed_tx_num
+        "SELECT tables.table_name, ids.row_id, reads.row_num, reads.observed_tx_num
          FROM jazz_tx_read reads
+         JOIN jazz_table tables ON tables.table_num = reads.table_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
          WHERE reads.tx_num = ?
            AND reads.reason = ?
-         ORDER BY reads.table_name, ids.row_id",
+         ORDER BY tables.table_name, ids.row_id",
     )?;
     let rows = stmt.query_map(params![tx_num, 1], |row| {
         Ok((
@@ -3197,10 +4172,14 @@ fn unavailable_policy_dependency(
         "SELECT COUNT(*)
          FROM jazz_tx_read
          WHERE tx_num = ?
-           AND table_name = ?
+           AND table_num = ?
            AND row_num = ?
            AND observed_tx_num IS NULL",
-        params![tx_num, ref_table_name, dependency_row_num],
+        params![
+            tx_num,
+            crate::schema::table_num(conn, ref_table_name)?,
+            dependency_row_num
+        ],
         |row| row.get(0),
     )?;
     if missing_observed_read_count > 0 {
@@ -3241,10 +4220,15 @@ fn repair_missing_observed_policy_read(
             "UPDATE jazz_tx_read
              SET observed_tx_num = ?
              WHERE tx_num = ?
-               AND table_name = ?
+               AND table_num = ?
                AND row_num = ?
                AND observed_tx_num IS NULL",
-            params![observed_tx_num, tx_num, table_name, row_num],
+            params![
+                observed_tx_num,
+                tx_num,
+                crate::schema::table_num(conn, table_name)?,
+                row_num
+            ],
         )?;
     }
     Ok(())
@@ -3256,18 +4240,23 @@ fn current_creation_metadata(
     row_num: i64,
     branch_num: i64,
 ) -> Result<Option<(i64, String)>> {
-    conn.query_row(
-        &format!(
-            "SELECT j_created_at, j_created_by
+    let metadata = conn
+        .query_row(
+            &format!(
+                "SELECT j_created_at, j_created_by
              FROM {}
              WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
-            crate::schema::current_table(table_name)
-        ),
-        params![row_num, branch_num],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .optional()
-    .map_err(Into::into)
+                crate::schema::current_table(table_name)
+            ),
+            params![row_num, branch_num],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    metadata
+        .map(|(created_at, created_by_num)| {
+            users::user_id(conn, created_by_num).map(|created_by| (created_at, created_by))
+        })
+        .transpose()
 }
 
 fn exclusive_write_conflict_exists(
@@ -3279,12 +4268,12 @@ fn exclusive_write_conflict_exists(
         "SELECT COUNT(*)
          FROM jazz_tx_write writes
          JOIN jazz_tx tx ON tx.tx_num = writes.tx_num
-         WHERE writes.table_name = ?
+         WHERE writes.table_num = ?
            AND writes.row_num = ?
            AND tx.conflict_mode = ?
            AND tx.outcome = ?",
         params![
-            table_name,
+            crate::schema::table_num(conn, table_name)?,
             row_num,
             tx::MODE_EXCLUSIVE,
             tx::OUTCOME_ACCEPTED
@@ -3504,11 +4493,22 @@ fn record_tx_write(
     row_num: i64,
     op: i64,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT OR REPLACE INTO jazz_tx_write (tx_num, table_name, row_num, op)
+    let table_num = crate::schema::table_num(conn, table_name)?;
+    record_tx_write_num(conn, tx_num, table_num, row_num, op)
+}
+
+fn record_tx_write_num(
+    conn: &Connection,
+    tx_num: i64,
+    table_num: i64,
+    row_num: i64,
+    op: i64,
+) -> Result<()> {
+    let mut stmt = conn.prepare_cached(
+        "INSERT OR REPLACE INTO jazz_tx_write (tx_num, table_num, row_num, op)
          VALUES (?, ?, ?, ?)",
-        params![tx_num, table_name, row_num, op],
     )?;
+    stmt.execute(params![tx_num, table_num, row_num, op])?;
     Ok(())
 }
 
@@ -3731,6 +4731,7 @@ impl<'a> TransactionBuilder<'a> {
                         "j_created_by".to_owned(),
                         "?".to_owned(),
                     ]);
+                    let user_num = users::ensure_user(&db, &user)?;
                     let inserted = db.execute(
                         &format!(
                             "INSERT OR IGNORE INTO {} ({})
@@ -3742,7 +4743,7 @@ impl<'a> TransactionBuilder<'a> {
                             select_columns.join(", "),
                             crate::schema::current_table(&table),
                         ),
-                        params![tx_num, now, user, row_num, self.runtime.branch_num],
+                        params![tx_num, now, user_num, row_num, self.runtime.branch_num],
                     )?;
                     if inserted == 0 {
                         let mut values = vec![
@@ -3764,8 +4765,8 @@ impl<'a> TransactionBuilder<'a> {
                         values.extend([
                             rusqlite::types::Value::Integer(now),
                             rusqlite::types::Value::Integer(now),
-                            rusqlite::types::Value::Text(user.to_owned()),
-                            rusqlite::types::Value::Text(user.to_owned()),
+                            rusqlite::types::Value::Integer(user_num),
+                            rusqlite::types::Value::Integer(user_num),
                         ]);
                         insert_dynamic(
                             &db,
@@ -3814,8 +4815,8 @@ impl<'a> TransactionBuilder<'a> {
                         current_values.extend([
                             rusqlite::types::Value::Integer(now),
                             rusqlite::types::Value::Integer(now),
-                            rusqlite::types::Value::Text(user.to_owned()),
-                            rusqlite::types::Value::Text(user.to_owned()),
+                            rusqlite::types::Value::Integer(user_num),
+                            rusqlite::types::Value::Integer(user_num),
                         ]);
                         insert_dynamic(
                             &db,
@@ -3853,21 +4854,46 @@ fn tx_conflict_mode(conn: &Connection, tx_num: i64) -> Result<i64> {
     )?)
 }
 
+#[derive(Clone, Copy)]
+struct ApplyTxInfo {
+    node_num: i64,
+    outcome: i64,
+    conflict_mode: i64,
+}
+
+struct ApplyHistoryContext<'a> {
+    schema: &'a SchemaDef,
+    db: &'a Connection,
+    local_node_num: i64,
+    tx_nums_by_id: &'a BTreeMap<String, i64>,
+    tx_info_by_num: &'a BTreeMap<i64, ApplyTxInfo>,
+    branch_nums_by_id: &'a BTreeMap<String, i64>,
+    table_nums_by_name: &'a BTreeMap<String, i64>,
+    row_nums_by_id: &'a mut BTreeMap<(String, String), i64>,
+    row_nums_created_in_apply: &'a mut BTreeSet<i64>,
+    user_nums_by_id: &'a mut BTreeMap<String, i64>,
+}
+
+fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {
+    Ok(conn.query_row(
+        "SELECT node_num, outcome, conflict_mode FROM jazz_tx WHERE tx_num = ?",
+        params![tx_num],
+        |row| {
+            Ok(ApplyTxInfo {
+                node_num: row.get(0)?,
+                outcome: row.get(1)?,
+                conflict_mode: row.get(2)?,
+            })
+        },
+    )?)
+}
+
 fn next_global_epoch(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COALESCE(MAX(global_epoch), 0) + 1 FROM jazz_tx",
         [],
         |row| row.get(0),
     )?)
-}
-
-fn tx_is_remote_pending(conn: &Connection, tx_num: i64, local_node_num: i64) -> Result<bool> {
-    let (node_num, outcome): (i64, i64) = conn.query_row(
-        "SELECT node_num, outcome FROM jazz_tx WHERE tx_num = ?",
-        params![tx_num],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok(outcome == tx::OUTCOME_PENDING && node_num != local_node_num)
 }
 
 fn durable_version_exists_for_row(
@@ -3955,6 +4981,67 @@ fn is_newest_version_for_current(
     Ok(count == 0)
 }
 
+fn current_visible_tx_num(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<Option<i64>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT visible_tx_num
+         FROM {}
+         WHERE row_num = ?
+           AND j_branch_num = ?",
+        crate::schema::current_table(table_name)
+    ))?;
+    let mut rows = stmt.query(params![row_num, branch_num])?;
+    rows.next()?
+        .map(|row| row.get(0))
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn history_record_exists(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    tx_num: i64,
+) -> Result<bool> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT 1
+         FROM {}
+         WHERE row_num = ?
+           AND tx_num = ?
+         LIMIT 1",
+        crate::schema::history_table(table_name)
+    ))?;
+    let mut rows = stmt.query(params![row_num, tx_num])?;
+    Ok(rows.next()?.is_some())
+}
+
+fn tx_is_newer_than_current_fast_path(
+    conn: &Connection,
+    candidate_tx_num: i64,
+    current_tx_num: i64,
+) -> Result<Option<bool>> {
+    let comparison: Option<i64> = conn.query_row(
+        "SELECT CASE
+           WHEN (candidate.global_epoch IS NULL) != (current.global_epoch IS NULL)
+             THEN NULL
+           WHEN candidate.global_epoch IS NOT NULL
+             THEN candidate.global_epoch > current.global_epoch
+               OR (candidate.global_epoch = current.global_epoch AND candidate.tx_num > current.tx_num)
+           ELSE candidate.tx_num > current.tx_num
+         END
+         FROM jazz_tx candidate
+         JOIN jazz_tx current ON current.tx_num = ?
+         WHERE candidate.tx_num = ?",
+        params![current_tx_num, candidate_tx_num],
+        |row| row.get(0),
+    )?;
+    Ok(comparison.map(|is_newer| is_newer != 0))
+}
+
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     let mut stmt = conn.prepare(
         "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
@@ -3975,6 +5062,92 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
         let receipt_tiers = receipt_stmt
             .query_map(params![tx_id], |row| row.get::<_, i64>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(TxRecord {
+            tx_id,
+            node_id: row.get(1)?,
+            local_epoch: row.get(2)?,
+            global_epoch: row.get(3)?,
+            conflict_mode: row.get(4)?,
+            outcome: row.get(5)?,
+            auth_user: parse_tx_auth_user_for_sqlite(&row.get::<_, String>(9)?, 9)?,
+            rejection_code: row.get(6)?,
+            rejection_detail: row
+                .get::<_, Option<String>>(7)?
+                .map(|detail_json| parse_rejection_detail_for_sqlite(&detail_json, 7))
+                .transpose()?
+                .flatten(),
+            receipt_tiers,
+            created_at: row.get(8)?,
+        })
+    })?;
+    records
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn export_txs_for_query_scope(
+    conn: &Connection,
+    _table_name: &str,
+    history: &[HistoryRecord],
+    reads: &[ReadRecord],
+    extra_tx_ids: &[String],
+) -> Result<Vec<TxRecord>> {
+    let mut needed_tx_ids = history
+        .iter()
+        .map(|record| record.tx_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for tx_id in extra_tx_ids {
+        needed_tx_ids.insert(tx_id.as_str());
+    }
+    for record in reads {
+        needed_tx_ids.insert(record.tx_id.as_str());
+        if let Some(observed_tx_id) = &record.observed_tx_id {
+            needed_tx_ids.insert(observed_tx_id.as_str());
+        }
+    }
+    export_txs_by_ids(conn, needed_tx_ids)
+}
+
+fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<TxRecord>> {
+    if tx_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tx_ids = tx_ids.into_iter().collect::<Vec<_>>();
+    let mut receipt_stmt = conn.prepare(&format!(
+        "SELECT tx.tx_id, receipt.tier
+         FROM jazz_tx tx
+         JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
+         WHERE tx.tx_id IN ({placeholders})
+         ORDER BY tx.tx_num, receipt.tier",
+        placeholders = (0..tx_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))?;
+    let receipt_rows = receipt_stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut receipt_tiers_by_tx = BTreeMap::<String, Vec<i64>>::new();
+    for receipt_row in receipt_rows {
+        let (tx_id, tier) = receipt_row?;
+        receipt_tiers_by_tx.entry(tx_id).or_default().push(tier);
+    }
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
+         FROM jazz_tx tx
+         JOIN jazz_node node ON node.node_num = tx.node_num
+         LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
+         WHERE tx.tx_id IN ({placeholders})
+         ORDER BY tx.tx_num",
+        placeholders = (0..tx_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))?;
+    let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
+        let tx_id = row.get::<_, String>(0)?;
+        let receipt_tiers = receipt_tiers_by_tx.get(&tx_id).cloned().unwrap_or_default();
         Ok(TxRecord {
             tx_id,
             node_id: row.get(1)?,
@@ -4072,20 +5245,133 @@ fn export_reads_for_history(
     if tx_ids.is_empty() {
         return Ok(Vec::new());
     }
+    let candidate_read_count = count_read_rows_for_tx_ids(conn, &tx_ids)?;
+    if candidate_read_count <= (history.len() * 4).max(256) {
+        return export_reads_for_history_simple(conn, history, &tx_ids);
+    }
+    export_reads_for_history_with_temp_scope(conn, history)
+}
+
+fn export_reads_for_history_simple(
+    conn: &Connection,
+    history: &[HistoryRecord],
+    tx_ids: &[String],
+) -> Result<Vec<ReadRecord>> {
+    let history_keys = history
+        .iter()
+        .map(|record| {
+            (
+                record.tx_id.as_str(),
+                record.table.as_str(),
+                record.row_id.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
     let mut stmt = conn.prepare(&format!(
-        "SELECT tx.tx_id, reads.table_name, ids.row_id, reads.reason, observed.tx_id
+        "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
          FROM jazz_tx_read reads
          JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+         JOIN jazz_table tables ON tables.table_num = reads.table_num
          LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
          WHERE tx.tx_id IN ({placeholders})
-         ORDER BY tx.tx_num, reads.table_name, ids.row_id, reads.reason",
+         ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
         placeholders = (0..tx_ids.len())
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(", "),
     ))?;
     let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
+        Ok(ReadRecord {
+            tx_id: row.get(0)?,
+            table: row.get(1)?,
+            row_id: row.get(2)?,
+            reason: row.get(3)?,
+            observed_tx_id: row.get(4)?,
+        })
+    })?;
+    let records = records
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|record| {
+            record.reason != read_set::REASON_ABSENT
+                || history_keys.contains(&(
+                    record.tx_id.as_str(),
+                    record.table.as_str(),
+                    record.row_id.as_str(),
+                ))
+        })
+        .collect();
+    Ok(records)
+}
+
+fn count_read_rows_for_tx_ids(conn: &Connection, tx_ids: &[String]) -> Result<usize> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM jazz_tx_read reads
+             JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             WHERE tx.tx_id IN ({placeholders})",
+            placeholders = (0..tx_ids.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        params_from_iter(tx_ids.iter()),
+        |row| row.get(0),
+    )?;
+    Ok(count as usize)
+}
+
+fn export_reads_for_history_with_temp_scope(
+    conn: &Connection,
+    history: &[HistoryRecord],
+) -> Result<Vec<ReadRecord>> {
+    if history.is_empty() {
+        return Ok(Vec::new());
+    }
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS jazz_export_tx_scope (
+           tx_id TEXT PRIMARY KEY
+         ) WITHOUT ROWID;
+         CREATE TEMP TABLE IF NOT EXISTS jazz_export_history_scope (
+           tx_id TEXT NOT NULL,
+           table_name TEXT NOT NULL,
+           row_id TEXT NOT NULL,
+           PRIMARY KEY (tx_id, table_name, row_id)
+         ) WITHOUT ROWID;
+         DELETE FROM jazz_export_tx_scope;
+         DELETE FROM jazz_export_history_scope;",
+    )?;
+    {
+        let mut tx_stmt =
+            conn.prepare_cached("INSERT OR IGNORE INTO jazz_export_tx_scope (tx_id) VALUES (?)")?;
+        let mut scope_stmt = conn.prepare_cached(
+            "INSERT OR IGNORE INTO jazz_export_history_scope (tx_id, table_name, row_id)
+             VALUES (?, ?, ?)",
+        )?;
+        for record in history {
+            tx_stmt.execute(params![record.tx_id])?;
+            scope_stmt.execute(params![record.tx_id, record.table, record.row_id])?;
+        }
+    }
+    let mut stmt = conn.prepare(
+        "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
+         FROM jazz_export_tx_scope tx_scope
+         JOIN jazz_tx tx ON tx.tx_id = tx_scope.tx_id
+         JOIN jazz_tx_read reads ON reads.tx_num = tx.tx_num
+         JOIN jazz_table tables ON tables.table_num = reads.table_num
+         LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
+         JOIN jazz_row_id ids ON ids.row_num = reads.row_num
+         LEFT JOIN jazz_export_history_scope history_scope
+           ON history_scope.tx_id = tx.tx_id
+          AND history_scope.table_name = tables.table_name
+          AND history_scope.row_id = ids.row_id
+         WHERE reads.reason != ?
+            OR history_scope.tx_id IS NOT NULL
+         ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
+    )?;
+    let records = stmt.query_map(params![read_set::REASON_ABSENT], |row| {
         Ok(ReadRecord {
             tx_id: row.get(0)?,
             table: row.get(1)?,
@@ -4457,35 +5743,52 @@ fn export_policy_dependency_history(
             field.name
         )));
     };
-    let policy_sql = export_read_policy_sql(schema, table, args.user, args.bypass_policy)?;
+    let policy_sql = if args.child_row_nums.is_some() {
+        "1 = 1".to_owned()
+    } else {
+        export_read_policy_sql(schema, table, args.user, args.bypass_policy)?
+    };
     let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    let sql = format!(
-        "SELECT DISTINCT current.{ref_column}
-         FROM {} current
-         JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
-         WHERE current.is_deleted = 0
-           AND {row_filter}
-           AND {}
-           AND current_tx.outcome != {}
-           AND {policy_sql}",
-        crate::schema::current_table(args.table_name),
-        branch_filter_sql("current", args.branch_nums),
-        tx::OUTCOME_REJECTED,
-        row_filter = current_row_filter_sql("current", args.child_row_nums),
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let row_nums = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut records = export_visible_table_history(
-        conn,
-        schema,
-        parent_table,
-        args.user,
-        args.bypass_policy,
-        args.branch_nums,
-        Some(&row_nums),
-    )?;
+    let row_nums = if let Some(child_row_nums) = args.child_row_nums {
+        scoped_policy_parent_row_nums(
+            conn,
+            args.table_name,
+            &ref_column,
+            args.branch_nums,
+            child_row_nums,
+        )?
+    } else {
+        let sql = format!(
+            "SELECT DISTINCT current.{ref_column}
+             FROM {} current
+             JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+             WHERE current.is_deleted = 0
+               AND {}
+               AND current_tx.outcome != {}
+               AND {policy_sql}",
+            crate::schema::current_table(args.table_name),
+            branch_filter_sql("current", args.branch_nums),
+            tx::OUTCOME_REJECTED,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut records = if args.child_row_nums.is_some() {
+        export_history_versions_for_rows(conn, schema, parent_table, Some(&row_nums), None)?
+    } else {
+        export_visible_table_history(
+            conn,
+            schema,
+            parent_table,
+            args.user,
+            args.bypass_policy,
+            args.branch_nums,
+            Some(&row_nums),
+        )?
+    };
     records.extend(export_policy_dependency_history(
         conn,
         schema,
@@ -4499,6 +5802,42 @@ fn export_policy_dependency_history(
         },
     )?);
     Ok(records)
+}
+
+fn scoped_policy_parent_row_nums(
+    conn: &Connection,
+    table_name: &str,
+    ref_column: &str,
+    branch_nums: &[i64],
+    child_row_nums: &[i64],
+) -> Result<Vec<i64>> {
+    if child_row_nums.is_empty() {
+        return Ok(Vec::new());
+    }
+    let child_placeholders = sql_placeholders(child_row_nums.len());
+    let mut stmt = conn.prepare(&format!(
+        "SELECT current.{ref_column}
+         FROM {} current
+         JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+         WHERE current.row_num IN ({child_placeholders})
+           AND current.is_deleted = 0
+           AND {}
+           AND current_tx.outcome != ?",
+        crate::schema::current_table(table_name),
+        branch_filter_sql("current", branch_nums),
+    ))?;
+    let mut params = child_row_nums
+        .iter()
+        .copied()
+        .map(rusqlite::types::Value::Integer)
+        .collect::<Vec<_>>();
+    params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
+    let mut parent_row_nums = BTreeSet::new();
+    let rows = stmt.query_map(params_from_iter(params.iter()), |row| row.get::<_, i64>(0))?;
+    for row in rows {
+        parent_row_nums.insert(row?);
+    }
+    Ok(parent_row_nums.into_iter().collect())
 }
 
 fn export_deleted_table_history(
@@ -4669,24 +6008,33 @@ fn query_scope_repair_row_nums(
     op: &str,
     value: &JsonValue,
 ) -> Result<Vec<i64>> {
-    if op == "eq_top_created_at_desc" {
-        let value = value
-            .get("eq")
-            .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-        return query_scope_repair_row_nums(conn, table, field_name, "eq", value);
+    if op == "eq_top_created_at_desc" || op == "eq_top_field_desc" {
+        let observed_ids = observed_ids_from_query_value(value)?;
+        if observed_ids.is_empty() {
+            let value = value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top query expects eq value"))?;
+            return query_scope_repair_row_nums(conn, table, field_name, "eq", value);
+        }
+        return observed_ids
+            .into_iter()
+            .map(|row_id| row_num(conn, &row_id))
+            .collect();
     }
     if field_name == "id" {
         if op == "ne" {
             let excluded_id = value
                 .as_str()
                 .ok_or_else(|| crate::Error::new("id inequality expects a string value"))?;
-            let mut stmt = conn.prepare(
-                "SELECT row_num
-                 FROM jazz_row_id
-                 WHERE table_name = ? AND row_id != ?
-                 ORDER BY row_num",
-            )?;
-            let rows = stmt.query_map(params![table.name, excluded_id], |row| row.get(0))?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT DISTINCT h.row_num
+                 FROM {} h
+                 JOIN jazz_row_id ids ON ids.row_num = h.row_num
+                 WHERE ids.row_id != ?
+                 ORDER BY h.row_num",
+                crate::schema::history_table(&table.name)
+            ))?;
+            let rows = stmt.query_map(params![excluded_id], |row| row.get(0))?;
             return rows
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into);
@@ -4701,6 +6049,11 @@ fn query_scope_repair_row_nums(
             return Err(crate::Error::new(
                 "$createdBy predicate expects a string value",
             ));
+        };
+        let created_by_num = match users::user_num(conn, created_by) {
+            Ok(user_num) => user_num,
+            Err(_) if op == "eq" => return Ok(Vec::new()),
+            Err(_) => -1,
         };
         let created_by_sql = match op {
             "eq" => "h.j_created_by = ?",
@@ -4720,7 +6073,7 @@ fn query_scope_repair_row_nums(
             crate::schema::history_table(&table.name),
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![created_by, tx::OUTCOME_REJECTED], |row| {
+        let rows = stmt.query_map(params![created_by_num, tx::OUTCOME_REJECTED], |row| {
             row.get::<_, i64>(0)
         })?;
         return rows
@@ -4762,6 +6115,156 @@ fn query_scope_repair_row_nums(
         row.get::<_, i64>(0)
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn query_scope_rejected_tx_ids(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    field_name: &str,
+    op: &str,
+    value: &JsonValue,
+) -> Result<Vec<String>> {
+    if op == "eq_top_created_at_desc" || op == "eq_top_field_desc" {
+        let observed_ids = observed_ids_from_query_value(value)?;
+        if observed_ids.is_empty() {
+            let value = value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top query expects eq value"))?;
+            return query_scope_rejected_tx_ids(conn, table, field_name, "eq", value);
+        }
+        let row_nums = observed_ids
+            .into_iter()
+            .map(|row_id| row_num(conn, &row_id))
+            .collect::<Result<Vec<_>>>()?;
+        return rejected_tx_ids_for_row_nums(conn, &table.name, &row_nums);
+    }
+    if op == "in" {
+        let mut tx_ids = Vec::new();
+        for value in value
+            .as_array()
+            .ok_or_else(|| crate::Error::new("in predicate expects an array value"))?
+        {
+            tx_ids.extend(query_scope_rejected_tx_ids(
+                conn, table, field_name, "eq", value,
+            )?);
+        }
+        tx_ids.sort();
+        tx_ids.dedup();
+        return Ok(tx_ids);
+    }
+    if field_name == "id" {
+        if op == "ne" {
+            let excluded_id = value
+                .as_str()
+                .ok_or_else(|| crate::Error::new("id inequality expects a string value"))?;
+            let sql = format!(
+                "SELECT DISTINCT tx.tx_id
+                 FROM {} h
+                 JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                 JOIN jazz_row_id ids ON ids.row_num = h.row_num
+                 WHERE ids.row_id != ?
+                   AND tx.outcome = ?
+                 ORDER BY tx.tx_num",
+                crate::schema::history_table(&table.name),
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let tx_ids = stmt.query_map(params![excluded_id, tx::OUTCOME_REJECTED], |row| {
+                row.get::<_, String>(0)
+            })?;
+            return tx_ids
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into);
+        }
+        let row_nums = id_predicate_values(op, value)?
+            .into_iter()
+            .map(|row_id| ensure_row_id(conn, &table.name, &row_id))
+            .collect::<Result<Vec<_>>>()?;
+        return rejected_tx_ids_for_row_nums(conn, &table.name, &row_nums);
+    }
+    if field_name == "$createdBy" {
+        let created_by = value
+            .as_str()
+            .ok_or_else(|| crate::Error::new("$createdBy predicate expects a string value"))?;
+        let created_by_num = match users::user_num(conn, created_by) {
+            Ok(user_num) => user_num,
+            Err(_) if op == "eq" => return Ok(Vec::new()),
+            Err(_) => -1,
+        };
+        let created_by_sql = match op {
+            "eq" => "h.j_created_by = ?",
+            "ne" => "h.j_created_by != ?",
+            op => {
+                return Err(crate::Error::new(format!(
+                    "unsupported $createdBy predicate op {op}"
+                )));
+            }
+        };
+        let sql = format!(
+            "SELECT DISTINCT tx.tx_id
+             FROM {} h
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE {created_by_sql}
+               AND tx.outcome = ?
+             ORDER BY tx.tx_num",
+            crate::schema::history_table(&table.name),
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let tx_ids = stmt.query_map(params![created_by_num, tx::OUTCOME_REJECTED], |row| {
+            row.get::<_, String>(0)
+        })?;
+        return tx_ids
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into);
+    }
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field_name)
+        .ok_or_else(|| crate::Error::new(format!("unknown query field {field_name}")))?;
+    let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let predicate_sql = query_predicate::sql(field, &format!("h.{predicate_column}"), op)?;
+    let predicate_value = query_predicate::value(field, op, value, conn)?;
+    let sql = format!(
+        "SELECT DISTINCT tx.tx_id
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE {predicate_sql}
+           AND tx.outcome = ?
+         ORDER BY tx.tx_num",
+        crate::schema::history_table(&table.name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let tx_ids = stmt.query_map(params![predicate_value, tx::OUTCOME_REJECTED], |row| {
+        row.get::<_, String>(0)
+    })?;
+    tx_ids
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn rejected_tx_ids_for_row_nums(
+    conn: &Connection,
+    table_name: &str,
+    row_nums: &[i64],
+) -> Result<Vec<String>> {
+    if row_nums.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT DISTINCT tx.tx_id
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE {}
+           AND tx.outcome = ?
+         ORDER BY tx.tx_num",
+        crate::schema::history_table(table_name),
+        history_row_filter_sql("h", Some(row_nums)),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let tx_ids = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| row.get::<_, String>(0))?;
+    tx_ids
+        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 
@@ -4825,8 +6328,14 @@ fn export_visible_table_history(
     select_columns.extend([
         "h.j_created_at".to_owned(),
         "h.j_updated_at".to_owned(),
-        "h.j_created_by".to_owned(),
-        "h.j_updated_by".to_owned(),
+        format!(
+            "{} AS j_created_by",
+            users::user_id_expr("h", "j_created_by")
+        ),
+        format!(
+            "{} AS j_updated_by",
+            users::user_id_expr("h", "j_updated_by")
+        ),
     ]);
     let sql = format!(
         "SELECT {}
@@ -4861,6 +6370,7 @@ fn export_visible_table_history(
         Some(row_nums) => stmt.query(params_from_iter(row_nums.iter()))?,
         None => stmt.query([])?,
     };
+    let mut public_row_id_cache = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let row = (0..row_width)
             .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -4869,7 +6379,7 @@ fn export_visible_table_history(
         for (idx, field) in table.fields.iter().enumerate() {
             values.insert(
                 field.name.clone(),
-                sql_value_to_json(conn, field, &row[idx + 4])?,
+                sql_value_to_json_cached(conn, field, &row[idx + 4], &mut public_row_id_cache)?,
             );
         }
         let sys = 4 + table.fields.len();
@@ -4912,8 +6422,14 @@ fn export_history_versions_for_rows(
     select_columns.extend([
         "h.j_created_at".to_owned(),
         "h.j_updated_at".to_owned(),
-        "h.j_created_by".to_owned(),
-        "h.j_updated_by".to_owned(),
+        format!(
+            "{} AS j_created_by",
+            users::user_id_expr("h", "j_created_by")
+        ),
+        format!(
+            "{} AS j_updated_by",
+            users::user_id_expr("h", "j_updated_by")
+        ),
     ]);
     let sql = format!(
         "SELECT {}
@@ -4936,6 +6452,7 @@ fn export_history_versions_for_rows(
         None => stmt.query([])?,
     };
     let mut records = Vec::new();
+    let mut public_row_id_cache = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let row = (0..row_width)
             .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -4944,7 +6461,7 @@ fn export_history_versions_for_rows(
         for (idx, field) in table.fields.iter().enumerate() {
             values.insert(
                 field.name.clone(),
-                sql_value_to_json(conn, field, &row[idx + 4])?,
+                sql_value_to_json_cached(conn, field, &row[idx + 4], &mut public_row_id_cache)?,
             );
         }
         let sys = 4 + table.fields.len();
@@ -4985,21 +6502,6 @@ fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
     }
 }
 
-fn current_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
-    match row_nums {
-        Some([]) => "0 = 1".to_owned(),
-        Some(row_nums) => format!(
-            "{alias}.row_num IN ({})",
-            row_nums
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        None => "1 = 1".to_owned(),
-    }
-}
-
 fn history_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
     match row_nums {
         Some([]) => "0 = 1".to_owned(),
@@ -5029,6 +6531,10 @@ fn branch_filter_sql(alias: &str, branch_nums: &[i64]) -> String {
     )
 }
 
+fn sql_placeholders(count: usize) -> String {
+    (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
+}
+
 fn export_read_policy_sql(
     schema: &SchemaDef,
     table: &crate::schema::TableDef,
@@ -5047,6 +6553,16 @@ fn sql_value_to_json(
     field: &FieldDef,
     value: &rusqlite::types::Value,
 ) -> Result<JsonValue> {
+    let mut public_row_id_cache = BTreeMap::new();
+    sql_value_to_json_cached(conn, field, value, &mut public_row_id_cache)
+}
+
+fn sql_value_to_json_cached(
+    conn: &Connection,
+    field: &FieldDef,
+    value: &rusqlite::types::Value,
+    public_row_id_cache: &mut BTreeMap<i64, String>,
+) -> Result<JsonValue> {
     match (&field.kind, value) {
         (_, rusqlite::types::Value::Null) if field.nullable => Ok(JsonValue::Null),
         (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
@@ -5055,14 +6571,74 @@ fn sql_value_to_json(
         (FieldKind::Bool, rusqlite::types::Value::Integer(value)) => {
             Ok(JsonValue::Bool(*value != 0))
         }
-        (FieldKind::Ref { .. }, rusqlite::types::Value::Integer(row_num)) => {
-            Ok(JsonValue::String(public_row_id(conn, *row_num)?))
-        }
+        (FieldKind::Ref { .. }, rusqlite::types::Value::Integer(row_num)) => Ok(JsonValue::String(
+            cached_public_row_id(conn, public_row_id_cache, *row_num)?,
+        )),
         _ => Err(crate::Error::new(format!(
             "unexpected SQL value for field {}",
             field.name
         ))),
     }
+}
+
+fn cached_public_row_id(
+    conn: &Connection,
+    cache: &mut BTreeMap<i64, String>,
+    row_num: i64,
+) -> Result<String> {
+    if let Some(row_id) = cache.get(&row_num) {
+        return Ok(row_id.clone());
+    }
+    let row_id = public_row_id(conn, row_num)?;
+    cache.insert(row_num, row_id.clone());
+    Ok(row_id)
+}
+
+fn cached_ensure_row_id(
+    conn: &Connection,
+    cache: &mut BTreeMap<(String, String), i64>,
+    table: &str,
+    row_id: &str,
+) -> Result<i64> {
+    let key = (table.to_owned(), row_id.to_owned());
+    if let Some(row_num) = cache.get(&key) {
+        return Ok(*row_num);
+    }
+    let row_num = ensure_row_id(conn, table, row_id)?;
+    cache.insert(key, row_num);
+    Ok(row_num)
+}
+
+fn cached_ensure_row_id_with_status(
+    conn: &Connection,
+    cache: &mut BTreeMap<(String, String), i64>,
+    created_in_apply: &mut BTreeSet<i64>,
+    table: &str,
+    row_id: &str,
+) -> Result<i64> {
+    let key = (table.to_owned(), row_id.to_owned());
+    if let Some(row_num) = cache.get(&key) {
+        return Ok(*row_num);
+    }
+    let (row_num, created) = ensure_row_id_with_status(conn, row_id)?;
+    if created {
+        created_in_apply.insert(row_num);
+    }
+    cache.insert(key, row_num);
+    Ok(row_num)
+}
+
+fn cached_ensure_user(
+    conn: &Connection,
+    cache: &mut BTreeMap<String, i64>,
+    user_id: &str,
+) -> Result<i64> {
+    if let Some(user_num) = cache.get(user_id) {
+        return Ok(*user_num);
+    }
+    let user_num = users::ensure_user(conn, user_id)?;
+    cache.insert(user_id.to_owned(), user_num);
+    Ok(user_num)
 }
 
 fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<String> {
@@ -5079,9 +6655,48 @@ fn integer_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
     }
 }
 
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn observed_row_ids(rows: &[RowView]) -> Vec<String> {
+    rows.iter().map(|row| row.id.clone()).collect()
+}
+
+fn observed_ids_from_query_value(value: &JsonValue) -> Result<Vec<String>> {
+    let Some(observed_ids) = value.get("observed_ids") else {
+        return Ok(Vec::new());
+    };
+    observed_ids
+        .as_array()
+        .ok_or_else(|| crate::Error::new("observed_ids expects an array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| crate::Error::new("observed_ids expects string row ids"))
+        })
+        .collect()
+}
+
 fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {
     let mut tables = BTreeSet::new();
     for record in &bundle.history {
+        tables.insert(record.table.clone());
+    }
+    for query_read in &bundle.query_reads {
+        tables.insert(query_read.table.clone());
+    }
+    tables
+}
+
+fn bundle_touched_tables(bundle: &Bundle) -> BTreeSet<String> {
+    let mut tables = BTreeSet::new();
+    for record in &bundle.history {
+        tables.insert(record.table.clone());
+    }
+    for record in &bundle.reads {
         tables.insert(record.table.clone());
     }
     for query_read in &bundle.query_reads {
@@ -5153,12 +6768,10 @@ fn insert_dynamic(
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(", ");
-    conn.execute(
-        &format!(
-            "INSERT OR REPLACE INTO {table} ({}) VALUES ({placeholders})",
-            columns.join(", ")
-        ),
-        params_from_iter(values.iter()),
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "INSERT OR REPLACE INTO {table} ({}) VALUES ({placeholders})",
+        columns.join(", ")
+    ))?;
+    stmt.execute(params_from_iter(values.iter()))?;
     Ok(())
 }

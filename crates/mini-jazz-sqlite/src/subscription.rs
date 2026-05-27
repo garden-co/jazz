@@ -120,11 +120,38 @@ impl RowsSubscription {
         }
     }
 
+    pub(crate) fn where_eq_top_field_desc(
+        table: &str,
+        field: &str,
+        value: JsonValue,
+        order_field: &str,
+        limit: usize,
+        rows: Vec<RowView>,
+    ) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
+                table,
+                field,
+                "eq_top_field_desc",
+                serde_json::json!({
+                    "eq": value,
+                    "order_field": order_field,
+                    "limit": limit,
+                }),
+            )),
+            last_rows: rows,
+        }
+    }
+
     pub fn initial_rows(&self) -> &[RowView] {
         &self.last_rows
     }
 
     pub(crate) fn replace_with_diff(&mut self, next_rows: Vec<RowView>) -> Vec<RowDiff> {
+        if self.last_rows == next_rows {
+            return Vec::new();
+        }
+
         let before = by_id(&self.last_rows);
         let after = by_id(&next_rows);
         let mut diffs = Vec::new();
@@ -143,6 +170,27 @@ impl RowsSubscription {
         for (id, after_row) in &after {
             if !before.contains_key(id) {
                 diffs.push(RowDiff::Added((*after_row).clone()));
+            }
+        }
+
+        if diffs.is_empty() {
+            let before_positions = positions_by_id(&self.last_rows);
+            let after_positions = positions_by_id(&next_rows);
+            for (id, before_index) in before_positions {
+                let Some(after_index) = after_positions.get(&id) else {
+                    continue;
+                };
+                if before_index == *after_index {
+                    continue;
+                }
+                let Some(after_row) = after.get(&id) else {
+                    continue;
+                };
+                diffs.push(RowDiff::Moved {
+                    row: (*after_row).clone(),
+                    before_index,
+                    after_index: *after_index,
+                });
             }
         }
 
@@ -187,4 +235,61 @@ impl RejectionSubscription {
 
 fn by_id(rows: &[RowView]) -> BTreeMap<String, &RowView> {
     rows.iter().map(|row| (row.id.clone(), row)).collect()
+}
+
+fn positions_by_id(rows: &[RowView]) -> BTreeMap<String, usize> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| (row.id.clone(), index))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn order_only_changes_emit_moved_diffs() {
+        let first = row("first");
+        let second = row("second");
+        let mut subscription = RowsSubscription::new("items", vec![first.clone(), second.clone()]);
+
+        let diffs = subscription.replace_with_diff(vec![second.clone(), first.clone()]);
+
+        assert!(matches!(
+            &diffs[..],
+            [
+                RowDiff::Moved {
+                    row,
+                    before_index: 0,
+                    after_index: 1
+                },
+                RowDiff::Moved {
+                    row: row2,
+                    before_index: 1,
+                    after_index: 0
+                }
+            ] if row.id == "first" && row2.id == "second"
+        ));
+        assert_eq!(
+            subscription
+                .initial_rows()
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second", "first"]
+        );
+    }
+
+    fn row(id: &str) -> RowView {
+        RowView {
+            table: "items".to_owned(),
+            id: id.to_owned(),
+            values: BTreeMap::from([("title".to_owned(), json!(id))]),
+            created_by: "alice".to_owned(),
+            tx_id: format!("tx-{id}"),
+            conflict_count: 0,
+        }
+    }
 }

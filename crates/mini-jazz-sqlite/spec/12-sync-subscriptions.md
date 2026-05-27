@@ -115,7 +115,13 @@ Diff categories:
 - all
 - added
 - updated
+- moved
 - removed
+
+`moved` is a semantic diff for order-only changes: the row remains visible with
+the same semantic value but changes position in the ordered result. This matters
+for ordered pages and subscriptions whose user-visible state is the sequence,
+not only the set of rows.
 
 Tiered delivery:
 
@@ -128,6 +134,10 @@ One-shot queries with a requested tier wait for the same settled condition as
 the first subscription delivery at that tier.
 
 Every subscription update is tier-gated, not only the first result.
+
+Subscription latency measurements should include local rerun/diff or
+poll/diff work. The product-observed update path ends when the subscription can
+publish semantic diffs, not when incoming history has merely been applied.
 
 A query settled signal means: for this query, branch view, catalogue revision,
 policy context, and durability tier, the runtime has applied the row history,

@@ -82,6 +82,13 @@ Planner-supported predicate forms currently include equality, text contains,
 predicates, ordered page descriptors, absence descriptors, hop/gather relation
 descriptors, and recursive ref descriptors.
 
+Supported indexable query forms should lower to the embedded database on current
+projections. Falling back to full visible-row scans is optimization debt and
+should be named as such. The current correctness baseline allows slower
+fallback paths for historical pinned-base branch snapshots, arbitrary historical
+snapshots, and other query-time visibility cases where no derived projection has
+been promoted yet.
+
 Query-scoped sync must include enough repair information for a receiver that
 previously synced the same scope to remove stale rows. Exporting only the
 current result rows is insufficient. If a row previously matched `done = false`
