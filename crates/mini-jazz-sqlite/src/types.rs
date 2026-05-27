@@ -35,7 +35,17 @@ pub struct StorageStats {
     pub page_count: i64,
     pub page_size: i64,
     pub database_bytes: i64,
+    pub main_file_bytes: i64,
+    pub wal_file_bytes: i64,
+    pub shm_file_bytes: i64,
+    pub total_file_bytes: i64,
     tx_nums_by_id: BTreeMap<String, i64>,
+}
+
+pub(crate) struct StorageFileBytes {
+    pub main: i64,
+    pub wal: i64,
+    pub shm: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,8 +117,10 @@ impl StorageStats {
         rejected_transactions: i64,
         page_count: i64,
         page_size: i64,
+        file_bytes: StorageFileBytes,
         tx_nums_by_id: BTreeMap<String, i64>,
     ) -> Self {
+        let total_file_bytes = file_bytes.main + file_bytes.wal + file_bytes.shm;
         Self {
             history_rows,
             current_rows,
@@ -116,6 +128,10 @@ impl StorageStats {
             page_count,
             page_size,
             database_bytes: page_count * page_size,
+            main_file_bytes: file_bytes.main,
+            wal_file_bytes: file_bytes.wal,
+            shm_file_bytes: file_bytes.shm,
+            total_file_bytes,
             tx_nums_by_id,
         }
     }

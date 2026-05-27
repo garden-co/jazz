@@ -93,9 +93,13 @@ struct ScenarioReport {
     approx_raw_json_payload_bytes: usize,
     core_database_to_raw_payload_ratio: f64,
     core_database_bytes: i64,
+    core_total_file_bytes: i64,
     edge_database_bytes: i64,
+    edge_total_file_bytes: i64,
     worker_database_bytes: i64,
+    worker_total_file_bytes: i64,
     tab_database_bytes: i64,
+    tab_total_file_bytes: i64,
     seed_ms: f64,
     core_query_ms: f64,
     export_ms: f64,
@@ -446,7 +450,11 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
     seed_rows_by_table.insert("orgs", 100);
     seed_rows_by_table.insert("documents", config.total_rows);
     let approx_raw_json_payload_bytes = approx_raw_json_payload_bytes(config)?;
-    let core_database_bytes = core.storage_stats()?.database_bytes;
+    let core_stats = core.storage_stats()?;
+    let edge_stats = edge.storage_stats()?;
+    let worker_stats = worker.storage_stats()?;
+    let tab_stats = tab.storage_stats()?;
+    let core_database_bytes = core_stats.database_bytes;
 
     Ok(ScenarioReport {
         scenario_id: "C1_CORE_ONLY_SCOPED_PAGE_UPDATED_AT",
@@ -471,9 +479,13 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         core_database_to_raw_payload_ratio: core_database_bytes as f64
             / approx_raw_json_payload_bytes as f64,
         core_database_bytes,
-        edge_database_bytes: edge.storage_stats()?.database_bytes,
-        worker_database_bytes: worker.storage_stats()?.database_bytes,
-        tab_database_bytes: tab.storage_stats()?.database_bytes,
+        core_total_file_bytes: core_stats.total_file_bytes,
+        edge_database_bytes: edge_stats.database_bytes,
+        edge_total_file_bytes: edge_stats.total_file_bytes,
+        worker_database_bytes: worker_stats.database_bytes,
+        worker_total_file_bytes: worker_stats.total_file_bytes,
+        tab_database_bytes: tab_stats.database_bytes,
+        tab_total_file_bytes: tab_stats.total_file_bytes,
         seed_ms: ms(seed_elapsed),
         core_query_ms: ms(core_query_elapsed),
         export_ms: ms(export_elapsed),

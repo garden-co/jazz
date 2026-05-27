@@ -565,3 +565,15 @@ apply bottleneck is mostly raw read-set insertion volume plus per-history-row
 current maintenance/newest checks. The next serious apply optimization is likely
 bulk read-set insert and/or bulk current repair by touched `(table, row,
 branch)`, not more tiny statement-cache tweaks.
+
+## 2026-05-26 23:19 PDT
+
+Added file-footprint stats to `StorageStats` so the benchmark can distinguish
+SQLite page-count bytes from actual main/WAL/SHM files. This matters before
+testing WAL, page size, and cache pragmas because `PRAGMA page_count * page_size`
+can otherwise hide WAL overhead.
+
+Current default result on a 1k-row scaled-down smoke run: file-backed core,
+edge, and worker report matching page-count and file bytes; in-memory tab
+reports page-count bytes but zero file bytes. This confirms the stat is useful
+and does not change semantics. The full whole-system suite remains green.
