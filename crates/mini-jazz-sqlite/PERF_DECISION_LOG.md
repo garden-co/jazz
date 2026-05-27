@@ -174,3 +174,16 @@ filtering in Rust. On the policy-scoped 100k/10k/page-50 profile, cold export
 moved from about 98 ms to about 88-90 ms in one run, with no bundle shape change.
 This is a modest win because the seed batch size is 100 (about 1k tx rows), but
 it should matter much more for workloads with one write call per row.
+
+## 2026-05-26 21:48 PDT
+
+Tried the duplicate-history export hypothesis carefully. Query-scope export now
+separates visible result row nums from repair row nums and only runs the
+unfiltered history fallback for repair rows. This preserves deleted/hidden row
+repair while avoiding one redundant history pass for pure current result rows.
+
+Targeted ordered-page and query-scope tests pass. The benchmark improvement was
+small in this scenario: cold export remained around 87 ms and refresh around 98
+ms. This suggests the bigger cost is not simply duplicate child history export;
+policy dependency export, SQL policy checks, JSON/ref conversion, or apply
+rebuild remain more likely.

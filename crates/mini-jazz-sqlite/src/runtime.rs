@@ -2458,16 +2458,23 @@ impl Runtime {
         let table = self.schema.table_def(table_name)?;
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
-        let mut row_nums = rows
+        let visible_row_nums = rows
             .iter()
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
+        let mut repair_row_nums = Vec::new();
         for row_id in options.extra_row_ids {
-            row_nums.push(row_num(&self.conn, row_id)?);
+            repair_row_nums.push(row_num(&self.conn, row_id)?);
         }
-        row_nums.extend(query_scope_repair_row_nums(
+        repair_row_nums.extend(query_scope_repair_row_nums(
             &self.conn, table, field_name, op, &value,
         )?);
+        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
+        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
+        repair_row_nums.sort();
+        repair_row_nums.dedup();
+        let mut row_nums = visible_row_nums;
+        row_nums.extend(repair_row_nums.iter());
         row_nums.sort();
         row_nums.dedup();
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
@@ -2480,13 +2487,15 @@ impl Runtime {
             &branch_nums,
             Some(&row_nums),
         )?;
-        history.extend(export_history_versions_for_rows(
-            &self.conn,
-            &self.schema,
-            table_name,
-            Some(&row_nums),
-            None,
-        )?);
+        if !repair_row_nums.is_empty() {
+            history.extend(export_history_versions_for_rows(
+                &self.conn,
+                &self.schema,
+                table_name,
+                Some(&repair_row_nums),
+                None,
+            )?);
+        }
         history.extend(export_policy_dependency_history(
             &self.conn,
             &self.schema,
