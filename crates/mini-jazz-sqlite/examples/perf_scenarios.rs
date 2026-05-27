@@ -19,6 +19,7 @@ fn main() -> BenchResult<()> {
         recursive_policy_probe: run_recursive_policy_probe()?,
         multi_tab_fanout_probe: run_multi_tab_fanout_probe()?,
         many_user_page_probe: run_many_user_page_probe()?,
+        mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -54,6 +55,7 @@ struct BenchmarkReport {
     recursive_policy_probe: RecursivePolicyProbe,
     multi_tab_fanout_probe: MultiTabFanoutProbe,
     many_user_page_probe: ManyUserPageProbe,
+    mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
 }
 
 #[derive(Serialize)]
@@ -155,6 +157,29 @@ struct ManyUserPageProbe {
     total_transaction_rows_synced: usize,
     average_transaction_rows_synced: f64,
     core_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct MixedMutationRefreshProbe {
+    total_rows: usize,
+    target_owner_rows: usize,
+    page_size: usize,
+    top_inserts: usize,
+    current_page_updates: usize,
+    off_page_owner_updates: usize,
+    unrelated_owner_updates: usize,
+    visible_rows_returned: usize,
+    history_rows_synced: usize,
+    transaction_rows_synced: usize,
+    observed_facts_synced: usize,
+    bundle_bytes: usize,
+    export_ms: f64,
+    apply_ms: f64,
+    tab_query_ms: f64,
+    subscription_poll_ms: f64,
+    subscription_added: usize,
+    subscription_updated: usize,
+    subscription_removed: usize,
 }
 
 #[derive(Serialize)]
@@ -533,6 +558,93 @@ fn run_many_user_page_probe() -> BenchResult<ManyUserPageProbe> {
         average_transaction_rows_synced: total_transaction_rows_synced as f64
             / sampled_users as f64,
         core_database_bytes: core.storage_stats()?.database_bytes,
+    })
+}
+
+fn run_mixed_mutation_refresh_probe() -> BenchResult<MixedMutationRefreshProbe> {
+    let config = Config {
+        total_rows: 20_000,
+        target_owner_rows: 2_000,
+        page_size: 50,
+        seed_batch_size: 100,
+        refresh_new_top_rows: 0,
+        durable_intermediaries: true,
+    };
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema.clone())?;
+
+    seed_documents(
+        &mut core,
+        config.total_rows,
+        config.target_owner_rows,
+        config.seed_batch_size,
+    )?;
+    let initial_bundle = export_top_owner_page(&mut core, config.page_size)?;
+    tab.apply_bundle(&initial_bundle)?;
+    let mut subscription = tab.subscribe_rows_where_eq_top_field_desc(
+        "documents",
+        "owner_id",
+        json!(OWNER),
+        "updated_at",
+        config.page_size,
+    )?;
+
+    let top_inserts = 25;
+    let current_page_updates = 10;
+    let off_page_owner_updates = 100;
+    let unrelated_owner_updates = 100;
+    apply_mixed_mutations(
+        &mut core,
+        config.total_rows,
+        config.target_owner_rows,
+        top_inserts,
+        current_page_updates,
+        off_page_owner_updates,
+        unrelated_owner_updates,
+    )?;
+
+    let export_started = Instant::now();
+    let bundles = core.run_as_user(OWNER, |core| {
+        core.export_query_read_refreshes(&tab.observed_query_reads()?)
+    })?;
+    let export_elapsed = export_started.elapsed();
+    let summary = BundleBatchSummary::from(&bundles)?;
+    let apply_elapsed = timed_apply_bundles(&mut tab, bundles)?;
+
+    let query_started = Instant::now();
+    let rows = read_top_owner_page(&tab, config.page_size)?;
+    let query_elapsed = query_started.elapsed();
+    let poll_started = Instant::now();
+    let diffs = tab.poll_subscription(&mut subscription)?;
+    let poll_elapsed = poll_started.elapsed();
+    let diff_counts = DiffCounts::from(&diffs);
+
+    Ok(MixedMutationRefreshProbe {
+        total_rows: config.total_rows,
+        target_owner_rows: config.target_owner_rows,
+        page_size: config.page_size,
+        top_inserts,
+        current_page_updates,
+        off_page_owner_updates,
+        unrelated_owner_updates,
+        visible_rows_returned: rows.len(),
+        history_rows_synced: summary.history_rows,
+        transaction_rows_synced: summary.transaction_rows,
+        observed_facts_synced: summary.observed_facts,
+        bundle_bytes: summary.bytes,
+        export_ms: ms(export_elapsed),
+        apply_ms: ms(apply_elapsed),
+        tab_query_ms: ms(query_elapsed),
+        subscription_poll_ms: ms(poll_elapsed),
+        subscription_added: diff_counts.added,
+        subscription_updated: diff_counts.updated,
+        subscription_removed: diff_counts.removed,
     })
 }
 
@@ -934,6 +1046,59 @@ fn insert_new_top_documents(
         let mut values = document_values(row_index, target_owner_rows);
         values.insert("owner_id".to_owned(), json!(OWNER));
         tx = tx.insert_row("documents", &format!("doc-refresh-new-{index}"), values);
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn apply_mixed_mutations(
+    runtime: &mut Runtime,
+    total_rows: usize,
+    target_owner_rows: usize,
+    top_inserts: usize,
+    current_page_updates: usize,
+    off_page_owner_updates: usize,
+    unrelated_owner_updates: usize,
+) -> Result<()> {
+    let mut tx = runtime.transaction();
+    for index in 0..top_inserts {
+        let row_index = total_rows + index;
+        let mut values = document_values(row_index, target_owner_rows);
+        values.insert("owner_id".to_owned(), json!(OWNER));
+        tx = tx.insert_row("documents", &format!("doc-mixed-new-top-{index}"), values);
+    }
+    for index in 0..current_page_updates {
+        let row_index = target_owner_rows.saturating_sub(1 + index);
+        tx = tx.update_row(
+            "documents",
+            &format!("doc-{row_index}"),
+            BTreeMap::from([(
+                "title".to_owned(),
+                json!(format!("Current page updated {index}")),
+            )]),
+        );
+    }
+    for index in 0..off_page_owner_updates {
+        let row_index = index.min(target_owner_rows.saturating_sub(1));
+        tx = tx.update_row(
+            "documents",
+            &format!("doc-{row_index}"),
+            BTreeMap::from([(
+                "title".to_owned(),
+                json!(format!("Off-page owner updated {index}")),
+            )]),
+        );
+    }
+    for index in 0..unrelated_owner_updates {
+        let row_index = target_owner_rows + index;
+        tx = tx.update_row(
+            "documents",
+            &format!("doc-{row_index}"),
+            BTreeMap::from([(
+                "title".to_owned(),
+                json!(format!("Unrelated owner updated {index}")),
+            )]),
+        );
     }
     tx.commit()?;
     Ok(())

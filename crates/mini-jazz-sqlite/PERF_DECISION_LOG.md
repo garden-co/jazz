@@ -312,3 +312,18 @@ about 19 KB, 21 history rows, and 2 tx records. This is a strong product-shaped
 data point for “many users each reading small policy-scoped pages”: per-user
 query export scales with page/dependency size, not total table size, once the
 predicate is selective.
+
+## 2026-05-26 22:17 PDT
+
+Added a mixed-mutation refresh probe to exercise a warm client page under
+realistic write noise. The probe seeds 20k documents with 2k matching the
+subscribed owner, boots a page-50 tab, then commits one transaction containing
+25 new top rows, 10 updates to rows currently on the page, 100 updates to
+matching-owner rows below the page, and 100 unrelated-owner updates.
+
+Result: refresh export is about 18 ms, tab apply about 34 ms, query about 0.7 ms,
+and subscription diffing about 0.8 ms. The diff is exactly the expected product
+shape: 25 added, 10 updated, 25 removed. The bundle still contains 160 history
+rows and 87 KB, so observed-id repair plus top-page re-export is correct and
+fast enough at this scale, but replacement-page refreshes still resend enough
+history to make apply cost the dominant piece.
