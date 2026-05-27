@@ -3130,7 +3130,8 @@ fn run_refresh_after_new_top_rows(
             + worker_apply_elapsed
             + worker_export_elapsed
             + tab_apply_elapsed
-            + tab_query_elapsed),
+            + tab_query_elapsed
+            + subscription_poll_elapsed),
     })
 }
 

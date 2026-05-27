@@ -2386,3 +2386,39 @@ Learning: fixing the warmup bug did not materially change the page-query
 headline. The primary path remains around low-30 ms API-to-first-result at this
 scale. The benchmark is now semantically cleaner, which matters more than the
 small numeric movement.
+
+## 2026-05-27 09:38 PDT
+
+Addressed two more PR review findings.
+
+- The primary refresh `api_to_updated_result_ms` now includes subscription poll
+  time, so the reported client-observed refresh path includes the local listener
+  diff step instead of stopping at the follow-up query.
+- `IN` queries now lower to SQL over the current projection for current/main
+  reads instead of calling `read_rows(table)` and filtering the full visible
+  result in Rust. The branch pinned-base fallback still filters the historical
+  base snapshot in memory, but the sparse overlay/current side uses SQLite
+  predicates for `id`, `j_created_by`, and declared schema fields.
+
+Validation:
+
+- `cargo test -p mini-jazz-sqlite`
+- `cargo clippy -p mini-jazz-sqlite --all-targets -- -D warnings`
+- full release perf harness after the fix
+
+Fresh full release harness sample:
+
+- primary API-to-first-result: ~34.6 ms
+- primary refresh API-to-updated-result: ~38.2 ms, now including ~0.24 ms
+  subscription polling
+- primary export: ~25.3 ms
+- dashboard 48-query case: initial export ~21.3 ms, tab apply ~6.3 ms,
+  refresh export ~21.6 ms, refresh apply ~4.0 ms
+- recursive 2k topology: initial export ~23.9 ms, initial edge apply ~31.9 ms,
+  refresh export ~25.7 ms, refresh edge apply ~11.7 ms
+
+Learning: including subscription polling barely moves the primary refresh number
+because polling is currently sub-millisecond in this scenario, but it makes the
+metric honest. The `IN` path is now structurally aligned with the equality path:
+ordinary current reads can use SQLite indexes and query planning, while
+historical branch snapshot reads remain the slower special case.
