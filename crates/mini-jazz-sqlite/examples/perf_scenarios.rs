@@ -17,6 +17,7 @@ fn main() -> BenchResult<()> {
         primary: run_core_only_scoped_page(&config)?,
         tx_granularity_probe: run_tx_granularity_probe()?,
         recursive_policy_probe: run_recursive_policy_probe()?,
+        multi_tab_fanout_probe: run_multi_tab_fanout_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -50,6 +51,7 @@ struct BenchmarkReport {
     primary: ScenarioReport,
     tx_granularity_probe: TxGranularityProbe,
     recursive_policy_probe: RecursivePolicyProbe,
+    multi_tab_fanout_probe: MultiTabFanoutProbe,
 }
 
 #[derive(Serialize)]
@@ -116,6 +118,22 @@ struct RecursivePolicyProbe {
     seed_ms: f64,
     core_query_ms: f64,
     export_ms: f64,
+}
+
+#[derive(Serialize)]
+struct MultiTabFanoutProbe {
+    total_rows: usize,
+    target_owner_rows: usize,
+    tab_count: usize,
+    worker_boot_ms: f64,
+    worker_export_ms: f64,
+    bundle_bytes: usize,
+    history_rows_synced: usize,
+    transaction_rows_synced: usize,
+    total_tab_apply_ms: f64,
+    average_tab_apply_ms: f64,
+    total_tab_query_ms: f64,
+    average_tab_query_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -380,6 +398,68 @@ fn run_recursive_policy_probe() -> BenchResult<RecursivePolicyProbe> {
         seed_ms: ms(seed_elapsed),
         core_query_ms: ms(query_elapsed),
         export_ms: ms(export_elapsed),
+    })
+}
+
+fn run_multi_tab_fanout_probe() -> BenchResult<MultiTabFanoutProbe> {
+    let total_rows = 20_000;
+    let target_owner_rows = 2_000;
+    let page_size = 50;
+    let tab_count = 8;
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut worker = Runtime::open_with_schema(
+        Storage::File(dir.path().join("worker.sqlite")),
+        "worker",
+        OWNER,
+        schema.clone(),
+    )?;
+    seed_documents(&mut core, total_rows, target_owner_rows, 100)?;
+
+    let worker_boot_started = Instant::now();
+    let core_bundle = export_top_owner_page(&mut core, page_size)?;
+    worker.apply_bundle(&core_bundle)?;
+    let worker_boot_elapsed = worker_boot_started.elapsed();
+
+    let worker_export_started = Instant::now();
+    let worker_bundle = export_top_owner_page(&mut worker, page_size)?;
+    let worker_export_elapsed = worker_export_started.elapsed();
+    let summary = BundleSummary::from(&worker_bundle)?;
+
+    let mut total_apply = Duration::ZERO;
+    let mut total_query = Duration::ZERO;
+    for tab_index in 0..tab_count {
+        let mut tab = Runtime::open_with_schema(
+            Storage::Memory,
+            &format!("tab-{tab_index}"),
+            OWNER,
+            schema.clone(),
+        )?;
+        total_apply += timed(|| tab.apply_bundle(&worker_bundle))?;
+        let query_started = Instant::now();
+        let rows = read_top_owner_page(&tab, page_size)?;
+        total_query += query_started.elapsed();
+        assert_eq!(rows.len(), page_size);
+    }
+
+    Ok(MultiTabFanoutProbe {
+        total_rows,
+        target_owner_rows,
+        tab_count,
+        worker_boot_ms: ms(worker_boot_elapsed),
+        worker_export_ms: ms(worker_export_elapsed),
+        bundle_bytes: summary.bytes,
+        history_rows_synced: worker_bundle.history.len(),
+        transaction_rows_synced: worker_bundle.txs.len(),
+        total_tab_apply_ms: ms(total_apply),
+        average_tab_apply_ms: ms(total_apply) / tab_count as f64,
+        total_tab_query_ms: ms(total_query),
+        average_tab_query_ms: ms(total_query) / tab_count as f64,
     })
 }
 

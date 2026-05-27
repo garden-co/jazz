@@ -261,3 +261,15 @@ KB, and history rows are 110 (50 docs + 50 projects + 10 teams). This is
 encouraging for recursively lowerable policy chains at page-sized scopes. It
 also shows dependency cardinality follows the distinct ancestors of the observed
 page, not the total table size.
+
+## 2026-05-26 22:02 PDT
+
+Added a multi-tab fanout probe: one durable worker receives a page from core,
+exports the scoped page once, and the same bundle is applied to 8 fresh in-memory
+tabs. Profile is 20k docs / 2k owner docs / page 50.
+
+Result: worker boot from core is about 38 ms, worker export is about 3.8 ms,
+bundle size is 46 KB, and each tab apply averages about 19 ms with about 0.65 ms
+query time. This supports a broker/coalescing model: the expensive part should
+be done once in the worker, then tabs pay mostly local apply. It also highlights
+tab apply as an optimization target if we expect many simultaneous tabs.
