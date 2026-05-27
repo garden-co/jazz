@@ -15,6 +15,7 @@ mod subscription;
 pub mod sync;
 mod tx;
 mod types;
+mod users;
 
 pub use error::{Error, Result};
 pub use runtime::Runtime;

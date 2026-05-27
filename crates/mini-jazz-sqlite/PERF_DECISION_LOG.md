@@ -913,3 +913,33 @@ Release sample with 100 users x 500 rows:
 Learning: a narrow runtime implementation that interns only system users looks
 worth trying. It should leave user/app fields alone, preserve string bundle and
 public API boundaries, and translate only in storage/query/policy lowering.
+
+## 2026-05-27 00:44 PDT
+
+Implemented the narrow system-user interning slice in the runtime: added
+`jazz_user(user_num, user_id)`, changed per-row system metadata
+`j_created_by`/`j_updated_by` to integer user nums, and kept public rows,
+history bundles, auth metadata, and app-level fields such as `owner_id` as
+strings. Bumped storage format to 7.
+
+Coverage: full `cargo test -p mini-jazz-sqlite` is green: 284 whole-system tests
+passed. Added explicit storage-shape coverage that verifies `j_created_by` is
+INTEGER while an app `owner_id` field remains TEXT, and existing `$createdBy`,
+policy, subscription repair, sync fate, branch, recursive query, and schema lens
+tests continued to pass.
+
+Release perf after the runtime change on the 100k primary profile:
+
+- core file footprint: ~34.6 MB before -> ~29.3 MB after
+- documents current table: ~11.6 MB before -> ~8.9 MB after
+- documents history table: ~11.6 MB before -> ~8.9 MB after
+- first result: ~11.2 ms before -> ~12.6 ms after in this run
+- refresh: ~15.4 ms before -> ~17.7 ms after in this run
+- many-user 50k core footprint: ~19.2 MB before -> ~16.5 MB after, average
+  export still ~0.89 ms
+
+Learning: system-user interning is a real storage win and the semantic surface
+can stay clean. There is a small release latency regression in this single run,
+likely from scalar subqueries used to materialize user ids; a next optimization
+candidate is joining or caching user ids in hot row materialization/export paths
+if repeated samples confirm the regression.

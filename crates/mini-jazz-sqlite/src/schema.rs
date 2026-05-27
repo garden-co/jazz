@@ -314,6 +314,11 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           node_id TEXT NOT NULL UNIQUE
         );
 
+        CREATE TABLE IF NOT EXISTS jazz_user (
+          user_num INTEGER PRIMARY KEY,
+          user_id TEXT NOT NULL UNIQUE
+        );
+
         CREATE TABLE IF NOT EXISTS jazz_tx (
           tx_num INTEGER PRIMARY KEY,
           tx_id TEXT NOT NULL UNIQUE,
@@ -548,8 +553,8 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
           {user_columns},
           j_created_at INTEGER NOT NULL,
           j_updated_at INTEGER NOT NULL,
-          j_created_by TEXT NOT NULL,
-          j_updated_by TEXT NOT NULL,
+          j_created_by INTEGER NOT NULL,
+          j_updated_by INTEGER NOT NULL,
           PRIMARY KEY (row_num, tx_num)
         ) WITHOUT ROWID;
 
@@ -561,8 +566,8 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
           {user_columns},
           j_created_at INTEGER NOT NULL,
           j_updated_at INTEGER NOT NULL,
-          j_created_by TEXT NOT NULL,
-          j_updated_by TEXT NOT NULL,
+          j_created_by INTEGER NOT NULL,
+          j_updated_by INTEGER NOT NULL,
           PRIMARY KEY ({current_primary_key})
         ){current_table_suffix};
         "#,

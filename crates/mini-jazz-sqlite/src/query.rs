@@ -1,7 +1,7 @@
 use crate::rows::{public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::types::RowView;
-use crate::{branch, policy, tx, Result};
+use crate::{branch, policy, tx, users, Result};
 use rusqlite::{params, params_from_iter, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -160,7 +160,10 @@ impl QueryContext<'_> {
                 .iter()
                 .map(|column| format!("current.{column}")),
         );
-        select_columns.push("current.j_created_by".to_owned());
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("current", "j_created_by")
+        ));
         let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
         let order_column = crate::schema::quote_ident(&crate::schema::storage_column(order_field));
         let predicate_value =
@@ -257,12 +260,14 @@ impl QueryContext<'_> {
                 })
             })?;
         let current_row_columns = format!(
-            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, current.j_created_by AS j_created_by, current.{order_column} AS sort_value, current.row_num AS sort_row_num",
-            current_field_columns.join(", ")
+            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, {} AS j_created_by, current.{order_column} AS sort_value, current.row_num AS sort_row_num",
+            current_field_columns.join(", "),
+            users::user_id_expr("current", "j_created_by")
         );
         let history_row_columns = format!(
-            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, h.j_created_by AS j_created_by, h.{order_column} AS sort_value, h.row_num AS sort_row_num",
-            history_field_columns.join(", ")
+            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, {} AS j_created_by, h.{order_column} AS sort_value, h.row_num AS sort_row_num",
+            history_field_columns.join(", "),
+            users::user_id_expr("h", "j_created_by")
         );
         let outer_columns = format!("row_id, tx_id, {}, j_created_by", field_columns.join(", "));
         let current_table = crate::schema::current_table(table_name);
@@ -416,8 +421,9 @@ impl QueryContext<'_> {
                 })
             })?;
         let row_columns = format!(
-            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, current.j_created_by AS j_created_by, current.{order_column} AS sort_value, current.row_num AS sort_row_num",
-            cte_field_columns.join(", ")
+            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, {} AS j_created_by, current.{order_column} AS sort_value, current.row_num AS sort_row_num",
+            cte_field_columns.join(", "),
+            users::user_id_expr("current", "j_created_by")
         );
         let outer_columns = format!(
             "row_id, tx_id, {}, j_created_by",
@@ -572,7 +578,10 @@ impl QueryContext<'_> {
                 .iter()
                 .map(|column| format!("current.{column}")),
         );
-        select_columns.push("current.j_created_by".to_owned());
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("current", "j_created_by")
+        ));
         let source_branch_nums = branch::scope_nums(self.conn, self.branch_num)?
             .into_iter()
             .filter(|branch_num| *branch_num != self.branch_num)
@@ -674,7 +683,10 @@ impl QueryContext<'_> {
                 .iter()
                 .map(|column| format!("current.{column}")),
         );
-        select_columns.push("current.j_created_by".to_owned());
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("current", "j_created_by")
+        ));
         let policy_sql = self.read_policy_sql(table)?;
         let sql = format!(
             "WITH RECURSIVE subtree(row_num) AS (
@@ -892,7 +904,10 @@ impl QueryContext<'_> {
                 .iter()
                 .map(|column| format!("current.{column}")),
         );
-        select_columns.push("current.j_created_by".to_owned());
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("current", "j_created_by")
+        ));
         let sql = format!(
             "SELECT {}
              FROM {} current
@@ -936,7 +951,10 @@ impl QueryContext<'_> {
                 .iter()
                 .map(|column| format!("current.{column}")),
         );
-        select_columns.push("current.j_created_by".to_owned());
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("current", "j_created_by")
+        ));
         let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
         let scope_placeholders = placeholders(scope_nums.len());
         let sql = format!(
@@ -1036,7 +1054,10 @@ impl QueryContext<'_> {
                 .iter()
                 .map(|column| format!("current.{column}")),
         );
-        select_columns.push("current.j_created_by".to_owned());
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("current", "j_created_by")
+        ));
         let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
         let (predicate_sql, predicate_value) = if value.is_null() {
             if !field.nullable {
@@ -1165,7 +1186,10 @@ impl QueryContext<'_> {
                 .iter()
                 .map(|column| format!("current.{column}")),
         );
-        select_columns.push("current.j_created_by".to_owned());
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("current", "j_created_by")
+        ));
         let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
         let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
         let scope_placeholders = placeholders(scope_nums.len());
@@ -1298,7 +1322,10 @@ impl QueryContext<'_> {
             .collect::<Vec<_>>();
         let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
         select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
-        select_columns.push("h.j_created_by".to_owned());
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("h", "j_created_by")
+        ));
         let sql = format!(
             "SELECT {}
              FROM {} h

@@ -11,7 +11,7 @@ use crate::types::{
 };
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
-    storage, tx, Result, Storage,
+    storage, tx, users, Result, Storage,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
@@ -1433,6 +1433,7 @@ impl Runtime {
                     "$createdBy predicate expects a string value",
                 ));
             };
+            let created_by_num = users::ensure_user(db, created_by)?;
             let created_by_sql = match query_read.op.as_str() {
                 "eq" => "j_created_by = ?",
                 "ne" => "j_created_by != ?",
@@ -1467,9 +1468,9 @@ impl Runtime {
                 ),
                 params![
                     branch_num,
-                    created_by,
+                    created_by_num,
                     branch_num,
-                    created_by,
+                    created_by_num,
                     tx::OUTCOME_REJECTED
                 ],
             )?;
@@ -1610,11 +1611,13 @@ impl Runtime {
             "j_created_by".to_owned(),
             "j_updated_by".to_owned(),
         ]);
+        let created_by_num = users::ensure_user(context.db, &record.created_by)?;
+        let updated_by_num = users::ensure_user(context.db, &record.updated_by)?;
         values.extend([
             rusqlite::types::Value::Integer(record.created_at),
             rusqlite::types::Value::Integer(record.updated_at),
-            rusqlite::types::Value::Text(record.created_by.clone()),
-            rusqlite::types::Value::Text(record.updated_by.clone()),
+            rusqlite::types::Value::Integer(created_by_num),
+            rusqlite::types::Value::Integer(updated_by_num),
         ]);
         insert_dynamic(
             context.db,
@@ -2125,6 +2128,7 @@ impl Runtime {
             "j_created_by".to_owned(),
             "?".to_owned(),
         ]);
+        let user_num = users::ensure_user(&db, &user)?;
         let inserted = db.execute(
             &format!(
                 "INSERT OR IGNORE INTO {} ({})
@@ -2136,7 +2140,7 @@ impl Runtime {
                 select_columns.join(", "),
                 crate::schema::current_table(&table.name),
             ),
-            params![tx_num, now, user, row_num, self.branch_num],
+            params![tx_num, now, user_num, row_num, self.branch_num],
         )?;
         if inserted == 0 {
             let mut values = vec![
@@ -2159,8 +2163,8 @@ impl Runtime {
             values.extend([
                 rusqlite::types::Value::Integer(now),
                 rusqlite::types::Value::Integer(now),
-                rusqlite::types::Value::Text(user.to_owned()),
-                rusqlite::types::Value::Text(user.to_owned()),
+                rusqlite::types::Value::Integer(user_num),
+                rusqlite::types::Value::Integer(user_num),
             ]);
             insert_dynamic(
                 &db,
@@ -2210,8 +2214,8 @@ impl Runtime {
             current_values.extend([
                 rusqlite::types::Value::Integer(now),
                 rusqlite::types::Value::Integer(now),
-                rusqlite::types::Value::Text(user.to_owned()),
-                rusqlite::types::Value::Text(user.to_owned()),
+                rusqlite::types::Value::Integer(user_num),
+                rusqlite::types::Value::Integer(user_num),
             ]);
             insert_dynamic(
                 &db,
@@ -3513,11 +3517,13 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         current_creation_metadata(args.db, &table.name, row_num, args.branch_num)?
             .unwrap_or((args.now, args.user.to_owned()))
     };
+    let created_by_num = users::ensure_user(args.db, &created_by)?;
+    let updated_by_num = users::ensure_user(args.db, args.user)?;
     sql_values.extend([
         rusqlite::types::Value::Integer(created_at),
         rusqlite::types::Value::Integer(args.now),
-        rusqlite::types::Value::Text(created_by),
-        rusqlite::types::Value::Text(args.user.to_owned()),
+        rusqlite::types::Value::Integer(created_by_num),
+        rusqlite::types::Value::Integer(updated_by_num),
     ]);
     insert_dynamic(
         args.db,
@@ -3718,8 +3724,14 @@ fn history_records_for_tx(
         select_columns.extend([
             "h.j_created_at".to_owned(),
             "h.j_updated_at".to_owned(),
-            "h.j_created_by".to_owned(),
-            "h.j_updated_by".to_owned(),
+            format!(
+                "{} AS j_created_by",
+                users::user_id_expr("h", "j_created_by")
+            ),
+            format!(
+                "{} AS j_updated_by",
+                users::user_id_expr("h", "j_updated_by")
+            ),
         ]);
         let sql = format!(
             "SELECT {}
@@ -3921,18 +3933,23 @@ fn current_creation_metadata(
     row_num: i64,
     branch_num: i64,
 ) -> Result<Option<(i64, String)>> {
-    conn.query_row(
-        &format!(
-            "SELECT j_created_at, j_created_by
+    let metadata = conn
+        .query_row(
+            &format!(
+                "SELECT j_created_at, j_created_by
              FROM {}
              WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
-            crate::schema::current_table(table_name)
-        ),
-        params![row_num, branch_num],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .optional()
-    .map_err(Into::into)
+                crate::schema::current_table(table_name)
+            ),
+            params![row_num, branch_num],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    metadata
+        .map(|(created_at, created_by_num)| {
+            users::user_id(conn, created_by_num).map(|created_by| (created_at, created_by))
+        })
+        .transpose()
 }
 
 fn exclusive_write_conflict_exists(
@@ -4407,6 +4424,7 @@ impl<'a> TransactionBuilder<'a> {
                         "j_created_by".to_owned(),
                         "?".to_owned(),
                     ]);
+                    let user_num = users::ensure_user(&db, &user)?;
                     let inserted = db.execute(
                         &format!(
                             "INSERT OR IGNORE INTO {} ({})
@@ -4418,7 +4436,7 @@ impl<'a> TransactionBuilder<'a> {
                             select_columns.join(", "),
                             crate::schema::current_table(&table),
                         ),
-                        params![tx_num, now, user, row_num, self.runtime.branch_num],
+                        params![tx_num, now, user_num, row_num, self.runtime.branch_num],
                     )?;
                     if inserted == 0 {
                         let mut values = vec![
@@ -4440,8 +4458,8 @@ impl<'a> TransactionBuilder<'a> {
                         values.extend([
                             rusqlite::types::Value::Integer(now),
                             rusqlite::types::Value::Integer(now),
-                            rusqlite::types::Value::Text(user.to_owned()),
-                            rusqlite::types::Value::Text(user.to_owned()),
+                            rusqlite::types::Value::Integer(user_num),
+                            rusqlite::types::Value::Integer(user_num),
                         ]);
                         insert_dynamic(
                             &db,
@@ -4490,8 +4508,8 @@ impl<'a> TransactionBuilder<'a> {
                         current_values.extend([
                             rusqlite::types::Value::Integer(now),
                             rusqlite::types::Value::Integer(now),
-                            rusqlite::types::Value::Text(user.to_owned()),
-                            rusqlite::types::Value::Text(user.to_owned()),
+                            rusqlite::types::Value::Integer(user_num),
+                            rusqlite::types::Value::Integer(user_num),
                         ]);
                         insert_dynamic(
                             &db,
@@ -5699,6 +5717,11 @@ fn query_scope_repair_row_nums(
                 "$createdBy predicate expects a string value",
             ));
         };
+        let created_by_num = match users::user_num(conn, created_by) {
+            Ok(user_num) => user_num,
+            Err(_) if op == "eq" => return Ok(Vec::new()),
+            Err(_) => -1,
+        };
         let created_by_sql = match op {
             "eq" => "h.j_created_by = ?",
             "ne" => "h.j_created_by != ?",
@@ -5717,7 +5740,7 @@ fn query_scope_repair_row_nums(
             crate::schema::history_table(&table.name),
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![created_by, tx::OUTCOME_REJECTED], |row| {
+        let rows = stmt.query_map(params![created_by_num, tx::OUTCOME_REJECTED], |row| {
             row.get::<_, i64>(0)
         })?;
         return rows
@@ -5830,6 +5853,11 @@ fn query_scope_rejected_tx_ids(
         let created_by = value
             .as_str()
             .ok_or_else(|| crate::Error::new("$createdBy predicate expects a string value"))?;
+        let created_by_num = match users::user_num(conn, created_by) {
+            Ok(user_num) => user_num,
+            Err(_) if op == "eq" => return Ok(Vec::new()),
+            Err(_) => -1,
+        };
         let created_by_sql = match op {
             "eq" => "h.j_created_by = ?",
             "ne" => "h.j_created_by != ?",
@@ -5849,7 +5877,7 @@ fn query_scope_rejected_tx_ids(
             crate::schema::history_table(&table.name),
         );
         let mut stmt = conn.prepare(&sql)?;
-        let tx_ids = stmt.query_map(params![created_by, tx::OUTCOME_REJECTED], |row| {
+        let tx_ids = stmt.query_map(params![created_by_num, tx::OUTCOME_REJECTED], |row| {
             row.get::<_, String>(0)
         })?;
         return tx_ids
@@ -5967,8 +5995,14 @@ fn export_visible_table_history(
     select_columns.extend([
         "h.j_created_at".to_owned(),
         "h.j_updated_at".to_owned(),
-        "h.j_created_by".to_owned(),
-        "h.j_updated_by".to_owned(),
+        format!(
+            "{} AS j_created_by",
+            users::user_id_expr("h", "j_created_by")
+        ),
+        format!(
+            "{} AS j_updated_by",
+            users::user_id_expr("h", "j_updated_by")
+        ),
     ]);
     let sql = format!(
         "SELECT {}
@@ -6055,8 +6089,14 @@ fn export_history_versions_for_rows(
     select_columns.extend([
         "h.j_created_at".to_owned(),
         "h.j_updated_at".to_owned(),
-        "h.j_created_by".to_owned(),
-        "h.j_updated_by".to_owned(),
+        format!(
+            "{} AS j_created_by",
+            users::user_id_expr("h", "j_created_by")
+        ),
+        format!(
+            "{} AS j_updated_by",
+            users::user_id_expr("h", "j_updated_by")
+        ),
     ]);
     let sql = format!(
         "SELECT {}

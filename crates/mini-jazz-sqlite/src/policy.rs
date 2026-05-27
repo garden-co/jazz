@@ -1,5 +1,5 @@
 use crate::schema::{FieldKind, PolicyDef, SchemaDef, TableDef};
-use crate::{branch, tx, Result};
+use crate::{branch, tx, users, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -20,6 +20,7 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
     match &check.table.write_policy {
         PolicyDef::AllowAll => Ok(true),
         PolicyDef::CreatedByUser => {
+            let user_num = users::ensure_user(check.db, check.user)?;
             let count: i64 = check.db.query_row(
                 &format!(
                     "SELECT COUNT(*)
@@ -29,7 +30,7 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
                        AND current.j_created_by = ?",
                     crate::schema::current_table(&check.table.name)
                 ),
-                params![check.row_num, check.branch_num, check.user],
+                params![check.row_num, check.branch_num, user_num],
                 |row| row.get(0),
             )?;
             Ok(count > 0)
@@ -246,7 +247,7 @@ fn lower_policy(
     match policy {
         PolicyDef::AllowAll => Ok("1 = 1".to_owned()),
         PolicyDef::CreatedByUser => Ok(format!(
-            "{alias}.j_created_by = '{}'",
+            "{alias}.j_created_by = (SELECT user_num FROM jazz_user WHERE user_id = '{}')",
             user.replace('\'', "''")
         )),
         PolicyDef::RefReadable { field } => {
@@ -321,7 +322,7 @@ fn lower_snapshot_policy(
     match policy {
         PolicyDef::AllowAll => Ok("1 = 1".to_owned()),
         PolicyDef::CreatedByUser => Ok(format!(
-            "{alias}.j_created_by = '{}'",
+            "{alias}.j_created_by = (SELECT user_num FROM jazz_user WHERE user_id = '{}')",
             user.replace('\'', "''")
         )),
         PolicyDef::RefReadable { field } => {
