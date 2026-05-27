@@ -3,6 +3,7 @@ use mini_jazz_sqlite::{
     ApplyBundleProfile, QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef,
     Storage,
 };
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -26,6 +27,7 @@ fn main() -> BenchResult<()> {
         multi_tab_fanout_probe: run_multi_tab_fanout_probe()?,
         many_user_page_probe: run_many_user_page_probe()?,
         user_id_footprint_probe: run_user_id_footprint_probe()?,
+        user_id_interning_projection_probe: run_user_id_interning_projection_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
         wide_schema_apply_probe: run_wide_schema_apply_probe()?,
         storage_topology_probe: run_storage_topology_probe()?,
@@ -73,6 +75,7 @@ struct BenchmarkReport {
     multi_tab_fanout_probe: MultiTabFanoutProbe,
     many_user_page_probe: ManyUserPageProbe,
     user_id_footprint_probe: UserIdFootprintProbe,
+    user_id_interning_projection_probe: UserIdInterningProjectionProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
     wide_schema_apply_probe: WideSchemaApplyProbe,
     storage_topology_probe: StorageTopologyProbe,
@@ -211,6 +214,23 @@ struct UserIdFootprintCase {
     current_page_bytes: i64,
     history_page_bytes: i64,
     tx_page_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct UserIdInterningProjectionProbe {
+    text_system_users: UserIdInterningProjectionCase,
+    interned_system_users: UserIdInterningProjectionCase,
+    saved_bytes_per_row: f64,
+}
+
+#[derive(Serialize)]
+struct UserIdInterningProjectionCase {
+    user_count: usize,
+    rows_per_user: usize,
+    representative_user_id_bytes: usize,
+    database_bytes: i64,
+    seed_ms: f64,
+    materialize_page_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -810,6 +830,164 @@ fn run_user_id_footprint_case(
             .get("documents__schema_v1_history")
             .unwrap_or(&0),
         tx_page_bytes: *stats.table_page_bytes.get("jazz_tx").unwrap_or(&0),
+    })
+}
+
+fn run_user_id_interning_projection_probe() -> BenchResult<UserIdInterningProjectionProbe> {
+    let user_count = 100;
+    let rows_per_user = 500;
+    let text_system_users =
+        run_user_id_interning_projection_case(user_count, rows_per_user, false)?;
+    let interned_system_users =
+        run_user_id_interning_projection_case(user_count, rows_per_user, true)?;
+    let total_rows = user_count * rows_per_user;
+    Ok(UserIdInterningProjectionProbe {
+        saved_bytes_per_row: (text_system_users.database_bytes
+            - interned_system_users.database_bytes) as f64
+            / total_rows as f64,
+        text_system_users,
+        interned_system_users,
+    })
+}
+
+fn run_user_id_interning_projection_case(
+    user_count: usize,
+    rows_per_user: usize,
+    interned: bool,
+) -> BenchResult<UserIdInterningProjectionCase> {
+    let dir = tempdir()?;
+    let path = dir.path().join(if interned {
+        "interned.sqlite"
+    } else {
+        "text.sqlite"
+    });
+    let mut conn = Connection::open(path)?;
+    conn.pragma_update(None, "journal_mode", "OFF")?;
+    conn.pragma_update(None, "synchronous", "OFF")?;
+
+    if interned {
+        conn.execute_batch(
+            "CREATE TABLE jazz_user (
+               user_num INTEGER PRIMARY KEY,
+               user_id TEXT NOT NULL UNIQUE
+             );
+             CREATE TABLE documents (
+               row_num INTEGER PRIMARY KEY,
+               owner_id TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               title TEXT NOT NULL,
+               j_created_by_num INTEGER NOT NULL,
+               j_updated_by_num INTEGER NOT NULL
+             );
+             CREATE INDEX documents_owner_updated
+               ON documents(owner_id, updated_at DESC, row_num);",
+        )?;
+    } else {
+        conn.execute_batch(
+            "CREATE TABLE documents (
+               row_num INTEGER PRIMARY KEY,
+               owner_id TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               title TEXT NOT NULL,
+               j_created_by TEXT NOT NULL,
+               j_updated_by TEXT NOT NULL
+             );
+             CREATE INDEX documents_owner_updated
+               ON documents(owner_id, updated_at DESC, row_num);",
+        )?;
+    }
+
+    let seed_started = Instant::now();
+    let tx = conn.transaction()?;
+    if interned {
+        {
+            let mut insert_user =
+                tx.prepare("INSERT INTO jazz_user (user_num, user_id) VALUES (?, ?)")?;
+            for user_index in 0..user_count {
+                insert_user.execute(params![
+                    user_index as i64 + 1,
+                    synthetic_user_id(user_index, true)
+                ])?;
+            }
+        }
+        {
+            let mut insert_doc = tx.prepare(
+                "INSERT INTO documents
+                   (row_num, owner_id, updated_at, title, j_created_by_num, j_updated_by_num)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )?;
+            for row_index in 0..(user_count * rows_per_user) {
+                let user_index = row_index / rows_per_user;
+                insert_doc.execute(params![
+                    row_index as i64 + 1,
+                    synthetic_user_id(user_index, true),
+                    format!("{:020}", row_index),
+                    format!("Projected document {row_index}"),
+                    user_index as i64 + 1,
+                    user_index as i64 + 1
+                ])?;
+            }
+        }
+    } else {
+        let mut insert_doc = tx.prepare(
+            "INSERT INTO documents
+               (row_num, owner_id, updated_at, title, j_created_by, j_updated_by)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )?;
+        for row_index in 0..(user_count * rows_per_user) {
+            let user_index = row_index / rows_per_user;
+            let user_id = synthetic_user_id(user_index, true);
+            insert_doc.execute(params![
+                row_index as i64 + 1,
+                user_id,
+                format!("{:020}", row_index),
+                format!("Projected document {row_index}"),
+                user_id,
+                synthetic_user_id(user_index, true)
+            ])?;
+        }
+    }
+    tx.commit()?;
+    let seed_elapsed = seed_started.elapsed();
+
+    let owner = synthetic_user_id(0, true);
+    let materialize_started = Instant::now();
+    if interned {
+        let mut stmt = conn.prepare(
+            "SELECT d.row_num, d.owner_id, d.updated_at, d.title, created.user_id, updated.user_id
+             FROM documents d
+             JOIN jazz_user created ON created.user_num = d.j_created_by_num
+             JOIN jazz_user updated ON updated.user_num = d.j_updated_by_num
+             WHERE d.owner_id = ?
+             ORDER BY d.updated_at DESC, d.row_num
+             LIMIT 50",
+        )?;
+        let rows = stmt
+            .query_map(params![owner], |row| row.get::<_, String>(4))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows.len(), 50);
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT row_num, owner_id, updated_at, title, j_created_by, j_updated_by
+             FROM documents
+             WHERE owner_id = ?
+             ORDER BY updated_at DESC, row_num
+             LIMIT 50",
+        )?;
+        let rows = stmt
+            .query_map(params![owner], |row| row.get::<_, String>(4))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows.len(), 50);
+    }
+    let materialize_elapsed = materialize_started.elapsed();
+
+    Ok(UserIdInterningProjectionCase {
+        user_count,
+        rows_per_user,
+        representative_user_id_bytes: synthetic_user_id(0, true).len(),
+        database_bytes: sqlite_database_bytes(&conn)?,
+        seed_ms: ms(seed_elapsed),
+        materialize_page_ms: ms(materialize_elapsed),
     })
 }
 
@@ -2111,6 +2289,12 @@ fn timed_apply_bundles(runtime: &mut Runtime, bundles: Vec<Bundle>) -> Result<Du
 
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+fn sqlite_database_bytes(conn: &Connection) -> Result<i64> {
+    let page_count: i64 = conn.pragma_query_value(None, "page_count", |row| row.get(0))?;
+    let page_size: i64 = conn.pragma_query_value(None, "page_size", |row| row.get(0))?;
+    Ok(page_count * page_size)
 }
 
 fn process_rss_bytes() -> Option<i64> {

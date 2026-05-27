@@ -892,3 +892,24 @@ Learning: larger pages do not look like an easy win for this shape. The default
 SQLite core itself also does not give us transparent page compression as a
 portable pragma; useful compression likely belongs either below SQLite in a VFS
 or at the transport stream layer.
+
+## 2026-05-27 00:39 PDT
+
+Added a raw SQLite projection probe for system-user interning. This does not
+change the runtime yet; it compares two equivalent physical projections with
+long production-shaped user ids:
+
+- text system users: store `j_created_by`/`j_updated_by` as text on each row
+- interned system users: store `j_created_by_num`/`j_updated_by_num` and join a
+  tiny `jazz_user` table when materializing rows
+
+Release sample with 100 users x 500 rows:
+
+- text: ~24.50 MB, seed ~197 ms, materialize 50-row page ~0.085 ms
+- interned: ~16.71 MB, seed ~161 ms, materialize 50-row page ~0.091 ms
+- savings: ~156 bytes per row for system metadata alone, while app-level
+  `owner_id` remains text
+
+Learning: a narrow runtime implementation that interns only system users looks
+worth trying. It should leave user/app fields alone, preserve string bundle and
+public API boundaries, and translate only in storage/query/policy lowering.
