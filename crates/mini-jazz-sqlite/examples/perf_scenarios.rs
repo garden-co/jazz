@@ -27,6 +27,7 @@ fn main() -> BenchResult<()> {
         multi_query_refresh_probe: run_multi_query_refresh_probe()?,
         subscription_storm_probe: run_subscription_storm_probe()?,
         branch_overlay_probe: run_branch_overlay_probe()?,
+        pinned_branch_snapshot_probe: run_pinned_branch_snapshot_probe()?,
         export_profile_probe: run_export_profile_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -69,6 +70,7 @@ struct BenchmarkReport {
     multi_query_refresh_probe: MultiQueryRefreshProbe,
     subscription_storm_probe: SubscriptionStormProbe,
     branch_overlay_probe: BranchOverlayProbe,
+    pinned_branch_snapshot_probe: PinnedBranchSnapshotProbe,
     export_profile_probe: ExportProfileProbe,
 }
 
@@ -280,6 +282,21 @@ struct BranchOverlayProbe {
     main_visible_rows: usize,
     branch_visible_rows: usize,
     main_query_ms: f64,
+    branch_query_ms: f64,
+    branch_export_ms: f64,
+    branch_bundle_bytes: usize,
+    branch_history_rows: usize,
+    branch_transaction_rows: usize,
+}
+
+#[derive(Serialize)]
+struct PinnedBranchSnapshotProbe {
+    total_rows: usize,
+    target_owner_rows: usize,
+    page_size: usize,
+    post_base_updates: usize,
+    overlay_updates: usize,
+    branch_visible_rows: usize,
     branch_query_ms: f64,
     branch_export_ms: f64,
     branch_bundle_bytes: usize,
@@ -1073,6 +1090,94 @@ fn run_branch_overlay_probe() -> BenchResult<BranchOverlayProbe> {
         main_visible_rows: main_rows.len(),
         branch_visible_rows: branch_rows.len(),
         main_query_ms: ms(main_query_elapsed),
+        branch_query_ms: ms(branch_query_elapsed),
+        branch_export_ms: ms(branch_export_elapsed),
+        branch_bundle_bytes: branch_summary.bytes,
+        branch_history_rows: branch_bundle.history.len(),
+        branch_transaction_rows: branch_bundle.txs.len(),
+    })
+}
+
+fn run_pinned_branch_snapshot_probe() -> BenchResult<PinnedBranchSnapshotProbe> {
+    let total_rows = 10_000;
+    let target_owner_rows = 1_000;
+    let page_size = 50;
+    let post_base_updates = 100;
+    let overlay_updates = 50;
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut runtime = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema,
+    )?;
+
+    seed_orgs(&mut runtime)?;
+    let mut base_tx = runtime.transaction().exclusive_at_global(1);
+    for row_index in 0..total_rows {
+        base_tx = base_tx.insert_row(
+            "documents",
+            &format!("doc-{row_index}"),
+            document_values(row_index, target_owner_rows),
+        );
+    }
+    base_tx.commit()?;
+    runtime.create_branch("pinned", Some(1))?;
+    for index in 0..post_base_updates {
+        runtime
+            .transaction()
+            .insert_row(
+                "documents",
+                &format!("doc-post-base-{index}"),
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!(OWNER)),
+                    ("org".to_owned(), json!("org-0")),
+                    (
+                        "title".to_owned(),
+                        json!(format!("Post base insert {index}")),
+                    ),
+                    (
+                        "updated_at".to_owned(),
+                        json!(format!("{:020}", total_rows + index)),
+                    ),
+                ]),
+            )
+            .commit()?;
+    }
+
+    runtime.checkout_branch("pinned")?;
+    let mut tx = runtime.transaction();
+    for index in 0..overlay_updates {
+        let row_index = target_owner_rows - 1 - index;
+        tx = tx.update_row(
+            "documents",
+            &format!("doc-{row_index}"),
+            BTreeMap::from([
+                ("title".to_owned(), json!(format!("Pinned draft {index}"))),
+                (
+                    "updated_at".to_owned(),
+                    json!(format!("{:020}", total_rows + post_base_updates + index)),
+                ),
+            ]),
+        );
+    }
+    tx.commit()?;
+
+    let branch_query_started = Instant::now();
+    let branch_rows = read_top_owner_page(&runtime, page_size)?;
+    let branch_query_elapsed = branch_query_started.elapsed();
+    let branch_export_started = Instant::now();
+    let branch_bundle = export_top_owner_page(&mut runtime, page_size)?;
+    let branch_export_elapsed = branch_export_started.elapsed();
+    let branch_summary = BundleSummary::from(&branch_bundle)?;
+
+    Ok(PinnedBranchSnapshotProbe {
+        total_rows,
+        target_owner_rows,
+        page_size,
+        post_base_updates,
+        overlay_updates,
+        branch_visible_rows: branch_rows.len(),
         branch_query_ms: ms(branch_query_elapsed),
         branch_export_ms: ms(branch_export_elapsed),
         branch_bundle_bytes: branch_summary.bytes,

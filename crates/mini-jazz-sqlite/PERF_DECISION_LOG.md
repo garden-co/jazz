@@ -520,3 +520,24 @@ scoped-sync rule: once a query has selected concrete child rows, dependency
 export may use those child rows to find the referenced parents instead of
 rediscovering all readable children. Future deeper policy cases should keep
 testing for no leakage from hidden/unrelated repair rows.
+
+## 2026-05-26 23:09 PDT
+
+Added a pinned branch snapshot probe after a false start. The first version made
+the branch base too early, so the branch attempted to update rows that did not
+exist at its base snapshot. The fixed probe seeds 10k documents in one globally
+accepted base transaction, creates a pinned branch at epoch 1, adds later main
+rows that should be ignored by the pinned base, then applies a sparse branch
+overlay.
+
+Result: this is the first clearly bad branch number after the direct-main-source
+fast path. For 10k base rows, 1k owner rows, 100 later main inserts, and 50
+branch overlay updates, the pinned branch top-page query is about 105 ms and the
+export is about 60 ms. The bundle is about 1.36 MB with 1200 history rows and
+103 transactions.
+
+Learning: pure-query pinned snapshot reads are acceptable for small historical
+lookups but not yet good enough for page-shaped branch workflows. The broad
+history payload is especially suspicious: the page result is 50 rows, but export
+pulls the whole 1000-row owner base plus policy dependencies. This makes pinned
+branch query/export the next branch-specific optimization target.
