@@ -2000,3 +2000,33 @@ scales, including whole-topology propagation. The remaining uncomfortable
 pattern is not ordinary page refresh or cold apply anymore; it is broad
 unchanged recursive scopes, where every tier still re-exports, re-applies, and
 re-polls thousands of rows to discover nothing changed.
+
+## 2026-05-27 03:12 PDT
+
+Ran the final code with the recursive tree scaled to 10k rows.
+
+10k direct subscription probe:
+
+- initial read ~28.4 ms
+- initial export ~123.7 ms
+- initial apply ~260.6 ms in this run
+- mutation refresh read ~28.7 ms
+- mutation refresh export ~126.7 ms
+- mutation refresh apply ~48.0 ms
+- mutation subscription poll ~33.4 ms
+- no-op refresh export ~128.6 ms
+- no-op refresh apply ~49.2 ms
+- no-op subscription poll ~31.4 ms
+- bundle size ~3.37 MiB initial / ~3.40 MiB refresh
+
+10k topology probe, core -> edge -> worker -> tab:
+
+- gzipped bundle size was ~102 KiB initial / ~105 KiB refresh over ~3.4 MiB JSON
+- initial apply per tier was ~146-158 ms
+- refresh apply per tier was ~48-71 ms
+- full benchmark RSS ended around ~213 MiB with the 10k recursive setting
+
+Learning: 10k recursive scopes are no longer catastrophic, but the shape remains
+expensive enough that we should treat "refresh huge unchanged recursive scope"
+as a first-class design problem. Stream compression makes transport bytes look
+surprisingly good, while CPU stays dominated by full-scope export/apply/poll.
