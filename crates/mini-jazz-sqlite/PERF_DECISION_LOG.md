@@ -1850,3 +1850,26 @@ Learning: the cold-apply fast path compounds across the topology and removes
 roughly 280 ms of total initial forwarding latency for a 10k recursive scope.
 The remaining warm-refresh cost is still history/read-set work for existing row
 ids.
+
+## 2026-05-27 02:48 PDT
+
+Added an idempotent-history apply fast path: if `(row_num, tx_num)` already
+exists in a table's history, skip rewriting that history row, tx-write row, and
+current projection for that record.
+
+10k recursive subscription:
+
+- refresh apply total: ~160 ms -> ~42 ms
+- refresh history/current projection: ~128 ms -> ~9.7 ms
+- read-set writes still cost ~32 ms
+
+10k recursive topology:
+
+- refresh edge apply: ~195 ms -> ~65 ms
+- refresh worker apply: ~159 ms -> ~42 ms
+- refresh tab apply: ~162 ms -> ~42 ms
+
+Learning: this is the warm-refresh counterpart to the cold-apply fast path.
+Because broad recursive refresh bundles currently resend mostly already-known
+history, idempotent apply must be cheap. The next remaining warm-refresh apply
+cost is read-set insertion for the repeated 10k-row scope.

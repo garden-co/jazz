@@ -1633,6 +1633,20 @@ impl Runtime {
             .copied()
             .map(Ok)
             .unwrap_or_else(|| branch::ensure(context.db, &record.branch_id, None, now_ms()))?;
+        let tx_info = context
+            .tx_info_by_num
+            .get(&tx_num)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| tx_apply_info(context.db, tx_num))?;
+        let outcome = tx_info.outcome;
+        let history_exists = history_record_exists(context.db, &record.table, row_num, tx_num)?;
+        if history_exists
+            && current_visible_tx_num(context.db, &record.table, row_num, branch_num)?
+                .is_none_or(|current_tx_num| current_tx_num == tx_num)
+        {
+            return Ok(());
+        }
 
         let mut columns = vec![
             "row_num".to_owned(),
@@ -1679,26 +1693,22 @@ impl Runtime {
             rusqlite::types::Value::Integer(created_by_num),
             rusqlite::types::Value::Integer(updated_by_num),
         ]);
-        insert_dynamic(
-            context.db,
-            &crate::schema::history_table(&record.table),
-            &columns,
-            &values,
-        )?;
+        if !history_exists {
+            insert_dynamic(
+                context.db,
+                &crate::schema::history_table(&record.table),
+                &columns,
+                &values,
+            )?;
+        }
         let table_num = context
             .table_nums_by_name
             .get(&record.table)
             .copied()
             .ok_or_else(|| crate::Error::new("history record references missing table"))?;
-        record_tx_write_num(context.db, tx_num, table_num, row_num, record.op)?;
-
-        let tx_info = context
-            .tx_info_by_num
-            .get(&tx_num)
-            .copied()
-            .map(Ok)
-            .unwrap_or_else(|| tx_apply_info(context.db, tx_num))?;
-        let outcome = tx_info.outcome;
+        if !history_exists {
+            record_tx_write_num(context.db, tx_num, table_num, row_num, record.op)?;
+        }
         if outcome == tx::OUTCOME_PENDING && tx_info.conflict_mode == tx::MODE_EXCLUSIVE {
             return Ok(());
         }
@@ -4988,6 +4998,24 @@ fn current_visible_tx_num(
         .map(|row| row.get(0))
         .transpose()
         .map_err(Into::into)
+}
+
+fn history_record_exists(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    tx_num: i64,
+) -> Result<bool> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT 1
+         FROM {}
+         WHERE row_num = ?
+           AND tx_num = ?
+         LIMIT 1",
+        crate::schema::history_table(table_name)
+    ))?;
+    let mut rows = stmt.query(params![row_num, tx_num])?;
+    Ok(rows.next()?.is_some())
 }
 
 fn tx_is_newer_than_current_fast_path(
