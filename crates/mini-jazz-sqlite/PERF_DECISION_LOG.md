@@ -2307,3 +2307,30 @@ Learning: including intermediary exports changes the primary topology headline
 but not the conclusion at page scale, because exports are small for bounded page
 queries. The correction matters much more for broad recursive scopes, where
 per-hop export is on the same order as apply.
+
+## 2026-05-27 03:32 PDT
+
+Ran two more focused 10k recursive topology pragma probes.
+
+`MINI_JAZZ_SQLITE_TEMP_STORE=MEMORY`:
+
+- initial core export ~125.4 ms
+- initial edge export ~132.1 ms
+- refresh core export ~126.1 ms
+- refresh edge export ~136.1 ms
+- initial edge apply ~158.1 ms
+- refresh edge apply ~78.4 ms
+
+`MINI_JAZZ_SQLITE_CACHE_SIZE=-64000` (roughly 64 MiB cache):
+
+- initial core export ~125.0 ms
+- initial edge export ~122.6 ms
+- refresh core export ~126.4 ms
+- refresh edge export ~125.8 ms
+- initial edge apply ~157.5 ms
+- refresh edge apply ~50.7 ms
+
+Learning: `temp_store=MEMORY` did not help. A larger SQLite page cache may help
+warm broad refresh apply materially, though this needs repeated isolated runs to
+separate signal from noise. This is a plausible runtime tuning knob for
+edge/worker processes, but still secondary to avoiding full-scope no-op work.
