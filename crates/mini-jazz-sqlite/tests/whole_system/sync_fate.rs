@@ -1242,10 +1242,13 @@ fn top_created_at_query_scope_refresh_replaces_displaced_page_boundary_row() {
 
     peer.apply_bundle(&alice.export_query_scope_newest_open_todos(2).unwrap())
         .unwrap();
+    let observed_query = peer.observed_query_reads().unwrap()[0].clone();
+    assert_eq!(observed_query.op, "query");
     assert_eq!(
-        peer.observed_query_reads().unwrap()[0].op,
-        "eq_top_created_at_desc"
+        observed_query.value["orderBy"],
+        json!([["$createdAt", "desc"]])
     );
+    assert_eq!(observed_query.value["limit"], json!(2));
     assert_eq!(
         peer.newest_open_todos(2)
             .unwrap()

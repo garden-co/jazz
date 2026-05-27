@@ -1,3 +1,4 @@
+use crate::query_api::BuiltQuery;
 use crate::rows::{public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::types::RowView;
@@ -77,30 +78,38 @@ impl QueryContext<'_> {
         self.read_rows_from_current_where_eq(table_name, field, &value, true)
     }
 
-    pub(crate) fn read_rows_where_eq_top_created_at_desc(
+    pub(crate) fn read_rows_for_built_query(
         &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        limit: usize,
-    ) -> Result<Vec<RowView>> {
-        if field_name == "id" || field_name == "$createdBy" {
-            return self
-                .read_rows_where_eq_top_created_at_desc_slow(table_name, field_name, value, limit);
+        query: &BuiltQuery,
+    ) -> Result<Option<Vec<RowView>>> {
+        let Some((condition, limit)) = query.ordered_page() else {
+            return Ok(None);
+        };
+        if condition.column == "id" || condition.column == "$createdBy" || self.branch_num != 1 {
+            return Ok(Some(self.read_ordered_page_slow(
+                &query.table,
+                &condition.column,
+                condition.value.clone(),
+                limit,
+            )?));
         }
-        let table = self.schema.table_def(table_name)?;
+        let table = self.schema.table_def(&query.table)?;
         let field = table
             .fields
             .iter()
-            .find(|field| field.name == field_name)
-            .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
-        if self.branch_num != 1 {
-            return self
-                .read_rows_where_eq_top_created_at_desc_slow(table_name, field_name, value, limit);
-        }
-        self.read_main_rows_from_current_where_eq_top_created_at_desc(
-            table_name, field, &value, limit,
-        )
+            .find(|field| field.name == condition.column)
+            .ok_or_else(|| {
+                crate::Error::new(format!(
+                    "unknown field {}.{}",
+                    query.table, condition.column
+                ))
+            })?;
+        Ok(Some(self.read_main_ordered_page_where_eq(
+            &query.table,
+            field,
+            &condition.value,
+            limit,
+        )?))
     }
 
     pub(crate) fn read_rows_where_in(
@@ -1500,7 +1509,7 @@ impl QueryContext<'_> {
             .collect()
     }
 
-    fn read_main_rows_from_current_where_eq_top_created_at_desc(
+    fn read_main_ordered_page_where_eq(
         &self,
         table_name: &str,
         field: &FieldDef,
@@ -1572,7 +1581,7 @@ impl QueryContext<'_> {
             params.push(predicate_value);
         }
         let limit = i64::try_from(limit)
-            .map_err(|_| crate::Error::new("top created query limit is too large"))?;
+            .map_err(|_| crate::Error::new("ordered query limit is too large"))?;
         params.push(rusqlite::types::Value::Integer(limit));
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
@@ -1585,7 +1594,7 @@ impl QueryContext<'_> {
             .collect()
     }
 
-    fn read_rows_where_eq_top_created_at_desc_slow(
+    fn read_ordered_page_slow(
         &self,
         table_name: &str,
         field_name: &str,
@@ -1925,5 +1934,83 @@ pub(crate) fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<S
     match value {
         rusqlite::types::Value::Text(value) => Ok(value.clone()),
         _ => Err(crate::Error::new(format!("expected text {name}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{schema, storage, tx, Storage};
+    use rusqlite::params;
+    use serde_json::json;
+
+    #[test]
+    fn top_created_at_query_returns_only_latest_page() -> Result<()> {
+        let schema = SchemaDef::attempt3_fixture();
+        let conn = storage::open(Storage::Memory)?;
+        schema::install(&conn, &schema)?;
+        seed_todos(&conn, 100)?;
+
+        let context = QueryContext {
+            conn: &conn,
+            schema: &schema,
+            branch_num: 1,
+            user: "alice",
+            bypass_policy: false,
+        };
+
+        let query = BuiltQuery::from_json_value(json!({
+            "table": "todos",
+            "conditions": [{"column": "done", "op": "eq", "value": false}],
+            "orderBy": [["$createdAt", "desc"]],
+            "limit": 10,
+        }))?;
+        let rows = context.read_rows_for_built_query(&query)?.unwrap();
+
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[0].id, "todo-100");
+        assert_eq!(rows[9].id, "todo-91");
+        Ok(())
+    }
+
+    fn seed_todos(conn: &Connection, count: i64) -> Result<()> {
+        users::ensure_user(conn, "alice")?;
+        conn.execute(
+            "INSERT INTO jazz_node (node_num, node_id) VALUES (1, 'node-a')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO jazz_tx
+              (tx_num, tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
+             VALUES (1, 'tx-1', 1, 1, NULL, ?, ?, ?, 1, '{}')",
+            params![tx::KIND_DATA, tx::MODE_MERGEABLE, tx::OUTCOME_ACCEPTED],
+        )?;
+        conn.execute(
+            "INSERT INTO jazz_row_id (row_num, table_name, row_id)
+             VALUES (1, 'projects', 'project-1')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO projects__schema_v1_current
+              (row_num, j_branch_num, visible_tx_num, is_deleted, title, j_created_at, j_updated_at, j_created_by, j_updated_by)
+             VALUES (1, 1, 1, 0, 'Project', 1, 1, 1, 1)",
+            [],
+        )?;
+        for index in 1..=count {
+            let row_num = index + 1;
+            let row_id = format!("todo-{index}");
+            conn.execute(
+                "INSERT INTO jazz_row_id (row_num, table_name, row_id)
+                 VALUES (?, 'todos', ?)",
+                params![row_num, row_id],
+            )?;
+            conn.execute(
+                "INSERT INTO todos__schema_v1_current
+                  (row_num, j_branch_num, visible_tx_num, is_deleted, title, done, project_row_num, j_created_at, j_updated_at, j_created_by, j_updated_by)
+                 VALUES (?, 1, 1, 0, ?, 0, 1, ?, ?, 1, 1)",
+                params![row_num, format!("Todo {index}"), index, index],
+            )?;
+        }
+        Ok(())
     }
 }

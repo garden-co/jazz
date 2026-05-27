@@ -101,27 +101,6 @@ impl RowsSubscription {
         }
     }
 
-    pub(crate) fn where_eq_top_created_at_desc(
-        table: &str,
-        field: &str,
-        value: JsonValue,
-        limit: usize,
-        rows: Vec<RowView>,
-    ) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table,
-                field,
-                "eq_top_created_at_desc",
-                serde_json::json!({
-                    "eq": value,
-                    "limit": limit,
-                }),
-            )),
-            last_rows: rows,
-        }
-    }
-
     pub(crate) fn where_eq_top_field_desc(
         table: &str,
         field: &str,

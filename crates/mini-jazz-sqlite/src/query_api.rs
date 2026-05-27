@@ -71,7 +71,7 @@ impl BuiltQuery {
         })
     }
 
-    fn top_created_at_desc_fast_path(&self) -> Option<(&QueryCondition, usize)> {
+    pub(crate) fn ordered_page(&self) -> Option<(&QueryCondition, usize)> {
         if self.offset.unwrap_or(0) != 0 || self.conditions.len() != 1 || self.order_by.len() != 1 {
             return None;
         }
@@ -87,19 +87,7 @@ impl BuiltQuery {
         }
     }
 
-    fn export_scope(&self) -> Result<QueryExportScope> {
-        if let Some((condition, limit)) = self.top_created_at_desc_fast_path() {
-            return Ok(QueryExportScope {
-                table: self.table.clone(),
-                field: condition.column.clone(),
-                op: "eq_top_created_at_desc",
-                value: serde_json::json!({
-                    "eq": condition.value.clone(),
-                    "limit": limit,
-                }),
-            });
-        }
-
+    pub(crate) fn single_predicate_export_condition(&self) -> Result<Option<&QueryCondition>> {
         if self.conditions.len() != 1
             || !self.order_by.is_empty()
             || self.limit.is_some()
@@ -110,18 +98,53 @@ impl BuiltQuery {
             ));
         }
 
-        let condition = &self.conditions[0];
-        Ok(QueryExportScope {
-            table: self.table.clone(),
-            field: condition.column.clone(),
-            op: condition.op.query_read_op(),
-            value: condition.value.clone(),
-        })
+        Ok(self.conditions.first())
+    }
+
+    pub(crate) fn to_json_value(&self) -> JsonValue {
+        let mut object = JsonMap::new();
+        object.insert("table".to_owned(), JsonValue::String(self.table.clone()));
+        object.insert(
+            "conditions".to_owned(),
+            JsonValue::Array(
+                self.conditions
+                    .iter()
+                    .map(|condition| {
+                        serde_json::json!({
+                            "column": condition.column.clone(),
+                            "op": condition.op.as_str(),
+                            "value": condition.value.clone(),
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+        object.insert(
+            "orderBy".to_owned(),
+            JsonValue::Array(
+                self.order_by
+                    .iter()
+                    .map(|order| {
+                        JsonValue::Array(vec![
+                            JsonValue::String(order.column.clone()),
+                            JsonValue::String(order.direction.as_str().to_owned()),
+                        ])
+                    })
+                    .collect(),
+            ),
+        );
+        if let Some(limit) = self.limit {
+            object.insert("limit".to_owned(), serde_json::json!(limit));
+        }
+        if let Some(offset) = self.offset {
+            object.insert("offset".to_owned(), serde_json::json!(offset));
+        }
+        JsonValue::Object(object)
     }
 }
 
 impl QueryConditionOp {
-    fn query_read_op(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             QueryConditionOp::Eq => "eq",
             QueryConditionOp::Ne => "ne",
@@ -131,22 +154,19 @@ impl QueryConditionOp {
     }
 }
 
-struct QueryExportScope {
-    table: String,
-    field: String,
-    op: &'static str,
-    value: JsonValue,
+impl QueryDirection {
+    fn as_str(&self) -> &'static str {
+        match self {
+            QueryDirection::Asc => "asc",
+            QueryDirection::Desc => "desc",
+        }
+    }
 }
 
 impl Runtime {
     pub fn query(&self, query: BuiltQuery) -> Result<Vec<RowView>> {
-        if let Some((condition, limit)) = query.top_created_at_desc_fast_path() {
-            return self.read_rows_where_eq_top_created_at_desc(
-                &query.table,
-                &condition.column,
-                condition.value.clone(),
-                limit,
-            );
+        if let Some(rows) = self.read_rows_for_built_query(&query)? {
+            return Ok(rows);
         }
 
         let mut rows = self.rows_for_conditions(&query.table, &query.conditions)?;
@@ -171,16 +191,8 @@ impl Runtime {
         query: BuiltQuery,
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
-        let scope = query.export_scope()?;
-        let rows = self.query(query)?;
-        self.export_query_scope(
-            &scope.table,
-            &scope.field,
-            scope.op,
-            scope.value,
-            rows,
-            ref_include_fields,
-        )
+        let rows = self.query(query.clone())?;
+        self.export_built_query_scope(query, rows, ref_include_fields)
     }
 
     pub fn subscription_delta(
@@ -212,23 +224,6 @@ impl Runtime {
                     return Err(Error::new("recursive refs expects root id string"));
                 };
                 self.read_recursive_refs(&query.table, root_id, &query.field)?
-            }
-            RowsSubscriptionQuery::Predicate(query) if query.op == "eq_top_created_at_desc" => {
-                let value = query
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| Error::new("top created query expects eq value"))?;
-                let limit = query
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| Error::new("top created query expects numeric limit"))?;
-                self.read_rows_where_eq_top_created_at_desc(
-                    &query.table,
-                    &query.field,
-                    value.clone(),
-                    limit as usize,
-                )?
             }
             RowsSubscriptionQuery::Predicate(query) => {
                 return Err(Error::new(format!(

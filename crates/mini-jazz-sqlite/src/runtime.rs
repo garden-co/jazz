@@ -1,3 +1,4 @@
+use crate::query_api::{BuiltQuery, QueryCondition};
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
@@ -303,17 +304,6 @@ impl Runtime {
         }
         db.commit()?;
         Ok(tx_id)
-    }
-
-    pub(crate) fn read_rows_where_eq_top_created_at_desc(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        limit: usize,
-    ) -> Result<Vec<RowView>> {
-        self.query_context()
-            .read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)
     }
 
     pub fn read_rows_where_eq_top_field_desc(
@@ -890,24 +880,6 @@ impl Runtime {
                 };
                 self.export_recursive_refs(&read.table, root_id, &read.field)
             }
-            "eq_top_created_at_desc" => {
-                let value = read
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-                let limit = read
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-                self.export_query_where_eq_top_created_at_desc_with_previous_observed(
-                    &read.table,
-                    &read.field,
-                    value.clone(),
-                    limit as usize,
-                    observed_ids_from_query_value(&read.value)?,
-                )
-            }
             "eq_top_field_desc" => {
                 let value = read
                     .value
@@ -932,6 +904,7 @@ impl Runtime {
                     observed_ids_from_query_value(&read.value)?,
                 )
             }
+            "query" => self.export_query(built_query_from_read(read)?),
             "absent" => {
                 if read.field == "id" {
                     let Some(row_id) = read.value.as_str() else {
@@ -1268,61 +1241,9 @@ impl Runtime {
             }
             return Ok(());
         }
-        if query_read.op == "eq_top_created_at_desc" {
-            let value = query_read
-                .value
-                .get("eq")
-                .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-            let limit = query_read
-                .value
-                .get("limit")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-            let table = schema.table_def(&query_read.table)?;
-            let field = table
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == query_read.field)
-                .ok_or_else(|| {
-                    crate::Error::new(format!("unknown query field {}", query_read.field))
-                })?;
-            let branch_num = branch::checkout(db, &query_read.branch_id)?;
-            let predicate_column =
-                crate::schema::quote_ident(&crate::schema::storage_column(field));
-            let predicate_sql = query_predicate::sql(field, &predicate_column, "eq")?;
-            let predicate_value = query_predicate::value(field, "eq", value, db)?;
-            db.execute(
-                &format!(
-                    "DELETE FROM {}
-                     WHERE j_branch_num = ?
-                       AND is_deleted = 0
-                       AND {predicate_sql}
-                       AND row_num NOT IN (
-                         SELECT current.row_num
-                         FROM {current_table} current
-                         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
-                         WHERE current.j_branch_num = ?
-                           AND current.is_deleted = 0
-                           AND tx.outcome != ?
-                           AND {current_predicate_sql}
-                         ORDER BY current.j_created_at DESC, current.row_num
-                         LIMIT ?
-                       )",
-                    crate::schema::current_table(&query_read.table),
-                    current_table = crate::schema::current_table(&query_read.table),
-                    current_predicate_sql =
-                        query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
-                ),
-                params![
-                    branch_num,
-                    predicate_value.clone(),
-                    branch_num,
-                    tx::OUTCOME_REJECTED,
-                    predicate_value,
-                    limit as i64
-                ],
-            )?;
-            return Ok(());
+        if query_read.op == "query" {
+            let query = built_query_from_read(query_read)?;
+            return Self::apply_built_query_scope_repair(schema, db, query_read, &query);
         }
         if query_read.op == "eq_top_field_desc" {
             let value = query_read
@@ -1565,6 +1486,85 @@ impl Runtime {
                 branch_num,
                 tx::OUTCOME_REJECTED,
                 predicate_value
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn apply_built_query_scope_repair(
+        schema: &SchemaDef,
+        db: &Connection,
+        query_read: &QueryReadRecord,
+        query: &BuiltQuery,
+    ) -> Result<()> {
+        if let Some((condition, limit)) = query.ordered_page() {
+            return Self::apply_ordered_page_repair(schema, db, query_read, condition, limit);
+        }
+        let Some(condition) = query.single_predicate_export_condition()? else {
+            return Err(crate::Error::new(
+                "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
+            ));
+        };
+        let predicate_read = QueryReadRecord {
+            branch_id: query_read.branch_id.clone(),
+            table: query.table.clone(),
+            field: condition.column.clone(),
+            op: condition.op.as_str().to_owned(),
+            value: condition.value.clone(),
+        };
+        Self::apply_query_scope_repair(schema, db, &predicate_read)
+    }
+
+    fn apply_ordered_page_repair(
+        schema: &SchemaDef,
+        db: &Connection,
+        query_read: &QueryReadRecord,
+        condition: &QueryCondition,
+        limit: usize,
+    ) -> Result<()> {
+        let table = schema.table_def(&query_read.table)?;
+        let field = table
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == condition.column)
+            .ok_or_else(|| {
+                crate::Error::new(format!("unknown query field {}", condition.column))
+            })?;
+        let branch_num = branch::checkout(db, &query_read.branch_id)?;
+        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        let predicate_sql = query_predicate::sql(field, &predicate_column, "eq")?;
+        let predicate_value = query_predicate::value(field, "eq", &condition.value, db)?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| crate::Error::new("ordered query limit is too large"))?;
+        db.execute(
+            &format!(
+                "DELETE FROM {}
+                 WHERE j_branch_num = ?
+                   AND is_deleted = 0
+                   AND {predicate_sql}
+                   AND row_num NOT IN (
+                     SELECT current.row_num
+                     FROM {current_table} current
+                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                     WHERE current.j_branch_num = ?
+                       AND current.is_deleted = 0
+                       AND tx.outcome != ?
+                       AND {current_predicate_sql}
+                     ORDER BY current.j_created_at DESC, current.row_num
+                     LIMIT ?
+                   )",
+                crate::schema::current_table(&query_read.table),
+                current_table = crate::schema::current_table(&query_read.table),
+                current_predicate_sql =
+                    query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
+            ),
+            params![
+                branch_num,
+                predicate_value.clone(),
+                branch_num,
+                tx::OUTCOME_REJECTED,
+                predicate_value,
+                limit,
             ],
         )?;
         Ok(())
@@ -2385,6 +2385,13 @@ impl Runtime {
             .read_rows_where_eq(table_name, field_name, value)
     }
 
+    pub(crate) fn read_rows_for_built_query(
+        &self,
+        query: &BuiltQuery,
+    ) -> Result<Option<Vec<RowView>>> {
+        self.query_context().read_rows_for_built_query(query)
+    }
+
     pub fn read_rows_where_contains(
         &self,
         table_name: &str,
@@ -2496,53 +2503,6 @@ impl Runtime {
             value.clone(),
             self.read_rows_where_ne(table_name, field_name, value)?,
             QueryScopeOptions::empty(),
-        )
-    }
-
-    pub(crate) fn export_query_where_eq_top_created_at_desc(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        limit: usize,
-    ) -> Result<Bundle> {
-        self.export_query_where_eq_top_created_at_desc_with_previous_observed(
-            table_name,
-            field_name,
-            value,
-            limit,
-            Vec::new(),
-        )
-    }
-
-    fn export_query_where_eq_top_created_at_desc_with_previous_observed(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        limit: usize,
-        previous_observed_ids: Vec<String>,
-    ) -> Result<Bundle> {
-        let rows = self.read_rows_where_eq_top_created_at_desc(
-            table_name,
-            field_name,
-            value.clone(),
-            limit,
-        )?;
-        self.export_query_scope(
-            table_name,
-            field_name,
-            "eq_top_created_at_desc",
-            json!({
-                "eq": value.clone(),
-                "limit": limit,
-                "observed_ids": observed_row_ids(&rows),
-            }),
-            rows,
-            QueryScopeOptions {
-                ref_include_fields: &[],
-                extra_row_ids: &previous_observed_ids,
-            },
         )
     }
 
@@ -2668,6 +2628,39 @@ impl Runtime {
         limit: usize,
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
+        let query_read = QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: table_name.to_owned(),
+            field: field_name.to_owned(),
+            op: op.to_owned(),
+            value,
+        };
+        self.export_query_read_scope(query_read, rows, ref_include_fields)
+    }
+
+    pub(crate) fn export_built_query_scope(
+        &self,
+        query: BuiltQuery,
+        rows: Vec<RowView>,
+        ref_include_fields: &[&str],
+    ) -> Result<Bundle> {
+        let query_read = QueryReadRecord {
+            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            table: query.table.clone(),
+            field: "$query".to_owned(),
+            op: "query".to_owned(),
+            value: query.to_json_value(),
+        };
+        self.export_query_read_scope(query_read, rows, ref_include_fields)
+    }
+
+    fn export_query_read_scope(
+        &self,
+        query_read: QueryReadRecord,
+        rows: Vec<RowView>,
+        ref_include_fields: &[&str],
+    ) -> Result<Bundle> {
+        let table_name = &query_read.table;
         let table = self.schema.table_def(table_name)?;
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
@@ -3132,13 +3125,7 @@ impl Runtime {
             export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
-        let query_reads = vec![QueryReadRecord {
-            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
-            table: table_name.to_owned(),
-            field: field_name.to_owned(),
-            op: op.to_owned(),
-            value,
-        }];
+        let query_reads = vec![query_read];
         Ok(make_bundle(
             &self.schema,
             branches,
@@ -3290,22 +3277,6 @@ impl Runtime {
         ))
     }
 
-    pub(crate) fn subscribe_rows_where_eq_top_created_at_desc(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        limit: usize,
-    ) -> Result<RowsSubscription> {
-        Ok(RowsSubscription::where_eq_top_created_at_desc(
-            table_name,
-            field_name,
-            value.clone(),
-            limit,
-            self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
-        ))
-    }
-
     pub fn subscribe_rows_where_eq_top_field_desc(
         &self,
         table_name: &str,
@@ -3362,23 +3333,6 @@ impl Runtime {
                     self.read_recursive_refs(&read.table, root_id, &read.field)?,
                 ))
             }
-            "eq_top_created_at_desc" => {
-                let value = read
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-                let limit = read
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-                self.subscribe_rows_where_eq_top_created_at_desc(
-                    &read.table,
-                    &read.field,
-                    value.clone(),
-                    limit as usize,
-                )
-            }
             "eq_top_field_desc" => {
                 let value = read
                     .value
@@ -3402,6 +3356,7 @@ impl Runtime {
                     limit as usize,
                 )
             }
+            "query" => self.subscribe_query(built_query_from_read(read)?),
             op => Err(crate::Error::new(format!(
                 "unsupported observed subscription query {op}"
             ))),
@@ -3527,23 +3482,6 @@ impl Runtime {
                     return Err(crate::Error::new("recursive refs expects root id string"));
                 };
                 self.read_recursive_refs(&query.table, root_id, &query.field)?
-            }
-            RowsSubscriptionQuery::Predicate(query) if query.op == "eq_top_created_at_desc" => {
-                let value = query
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-                let limit = query
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-                self.read_rows_where_eq_top_created_at_desc(
-                    &query.table,
-                    &query.field,
-                    value.clone(),
-                    limit as usize,
-                )?
             }
             RowsSubscriptionQuery::Predicate(query) if query.op == "eq_top_field_desc" => {
                 let value = query
@@ -5921,7 +5859,7 @@ fn query_scope_repair_row_nums(
     op: &str,
     value: &JsonValue,
 ) -> Result<Vec<i64>> {
-    if op == "eq_top_created_at_desc" || op == "eq_top_field_desc" {
+    if op == "eq_top_field_desc" {
         let observed_ids = observed_ids_from_query_value(value)?;
         if observed_ids.is_empty() {
             let value = value
@@ -6038,7 +5976,7 @@ fn query_scope_rejected_tx_ids(
     op: &str,
     value: &JsonValue,
 ) -> Result<Vec<String>> {
-    if op == "eq_top_created_at_desc" || op == "eq_top_field_desc" {
+    if op == "eq_top_field_desc" {
         let observed_ids = observed_ids_from_query_value(value)?;
         if observed_ids.is_empty() {
             let value = value
@@ -6179,6 +6117,67 @@ fn rejected_tx_ids_for_row_nums(
     tx_ids
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn query_scope_repair_row_nums_for_read(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    query_read: &QueryReadRecord,
+) -> Result<Vec<i64>> {
+    if query_read.op == "query" {
+        let query = built_query_from_read(query_read)?;
+        return query_scope_repair_row_nums_for_built_query(conn, table, &query);
+    }
+    query_scope_repair_row_nums(
+        conn,
+        table,
+        &query_read.field,
+        &query_read.op,
+        &query_read.value,
+    )
+}
+
+fn query_scope_repair_row_nums_for_built_query(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    query: &BuiltQuery,
+) -> Result<Vec<i64>> {
+    if query.table != table.name {
+        return Err(crate::Error::new(
+            "query read table does not match descriptor",
+        ));
+    }
+    if let Some((condition, _limit)) = query.ordered_page() {
+        return query_scope_repair_row_nums(
+            conn,
+            table,
+            &condition.column,
+            condition.op.as_str(),
+            &condition.value,
+        );
+    }
+    let Some(condition) = query.single_predicate_export_condition()? else {
+        return Err(crate::Error::new(
+            "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
+        ));
+    };
+    query_scope_repair_row_nums(
+        conn,
+        table,
+        &condition.column,
+        condition.op.as_str(),
+        &condition.value,
+    )
+}
+
+fn built_query_from_read(read: &QueryReadRecord) -> Result<BuiltQuery> {
+    let query = BuiltQuery::from_json_value(read.value.clone())?;
+    if read.table != query.table {
+        return Err(crate::Error::new(
+            "query read table does not match descriptor",
+        ));
+    }
+    Ok(query)
 }
 
 fn id_predicate_values(op: &str, value: &JsonValue) -> Result<Vec<String>> {
