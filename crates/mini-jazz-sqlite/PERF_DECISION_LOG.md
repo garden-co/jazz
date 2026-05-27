@@ -1779,3 +1779,24 @@ Learning: the trivial parent-row N+1 fix is correct but not a silver bullet for
 the current benchmark shapes. The remaining policy export cost is deeper in
 history extraction / policy-dependency traversal rather than just resolving
 parent row ids one at a time.
+
+## 2026-05-27 02:38 PDT
+
+Added `ApplyBundleProfile` output to the dashboard query-scaling probe so we can
+see whether many same-shape page subscriptions are dominated by query-scope
+repair.
+
+50k rows, 48 dashboard subscriptions:
+
+- initial apply: ~10.6 ms total
+- initial history/current projection: ~7.8 ms
+- initial reads: ~1.1 ms
+- initial query-scope repair: ~1.3 ms
+- refresh apply: ~8.9 ms total
+- refresh history/current projection: ~6.0 ms
+- refresh reads: ~1.1 ms
+- refresh query-scope repair: ~1.4 ms
+
+Learning: grouped top-query repair may still be worth doing eventually, but it
+is not tonight's dominant dashboard bottleneck. History/current projection and
+read-set writes are consistently larger apply buckets.

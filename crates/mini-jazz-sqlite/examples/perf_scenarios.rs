@@ -371,11 +371,13 @@ struct DashboardQueryScalingCase {
     initial_history_rows: usize,
     initial_transaction_rows: usize,
     tab_apply_ms: f64,
+    tab_apply_profile: ApplyBundleProfile,
     refresh_export_ms: f64,
     refresh_bundle_count: usize,
     refresh_bundle_bytes: usize,
     refresh_history_rows: usize,
     refresh_apply_ms: f64,
+    refresh_apply_profile: ApplyBundleProfile,
 }
 
 #[derive(Serialize)]
@@ -1483,7 +1485,7 @@ fn run_dashboard_query_scaling_probe() -> BenchResult<DashboardQueryScalingProbe
         })?;
         let initial_elapsed = initial_started.elapsed();
         let initial_summary = BundleSummary::from(&initial_bundle)?;
-        let tab_apply_elapsed = timed(|| tab.apply_bundle(&initial_bundle))?;
+        let tab_apply_profile = tab.profile_apply_bundle(&initial_bundle)?;
 
         insert_new_top_recursive_documents_for_owners(
             &mut core,
@@ -1498,7 +1500,7 @@ fn run_dashboard_query_scaling_probe() -> BenchResult<DashboardQueryScalingProbe
         let refresh_elapsed = refresh_started.elapsed();
         let refresh_summary = BundleBatchSummary::from(&refresh_bundles)?;
         let refresh_bundle_count = refresh_bundles.len();
-        let refresh_apply_elapsed = timed_apply_bundles(&mut tab, refresh_bundles)?;
+        let refresh_apply_profile = profile_apply_bundles(&mut tab, refresh_bundles)?;
 
         cases.push(DashboardQueryScalingCase {
             query_count,
@@ -1506,12 +1508,14 @@ fn run_dashboard_query_scaling_probe() -> BenchResult<DashboardQueryScalingProbe
             initial_bundle_bytes: initial_summary.bytes,
             initial_history_rows: initial_bundle.history.len(),
             initial_transaction_rows: initial_bundle.txs.len(),
-            tab_apply_ms: ms(tab_apply_elapsed),
+            tab_apply_ms: tab_apply_profile.total_ms,
+            tab_apply_profile,
             refresh_export_ms: ms(refresh_elapsed),
             refresh_bundle_count,
             refresh_bundle_bytes: refresh_summary.bytes,
             refresh_history_rows: refresh_summary.history_rows,
-            refresh_apply_ms: ms(refresh_apply_elapsed),
+            refresh_apply_ms: refresh_apply_profile.total_ms,
+            refresh_apply_profile,
         });
     }
 
@@ -1557,6 +1561,12 @@ fn run_dashboard_query_scaling_repeat(
                     .collect(),
             ),
             tab_apply_ms: median_f64(cases.iter().map(|case| case.tab_apply_ms).collect()),
+            tab_apply_profile: median_apply_profile(
+                cases
+                    .iter()
+                    .map(|case| case.tab_apply_profile.clone())
+                    .collect(),
+            ),
             refresh_export_ms: median_f64(
                 cases.iter().map(|case| case.refresh_export_ms).collect(),
             ),
@@ -1570,6 +1580,12 @@ fn run_dashboard_query_scaling_repeat(
                 cases.iter().map(|case| case.refresh_history_rows).collect(),
             ),
             refresh_apply_ms: median_f64(cases.iter().map(|case| case.refresh_apply_ms).collect()),
+            refresh_apply_profile: median_apply_profile(
+                cases
+                    .iter()
+                    .map(|case| case.refresh_apply_profile.clone())
+                    .collect(),
+            ),
         });
     }
 
@@ -3879,6 +3895,52 @@ fn timed_apply_bundles(runtime: &mut Runtime, bundles: Vec<Bundle>) -> Result<Du
     })
 }
 
+fn profile_apply_bundles(
+    runtime: &mut Runtime,
+    bundles: Vec<Bundle>,
+) -> Result<ApplyBundleProfile> {
+    let mut aggregate = ApplyBundleProfile {
+        total_ms: 0.0,
+        validation_ms: 0.0,
+        begin_tx_ms: 0.0,
+        branches_ms: 0.0,
+        txs_ms: 0.0,
+        reads_ms: 0.0,
+        rejected_cleanup_ms: 0.0,
+        query_reads_ms: 0.0,
+        history_ms: 0.0,
+        query_scope_repair_ms: 0.0,
+        commit_ms: 0.0,
+        revalidate_awaiting_ms: 0.0,
+        branch_rows: 0,
+        tx_rows: 0,
+        read_rows: 0,
+        query_read_rows: 0,
+        history_rows: 0,
+    };
+    for bundle in bundles {
+        let profile = runtime.profile_apply_bundle(&bundle)?;
+        aggregate.total_ms += profile.total_ms;
+        aggregate.validation_ms += profile.validation_ms;
+        aggregate.begin_tx_ms += profile.begin_tx_ms;
+        aggregate.branches_ms += profile.branches_ms;
+        aggregate.txs_ms += profile.txs_ms;
+        aggregate.reads_ms += profile.reads_ms;
+        aggregate.rejected_cleanup_ms += profile.rejected_cleanup_ms;
+        aggregate.query_reads_ms += profile.query_reads_ms;
+        aggregate.history_ms += profile.history_ms;
+        aggregate.query_scope_repair_ms += profile.query_scope_repair_ms;
+        aggregate.commit_ms += profile.commit_ms;
+        aggregate.revalidate_awaiting_ms += profile.revalidate_awaiting_ms;
+        aggregate.branch_rows += profile.branch_rows;
+        aggregate.tx_rows += profile.tx_rows;
+        aggregate.read_rows += profile.read_rows;
+        aggregate.query_read_rows += profile.query_read_rows;
+        aggregate.history_rows += profile.history_rows;
+    }
+    Ok(aggregate)
+}
+
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
@@ -3937,4 +3999,61 @@ fn median_i64(mut values: Vec<i64>) -> i64 {
 fn median_usize(mut values: Vec<usize>) -> usize {
     values.sort();
     values[values.len() / 2]
+}
+
+fn median_apply_profile(profiles: Vec<ApplyBundleProfile>) -> ApplyBundleProfile {
+    ApplyBundleProfile {
+        total_ms: median_f64(profiles.iter().map(|profile| profile.total_ms).collect()),
+        validation_ms: median_f64(
+            profiles
+                .iter()
+                .map(|profile| profile.validation_ms)
+                .collect(),
+        ),
+        begin_tx_ms: median_f64(profiles.iter().map(|profile| profile.begin_tx_ms).collect()),
+        branches_ms: median_f64(profiles.iter().map(|profile| profile.branches_ms).collect()),
+        txs_ms: median_f64(profiles.iter().map(|profile| profile.txs_ms).collect()),
+        reads_ms: median_f64(profiles.iter().map(|profile| profile.reads_ms).collect()),
+        rejected_cleanup_ms: median_f64(
+            profiles
+                .iter()
+                .map(|profile| profile.rejected_cleanup_ms)
+                .collect(),
+        ),
+        query_reads_ms: median_f64(
+            profiles
+                .iter()
+                .map(|profile| profile.query_reads_ms)
+                .collect(),
+        ),
+        history_ms: median_f64(profiles.iter().map(|profile| profile.history_ms).collect()),
+        query_scope_repair_ms: median_f64(
+            profiles
+                .iter()
+                .map(|profile| profile.query_scope_repair_ms)
+                .collect(),
+        ),
+        commit_ms: median_f64(profiles.iter().map(|profile| profile.commit_ms).collect()),
+        revalidate_awaiting_ms: median_f64(
+            profiles
+                .iter()
+                .map(|profile| profile.revalidate_awaiting_ms)
+                .collect(),
+        ),
+        branch_rows: median_usize(profiles.iter().map(|profile| profile.branch_rows).collect()),
+        tx_rows: median_usize(profiles.iter().map(|profile| profile.tx_rows).collect()),
+        read_rows: median_usize(profiles.iter().map(|profile| profile.read_rows).collect()),
+        query_read_rows: median_usize(
+            profiles
+                .iter()
+                .map(|profile| profile.query_read_rows)
+                .collect(),
+        ),
+        history_rows: median_usize(
+            profiles
+                .iter()
+                .map(|profile| profile.history_rows)
+                .collect(),
+        ),
+    }
 }
