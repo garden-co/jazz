@@ -651,7 +651,6 @@ impl Runtime {
         }
         for query_read in &bundle.query_reads {
             Self::record_query_read(&db, query_read)?;
-            Self::apply_query_scope_repair(&schema, &db, query_read)?;
         }
         for record in &bundle.history {
             Self::apply_history_record(&schema, &db, self.node_num, record)?;

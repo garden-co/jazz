@@ -352,3 +352,16 @@ only has two tables. This is still an important product-shaped guardrail for
 wide schemas: a small query refresh should not pay O(number of app tables) just
 to remove rejected current rows. A dedicated wide-schema probe is still worth
 adding to quantify the protected case.
+
+## 2026-05-26 22:22 PDT
+
+Removed the pre-history query-scope repair pass from bundle apply and kept the
+post-history repair as the single source of final query-scope cleanup. This is a
+semantic simplification: bundles first record observed queries, then materialize
+history, then repair current state against the final local history view. The
+full `whole_system` suite passes.
+
+Result: benchmark movement is modest in the current page-shaped workload: cold
+first-result stays around 130-131 ms and mixed refresh apply is around 32.5 ms.
+Still, this removes a whole duplicate repair phase from every scoped apply, so
+it should matter more as the number or complexity of observed queries grows.
