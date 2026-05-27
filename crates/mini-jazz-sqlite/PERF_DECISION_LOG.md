@@ -1904,3 +1904,21 @@ Decision: reverted the code change. Multi-row VALUES batches do not improve this
 path in SQLite/rusqlite as used here. The remaining read-set cost likely needs a
 representation change, such as compact query-scope read-set facts, not just
 fewer SQL statements.
+
+## 2026-05-27 02:59 PDT
+
+Tried preloading public row ids for all bundle read/history rows before apply,
+because refresh bundles repeatedly resolve row ids that are already known.
+
+10k recursive subscription with preload:
+
+- refresh reads improved: ~32 ms -> ~25 ms
+- refresh total barely moved: ~42 ms -> ~41 ms
+- cold initial apply got worse: ~145-150 ms -> ~158 ms, because the receiver has
+  no existing row ids and pays an extra failed lookup pass
+
+Decision: kept the code as an opt-in experiment behind
+`MINI_JAZZ_SQLITE_PRELOAD_ROW_IDS=1`, but disabled it by default. Cold-client
+startup matters too much to pay this cost speculatively. A real version would
+need a better signal, for example peer capability/state saying the receiver is
+warm for the scope.
