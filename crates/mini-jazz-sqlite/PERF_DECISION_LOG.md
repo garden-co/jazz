@@ -2218,3 +2218,20 @@ Current projection has real space cost, but the speed tradeoff still looks worth
 keeping for main-branch current reads. Closure tables are very fast but multiply
 storage; they should stay as targeted/derived acceleration, not the default
 recursive representation.
+
+## 2026-05-27 03:29 PDT
+
+Subagent review found three benchmark-validity issues and I fixed them:
+
+- primary topology first-result and refresh latency now include intermediary
+  edge/worker export time, not only apply time
+- subscription diffs now expose order-only changes as `RowDiff::Moved`, while
+  preserving existing add/update/remove semantics when membership or row content
+  changes
+- dashboard query-scaling cases now build a fresh seeded core per query-count
+  case, so later cases are not contaminated by mutations from earlier cases
+
+Learning: the benchmark harness is useful enough that its measurement semantics
+need the same rigor as product code. The review also caught an important product
+semantics gap: ordered subscriptions need explicit order-change events, not just
+row add/update/remove events.

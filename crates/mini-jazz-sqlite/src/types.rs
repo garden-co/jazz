@@ -16,7 +16,15 @@ pub struct RowView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowDiff {
     Added(RowView),
-    Updated { before: RowView, after: RowView },
+    Updated {
+        before: RowView,
+        after: RowView,
+    },
+    Moved {
+        row: RowView,
+        before_index: usize,
+        after_index: usize,
+    },
     Removed(RowView),
 }
 

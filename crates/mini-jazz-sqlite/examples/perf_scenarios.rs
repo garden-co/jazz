@@ -218,7 +218,9 @@ struct ScenarioReport {
     core_query_ms: f64,
     export_ms: f64,
     core_to_edge_apply_ms: f64,
+    edge_export_ms: f64,
     edge_to_worker_apply_ms: f64,
+    worker_export_ms: f64,
     worker_to_tab_apply_ms: f64,
     tab_query_ms: f64,
     api_to_first_result_ms: f64,
@@ -758,12 +760,15 @@ struct RefreshReport {
     bundle_bytes: usize,
     export_ms: f64,
     core_to_edge_apply_ms: f64,
+    edge_export_ms: f64,
     edge_to_worker_apply_ms: f64,
+    worker_export_ms: f64,
     worker_to_tab_apply_ms: f64,
     tab_query_ms: f64,
     tab_subscription_poll_ms: f64,
     tab_subscription_added: usize,
     tab_subscription_updated: usize,
+    tab_subscription_moved: usize,
     tab_subscription_removed: usize,
     api_to_updated_result_ms: f64,
 }
@@ -818,9 +823,13 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
     let core_bundle_summary = BundleSummary::from(&core_bundle)?;
 
     let edge_apply_elapsed = timed(|| edge.apply_bundle(&core_bundle))?;
+    let edge_export_started = Instant::now();
     let edge_bundle = export_top_owner_page(&mut edge, config.page_size)?;
+    let edge_export_elapsed = edge_export_started.elapsed();
     let worker_apply_elapsed = timed(|| worker.apply_bundle(&edge_bundle))?;
+    let worker_export_started = Instant::now();
     let worker_bundle = export_top_owner_page(&mut worker, config.page_size)?;
+    let worker_export_elapsed = worker_export_started.elapsed();
     let tab_apply_elapsed = timed(|| tab.apply_bundle(&worker_bundle))?;
 
     let query_started = Instant::now();
@@ -898,12 +907,16 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         core_query_ms: ms(core_query_elapsed),
         export_ms: ms(export_elapsed),
         core_to_edge_apply_ms: ms(edge_apply_elapsed),
+        edge_export_ms: ms(edge_export_elapsed),
         edge_to_worker_apply_ms: ms(worker_apply_elapsed),
+        worker_export_ms: ms(worker_export_elapsed),
         worker_to_tab_apply_ms: ms(tab_apply_elapsed),
         tab_query_ms: ms(tab_query_elapsed),
         api_to_first_result_ms: ms(export_elapsed
             + edge_apply_elapsed
+            + edge_export_elapsed
             + worker_apply_elapsed
+            + worker_export_elapsed
             + tab_apply_elapsed
             + tab_query_elapsed),
         edge_warm_worker_cold,
@@ -1448,12 +1461,14 @@ fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe>
     let mut total_counts = DiffCounts {
         added: 0,
         updated: 0,
+        moved: 0,
         removed: 0,
     };
     for subscription in &mut subscriptions {
         let counts = DiffCounts::from(&tab.poll_subscription(subscription)?);
         total_counts.added += counts.added;
         total_counts.updated += counts.updated;
+        total_counts.moved += counts.moved;
         total_counts.removed += counts.removed;
     }
     let poll_elapsed = poll_started.elapsed();
@@ -1494,17 +1509,17 @@ fn run_dashboard_query_scaling_probe() -> BenchResult<DashboardQueryScalingProbe
     let total_rows = env_usize("MINI_JAZZ_PERF_DASHBOARD_TOTAL_ROWS", 50_000);
     let target_owner_rows = env_usize("MINI_JAZZ_PERF_DASHBOARD_TARGET_OWNER_ROWS", 5_000);
     let page_size = env_usize("MINI_JAZZ_PERF_DASHBOARD_PAGE_SIZE", 20);
-    let dir = tempdir()?;
     let schema = recursive_policy_schema();
-    let mut core = Runtime::open_trusted_with_schema(
-        Storage::File(dir.path().join("core.sqlite")),
-        "core",
-        schema.clone(),
-    )?;
-    seed_recursive_policy_graph(&mut core, total_rows, target_owner_rows, 100)?;
 
     let mut cases = Vec::new();
     for (case_index, query_count) in [1, 4, 12, 24, 48].into_iter().enumerate() {
+        let dir = tempdir()?;
+        let mut core = Runtime::open_trusted_with_schema(
+            Storage::File(dir.path().join("core.sqlite")),
+            &format!("scaling-core-{query_count}"),
+            schema.clone(),
+        )?;
+        seed_recursive_policy_graph(&mut core, total_rows, target_owner_rows, 100)?;
         let owners = dashboard_owner_filters(query_count);
         let mut tab = Runtime::open_with_schema(
             Storage::Memory,
@@ -2623,12 +2638,14 @@ fn run_subscription_storm_probe() -> BenchResult<SubscriptionStormProbe> {
     let mut total_counts = DiffCounts {
         added: 0,
         updated: 0,
+        moved: 0,
         removed: 0,
     };
     for subscription in &mut subscriptions {
         let counts = DiffCounts::from(&tab.poll_subscription(subscription)?);
         total_counts.added += counts.added;
         total_counts.updated += counts.updated;
+        total_counts.moved += counts.moved;
         total_counts.removed += counts.removed;
     }
     let poll_elapsed = poll_started.elapsed();
@@ -3064,11 +3081,15 @@ fn run_refresh_after_new_top_rows(
 
     let edge_apply_elapsed = timed_apply_bundles(edge, core_bundles)?;
     let worker_reads = worker.observed_query_reads()?;
+    let edge_export_started = Instant::now();
     let edge_bundles = edge.run_as_user(OWNER, |edge| {
         edge.export_query_read_refreshes(&worker_reads)
     })?;
+    let edge_export_elapsed = edge_export_started.elapsed();
     let worker_apply_elapsed = timed_apply_bundles(worker, edge_bundles)?;
+    let worker_export_started = Instant::now();
     let worker_bundles = worker.export_query_read_refreshes(&tab.observed_query_reads()?)?;
+    let worker_export_elapsed = worker_export_started.elapsed();
     let tab_apply_elapsed = timed_apply_bundles(tab, worker_bundles)?;
 
     let query_started = Instant::now();
@@ -3094,16 +3115,21 @@ fn run_refresh_after_new_top_rows(
         bundle_bytes: core_summary.bytes,
         export_ms: ms(export_elapsed),
         core_to_edge_apply_ms: ms(edge_apply_elapsed),
+        edge_export_ms: ms(edge_export_elapsed),
         edge_to_worker_apply_ms: ms(worker_apply_elapsed),
+        worker_export_ms: ms(worker_export_elapsed),
         worker_to_tab_apply_ms: ms(tab_apply_elapsed),
         tab_query_ms: ms(tab_query_elapsed),
         tab_subscription_poll_ms: ms(subscription_poll_elapsed),
         tab_subscription_added: diff_counts.added,
         tab_subscription_updated: diff_counts.updated,
+        tab_subscription_moved: diff_counts.moved,
         tab_subscription_removed: diff_counts.removed,
         api_to_updated_result_ms: ms(export_elapsed
             + edge_apply_elapsed
+            + edge_export_elapsed
             + worker_apply_elapsed
+            + worker_export_elapsed
             + tab_apply_elapsed
             + tab_query_elapsed),
     })
@@ -3205,6 +3231,7 @@ fn project_board_schema() -> SchemaDef {
 struct DiffCounts {
     added: usize,
     updated: usize,
+    moved: usize,
     removed: usize,
 }
 
@@ -3213,12 +3240,14 @@ impl DiffCounts {
         let mut counts = Self {
             added: 0,
             updated: 0,
+            moved: 0,
             removed: 0,
         };
         for diff in diffs {
             match diff {
                 RowDiff::Added(_) => counts.added += 1,
                 RowDiff::Updated { .. } => counts.updated += 1,
+                RowDiff::Moved { .. } => counts.moved += 1,
                 RowDiff::Removed(_) => counts.removed += 1,
             }
         }
