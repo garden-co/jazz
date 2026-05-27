@@ -1140,6 +1140,96 @@ fn branch_equality_query_uses_effective_branch_policy() {
 }
 
 #[test]
+fn branch_ordered_query_applies_effective_policy_before_pagination() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let visible_project_tx = alice
+        .insert_row(
+            "projects",
+            "project-visible",
+            BTreeMap::from([("title".to_owned(), json!("Visible project"))]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&visible_project_tx, 1)
+        .unwrap();
+    let hidden_project_tx = alice
+        .insert_row(
+            "projects",
+            "project-hidden",
+            BTreeMap::from([("title".to_owned(), json!("Hidden later"))]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&hidden_project_tx, 2)
+        .unwrap();
+    let visible_todo_tx = alice
+        .insert_row(
+            "todos",
+            "todo-visible",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Older visible todo")),
+                ("project".to_owned(), json!("project-visible")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&visible_todo_tx, 3)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let hidden_todo_tx = alice
+        .insert_row(
+            "todos",
+            "todo-hidden",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Newer hidden todo")),
+                ("project".to_owned(), json!("project-hidden")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&hidden_todo_tx, 4)
+        .unwrap();
+
+    alice.create_branch("draft", Some(4)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice.session_user_for_test("bob");
+    alice
+        .update_row(
+            "projects",
+            "project-hidden",
+            BTreeMap::from([("title".to_owned(), json!("Bob branch project"))]),
+        )
+        .unwrap();
+    alice.session_user_for_test("alice");
+
+    let rows = alice
+        .query(
+            BuiltQuery::from_json_value(json!({
+                "table": "todos",
+                "orderBy": [["$createdAt", "desc"]],
+                "limit": 1,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-visible");
+}
+
+#[test]
 fn branch_base_export_preserves_ref_policy_at_base_epoch() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

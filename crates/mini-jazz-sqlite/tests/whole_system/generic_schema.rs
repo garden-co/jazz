@@ -794,6 +794,135 @@ fn generic_top_created_at_query_scope_refresh_replaces_displaced_boundary_row() 
 }
 
 #[test]
+fn built_query_scope_export_accepts_multiple_filters() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-match",
+            BTreeMap::from([
+                ("body".to_owned(), json!("ship the small thing")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-filtered",
+            BTreeMap::from([
+                ("body".to_owned(), json!("ship something later")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [
+            {"column": "pinned", "op": "eq", "value": true},
+            {"column": "body", "op": "contains", "value": "ship"}
+        ],
+    }))
+    .unwrap();
+    assert_eq!(alice.query(query.clone()).unwrap()[0].id, "note-match");
+
+    peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
+        .unwrap();
+
+    let rows = peer.query(query).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-match");
+}
+
+#[test]
+fn built_query_scope_export_includes_offset_support_rows() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-older",
+            BTreeMap::from([
+                ("body".to_owned(), json!("older")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-newer",
+            BTreeMap::from([
+                ("body".to_owned(), json!("newer")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [{"column": "pinned", "op": "eq", "value": true}],
+        "orderBy": [["$createdAt", "desc"]],
+        "limit": 1,
+        "offset": 1,
+    }))
+    .unwrap();
+    assert_eq!(alice.query(query.clone()).unwrap()[0].id, "note-older");
+
+    peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
+        .unwrap();
+
+    let rows = peer.query(query).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-older");
+}
+
+#[test]
+fn generic_top_created_at_query_scope_repairs_system_predicates() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-target",
+            BTreeMap::from([
+                ("body".to_owned(), json!("target")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    for query in [
+        support::top_created_query("notes", "id", json!("note-target"), 1),
+        support::top_created_query("notes", "$createdBy", json!("alice"), 1),
+    ] {
+        let mut peer =
+            Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema.clone())
+                .unwrap();
+
+        peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
+            .unwrap();
+
+        let rows = peer.query(query).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "note-target");
+    }
+}
+
+#[test]
 fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

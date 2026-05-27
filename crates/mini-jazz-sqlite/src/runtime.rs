@@ -1554,6 +1554,12 @@ impl Runtime {
         //   +-----------------------------+
         //   | page-boundary repair        |
         //   +-----------------------------+
+        //
+        //        | every other SQL-lowered shape
+        //        v
+        //   +-----------------------------+
+        //   | no contraction repair yet   |
+        //   +-----------------------------+
         match built_query_repair_scope(built_query)? {
             BuiltQueryRepairScope::CreatedAtDescPage { condition, limit } => {
                 Self::apply_created_at_desc_page_repair(schema, db, query_read, condition, limit)
@@ -1568,6 +1574,7 @@ impl Runtime {
                 };
                 Self::apply_query_scope_repair(schema, db, &predicate_read)
             }
+            BuiltQueryRepairScope::Unsupported => Ok(()),
         }
     }
 
@@ -1596,17 +1603,8 @@ impl Runtime {
         // This is page-boundary contraction, not authorization. The refreshed
         // top-N rows themselves arrive through normal history application.
         let table = schema.table_def(&query_read.table)?;
-        let field = table
-            .fields
-            .iter()
-            .find(|candidate| candidate.name == condition.column)
-            .ok_or_else(|| {
-                crate::Error::new(format!("unknown query field {}", condition.column))
-            })?;
         let branch_num = branch::checkout(db, &query_read.branch_id)?;
-        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-        let predicate_sql = query_predicate::sql(field, &predicate_column, "eq")?;
-        let predicate_value = query_predicate::value(field, "eq", &condition.value, db)?;
+        let predicate = ordered_page_eq_predicate(table, condition, db)?;
         let limit = i64::try_from(limit)
             .map_err(|_| crate::Error::new("ordered query limit is too large"))?;
         db.execute(
@@ -1618,6 +1616,7 @@ impl Runtime {
                    AND row_num NOT IN (
                      SELECT current.row_num
                      FROM {current_table} current
+                     JOIN jazz_row_id current_ids ON current_ids.row_num = current.row_num
                      JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
                      WHERE current.j_branch_num = ?
                        AND current.is_deleted = 0
@@ -1628,15 +1627,15 @@ impl Runtime {
                    )",
                 crate::schema::current_table(&query_read.table),
                 current_table = crate::schema::current_table(&query_read.table),
-                current_predicate_sql =
-                    query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
+                predicate_sql = &predicate.outer_sql,
+                current_predicate_sql = &predicate.inner_sql,
             ),
             params![
                 branch_num,
-                predicate_value.clone(),
+                predicate.value.clone(),
                 branch_num,
                 tx::OUTCOME_REJECTED,
-                predicate_value,
+                predicate.value,
                 limit,
             ],
         )?;
@@ -5936,6 +5935,55 @@ fn export_recursive_scope_repair_history(
     export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), None)
 }
 
+struct OrderedPageEqPredicate {
+    outer_sql: String,
+    inner_sql: String,
+    value: rusqlite::types::Value,
+}
+
+fn ordered_page_eq_predicate(
+    table: &crate::schema::TableDef,
+    condition: &QueryCondition,
+    db: &Connection,
+) -> Result<OrderedPageEqPredicate> {
+    if condition.column == "id" {
+        let row_id = condition
+            .value
+            .as_str()
+            .ok_or_else(|| crate::Error::new("id equality expects a string value"))?;
+        return Ok(OrderedPageEqPredicate {
+            outer_sql: "row_num IN (SELECT ids.row_num FROM jazz_row_id ids WHERE ids.row_id = ?)"
+                .to_owned(),
+            inner_sql: "current_ids.row_id = ?".to_owned(),
+            value: rusqlite::types::Value::Text(row_id.to_owned()),
+        });
+    }
+
+    if condition.column == "$createdBy" {
+        let created_by = condition
+            .value
+            .as_str()
+            .ok_or_else(|| crate::Error::new("$createdBy equality expects a string value"))?;
+        return Ok(OrderedPageEqPredicate {
+            outer_sql: "j_created_by = ?".to_owned(),
+            inner_sql: "current.j_created_by = ?".to_owned(),
+            value: rusqlite::types::Value::Text(created_by.to_owned()),
+        });
+    }
+
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == condition.column)
+        .ok_or_else(|| crate::Error::new(format!("unknown query field {}", condition.column)))?;
+    let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    Ok(OrderedPageEqPredicate {
+        outer_sql: query_predicate::sql(field, &predicate_column, "eq")?,
+        inner_sql: query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
+        value: query_predicate::value(field, "eq", &condition.value, db)?,
+    })
+}
+
 fn query_scope_repair_row_nums(
     conn: &Connection,
     table: &crate::schema::TableDef,
@@ -6252,6 +6300,8 @@ fn query_scope_repair_row_nums_for_built_query(
     //       +-- one predicate ------------------------+
     //       |                                         v
     //       +-- eq + createdAt desc + limit --> predicate repair rows
+    //       |
+    //       +-- other SQL-lowered shape ------> exported result/support rows only
     //
     // The ordered-page case exports rows that ever matched the predicate. The
     // receiver then recomputes the actual page boundary locally and deletes any
@@ -6267,6 +6317,7 @@ fn query_scope_repair_row_nums_for_built_query(
             limit: _,
         }
         | BuiltQueryRepairScope::Predicate(condition) => condition,
+        BuiltQueryRepairScope::Unsupported => return Ok(Vec::new()),
     };
     query_scope_repair_row_nums(
         conn,
@@ -6327,17 +6378,17 @@ enum BuiltQueryRepairScope<'a> {
         condition: &'a QueryCondition,
         limit: usize,
     },
+    Unsupported,
 }
 
 fn built_query_repair_scope(query: &BuiltQuery) -> Result<BuiltQueryRepairScope<'_>> {
     if query.conditions.len() != 1 || query.offset.unwrap_or(0) != 0 {
-        return Err(unsupported_built_query_repair_scope());
+        return Ok(BuiltQueryRepairScope::Unsupported);
     }
 
-    let condition = query
-        .conditions
-        .first()
-        .ok_or_else(unsupported_built_query_repair_scope)?;
+    let Some(condition) = query.conditions.first() else {
+        return Ok(BuiltQueryRepairScope::Unsupported);
+    };
 
     match (query.order_by.as_slice(), query.limit) {
         ([], None) => Ok(BuiltQueryRepairScope::Predicate(condition)),
@@ -6348,14 +6399,8 @@ fn built_query_repair_scope(query: &BuiltQuery) -> Result<BuiltQueryRepairScope<
         {
             Ok(BuiltQueryRepairScope::CreatedAtDescPage { condition, limit })
         }
-        _ => Err(unsupported_built_query_repair_scope()),
+        _ => Ok(BuiltQueryRepairScope::Unsupported),
     }
-}
-
-fn unsupported_built_query_repair_scope() -> crate::Error {
-    crate::Error::new(
-        "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
-    )
 }
 
 fn built_query_from_read(read: &QueryReadRecord) -> Result<BuiltQuery> {

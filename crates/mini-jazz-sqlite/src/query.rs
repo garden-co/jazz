@@ -53,6 +53,8 @@ impl QueryContext<'_> {
         }
         let (candidates_sql, mut params) = self.lower_query_candidates(query, table)?;
         let order_sql = self.lower_query_order(table, &query.order_by)?;
+        let defer_window_until_effective_policy =
+            self.defer_query_window_until_effective_branch_policy(table, query, base_epoch);
         let field_columns = table
             .fields
             .iter()
@@ -76,15 +78,8 @@ impl QueryContext<'_> {
              ORDER BY {order_sql}",
             select_columns.join(", "),
         );
-        if let Some(limit) = query.limit {
-            sql.push_str(" LIMIT ?");
-            params.push(SqlValue::Integer(window_value_to_i64(limit, "limit")?));
-        } else if query.offset.is_some() {
-            sql.push_str(" LIMIT -1");
-        }
-        if let Some(offset) = query.offset {
-            sql.push_str(" OFFSET ?");
-            params.push(SqlValue::Integer(window_value_to_i64(offset, "offset")?));
+        if !defer_window_until_effective_policy {
+            append_query_window_sql(&mut sql, &mut params, query.limit, query.offset)?;
         }
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -94,11 +89,14 @@ impl QueryContext<'_> {
                 .map(|idx| row.get::<_, SqlValue>(idx))
                 .collect::<rusqlite::Result<Vec<_>>>()
         })?;
-        let rows = rows
+        let mut rows = rows
             .map(|row| row_to_view(self.conn, &query.table, table, row?))
             .collect::<Result<Vec<_>>>()?;
         if self.branch_num != 1 && base_epoch.is_some() {
-            return self.filter_rows_by_effective_branch_policy(&query.table, rows);
+            rows = self.filter_rows_by_effective_branch_policy(&query.table, rows)?;
+        }
+        if defer_window_until_effective_policy {
+            rows = apply_query_window(rows, query.limit, query.offset);
         }
         Ok(rows)
     }
@@ -146,16 +144,7 @@ impl QueryContext<'_> {
             SqlValue::Integer(tx::OUTCOME_REJECTED),
         ];
         query_params.append(&mut params);
-        if let Some(limit) = query.limit {
-            sql.push_str(" LIMIT ?");
-            query_params.push(SqlValue::Integer(window_value_to_i64(limit, "limit")?));
-        } else if query.offset.is_some() {
-            sql.push_str(" LIMIT -1");
-        }
-        if let Some(offset) = query.offset {
-            sql.push_str(" OFFSET ?");
-            query_params.push(SqlValue::Integer(window_value_to_i64(offset, "offset")?));
-        }
+        append_query_window_sql(&mut sql, &mut query_params, query.limit, query.offset)?;
 
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
@@ -1394,6 +1383,19 @@ impl QueryContext<'_> {
             .collect())
     }
 
+    fn defer_query_window_until_effective_branch_policy(
+        &self,
+        table: &crate::schema::TableDef,
+        query: &BuiltQuery,
+        base_epoch: Option<i64>,
+    ) -> bool {
+        !self.bypass_policy
+            && self.branch_num != 1
+            && base_epoch.is_some()
+            && (query.limit.is_some() || query.offset.is_some())
+            && matches!(table.read_policy, PolicyDef::RefReadable { .. })
+    }
+
     fn row_view_visible_in_branch(
         &self,
         table_name: &str,
@@ -2091,6 +2093,40 @@ fn query_column_is_text(column: &QueryColumn<'_>) -> bool {
 
 fn window_value_to_i64(value: usize, field: &str) -> Result<i64> {
     i64::try_from(value).map_err(|_| crate::Error::new(format!("query {field} is too large")))
+}
+
+fn append_query_window_sql(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<()> {
+    if let Some(limit) = limit {
+        sql.push_str(" LIMIT ?");
+        params.push(SqlValue::Integer(window_value_to_i64(limit, "limit")?));
+    } else if offset.is_some() {
+        sql.push_str(" LIMIT -1");
+    }
+    if let Some(offset) = offset {
+        sql.push_str(" OFFSET ?");
+        params.push(SqlValue::Integer(window_value_to_i64(offset, "offset")?));
+    }
+    Ok(())
+}
+
+fn apply_query_window(
+    rows: Vec<RowView>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Vec<RowView> {
+    let mut rows = rows
+        .into_iter()
+        .skip(offset.unwrap_or(0))
+        .collect::<Vec<_>>();
+    if let Some(limit) = limit {
+        rows.truncate(limit);
+    }
+    rows
 }
 
 fn row_to_view(

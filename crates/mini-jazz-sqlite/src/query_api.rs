@@ -173,7 +173,7 @@ impl Runtime {
         query: BuiltQuery,
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
-        let rows = self.query(query.clone())?;
+        let rows = self.query(export_support_query(&query)?)?;
         self.export_built_query_scope(query, rows, ref_include_fields)
     }
 
@@ -267,6 +267,24 @@ fn is_empty_object(value: &JsonValue) -> bool {
 
 fn is_empty_array(value: &JsonValue) -> bool {
     value.as_array().is_some_and(Vec::is_empty)
+}
+
+fn export_support_query(query: &BuiltQuery) -> Result<BuiltQuery> {
+    let offset = query.offset.unwrap_or(0);
+    if offset == 0 {
+        return Ok(query.clone());
+    }
+
+    let mut support_query = query.clone();
+    support_query.offset = None;
+    if let Some(limit) = query.limit {
+        support_query.limit = Some(
+            offset
+                .checked_add(limit)
+                .ok_or_else(|| Error::new("query limit plus offset is too large"))?,
+        );
+    }
+    Ok(support_query)
 }
 
 fn parse_conditions(value: Option<&JsonValue>) -> Result<Vec<QueryCondition>> {
