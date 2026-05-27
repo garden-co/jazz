@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
 const RECURSIVE_VISIBLE_ROWS_TABLE_SCAN_THRESHOLD: i64 = 50_000;
+const MAX_MULTI_VALUE_TOP_PAGE_VALUES: usize = 400;
 
 pub(crate) struct QueryContext<'a> {
     pub(crate) conn: &'a Connection,
@@ -156,6 +157,157 @@ impl QueryContext<'_> {
         self.read_rows_from_current_where_in(table_name, field, &values, true)
     }
 
+    pub(crate) fn read_rows_where_eq_top_created_at_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        let mut rows = self.read_many_rows_where_eq_top_created_at_desc(
+            table_name,
+            field_name,
+            &[value],
+            limit,
+        )?;
+        Ok(rows.pop().unwrap_or_default())
+    }
+
+    pub(crate) fn read_many_rows_where_eq_top_created_at_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: &[JsonValue],
+        limit: usize,
+    ) -> Result<Vec<Vec<RowView>>> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        if values.len() > MAX_MULTI_VALUE_TOP_PAGE_VALUES {
+            let mut grouped = Vec::with_capacity(values.len());
+            for chunk in values.chunks(MAX_MULTI_VALUE_TOP_PAGE_VALUES) {
+                grouped.extend(self.read_many_rows_where_eq_top_created_at_desc(
+                    table_name, field_name, chunk, limit,
+                )?);
+            }
+            return Ok(grouped);
+        }
+        if self.branch_num != 1 || matches!(field_name, "id" | "$createdBy") {
+            let created_at_by_id = current_created_at_by_row_id(self.conn, table_name)?;
+            return values
+                .iter()
+                .map(|value| {
+                    let mut rows =
+                        self.read_rows_where_eq(table_name, field_name, value.clone())?;
+                    rows.sort_by(|left, right| {
+                        created_at_by_id
+                            .get(&right.id)
+                            .cmp(&created_at_by_id.get(&left.id))
+                            .then_with(|| left.id.cmp(&right.id))
+                    });
+                    rows.truncate(limit);
+                    Ok(rows)
+                })
+                .collect();
+        }
+        let table = self.schema.table_def(table_name)?;
+        let field = table
+            .fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec![
+            "value_index".to_owned(),
+            "row_id".to_owned(),
+            "tx_id".to_owned(),
+        ];
+        select_columns.extend(field_columns.iter().map(|column| column.to_owned()));
+        select_columns.push("j_created_by".to_owned());
+        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        let value_rows = (0..values.len())
+            .map(|_| "(?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH query_values(value_index, predicate_value) AS (VALUES {value_rows}),
+             ranked AS (
+               SELECT
+                 query_values.value_index AS value_index,
+                 ids.row_id AS row_id,
+                 tx.tx_id AS tx_id,
+                 {field_columns},
+                 {created_by} AS j_created_by,
+                 row_number() OVER (
+                   PARTITION BY query_values.value_index
+                   ORDER BY current.j_created_at DESC, current.row_num
+                 ) AS query_rank
+               FROM query_values
+               JOIN {current_table} current
+                 ON current.{predicate_column} = query_values.predicate_value
+               JOIN jazz_row_id ids ON ids.row_num = current.row_num
+               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               WHERE current.j_branch_num = 1
+                 AND current.is_deleted = 0
+                 AND tx.outcome != ?
+                 AND {policy_sql}
+             )
+             SELECT {select_columns}
+             FROM ranked
+             WHERE query_rank <= ?
+             ORDER BY value_index, query_rank",
+            field_columns = field_columns
+                .iter()
+                .map(|column| format!("current.{column} AS {column}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            created_by = users::user_id_expr("current", "j_created_by"),
+            current_table = crate::schema::current_table(table_name),
+            policy_sql = self.read_policy_sql(table)?,
+            select_columns = select_columns.join(", "),
+        );
+        let mut params = Vec::new();
+        for (idx, value) in values.iter().enumerate() {
+            params.push(rusqlite::types::Value::Integer(idx as i64));
+            params.push(crate::schema::field_sql_value(
+                field,
+                value,
+                |ref_table, row_id| {
+                    row_num(self.conn, row_id).map_err(|err| {
+                        crate::Error::new(format!(
+                            "failed to resolve ref {ref_table}.{row_id} for equality predicate: {err}"
+                        ))
+                    })
+                },
+            )?);
+        }
+        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
+        params.push(rusqlite::types::Value::Integer(limit as i64));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 3 + table.fields.len() + 1;
+        let mut grouped = vec![Vec::new(); values.len()];
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            let value_index = row.get::<_, i64>(0)? as usize;
+            let values = (1..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((value_index, values))
+        })?;
+        for row in rows {
+            let (value_index, row) = row?;
+            let row = row_to_view(self.conn, table_name, table, row)?;
+            grouped
+                .get_mut(value_index)
+                .ok_or_else(|| crate::Error::new("query value index out of range"))?
+                .push(row);
+        }
+        Ok(grouped)
+    }
+
     pub(crate) fn read_rows_where_eq_top_field_desc(
         &self,
         table_name: &str,
@@ -260,6 +412,152 @@ impl QueryContext<'_> {
         )?;
         rows.map(|row| row_to_view(self.conn, table_name, table, row?))
             .collect()
+    }
+
+    pub(crate) fn read_many_rows_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: &[JsonValue],
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Vec<Vec<RowView>>> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        if values.len() > MAX_MULTI_VALUE_TOP_PAGE_VALUES {
+            let mut grouped = Vec::with_capacity(values.len());
+            for chunk in values.chunks(MAX_MULTI_VALUE_TOP_PAGE_VALUES) {
+                grouped.extend(self.read_many_rows_where_eq_top_field_desc(
+                    table_name,
+                    field_name,
+                    chunk,
+                    order_field_name,
+                    limit,
+                )?);
+            }
+            return Ok(grouped);
+        }
+        if self.branch_num != 1 {
+            return values
+                .iter()
+                .map(|value| {
+                    self.read_rows_where_eq_top_field_desc(
+                        table_name,
+                        field_name,
+                        value.clone(),
+                        order_field_name,
+                        limit,
+                    )
+                })
+                .collect();
+        }
+        let table = self.schema.table_def(table_name)?;
+        let field = table
+            .fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
+        let order_field = table
+            .fields
+            .iter()
+            .find(|field| field.name == order_field_name)
+            .ok_or_else(|| {
+                crate::Error::new(format!(
+                    "unknown order field {table_name}.{order_field_name}"
+                ))
+            })?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec![
+            "value_index".to_owned(),
+            "row_id".to_owned(),
+            "tx_id".to_owned(),
+        ];
+        select_columns.extend(field_columns.iter().map(|column| column.to_owned()));
+        select_columns.push("j_created_by".to_owned());
+        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        let order_column = crate::schema::quote_ident(&crate::schema::storage_column(order_field));
+        let value_rows = (0..values.len())
+            .map(|_| "(?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH query_values(value_index, predicate_value) AS (VALUES {value_rows}),
+             ranked AS (
+               SELECT
+                 query_values.value_index AS value_index,
+                 ids.row_id AS row_id,
+                 tx.tx_id AS tx_id,
+                 {field_columns},
+                 {created_by} AS j_created_by,
+                 row_number() OVER (
+                   PARTITION BY query_values.value_index
+                   ORDER BY current.{order_column} DESC, current.row_num
+                 ) AS query_rank
+               FROM query_values
+               JOIN {current_table} current
+                 ON current.{predicate_column} = query_values.predicate_value
+               JOIN jazz_row_id ids ON ids.row_num = current.row_num
+               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               WHERE current.j_branch_num = 1
+                 AND current.is_deleted = 0
+                 AND tx.outcome != ?
+                 AND {policy_sql}
+             )
+             SELECT {select_columns}
+             FROM ranked
+             WHERE query_rank <= ?
+             ORDER BY value_index, query_rank",
+            field_columns = field_columns
+                .iter()
+                .map(|column| format!("current.{column} AS {column}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            created_by = users::user_id_expr("current", "j_created_by"),
+            current_table = crate::schema::current_table(table_name),
+            policy_sql = self.read_policy_sql(table)?,
+            select_columns = select_columns.join(", "),
+        );
+        let mut params = Vec::new();
+        for (idx, value) in values.iter().enumerate() {
+            params.push(rusqlite::types::Value::Integer(idx as i64));
+            params.push(crate::schema::field_sql_value(
+                field,
+                value,
+                |ref_table, row_id| {
+                    row_num(self.conn, row_id).map_err(|err| {
+                        crate::Error::new(format!(
+                            "failed to resolve ref {ref_table}.{row_id} for equality predicate: {err}"
+                        ))
+                    })
+                },
+            )?);
+        }
+        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
+        params.push(rusqlite::types::Value::Integer(limit as i64));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 3 + table.fields.len() + 1;
+        let mut grouped = vec![Vec::new(); values.len()];
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            let value_index = row.get::<_, i64>(0)? as usize;
+            let values = (1..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((value_index, values))
+        })?;
+        for row in rows {
+            let (value_index, row) = row?;
+            let row = row_to_view(self.conn, table_name, table, row)?;
+            grouped
+                .get_mut(value_index)
+                .ok_or_else(|| crate::Error::new("query value index out of range"))?
+                .push(row);
+        }
+        Ok(grouped)
     }
 
     fn read_rows_where_eq_top_field_desc_from_pinned_base_branch(
@@ -1731,6 +2029,24 @@ fn json_sort_key(value: Option<&JsonValue>) -> String {
         Some(value) => format!("j:{value}"),
         None => String::new(),
     }
+}
+
+fn current_created_at_by_row_id(
+    conn: &Connection,
+    table_name: &str,
+) -> Result<BTreeMap<String, i64>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT ids.row_id, MAX(current.j_created_at)
+         FROM {} current
+         JOIN jazz_row_id ids ON ids.row_num = current.row_num
+         GROUP BY ids.row_id",
+        crate::schema::current_table(table_name)
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
+        .map_err(Into::into)
 }
 
 fn placeholders(count: usize) -> String {

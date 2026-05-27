@@ -39,8 +39,48 @@ struct QueryScopeOptions<'a> {
     extra_row_ids: &'a [String],
 }
 
+struct BatchedQueryScopeItem {
+    op: String,
+    value: JsonValue,
+    rows: Vec<RowView>,
+    extra_row_ids: Vec<String>,
+}
+
+type PredicateRefreshKey = (String, String, String, String);
+type PredicateRefreshValue = (JsonValue, Vec<String>);
+type RecursiveRefreshKey = (String, String, String);
 type TopFieldRefreshKey = (String, String, String, String, usize);
 type TopFieldRefreshValue = (JsonValue, Vec<String>);
+type TopCreatedAtRefreshKey = (String, String, String, usize);
+type TopCreatedAtRefreshValue = (JsonValue, Vec<String>);
+
+enum QueryRefreshPlan {
+    Predicate {
+        table: String,
+        field: String,
+        op: String,
+        values: Vec<PredicateRefreshValue>,
+    },
+    RecursiveRefs {
+        table: String,
+        field: String,
+        root_ids: Vec<String>,
+    },
+    TopCreatedAt {
+        table: String,
+        field: String,
+        values: Vec<TopCreatedAtRefreshValue>,
+        limit: usize,
+    },
+    TopField {
+        table: String,
+        field: String,
+        values: Vec<TopFieldRefreshValue>,
+        order_field: String,
+        limit: usize,
+    },
+    Single(QueryReadRecord),
+}
 
 impl QueryScopeOptions<'_> {
     fn empty() -> Self {
@@ -312,16 +352,8 @@ impl Runtime {
         value: JsonValue,
         limit: usize,
     ) -> Result<Vec<RowView>> {
-        let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
-        let created_at_by_id = current_created_at_by_row_id(&self.conn, table_name)?;
-        rows.sort_by(|left, right| {
-            created_at_by_id
-                .get(&right.id)
-                .cmp(&created_at_by_id.get(&left.id))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        rows.truncate(limit);
-        Ok(rows)
+        self.query_context()
+            .read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)
     }
 
     pub fn read_rows_where_eq_top_field_desc(
@@ -494,6 +526,109 @@ impl Runtime {
             op: "recursive_refs".to_owned(),
             value: JsonValue::String(root_id.to_owned()),
         }];
+        Ok(make_bundle(
+            &self.schema,
+            branches,
+            txs,
+            reads,
+            query_reads,
+            history,
+        ))
+    }
+
+    fn export_many_recursive_refs(
+        &self,
+        table_name: &str,
+        parent_field: &str,
+        root_ids: Vec<String>,
+    ) -> Result<Bundle> {
+        self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let mut row_nums = Vec::new();
+        let mut query_reads = Vec::new();
+
+        for root_id in root_ids {
+            let rows = self.read_recursive_refs(table_name, &root_id, parent_field)?;
+            row_nums.extend(
+                rows.iter()
+                    .map(|row| row_num(&self.conn, &row.id))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            query_reads.push(QueryReadRecord {
+                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+                table: table_name.to_owned(),
+                field: parent_field.to_owned(),
+                op: "recursive_refs".to_owned(),
+                value: JsonValue::String(root_id),
+            });
+        }
+
+        row_nums.sort();
+        row_nums.dedup();
+        let mut history = export_visible_table_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            user,
+            bypass_policy,
+            &branch_nums,
+            Some(&row_nums),
+        )?;
+        history.extend(export_deleted_recursive_descendant_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            parent_field,
+            &branch_nums,
+            &row_nums,
+        )?);
+        history.extend(export_recursive_scope_repair_history(
+            &self.conn,
+            &self.schema,
+            table_name,
+            parent_field,
+            &branch_nums,
+            &row_nums,
+        )?);
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            PolicyDependencyExport {
+                table_name,
+                policy: &self.schema.table_def(table_name)?.read_policy,
+                user,
+                bypass_policy,
+                branch_nums: &branch_nums,
+                child_row_nums: Some(&row_nums),
+            },
+        )?);
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
+                history.extend(export_history_versions_for_rows(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    Some(&row_nums),
+                    Some(base_epoch),
+                )?);
+                history.extend(export_snapshot_policy_dependency_history(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    user,
+                    bypass_policy,
+                    base_epoch,
+                    Some(&row_nums),
+                )?);
+            }
+        }
+        dedupe_history_records(&mut history);
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let txs = export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &[])?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(make_bundle(
             &self.schema,
             branches,
@@ -804,51 +939,51 @@ impl Runtime {
 
     pub fn export_query_read_refreshes(&self, reads: &[QueryReadRecord]) -> Result<Vec<Bundle>> {
         let current_branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
-        let mut top_field_groups: BTreeMap<TopFieldRefreshKey, Vec<TopFieldRefreshValue>> =
-            BTreeMap::new();
         let mut bundles = Vec::new();
 
-        for read in reads {
-            if read.branch_id == current_branch_id && read.op == "eq_top_field_desc" {
-                let value = read
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
-                let order_field = read
-                    .value
-                    .get("order_field")
-                    .and_then(JsonValue::as_str)
-                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
-                let limit = read
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
-                top_field_groups
-                    .entry((
-                        read.table.clone(),
-                        read.field.clone(),
-                        read.branch_id.clone(),
-                        order_field.to_owned(),
-                        limit as usize,
-                    ))
-                    .or_default()
-                    .push((value.clone(), observed_ids_from_query_value(&read.value)?));
-                continue;
-            }
-            bundles.push(self.export_query_read_refresh(read)?);
-        }
-
-        for ((table, field, _branch, order_field, limit), values) in top_field_groups {
-            bundles.push(
-                self.export_many_query_where_eq_top_field_desc_with_previous_observed(
-                    &table,
-                    &field,
+        for plan in plan_query_read_refreshes(&current_branch_id, reads)? {
+            match plan {
+                QueryRefreshPlan::Predicate {
+                    table,
+                    field,
+                    op,
                     values,
-                    &order_field,
+                } => bundles
+                    .push(self.export_many_predicate_query_refreshes(&table, &field, &op, values)?),
+                QueryRefreshPlan::RecursiveRefs {
+                    table,
+                    field,
+                    root_ids,
+                } => bundles.push(self.export_many_recursive_refs(&table, &field, root_ids)?),
+                QueryRefreshPlan::TopCreatedAt {
+                    table,
+                    field,
+                    values,
                     limit,
-                )?,
-            );
+                } => bundles.push(
+                    self.export_many_query_where_eq_top_created_at_desc_with_previous_observed(
+                        &table, &field, values, limit,
+                    )?,
+                ),
+                QueryRefreshPlan::TopField {
+                    table,
+                    field,
+                    values,
+                    order_field,
+                    limit,
+                } => bundles.push(
+                    self.export_many_query_where_eq_top_field_desc_with_previous_observed(
+                        &table,
+                        &field,
+                        values,
+                        &order_field,
+                        limit,
+                    )?,
+                ),
+                QueryRefreshPlan::Single(read) => {
+                    bundles.push(self.export_query_read_refresh(&read)?);
+                }
+            }
         }
         Ok(bundles)
     }
@@ -1287,6 +1422,59 @@ impl Runtime {
                 .and_then(JsonValue::as_u64)
                 .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
             let table = schema.table_def(&query_read.table)?;
+            if matches!(query_read.field.as_str(), "id" | "$createdBy") {
+                let branch_num = branch::checkout(db, &query_read.branch_id)?;
+                let observed_row_nums = observed_ids_from_query_value(&query_read.value)?
+                    .into_iter()
+                    .map(|row_id| row_num(db, &row_id))
+                    .collect::<Result<Vec<_>>>()?;
+                let observed_filter = if observed_row_nums.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "AND row_num NOT IN ({})",
+                        sql_placeholders(observed_row_nums.len())
+                    )
+                };
+                let mut params = vec![rusqlite::types::Value::Integer(branch_num)];
+                let predicate_sql = if query_read.field == "id" {
+                    let row_id = value
+                        .as_str()
+                        .ok_or_else(|| crate::Error::new("id equality expects a string value"))?;
+                    params.push(rusqlite::types::Value::Integer(ensure_row_id(
+                        db,
+                        &query_read.table,
+                        row_id,
+                    )?));
+                    "row_num = ?".to_owned()
+                } else {
+                    let user_id = value.as_str().ok_or_else(|| {
+                        crate::Error::new("$createdBy equality expects a string value")
+                    })?;
+                    let Ok(user_num) = users::user_num(db, user_id) else {
+                        return Ok(());
+                    };
+                    params.push(rusqlite::types::Value::Integer(user_num));
+                    "j_created_by = ?".to_owned()
+                };
+                params.extend(
+                    observed_row_nums
+                        .into_iter()
+                        .map(rusqlite::types::Value::Integer),
+                );
+                db.execute(
+                    &format!(
+                        "DELETE FROM {}
+                         WHERE j_branch_num = ?
+                           AND is_deleted = 0
+                           AND {predicate_sql}
+                           {observed_filter}",
+                        crate::schema::current_table(&query_read.table),
+                    ),
+                    params_from_iter(params.iter()),
+                )?;
+                return Ok(());
+            }
             let field = table
                 .fields
                 .iter()
@@ -2539,6 +2727,46 @@ impl Runtime {
         )
     }
 
+    fn export_many_predicate_query_refreshes(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        op: &str,
+        values: Vec<(JsonValue, Vec<String>)>,
+    ) -> Result<Bundle> {
+        let mut items = Vec::new();
+        for (value, extra_row_ids) in values {
+            let rows = match op {
+                "eq" => self.read_rows_where_eq(table_name, field_name, value.clone())?,
+                "ne" => self.read_rows_where_ne(table_name, field_name, value.clone())?,
+                "contains" => {
+                    let Some(needle) = value.as_str() else {
+                        return Err(crate::Error::new("contains expects a string value"));
+                    };
+                    self.read_rows_where_contains(table_name, field_name, needle)?
+                }
+                "in" => {
+                    let Some(values) = value.as_array() else {
+                        return Err(crate::Error::new("in predicate expects an array value"));
+                    };
+                    self.read_rows_where_in(table_name, field_name, values.clone())?
+                }
+                op => {
+                    return Err(crate::Error::new(format!(
+                        "unsupported batched predicate refresh {op}"
+                    )));
+                }
+            };
+            items.push(BatchedQueryScopeItem {
+                op: op.to_owned(),
+                value,
+                rows,
+                extra_row_ids,
+            });
+        }
+        self.export_batched_query_scopes(table_name, field_name, items, &[])
+    }
+
     pub fn export_query_where_eq_top_created_at_desc(
         &self,
         table_name: &str,
@@ -2615,6 +2843,41 @@ impl Runtime {
                 extra_row_ids: &[],
             },
         )
+    }
+
+    fn export_many_query_where_eq_top_created_at_desc_with_previous_observed(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<(JsonValue, Vec<String>)>,
+        limit: usize,
+    ) -> Result<Bundle> {
+        let value_only = values
+            .iter()
+            .map(|(value, _)| value.clone())
+            .collect::<Vec<_>>();
+        let rows_by_value = self
+            .query_context()
+            .read_many_rows_where_eq_top_created_at_desc(
+                table_name,
+                field_name,
+                &value_only,
+                limit,
+            )?;
+        let mut items = Vec::new();
+        for ((value, previous_observed_ids), rows) in values.into_iter().zip(rows_by_value) {
+            items.push(BatchedQueryScopeItem {
+                op: "eq_top_created_at_desc".to_owned(),
+                value: json!({
+                    "eq": value.clone(),
+                    "limit": limit,
+                    "observed_ids": observed_row_ids(&rows),
+                }),
+                rows,
+                extra_row_ids: previous_observed_ids,
+            });
+        }
+        self.export_batched_query_scopes(table_name, field_name, items, &[])
     }
 
     pub fn export_query_where_eq_top_field_desc(
@@ -2739,134 +3002,34 @@ impl Runtime {
         limit: usize,
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
-        let table = self.schema.table_def(table_name)?;
-        let user = self.policy_user();
-        let bypass_policy = self.bypasses_policy();
-        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let mut all_rows = Vec::new();
-        let mut visible_row_nums = Vec::new();
-        let mut repair_row_nums = Vec::new();
-        let mut query_reads = Vec::new();
-        let mut rejected_tx_ids = Vec::new();
-
-        for (value, previous_observed_ids) in values {
-            let rows = self.read_rows_where_eq_top_field_desc(
+        let value_only = values
+            .iter()
+            .map(|(value, _)| value.clone())
+            .collect::<Vec<_>>();
+        let rows_by_value = self
+            .query_context()
+            .read_many_rows_where_eq_top_field_desc(
                 table_name,
                 field_name,
-                value.clone(),
+                &value_only,
                 order_field_name,
                 limit,
             )?;
-            let row_nums = rows
-                .iter()
-                .map(|row| row_num(&self.conn, &row.id))
-                .collect::<Result<Vec<_>>>()?;
-            let query_value = json!({
-                "eq": value.clone(),
-                "order_field": order_field_name,
-                "limit": limit,
-                "observed_ids": observed_row_ids(&rows),
-            });
-            for row_id in previous_observed_ids {
-                repair_row_nums.push(row_num(&self.conn, &row_id)?);
-            }
-            repair_row_nums.extend(query_scope_repair_row_nums(
-                &self.conn,
-                table,
-                field_name,
-                "eq_top_field_desc",
-                &query_value,
-            )?);
-            rejected_tx_ids.extend(query_scope_rejected_tx_ids(
-                &self.conn,
-                table,
-                field_name,
-                "eq_top_field_desc",
-                &query_value,
-            )?);
-            query_reads.push(QueryReadRecord {
-                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
-                table: table_name.to_owned(),
-                field: field_name.to_owned(),
+        let mut items = Vec::new();
+        for ((value, previous_observed_ids), rows) in values.into_iter().zip(rows_by_value) {
+            items.push(BatchedQueryScopeItem {
                 op: "eq_top_field_desc".to_owned(),
-                value: query_value,
+                value: json!({
+                    "eq": value.clone(),
+                    "order_field": order_field_name,
+                    "limit": limit,
+                    "observed_ids": observed_row_ids(&rows),
+                }),
+                rows,
+                extra_row_ids: previous_observed_ids,
             });
-            visible_row_nums.extend(row_nums);
-            all_rows.extend(rows);
         }
-
-        visible_row_nums.sort();
-        visible_row_nums.dedup();
-        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
-        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
-        repair_row_nums.sort();
-        repair_row_nums.dedup();
-        let mut row_nums = visible_row_nums.clone();
-        row_nums.extend(repair_row_nums.iter());
-        row_nums.sort();
-        row_nums.dedup();
-        rejected_tx_ids.sort();
-        rejected_tx_ids.dedup();
-
-        let mut history = export_history_versions_for_rows(
-            &self.conn,
-            &self.schema,
-            table_name,
-            Some(&visible_row_nums),
-            None,
-        )?;
-        if !repair_row_nums.is_empty() {
-            history.extend(export_visible_table_history(
-                &self.conn,
-                &self.schema,
-                table_name,
-                user,
-                bypass_policy,
-                &branch_nums,
-                Some(&repair_row_nums),
-            )?);
-            history.extend(export_history_versions_for_rows(
-                &self.conn,
-                &self.schema,
-                table_name,
-                Some(&repair_row_nums),
-                None,
-            )?);
-        }
-        history.extend(export_policy_dependency_history(
-            &self.conn,
-            &self.schema,
-            PolicyDependencyExport {
-                table_name,
-                policy: &table.read_policy,
-                user,
-                bypass_policy,
-                branch_nums: &branch_nums,
-                child_row_nums: Some(&row_nums),
-            },
-        )?);
-        for ref_field_name in ref_include_fields {
-            history.extend(self.export_ref_include_history(
-                table,
-                &all_rows,
-                ref_field_name,
-                &branch_nums,
-            )?);
-        }
-        dedupe_history_records(&mut history);
-        let reads = export_reads_for_history(&self.conn, &history)?;
-        let txs =
-            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
-        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
-        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
-        Ok(make_bundle(
-            &self.schema,
-            branches,
-            txs,
-            reads,
-            query_reads,
-            history,
-        ))
+        self.export_batched_query_scopes(table_name, field_name, items, ref_include_fields)
     }
 
     fn export_query_where_eq_top_field_desc_with_previous_observed(
@@ -3210,6 +3373,151 @@ impl Runtime {
             op: op.to_owned(),
             value,
         }];
+        Ok(make_bundle(
+            &self.schema,
+            branches,
+            txs,
+            reads,
+            query_reads,
+            history,
+        ))
+    }
+
+    fn export_batched_query_scopes(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        items: Vec<BatchedQueryScopeItem>,
+        ref_include_fields: &[&str],
+    ) -> Result<Bundle> {
+        let table = self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let mut all_rows = Vec::new();
+        let mut visible_row_nums = Vec::new();
+        let mut repair_row_nums = Vec::new();
+        let mut rejected_tx_ids = Vec::new();
+        let mut query_reads = Vec::new();
+
+        for item in items {
+            let row_nums = item
+                .rows
+                .iter()
+                .map(|row| row_num(&self.conn, &row.id))
+                .collect::<Result<Vec<_>>>()?;
+            for row_id in &item.extra_row_ids {
+                repair_row_nums.push(row_num(&self.conn, row_id)?);
+            }
+            repair_row_nums.extend(query_scope_repair_row_nums(
+                &self.conn,
+                table,
+                field_name,
+                &item.op,
+                &item.value,
+            )?);
+            rejected_tx_ids.extend(query_scope_rejected_tx_ids(
+                &self.conn,
+                table,
+                field_name,
+                &item.op,
+                &item.value,
+            )?);
+            query_reads.push(QueryReadRecord {
+                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+                table: table_name.to_owned(),
+                field: field_name.to_owned(),
+                op: item.op,
+                value: item.value,
+            });
+            visible_row_nums.extend(row_nums);
+            all_rows.extend(item.rows);
+        }
+
+        visible_row_nums.sort();
+        visible_row_nums.dedup();
+        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
+        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
+        repair_row_nums.sort();
+        repair_row_nums.dedup();
+        let mut row_nums = visible_row_nums.clone();
+        row_nums.extend(repair_row_nums.iter());
+        row_nums.sort();
+        row_nums.dedup();
+        rejected_tx_ids.sort();
+        rejected_tx_ids.dedup();
+
+        let mut history = export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            table_name,
+            Some(&visible_row_nums),
+            None,
+        )?;
+        if !repair_row_nums.is_empty() {
+            history.extend(export_visible_table_history(
+                &self.conn,
+                &self.schema,
+                table_name,
+                user,
+                bypass_policy,
+                &branch_nums,
+                Some(&repair_row_nums),
+            )?);
+            history.extend(export_history_versions_for_rows(
+                &self.conn,
+                &self.schema,
+                table_name,
+                Some(&repair_row_nums),
+                None,
+            )?);
+        }
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            PolicyDependencyExport {
+                table_name,
+                policy: &table.read_policy,
+                user,
+                bypass_policy,
+                branch_nums: &branch_nums,
+                child_row_nums: Some(&row_nums),
+            },
+        )?);
+        for ref_field_name in ref_include_fields {
+            history.extend(self.export_ref_include_history(
+                table,
+                &all_rows,
+                ref_field_name,
+                &branch_nums,
+            )?);
+        }
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
+                history.extend(export_history_versions_for_rows(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    Some(&row_nums),
+                    Some(base_epoch),
+                )?);
+                history.extend(export_snapshot_policy_dependency_history(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    user,
+                    bypass_policy,
+                    base_epoch,
+                    Some(&row_nums),
+                )?);
+            }
+        }
+        dedupe_history_records(&mut history);
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let txs =
+            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(make_bundle(
             &self.schema,
             branches,
@@ -5478,23 +5786,6 @@ fn branch_id_for_num(conn: &Connection, branch_num: i64) -> Result<String> {
     .map_err(Into::into)
 }
 
-fn current_created_at_by_row_id(
-    conn: &Connection,
-    table_name: &str,
-) -> Result<BTreeMap<String, i64>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT ids.row_id, current.j_created_at
-         FROM {} current
-         JOIN jazz_row_id ids ON ids.row_num = current.row_num",
-        crate::schema::current_table(table_name)
-    ))?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
-        .map_err(Into::into)
-}
-
 fn export_table_history(
     conn: &Connection,
     schema: &SchemaDef,
@@ -6678,6 +6969,144 @@ fn observed_ids_from_query_value(value: &JsonValue) -> Result<Vec<String>> {
                 .ok_or_else(|| crate::Error::new("observed_ids expects string row ids"))
         })
         .collect()
+}
+
+fn plan_query_read_refreshes(
+    current_branch_id: &str,
+    reads: &[QueryReadRecord],
+) -> Result<Vec<QueryRefreshPlan>> {
+    let mut predicate_groups: BTreeMap<PredicateRefreshKey, Vec<PredicateRefreshValue>> =
+        BTreeMap::new();
+    let mut recursive_groups: BTreeMap<RecursiveRefreshKey, Vec<String>> = BTreeMap::new();
+    let mut top_created_at_groups: BTreeMap<TopCreatedAtRefreshKey, Vec<TopCreatedAtRefreshValue>> =
+        BTreeMap::new();
+    let mut top_field_groups: BTreeMap<TopFieldRefreshKey, Vec<TopFieldRefreshValue>> =
+        BTreeMap::new();
+    let mut singles = Vec::new();
+
+    for read in reads {
+        if read.branch_id == current_branch_id
+            && matches!(read.op.as_str(), "eq" | "ne" | "contains" | "in")
+        {
+            predicate_groups
+                .entry((
+                    read.table.clone(),
+                    read.field.clone(),
+                    read.branch_id.clone(),
+                    read.op.clone(),
+                ))
+                .or_default()
+                .push((read.value.clone(), Vec::new()));
+            continue;
+        }
+        if read.branch_id == current_branch_id && read.op == "recursive_refs" {
+            let Some(root_id) = read.value.as_str() else {
+                return Err(crate::Error::new("recursive refs expects root id string"));
+            };
+            recursive_groups
+                .entry((
+                    read.table.clone(),
+                    read.field.clone(),
+                    read.branch_id.clone(),
+                ))
+                .or_default()
+                .push(root_id.to_owned());
+            continue;
+        }
+        if read.branch_id == current_branch_id && read.op == "eq_top_created_at_desc" {
+            let value = read
+                .value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
+            let limit = read
+                .value
+                .get("limit")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
+            top_created_at_groups
+                .entry((
+                    read.table.clone(),
+                    read.field.clone(),
+                    read.branch_id.clone(),
+                    limit as usize,
+                ))
+                .or_default()
+                .push((value.clone(), observed_ids_from_query_value(&read.value)?));
+            continue;
+        }
+        if read.branch_id == current_branch_id && read.op == "eq_top_field_desc" {
+            let value = read
+                .value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+            let order_field = read
+                .value
+                .get("order_field")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+            let limit = read
+                .value
+                .get("limit")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+            top_field_groups
+                .entry((
+                    read.table.clone(),
+                    read.field.clone(),
+                    read.branch_id.clone(),
+                    order_field.to_owned(),
+                    limit as usize,
+                ))
+                .or_default()
+                .push((value.clone(), observed_ids_from_query_value(&read.value)?));
+            continue;
+        }
+        singles.push(QueryRefreshPlan::Single(read.clone()));
+    }
+
+    let mut plans = Vec::new();
+    plans.extend(
+        predicate_groups
+            .into_iter()
+            .map(
+                |((table, field, _branch, op), values)| QueryRefreshPlan::Predicate {
+                    table,
+                    field,
+                    op,
+                    values,
+                },
+            ),
+    );
+    plans.extend(
+        recursive_groups
+            .into_iter()
+            .map(
+                |((table, field, _branch), root_ids)| QueryRefreshPlan::RecursiveRefs {
+                    table,
+                    field,
+                    root_ids,
+                },
+            ),
+    );
+    plans.extend(top_created_at_groups.into_iter().map(
+        |((table, field, _branch, limit), values)| QueryRefreshPlan::TopCreatedAt {
+            table,
+            field,
+            values,
+            limit,
+        },
+    ));
+    plans.extend(top_field_groups.into_iter().map(
+        |((table, field, _branch, order_field, limit), values)| QueryRefreshPlan::TopField {
+            table,
+            field,
+            values,
+            order_field,
+            limit,
+        },
+    ));
+    plans.extend(singles);
+    Ok(plans)
 }
 
 fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {

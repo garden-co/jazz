@@ -118,6 +118,16 @@ query may remain cached after it leaves that query's active result set. Evicting
 uninteresting cached data is an asynchronous cache-management concern, not
 eager query-scope contraction.
 
+When an upstream peer refreshes active query descriptors for one downstream
+peer, it should plan compatible descriptors together before assembling bundles.
+Compatibility is descriptor-family specific, but generally means same branch
+view, table, field/path, operator, ordering, limit, include shape, and policy
+context, with only bound values/root ids differing. The implementation may still
+evaluate each descriptor separately internally, but bundle assembly should dedupe
+shared history, read-set facts, transaction metadata, branch/source records, and
+policy dependencies before encoding. Descriptor families proven batchable in the
+prototype include ordinary predicates, ordered pages, and recursive ref roots.
+
 Example: querying open todos includes:
 
 - todo rows that matched `done = false`
