@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use std::env;
 use std::path::PathBuf;
 
-pub const STORAGE_FORMAT_VERSION: i64 = 5;
+pub const STORAGE_FORMAT_VERSION: i64 = 6;
 
 #[derive(Clone, Debug)]
 pub enum Storage {

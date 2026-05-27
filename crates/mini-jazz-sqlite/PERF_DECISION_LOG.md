@@ -785,3 +785,18 @@ Learning: the scary ~136 ms refresh sample was noise. Adaptive read-set export
 looks stable around the earlier baseline for ordinary top-page work while
 keeping the pinned branch broad-read fix. `temp_store=MEMORY` does not matter
 enough to default.
+
+## 2026-05-27 00:21 PDT
+
+Removed redundant `table_name` storage from `jazz_row_id`. Row ids are already
+globally unique in the model, and the remaining table-scoped id repair/export
+queries can derive their scope from the per-table history/current tables.
+
+Result on the 100k-row primary core: total file footprint dropped from ~35.7 MB
+to ~34.6 MB. `jazz_row_id` dropped from ~2.8 MB to ~1.8 MB while the unique
+row-id index stayed ~1.95 MB. First-result/refresh/apply remained in the normal
+range (~38.8 ms, ~56.9 ms, ~38.2 ms). Whole-system tests remained green.
+
+This means row identity is now much closer to the spec's "globally unique row
+id" assumption physically as well as semantically. Bumped storage format again
+from 5 to 6.

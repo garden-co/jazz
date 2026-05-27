@@ -384,7 +384,6 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS jazz_row_id (
           row_num INTEGER PRIMARY KEY,
-          table_name TEXT NOT NULL,
           row_id TEXT NOT NULL UNIQUE
         );
 

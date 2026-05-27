@@ -1,10 +1,10 @@
 use crate::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub(crate) fn ensure_row_id(conn: &Connection, table: &str, row_id: &str) -> Result<i64> {
+pub(crate) fn ensure_row_id(conn: &Connection, _table: &str, row_id: &str) -> Result<i64> {
     conn.execute(
-        "INSERT OR IGNORE INTO jazz_row_id (table_name, row_id) VALUES (?, ?)",
-        params![table, row_id],
+        "INSERT OR IGNORE INTO jazz_row_id (row_id) VALUES (?)",
+        params![row_id],
     )?;
     Ok(conn.query_row(
         "SELECT row_num FROM jazz_row_id WHERE row_id = ?",

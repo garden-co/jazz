@@ -1372,17 +1372,13 @@ impl Runtime {
                     &format!(
                         "DELETE FROM {current_table}
                          WHERE j_branch_num = ?
-                           AND row_num IN (
-                             SELECT row_num FROM jazz_row_id
-                             WHERE table_name = ? AND row_id != ?
-                           )
+                           AND row_num != (SELECT row_num FROM jazz_row_id WHERE row_id = ?)
                            AND row_num NOT IN (
                              SELECT h.row_num
                              FROM {history_table} h
                              JOIN jazz_row_id ids ON ids.row_num = h.row_num
                              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-                             WHERE ids.table_name = ?
-                               AND ids.row_id != ?
+                             WHERE ids.row_id != ?
                                AND h.j_branch_num = ?
                                AND h.op != 3
                                AND tx.outcome != ?
@@ -1392,9 +1388,7 @@ impl Runtime {
                     ),
                     params![
                         branch_num,
-                        query_read.table,
                         excluded_id,
-                        query_read.table,
                         excluded_id,
                         branch_num,
                         tx::OUTCOME_REJECTED
@@ -1536,8 +1530,7 @@ impl Runtime {
                      FROM jazz_row_id ids
                      JOIN {history_table} h ON h.row_num = ids.row_num
                      JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-                     WHERE ids.table_name = ?
-                       AND h.j_branch_num = ?
+                     WHERE h.j_branch_num = ?
                        AND h.op != 3
                        AND tx.outcome != ?
                        AND {history_predicate_sql}
@@ -1550,7 +1543,6 @@ impl Runtime {
             params![
                 branch_num,
                 predicate_value.clone(),
-                query_read.table,
                 branch_num,
                 tx::OUTCOME_REJECTED,
                 predicate_value
@@ -5679,13 +5671,15 @@ fn query_scope_repair_row_nums(
             let excluded_id = value
                 .as_str()
                 .ok_or_else(|| crate::Error::new("id inequality expects a string value"))?;
-            let mut stmt = conn.prepare(
-                "SELECT row_num
-                 FROM jazz_row_id
-                 WHERE table_name = ? AND row_id != ?
-                 ORDER BY row_num",
-            )?;
-            let rows = stmt.query_map(params![table.name, excluded_id], |row| row.get(0))?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT DISTINCT h.row_num
+                 FROM {} h
+                 JOIN jazz_row_id ids ON ids.row_num = h.row_num
+                 WHERE ids.row_id != ?
+                 ORDER BY h.row_num",
+                crate::schema::history_table(&table.name)
+            ))?;
+            let rows = stmt.query_map(params![excluded_id], |row| row.get(0))?;
             return rows
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into);
@@ -5809,17 +5803,15 @@ fn query_scope_rejected_tx_ids(
                  FROM {} h
                  JOIN jazz_tx tx ON tx.tx_num = h.tx_num
                  JOIN jazz_row_id ids ON ids.row_num = h.row_num
-                 WHERE ids.table_name = ?
-                   AND ids.row_id != ?
+                 WHERE ids.row_id != ?
                    AND tx.outcome = ?
                  ORDER BY tx.tx_num",
                 crate::schema::history_table(&table.name),
             );
             let mut stmt = conn.prepare(&sql)?;
-            let tx_ids = stmt.query_map(
-                params![table.name, excluded_id, tx::OUTCOME_REJECTED],
-                |row| row.get::<_, String>(0),
-            )?;
+            let tx_ids = stmt.query_map(params![excluded_id, tx::OUTCOME_REJECTED], |row| {
+                row.get::<_, String>(0)
+            })?;
             return tx_ids
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into);
