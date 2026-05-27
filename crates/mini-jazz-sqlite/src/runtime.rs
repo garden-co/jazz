@@ -2959,6 +2959,40 @@ fn transaction_effective_values(
     Ok(values)
 }
 
+fn transaction_rows_by_id(rows: Vec<RowView>) -> BTreeMap<String, Vec<RowView>> {
+    let mut rows_by_id = BTreeMap::<String, Vec<RowView>>::new();
+    for row in rows {
+        rows_by_id.entry(row.id.clone()).or_default().push(row);
+    }
+    rows_by_id
+}
+
+fn single_transaction_row<'a>(
+    rows: Option<&'a Vec<RowView>>,
+    id: &str,
+) -> Result<Option<&'a RowView>> {
+    let Some(rows) = rows else {
+        return Ok(None);
+    };
+    if rows.len() > 1 {
+        return Err(crate::Error::new("ambiguous branch row source candidates"));
+    }
+    rows.first()
+        .map(Some)
+        .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))
+}
+
+fn take_single_transaction_row(rows: Option<Vec<RowView>>, id: &str) -> Result<RowView> {
+    let Some(mut rows) = rows else {
+        return Err(crate::Error::new(format!("row {id} is not visible")));
+    };
+    if rows.len() > 1 {
+        return Err(crate::Error::new("ambiguous branch row source candidates"));
+    }
+    rows.pop()
+        .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))
+}
+
 struct LocalWriteCheck<'a> {
     db: &'a Connection,
     schema: &'a SchemaDef,
@@ -3664,11 +3698,13 @@ impl<'a> TransactionBuilder<'a> {
 
     pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
         let table = self.runtime.schema.table_def(table_name)?;
-        let mut rows_by_id = self
-            .read_rows_at_start(table_name)?
-            .into_iter()
-            .map(|row| (row.id.clone(), row))
-            .collect::<BTreeMap<_, _>>();
+        let mut rows_by_id = self.read_rows_at_start(table_name)?.into_iter().fold(
+            BTreeMap::<String, Vec<RowView>>::new(),
+            |mut rows, row| {
+                rows.entry(row.id.clone()).or_default().push(row);
+                rows
+            },
+        );
 
         for mutation in &self.mutations {
             match mutation {
@@ -3679,26 +3715,25 @@ impl<'a> TransactionBuilder<'a> {
                     op,
                 } if mutation_table == table_name => {
                     validate_write_fields(table, values)?;
+                    let base = single_transaction_row(rows_by_id.get(id), id)?;
                     let effective_values =
-                        transaction_effective_values(table, rows_by_id.get(id), values, *op, id)?;
+                        transaction_effective_values(table, base, values, *op, id)?;
                     let created_by = if *op == 1 {
                         self.runtime.attribution_user().to_owned()
                     } else {
-                        rows_by_id
-                            .get(id)
-                            .map(|row| row.created_by.clone())
+                        base.map(|row| row.created_by.clone())
                             .unwrap_or_else(|| self.runtime.attribution_user().to_owned())
                     };
                     rows_by_id.insert(
                         id.clone(),
-                        RowView {
+                        vec![RowView {
                             table: table_name.to_owned(),
                             id: id.clone(),
                             values: effective_values,
                             created_by,
                             tx_id: "staged".to_owned(),
                             conflict_count: 0,
-                        },
+                        }],
                     );
                 }
                 Mutation::DeleteRow {
@@ -3713,7 +3748,7 @@ impl<'a> TransactionBuilder<'a> {
 
         let mut rows = self.filter_transaction_rows_by_policy(
             table_name,
-            rows_by_id.into_values().collect::<Vec<_>>(),
+            rows_by_id.into_values().flatten().collect::<Vec<_>>(),
         )?;
         rows.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(rows)
@@ -3982,7 +4017,7 @@ impl<'a> TransactionBuilder<'a> {
     }
 
     fn materialize_commit_mutations(&self) -> Result<Vec<CommitMutation>> {
-        let mut rows_by_table = BTreeMap::<String, BTreeMap<String, RowView>>::new();
+        let mut rows_by_table = BTreeMap::<String, BTreeMap<String, Vec<RowView>>>::new();
         let mut commit_mutations = Vec::new();
         let user = self.runtime.attribution_user().to_owned();
 
@@ -3999,38 +4034,29 @@ impl<'a> TransactionBuilder<'a> {
                     if !rows_by_table.contains_key(table) {
                         rows_by_table.insert(
                             table.clone(),
-                            self.read_rows_at_start(table)?
-                                .into_iter()
-                                .map(|row| (row.id.clone(), row))
-                                .collect(),
+                            transaction_rows_by_id(self.read_rows_at_start(table)?),
                         );
                     }
                     let rows_by_id = rows_by_table.get_mut(table).expect("table rows inserted");
-                    let effective_values = transaction_effective_values(
-                        table_def,
-                        rows_by_id.get(id),
-                        values,
-                        *op,
-                        id,
-                    )?;
+                    let base = single_transaction_row(rows_by_id.get(id), id)?;
+                    let effective_values =
+                        transaction_effective_values(table_def, base, values, *op, id)?;
                     let created_by = if *op == 1 {
                         user.clone()
                     } else {
-                        rows_by_id
-                            .get(id)
-                            .map(|row| row.created_by.clone())
+                        base.map(|row| row.created_by.clone())
                             .unwrap_or_else(|| user.clone())
                     };
                     rows_by_id.insert(
                         id.clone(),
-                        RowView {
+                        vec![RowView {
                             table: table.clone(),
                             id: id.clone(),
                             values: effective_values.clone(),
                             created_by,
                             tx_id: "staged".to_owned(),
                             conflict_count: 0,
-                        },
+                        }],
                     );
                     commit_mutations.push(CommitMutation::Row {
                         table: table.clone(),
@@ -4043,16 +4069,11 @@ impl<'a> TransactionBuilder<'a> {
                     if !rows_by_table.contains_key(table) {
                         rows_by_table.insert(
                             table.clone(),
-                            self.read_rows_at_start(table)?
-                                .into_iter()
-                                .map(|row| (row.id.clone(), row))
-                                .collect(),
+                            transaction_rows_by_id(self.read_rows_at_start(table)?),
                         );
                     }
                     let rows_by_id = rows_by_table.get_mut(table).expect("table rows inserted");
-                    let visible_row = rows_by_id
-                        .remove(id)
-                        .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?;
+                    let visible_row = take_single_transaction_row(rows_by_id.remove(id), id)?;
                     commit_mutations.push(CommitMutation::DeleteRow {
                         table: table.clone(),
                         id: id.clone(),

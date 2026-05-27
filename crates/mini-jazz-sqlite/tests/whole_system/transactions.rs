@@ -1345,6 +1345,103 @@ fn transaction_writes_are_applied_to_start_snapshot() {
 }
 
 #[test]
+fn transaction_reads_preserve_branch_conflict_candidates() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let rows = alice.transaction().read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.id == "task-1"));
+    let titles = rows
+        .iter()
+        .map(|row| row.values["title"].clone())
+        .collect::<Vec<_>>();
+    assert!(titles.contains(&json!("Left title")));
+    assert!(titles.contains(&json!("Right title")));
+}
+
+#[test]
+fn transaction_update_rejects_ambiguous_branch_conflict() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let err = alice
+        .transaction()
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("title".to_owned(), json!("Implicit resolution"))]),
+        )
+        .commit()
+        .unwrap_err();
+    assert!(err.to_string().contains("ambiguous branch row"));
+}
+
+#[test]
 fn transaction_reads_include_own_staged_writes() {
     let schema = support::notes_schema();
     let mut alice =
