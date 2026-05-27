@@ -2284,3 +2284,26 @@ Decision: did not change the current-Jazz benchmark during this SQLite-core
 sprint. It is still useful as an inspiration/source signal, but if we use it as
 a direct comparator we should split "many known schemas" from "wide returned row
 payload" so the measured bottleneck is unambiguous.
+
+## 2026-05-27 03:32 PDT
+
+Ran one corrected full default harness after the review fixes.
+
+Selected final default numbers:
+
+- primary page topology API-to-first-result, now including edge/worker export:
+  ~32.8 ms
+- primary refresh API-to-updated-result, now including edge/worker export:
+  ~36.8 ms
+- primary initial intermediary exports were small at default page scale:
+  edge ~1.2 ms, worker ~1.1 ms
+- primary refresh intermediary exports: edge ~1.4 ms, worker ~1.7 ms
+- corrected dashboard 48-query case: initial export ~22.0 ms, refresh export
+  ~22.8 ms, tab apply ~6.0 ms, refresh apply ~3.6 ms
+- recursive 2k: initial apply ~29.5 ms, refresh apply ~10.1 ms, three repeated
+  no-op applies ~28.7 ms, three repeated no-op polls ~17.0 ms
+
+Learning: including intermediary exports changes the primary topology headline
+but not the conclusion at page scale, because exports are small for bounded page
+queries. The correction matters much more for broad recursive scopes, where
+per-hop export is on the same order as apply.
