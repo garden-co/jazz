@@ -943,3 +943,25 @@ can stay clean. There is a small release latency regression in this single run,
 likely from scalar subqueries used to materialize user ids; a next optimization
 candidate is joining or caching user ids in hot row materialization/export paths
 if repeated samples confirm the regression.
+
+## 2026-05-27 00:46 PDT
+
+Added a permissioned dashboard perf probe that combines several previously
+separate dimensions: recursive read policy (`documents -> projects -> teams`),
+24 concurrent top-page subscriptions, a full core -> edge -> worker -> memory-tab
+topology, merged initial bundles, and refresh after new top rows.
+
+Release sample:
+
+- seed: 50k recursive-policy documents in ~1.74 s
+- initial core export for 24 pages: ~86.9 ms total, merged bundle ~86 KB,
+  188 history rows and 7 transactions after dedupe
+- apply: edge ~8.0 ms, worker ~7.2 ms, tab ~5.8 ms
+- subscribe existing local pages: ~1.8 ms for 24 subscriptions
+- refresh export after 72 inserted top rows: ~93.4 ms, tab apply ~8.1 ms,
+  polling all subscriptions ~2.4 ms
+
+Learning: the whole-topology subscription side looks cheap once data is scoped,
+but recursive-policy export across many query descriptors is now a visible
+server-side cost. This is a good benchmark for future policy-dependency and
+multi-query export dedupe work.

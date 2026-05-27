@@ -28,6 +28,7 @@ fn main() -> BenchResult<()> {
         many_user_page_probe: run_many_user_page_probe()?,
         user_id_footprint_probe: run_user_id_footprint_probe()?,
         user_id_interning_projection_probe: run_user_id_interning_projection_probe()?,
+        permissioned_dashboard_probe: run_permissioned_dashboard_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
         wide_schema_apply_probe: run_wide_schema_apply_probe()?,
         storage_topology_probe: run_storage_topology_probe()?,
@@ -76,6 +77,7 @@ struct BenchmarkReport {
     many_user_page_probe: ManyUserPageProbe,
     user_id_footprint_probe: UserIdFootprintProbe,
     user_id_interning_projection_probe: UserIdInterningProjectionProbe,
+    permissioned_dashboard_probe: PermissionedDashboardProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
     wide_schema_apply_probe: WideSchemaApplyProbe,
     storage_topology_probe: StorageTopologyProbe,
@@ -231,6 +233,31 @@ struct UserIdInterningProjectionCase {
     database_bytes: i64,
     seed_ms: f64,
     materialize_page_ms: f64,
+}
+
+#[derive(Serialize)]
+struct PermissionedDashboardProbe {
+    total_rows: usize,
+    target_owner_rows: usize,
+    query_count: usize,
+    page_size: usize,
+    seed_ms: f64,
+    core_export_ms: f64,
+    merged_bundle_bytes: usize,
+    merged_history_rows: usize,
+    merged_transaction_rows: usize,
+    edge_apply_ms: f64,
+    worker_apply_ms: f64,
+    tab_apply_ms: f64,
+    subscribe_ms: f64,
+    refresh_export_ms: f64,
+    refresh_apply_ms: f64,
+    subscription_poll_ms: f64,
+    subscription_added: usize,
+    subscription_updated: usize,
+    subscription_removed: usize,
+    core_database_bytes: i64,
+    tab_database_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -988,6 +1015,122 @@ fn run_user_id_interning_projection_case(
         database_bytes: sqlite_database_bytes(&conn)?,
         seed_ms: ms(seed_elapsed),
         materialize_page_ms: ms(materialize_elapsed),
+    })
+}
+
+fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe> {
+    let total_rows = 50_000;
+    let target_owner_rows = 5_000;
+    let query_count = 24;
+    let page_size = 20;
+    let dir = tempdir()?;
+    let schema = recursive_policy_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut edge = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("edge.sqlite")),
+        "edge",
+        schema.clone(),
+    )?;
+    let mut worker = Runtime::open_with_schema(
+        Storage::File(dir.path().join("worker.sqlite")),
+        "worker",
+        OWNER,
+        schema.clone(),
+    )?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema)?;
+
+    let seed_started = Instant::now();
+    seed_recursive_policy_graph(&mut core, total_rows, target_owner_rows, 100)?;
+    let seed_elapsed = seed_started.elapsed();
+
+    let owners = dashboard_owner_filters(query_count);
+    let export_started = Instant::now();
+    let bundles = owners
+        .iter()
+        .map(|owner| export_top_owner_page_for(&mut core, OWNER, owner, page_size))
+        .collect::<Result<Vec<_>>>()?;
+    let core_export_elapsed = export_started.elapsed();
+    let merged_bundle = merge_bundles(&bundles)?;
+    let merged_summary = BundleSummary::from(&merged_bundle)?;
+    let edge_apply_elapsed = timed(|| edge.apply_bundle(&merged_bundle))?;
+    let edge_bundle = merge_bundles(
+        &owners
+            .iter()
+            .map(|owner| export_top_owner_page_for(&mut edge, OWNER, owner, page_size))
+            .collect::<Result<Vec<_>>>()?,
+    )?;
+    let worker_apply_elapsed = timed(|| worker.apply_bundle(&edge_bundle))?;
+    let worker_bundle = merge_bundles(
+        &owners
+            .iter()
+            .map(|owner| export_top_owner_page_for(&mut worker, OWNER, owner, page_size))
+            .collect::<Result<Vec<_>>>()?,
+    )?;
+    let tab_apply_elapsed = timed(|| tab.apply_bundle(&worker_bundle))?;
+
+    let subscribe_started = Instant::now();
+    let mut subscriptions = owners
+        .iter()
+        .map(|owner| {
+            tab.subscribe_rows_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!(owner),
+                "updated_at",
+                page_size,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let subscribe_elapsed = subscribe_started.elapsed();
+
+    insert_new_top_recursive_documents_for_owners(&mut core, total_rows, &owners, 3)?;
+    let refresh_started = Instant::now();
+    let refresh_bundles = core.run_as_user(OWNER, |core| {
+        core.export_query_read_refreshes(&tab.observed_query_reads()?)
+    })?;
+    let refresh_elapsed = refresh_started.elapsed();
+    let refresh_merged = merge_bundles(&refresh_bundles)?;
+    let refresh_apply_elapsed = timed(|| tab.apply_bundle(&refresh_merged))?;
+    let poll_started = Instant::now();
+    let mut total_counts = DiffCounts {
+        added: 0,
+        updated: 0,
+        removed: 0,
+    };
+    for subscription in &mut subscriptions {
+        let counts = DiffCounts::from(&tab.poll_subscription(subscription)?);
+        total_counts.added += counts.added;
+        total_counts.updated += counts.updated;
+        total_counts.removed += counts.removed;
+    }
+    let poll_elapsed = poll_started.elapsed();
+
+    Ok(PermissionedDashboardProbe {
+        total_rows,
+        target_owner_rows,
+        query_count,
+        page_size,
+        seed_ms: ms(seed_elapsed),
+        core_export_ms: ms(core_export_elapsed),
+        merged_bundle_bytes: merged_summary.bytes,
+        merged_history_rows: merged_bundle.history.len(),
+        merged_transaction_rows: merged_bundle.txs.len(),
+        edge_apply_ms: ms(edge_apply_elapsed),
+        worker_apply_ms: ms(worker_apply_elapsed),
+        tab_apply_ms: ms(tab_apply_elapsed),
+        subscribe_ms: ms(subscribe_elapsed),
+        refresh_export_ms: ms(refresh_elapsed),
+        refresh_apply_ms: ms(refresh_apply_elapsed),
+        subscription_poll_ms: ms(poll_elapsed),
+        subscription_added: total_counts.added,
+        subscription_updated: total_counts.updated,
+        subscription_removed: total_counts.removed,
+        core_database_bytes: core.storage_stats()?.database_bytes,
+        tab_database_bytes: tab.storage_stats()?.database_bytes,
     })
 }
 
@@ -2107,6 +2250,38 @@ fn insert_new_top_documents_for_shared_readable_owners(
                         )),
                     ),
                 ]),
+            );
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn dashboard_owner_filters(query_count: usize) -> Vec<String> {
+    let mut owners = Vec::with_capacity(query_count);
+    owners.push(OWNER.to_owned());
+    for index in 1..query_count {
+        owners.push(format!("user-{}", 5_000 + index));
+    }
+    owners
+}
+
+fn insert_new_top_recursive_documents_for_owners(
+    runtime: &mut Runtime,
+    total_rows: usize,
+    owners: &[String],
+    count_per_owner: usize,
+) -> Result<()> {
+    let mut tx = runtime.transaction();
+    for (owner_index, owner) in owners.iter().enumerate() {
+        for index in 0..count_per_owner {
+            let row_index = total_rows + owner_index * count_per_owner + index;
+            let mut values = recursive_document_values(row_index, 0);
+            values.insert("owner_id".to_owned(), json!(owner));
+            tx = tx.insert_row(
+                "documents",
+                &format!("recursive-dashboard-new-{owner_index}-{index}"),
+                values,
             );
         }
     }
