@@ -66,6 +66,15 @@ effective base may be a current branch row, a row inherited from branch sources,
 or a pinned historical base snapshot. Unknown user fields fail closed before
 history/projection writes; they are not silently dropped.
 
+`insert` is create-only for an already visible row in the same table and branch
+view. Mutating an existing visible row must use `update`, and caller intent to
+create-or-update must use explicit `upsert`. A branch-local overlay may still
+insert a row id that is inherited only from a branch source or pinned base,
+because that creates branch-local state rather than rewriting the inherited
+row. Public row ids remain globally unique across tables: an unresolved ref may
+mention an id before ownership exists, but once a table owns the id no other
+table may claim it through local write or sync.
+
 Authority acceptance enriches the existing transaction. It must not create a new
 public transaction id.
 
@@ -139,3 +148,6 @@ Open issues:
 - forwarded exclusive transaction retry, offline storage, auth-context
   preservation, and global fate propagation
 - audit-grade append-only fate/receipt history
+- exclusive upsert over an existing visible row: whether it should validate as
+  an ordinary globally ordered update with a precise read set, or require a
+  stricter expected-version/previous-row contract to avoid hidden conflicts

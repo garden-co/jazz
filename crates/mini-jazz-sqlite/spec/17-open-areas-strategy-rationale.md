@@ -512,6 +512,14 @@ Implementation lessons from the prototype:
 - Observable ordering must be semantic. Physical SQLite row numbers are useful
   locally, but leaking them into default query order creates cross-replica
   divergence when bundles are applied in different orders.
+- Query descriptor lifetime is a protocol concern. The prototype showed that
+  simply making descriptor tables temporary breaks reconnect repair when stale
+  cached facts survive restart. The durable product contract should be active
+  descriptor replay plus settled-query repair, not persisted query interest as
+  user data.
+- Create/update intent should be explicit at the API boundary. Treating
+  `insert` as an accidental update hid important product semantics; the current
+  shape is create-only `insert`, explicit `update`, and explicit `upsert`.
 - Read/write sets are becoming the bridge between policy, validation,
   replayability, causality, and future conflict explanation.
 - Whole-system tests are more valuable than narrow helper tests for this design:
