@@ -550,6 +550,7 @@ impl Runtime {
                 branch_record.source_version,
             )?;
         }
+        let mut tx_nums_by_id = BTreeMap::new();
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
             let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
@@ -577,9 +578,10 @@ impl Runtime {
                     metadata_json
                 ],
             )?;
+            let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
+            tx_nums_by_id.insert(tx_record.tx_id.as_str(), tx_num);
             if tx_record.outcome == tx::OUTCOME_REJECTED {
                 if let Some(code) = &tx_record.rejection_code {
-                    let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
                     let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
                     db.execute(
                         "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
@@ -589,7 +591,6 @@ impl Runtime {
                 }
             }
             if let Some(global_epoch) = tx_record.global_epoch {
-                let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
                 db.execute(
                     "INSERT OR REPLACE INTO jazz_tx_receipt
                      (tx_num, tier, observed_at, receipt_json)
@@ -598,7 +599,6 @@ impl Runtime {
                 )?;
             }
             for tier in &tx_record.receipt_tiers {
-                let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
                 let observed_at = if *tier == tx::TIER_GLOBAL {
                     tx_record.global_epoch.unwrap_or(tx_record.created_at)
                 } else {
@@ -613,12 +613,19 @@ impl Runtime {
             }
         }
         for read_record in &bundle.reads {
-            let tx_num = tx::tx_num(&db, &read_record.tx_id)?;
+            let tx_num = tx_nums_by_id
+                .get(read_record.tx_id.as_str())
+                .copied()
+                .ok_or_else(|| crate::Error::new("bundle read references missing tx"))?;
             let row_num = ensure_row_id(&db, &read_record.table, &read_record.row_id)?;
             let observed_tx_num = read_record
                 .observed_tx_id
                 .as_deref()
-                .map(|observed_tx_id| tx::tx_num(&db, observed_tx_id))
+                .map(|observed_tx_id| {
+                    tx_nums_by_id.get(observed_tx_id).copied().ok_or_else(|| {
+                        crate::Error::new("bundle read references missing observed tx")
+                    })
+                })
                 .transpose()?;
             read_set::record_tx_read_with_observed(
                 &db,

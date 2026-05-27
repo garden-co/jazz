@@ -327,3 +327,16 @@ shape: 25 added, 10 updated, 25 removed. The bundle still contains 160 history
 rows and 87 KB, so observed-id repair plus top-page re-export is correct and
 fast enough at this scale, but replacement-page refreshes still resend enough
 history to make apply cost the dominant piece.
+
+## 2026-05-26 22:18 PDT
+
+Optimized bundle apply to cache tx id -> tx num mappings while applying each
+bundle, instead of repeatedly looking up the same transaction row for receipts
+and read-set rows. The query-scope test suite passes.
+
+Result: the effect is real but small at the current scoped-page bundle sizes.
+Cold first-result moved from roughly 133-135 ms to about 130 ms, warm tab apply
+from about 19.4 ms to about 18.9 ms, and mixed-mutation apply from about 34 ms
+to about 32 ms. This confirms apply cost is not primarily tx lookup overhead;
+the next apply targets should be per-history-row current projection writes,
+row-id lookups, and query-scope repair passes.
