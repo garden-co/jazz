@@ -385,6 +385,8 @@ fn parse_order_by(value: Option<&JsonValue>) -> Result<Vec<QueryOrderBy>> {
 }
 
 fn parse_usize_field(object: &JsonMap<String, JsonValue>, field: &str) -> Result<Option<usize>> {
+    const MAX_PORTABLE_USIZE: u64 = u32::MAX as u64;
+
     let Some(value) = object.get(field) else {
         return Ok(None);
     };
@@ -396,7 +398,14 @@ fn parse_usize_field(object: &JsonMap<String, JsonValue>, field: &str) -> Result
             "query {field} must be a non-negative integer"
         )));
     };
-    Ok(Some(value as usize))
+    if value > MAX_PORTABLE_USIZE {
+        return Err(Error::new(format!(
+            "query {field} is too large; maximum is {MAX_PORTABLE_USIZE}"
+        )));
+    }
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| Error::new(format!("query {field} is too large")))
 }
 
 fn condition_matches(row: &RowView, condition: &QueryCondition) -> Result<bool> {
@@ -503,5 +512,29 @@ fn apply_window(rows: Vec<RowView>, offset: Option<usize>, limit: Option<usize>)
     match limit {
         Some(limit) => rows.into_iter().skip(offset).take(limit).collect(),
         None => rows.into_iter().skip(offset).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn built_query_rejects_window_values_too_large_for_wasm_usize() {
+        for field in ["limit", "offset"] {
+            let err = BuiltQuery::from_json_value(json!({
+                "table": "todos",
+                "conditions": [],
+                field: u64::from(u32::MAX) + 1,
+            }))
+            .unwrap_err();
+
+            assert!(
+                err.to_string()
+                    .contains(&format!("query {field} is too large")),
+                "{err}"
+            );
+        }
     }
 }
