@@ -1421,6 +1421,59 @@ impl Runtime {
                 .and_then(JsonValue::as_u64)
                 .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
             let table = schema.table_def(&query_read.table)?;
+            if matches!(query_read.field.as_str(), "id" | "$createdBy") {
+                let branch_num = branch::checkout(db, &query_read.branch_id)?;
+                let observed_row_nums = observed_ids_from_query_value(&query_read.value)?
+                    .into_iter()
+                    .map(|row_id| row_num(db, &row_id))
+                    .collect::<Result<Vec<_>>>()?;
+                let observed_filter = if observed_row_nums.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "AND row_num NOT IN ({})",
+                        sql_placeholders(observed_row_nums.len())
+                    )
+                };
+                let mut params = vec![rusqlite::types::Value::Integer(branch_num)];
+                let predicate_sql = if query_read.field == "id" {
+                    let row_id = value
+                        .as_str()
+                        .ok_or_else(|| crate::Error::new("id equality expects a string value"))?;
+                    params.push(rusqlite::types::Value::Integer(ensure_row_id(
+                        db,
+                        &query_read.table,
+                        row_id,
+                    )?));
+                    "row_num = ?".to_owned()
+                } else {
+                    let user_id = value.as_str().ok_or_else(|| {
+                        crate::Error::new("$createdBy equality expects a string value")
+                    })?;
+                    let Ok(user_num) = users::user_num(db, user_id) else {
+                        return Ok(());
+                    };
+                    params.push(rusqlite::types::Value::Integer(user_num));
+                    "j_created_by = ?".to_owned()
+                };
+                params.extend(
+                    observed_row_nums
+                        .into_iter()
+                        .map(rusqlite::types::Value::Integer),
+                );
+                db.execute(
+                    &format!(
+                        "DELETE FROM {}
+                         WHERE j_branch_num = ?
+                           AND is_deleted = 0
+                           AND {predicate_sql}
+                           {observed_filter}",
+                        crate::schema::current_table(&query_read.table),
+                    ),
+                    params_from_iter(params.iter()),
+                )?;
+                return Ok(());
+            }
             let field = table
                 .fields
                 .iter()

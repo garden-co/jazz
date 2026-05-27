@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
 const RECURSIVE_VISIBLE_ROWS_TABLE_SCAN_THRESHOLD: i64 = 50_000;
+const MAX_MULTI_VALUE_TOP_PAGE_VALUES: usize = 400;
 
 pub(crate) struct QueryContext<'a> {
     pub(crate) conn: &'a Connection,
@@ -182,7 +183,16 @@ impl QueryContext<'_> {
         if values.is_empty() {
             return Ok(Vec::new());
         }
-        if self.branch_num != 1 {
+        if values.len() > MAX_MULTI_VALUE_TOP_PAGE_VALUES {
+            let mut grouped = Vec::with_capacity(values.len());
+            for chunk in values.chunks(MAX_MULTI_VALUE_TOP_PAGE_VALUES) {
+                grouped.extend(self.read_many_rows_where_eq_top_created_at_desc(
+                    table_name, field_name, chunk, limit,
+                )?);
+            }
+            return Ok(grouped);
+        }
+        if self.branch_num != 1 || matches!(field_name, "id" | "$createdBy") {
             let created_at_by_id = current_created_at_by_row_id(self.conn, table_name)?;
             return values
                 .iter()
@@ -414,6 +424,19 @@ impl QueryContext<'_> {
     ) -> Result<Vec<Vec<RowView>>> {
         if values.is_empty() {
             return Ok(Vec::new());
+        }
+        if values.len() > MAX_MULTI_VALUE_TOP_PAGE_VALUES {
+            let mut grouped = Vec::with_capacity(values.len());
+            for chunk in values.chunks(MAX_MULTI_VALUE_TOP_PAGE_VALUES) {
+                grouped.extend(self.read_many_rows_where_eq_top_field_desc(
+                    table_name,
+                    field_name,
+                    chunk,
+                    order_field_name,
+                    limit,
+                )?);
+            }
+            return Ok(grouped);
         }
         if self.branch_num != 1 {
             return values

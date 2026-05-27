@@ -1708,6 +1708,107 @@ fn predicate_query_read_refresh_batches_same_shape_queries() {
 }
 
 #[test]
+fn non_eq_predicate_query_read_refreshes_batch_by_operator() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    for (id, title, done) in [
+        ("todo-alpha-open", "Alpha open", false),
+        ("todo-alpha-done", "Alpha done", true),
+        ("todo-beta-open", "Beta open", false),
+        ("todo-beta-done", "Beta done", true),
+    ] {
+        alice.create_todo(id, title, done, "project-1").unwrap();
+    }
+
+    for bundle in [
+        alice
+            .export_query_where_contains("todos", "title", "Alpha")
+            .unwrap(),
+        alice
+            .export_query_where_contains("todos", "title", "Beta")
+            .unwrap(),
+        alice
+            .export_query_where_in("todos", "title", vec![json!("Alpha open")])
+            .unwrap(),
+        alice
+            .export_query_where_in("todos", "title", vec![json!("Beta open")])
+            .unwrap(),
+        alice
+            .export_query_where_ne("todos", "done", json!(false))
+            .unwrap(),
+        alice
+            .export_query_where_ne("todos", "done", json!(true))
+            .unwrap(),
+    ] {
+        peer.apply_bundle(&bundle).unwrap();
+    }
+    assert_eq!(peer.observed_query_reads().unwrap().len(), 6);
+
+    alice
+        .transaction()
+        .update_row(
+            "todos",
+            "todo-alpha-open",
+            BTreeMap::from([("title".to_owned(), json!("Gamma open"))]),
+        )
+        .commit()
+        .unwrap();
+    alice
+        .transaction()
+        .update_row(
+            "todos",
+            "todo-beta-open",
+            BTreeMap::from([("done".to_owned(), json!(true))]),
+        )
+        .commit()
+        .unwrap();
+
+    let refreshes = alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap();
+    let query_read_counts = refreshes
+        .iter()
+        .map(|bundle| bundle.query_reads.len())
+        .collect::<Vec<_>>();
+    assert_eq!(query_read_counts, vec![2, 2, 2]);
+
+    for refresh in refreshes {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+    let rows = peer.read_rows("todos").unwrap();
+    let alpha_open = rows.iter().find(|row| row.id == "todo-alpha-open").unwrap();
+    let beta_open = rows.iter().find(|row| row.id == "todo-beta-open").unwrap();
+    assert_eq!(alpha_open.values["title"], json!("Gamma open"));
+    assert_eq!(beta_open.values["done"], json!(true));
+}
+
+#[test]
+fn top_created_at_query_can_filter_by_created_by_magic_field() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-old", "Old authored todo", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-new", "New authored todo", false, "project-1")
+        .unwrap();
+
+    let bundle = alice
+        .export_query_where_eq_top_created_at_desc("todos", "$createdBy", json!("alice"), 1)
+        .unwrap();
+    peer.apply_bundle(&bundle).unwrap();
+
+    let rows = peer.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-new");
+    assert_eq!(peer.observed_query_reads().unwrap()[0].field, "$createdBy");
+}
+
+#[test]
 fn missing_optional_ref_include_observed_refresh_delivers_later_dependency() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();

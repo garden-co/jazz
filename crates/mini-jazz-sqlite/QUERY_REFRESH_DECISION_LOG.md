@@ -179,3 +179,30 @@ The metric is still whole-export time, not isolated SQL read time. It includes
 policy dependency export, repair history, read-set export, tx export, and bundle
 assembly. That is useful product-wise, but we may still want a more focused
 profile later if reviewers ask whether the SQL part itself improved.
+
+## 2026-05-27 12:38 PDT
+
+Subagent review found three useful issues:
+
+1. main-branch multi-value `$createdAt` lowering accidentally stopped accepting
+   semantic fields supported by `read_rows_where_eq`, such as `id` and
+   `$createdBy`;
+2. unbounded grouped values could create huge SQL statements / too many bind
+   parameters;
+3. ordinary predicate batching tests only covered `eq`, despite planning `ne`,
+   `contains`, and `in`.
+
+Decision: fix all three in this PR.
+
+## 2026-05-27 12:41 PDT
+
+Review fixes:
+
+- chunk multi-value ordered page SQL at `400` values per statement;
+- preserve the previous semantic-field behavior for `$createdAt` ordered
+  queries over `id` and `$createdBy` by falling back to the semantic equality
+  path;
+- extend apply-side query-scope repair for `$createdAt` ordered descriptors
+  over `id` and `$createdBy`;
+- add focused tests for `$createdBy` ordered pages and for batched `ne`,
+  `contains`, and `in` predicate refreshes.
