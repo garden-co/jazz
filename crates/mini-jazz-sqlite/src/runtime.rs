@@ -1495,19 +1495,23 @@ impl Runtime {
         schema: &SchemaDef,
         db: &Connection,
         query_read: &QueryReadRecord,
-        query: &BuiltQuery,
+        built_query: &BuiltQuery,
     ) -> Result<()> {
-        if let Some((condition, limit)) = query.ordered_page() {
-            return Self::apply_ordered_page_repair(schema, db, query_read, condition, limit);
+        if let Some(query::QueryStoragePlan::EqCreatedAtDescPage { condition, limit }) =
+            query::storage_plan(built_query)
+        {
+            return Self::apply_created_at_desc_page_repair(
+                schema, db, query_read, condition, limit,
+            );
         }
-        let Some(condition) = query.single_predicate_export_condition()? else {
+        let Some(condition) = built_query.single_predicate_export_condition()? else {
             return Err(crate::Error::new(
                 "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
             ));
         };
         let predicate_read = QueryReadRecord {
             branch_id: query_read.branch_id.clone(),
-            table: query.table.clone(),
+            table: built_query.table.clone(),
             field: condition.column.clone(),
             op: condition.op.as_str().to_owned(),
             value: condition.value.clone(),
@@ -1515,7 +1519,7 @@ impl Runtime {
         Self::apply_query_scope_repair(schema, db, &predicate_read)
     }
 
-    fn apply_ordered_page_repair(
+    fn apply_created_at_desc_page_repair(
         schema: &SchemaDef,
         db: &Connection,
         query_read: &QueryReadRecord,
@@ -6140,14 +6144,18 @@ fn query_scope_repair_row_nums_for_read(
 fn query_scope_repair_row_nums_for_built_query(
     conn: &Connection,
     table: &crate::schema::TableDef,
-    query: &BuiltQuery,
+    built_query: &BuiltQuery,
 ) -> Result<Vec<i64>> {
-    if query.table != table.name {
+    if built_query.table != table.name {
         return Err(crate::Error::new(
             "query read table does not match descriptor",
         ));
     }
-    if let Some((condition, _limit)) = query.ordered_page() {
+    if let Some(query::QueryStoragePlan::EqCreatedAtDescPage {
+        condition,
+        limit: _,
+    }) = query::storage_plan(built_query)
+    {
         return query_scope_repair_row_nums(
             conn,
             table,
@@ -6156,7 +6164,7 @@ fn query_scope_repair_row_nums_for_built_query(
             &condition.value,
         );
     }
-    let Some(condition) = query.single_predicate_export_condition()? else {
+    let Some(condition) = built_query.single_predicate_export_condition()? else {
         return Err(crate::Error::new(
             "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
         ));

@@ -1,4 +1,4 @@
-use crate::query_api::BuiltQuery;
+use crate::query_api::{BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection};
 use crate::rows::{public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::types::RowView;
@@ -15,6 +15,31 @@ pub(crate) struct QueryContext<'a> {
     pub(crate) branch_num: i64,
     pub(crate) user: &'a str,
     pub(crate) bypass_policy: bool,
+}
+
+pub(crate) enum QueryStoragePlan<'a> {
+    EqCreatedAtDescPage {
+        condition: &'a QueryCondition,
+        limit: usize,
+    },
+}
+
+pub(crate) fn storage_plan(query: &BuiltQuery) -> Option<QueryStoragePlan<'_>> {
+    if query.offset.unwrap_or(0) != 0 || query.conditions.len() != 1 || query.order_by.len() != 1 {
+        return None;
+    }
+    let condition = query.conditions.first()?;
+    if condition.op != QueryConditionOp::Eq {
+        return None;
+    }
+    let order = query.order_by.first()?;
+    if order.column == "$createdAt" && order.direction == QueryDirection::Desc {
+        query
+            .limit
+            .map(|limit| QueryStoragePlan::EqCreatedAtDescPage { condition, limit })
+    } else {
+        None
+    }
 }
 
 impl QueryContext<'_> {
@@ -82,11 +107,12 @@ impl QueryContext<'_> {
         &self,
         query: &BuiltQuery,
     ) -> Result<Option<Vec<RowView>>> {
-        let Some((condition, limit)) = query.ordered_page() else {
+        let Some(QueryStoragePlan::EqCreatedAtDescPage { condition, limit }) = storage_plan(query)
+        else {
             return Ok(None);
         };
         if condition.column == "id" || condition.column == "$createdBy" || self.branch_num != 1 {
-            return Ok(Some(self.read_ordered_page_slow(
+            return Ok(Some(self.read_created_at_desc_page_slow(
                 &query.table,
                 &condition.column,
                 condition.value.clone(),
@@ -104,7 +130,7 @@ impl QueryContext<'_> {
                     query.table, condition.column
                 ))
             })?;
-        Ok(Some(self.read_main_ordered_page_where_eq(
+        Ok(Some(self.read_main_created_at_desc_page_where_eq(
             &query.table,
             field,
             &condition.value,
@@ -1509,7 +1535,7 @@ impl QueryContext<'_> {
             .collect()
     }
 
-    fn read_main_ordered_page_where_eq(
+    fn read_main_created_at_desc_page_where_eq(
         &self,
         table_name: &str,
         field: &FieldDef,
@@ -1594,7 +1620,7 @@ impl QueryContext<'_> {
             .collect()
     }
 
-    fn read_ordered_page_slow(
+    fn read_created_at_desc_page_slow(
         &self,
         table_name: &str,
         field_name: &str,

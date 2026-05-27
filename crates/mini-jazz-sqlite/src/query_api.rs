@@ -71,22 +71,6 @@ impl BuiltQuery {
         })
     }
 
-    pub(crate) fn ordered_page(&self) -> Option<(&QueryCondition, usize)> {
-        if self.offset.unwrap_or(0) != 0 || self.conditions.len() != 1 || self.order_by.len() != 1 {
-            return None;
-        }
-        let condition = self.conditions.first()?;
-        if condition.op != QueryConditionOp::Eq {
-            return None;
-        }
-        let order = self.order_by.first()?;
-        if order.column == "$createdAt" && order.direction == QueryDirection::Desc {
-            self.limit.map(|limit| (condition, limit))
-        } else {
-            None
-        }
-    }
-
     pub(crate) fn single_predicate_export_condition(&self) -> Result<Option<&QueryCondition>> {
         if self.conditions.len() != 1
             || !self.order_by.is_empty()
