@@ -289,6 +289,20 @@ impl Runtime {
         self.write_row(table_name, id, values, 2)
     }
 
+    pub fn upsert_row(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        values: BTreeMap<String, JsonValue>,
+    ) -> Result<String> {
+        let op = if self.row_has_current_branch_value(table_name, id)? {
+            2
+        } else {
+            1
+        };
+        self.write_row(table_name, id, values, op)
+    }
+
     pub fn resolve_row_conflict(
         &mut self,
         table_name: &str,
@@ -3841,7 +3855,9 @@ impl Runtime {
 
     fn row_has_current_branch_value(&self, table_name: &str, id: &str) -> Result<bool> {
         self.schema.table_def(table_name)?;
-        let row_num = row_num(&self.conn, id)?;
+        let Ok(row_num) = row_num(&self.conn, id) else {
+            return Ok(false);
+        };
         let count: i64 = self.conn.query_row(
             &format!(
                 "SELECT COUNT(*)
@@ -4843,6 +4859,50 @@ enum Mutation {
     },
 }
 
+fn normalize_mutations(mutations: Vec<Mutation>) -> Vec<Mutation> {
+    let mut normalized: Vec<Mutation> = Vec::new();
+    for mutation in mutations {
+        let (table, id) = match &mutation {
+            Mutation::Row { table, id, .. } | Mutation::DeleteRow { table, id } => {
+                (table.as_str(), id.as_str())
+            }
+        };
+        let Some(existing) = normalized.iter_mut().find(|existing| match existing {
+            Mutation::Row {
+                table: existing_table,
+                id: existing_id,
+                ..
+            }
+            | Mutation::DeleteRow {
+                table: existing_table,
+                id: existing_id,
+            } => existing_table == table && existing_id == id,
+        }) else {
+            normalized.push(mutation);
+            continue;
+        };
+        match (existing, mutation) {
+            (
+                Mutation::Row {
+                    values: existing_values,
+                    op: existing_op,
+                    ..
+                },
+                Mutation::Row { values, op, .. },
+            ) => {
+                existing_values.extend(values);
+                if *existing_op != 1 {
+                    *existing_op = op;
+                }
+            }
+            (existing_slot, later) => {
+                *existing_slot = later;
+            }
+        }
+    }
+    normalized
+}
+
 impl<'a> TransactionBuilder<'a> {
     pub fn exclusive(mut self) -> Self {
         self.mode = TransactionMode::Exclusive { global_epoch: None };
@@ -4886,6 +4946,25 @@ impl<'a> TransactionBuilder<'a> {
         self
     }
 
+    pub fn upsert_row(
+        mut self,
+        table: &str,
+        id: &str,
+        values: BTreeMap<String, JsonValue>,
+    ) -> Self {
+        let op = match self.runtime.row_has_current_branch_value(table, id) {
+            Ok(true) => 2,
+            Ok(false) | Err(_) => 1,
+        };
+        self.mutations.push(Mutation::Row {
+            table: table.to_owned(),
+            id: id.to_owned(),
+            values,
+            op,
+        });
+        self
+    }
+
     pub fn delete_row(mut self, table: &str, id: &str) -> Self {
         self.mutations.push(Mutation::DeleteRow {
             table: table.to_owned(),
@@ -4895,7 +4974,10 @@ impl<'a> TransactionBuilder<'a> {
     }
 
     pub fn commit(self) -> Result<String> {
-        let mutations = self.mutations;
+        let mutations = normalize_mutations(self.mutations);
+        if mutations.is_empty() {
+            return Ok(String::new());
+        }
         let user = self.runtime.attribution_user().to_owned();
         let bypass_policy = self.runtime.bypasses_policy();
         let mut delete_snapshots = BTreeMap::new();
