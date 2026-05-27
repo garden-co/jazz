@@ -1960,3 +1960,20 @@ recursive CTE policy-first experiment gave only a small improvement, so the
 overall decision is: do not prefix ordinary user-declared indexes with policy
 columns by default. If we need policy-specific acceleration, it should be a
 separate targeted index/plan, not a blanket index shape.
+
+## 2026-05-27 03:09 PDT
+
+Tried a subscription diff no-op fast path: if the freshly read ordered rows are
+exactly equal to the previous ordered rows, return no diffs before building
+`BTreeMap`s.
+
+10k recursive subscription after an unchanged refresh:
+
+- no-op poll stayed around ~32 ms
+- no-op apply stayed around ~48 ms in this sample
+
+Learning: this is still a reasonable local cleanup, but it is not the lever.
+The no-op poll cost is dominated by rerunning the recursive read over ~10k rows,
+not by constructing the semantic diff. Large-query subscriptions need an
+invalidation/version signal that can avoid rerunning the query at all when no
+possibly relevant transactions arrived.

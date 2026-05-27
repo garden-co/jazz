@@ -148,6 +148,10 @@ impl RowsSubscription {
     }
 
     pub(crate) fn replace_with_diff(&mut self, next_rows: Vec<RowView>) -> Vec<RowDiff> {
+        if self.last_rows == next_rows {
+            return Vec::new();
+        }
+
         let before = by_id(&self.last_rows);
         let after = by_id(&next_rows);
         let mut diffs = Vec::new();
