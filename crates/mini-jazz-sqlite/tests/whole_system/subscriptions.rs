@@ -123,7 +123,9 @@ fn built_query_reads_newest_matching_rows_from_jazz_tools_json_shape() {
 fn built_query_lowers_predicates_ordering_and_window_to_sqlite() {
     let schema = support::notes_schema();
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
 
     for (id, body, pinned) in [
         ("note-old", "keep old", true),
@@ -156,10 +158,48 @@ fn built_query_lowers_predicates_ordering_and_window_to_sqlite() {
     }))
     .unwrap();
 
-    let rows = alice.query(query).unwrap();
+    let rows = alice.query(query.clone()).unwrap();
     assert_eq!(
         rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
         vec!["note-middle", "note-old"]
+    );
+
+    peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
+        .unwrap();
+    assert_eq!(
+        peer.query(query.clone())
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-middle", "note-old"]
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-newest",
+            BTreeMap::from([
+                ("body".to_owned(), json!("keep newest")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+    assert_eq!(
+        peer.query(query)
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-new", "note-middle"]
     );
 }
 
