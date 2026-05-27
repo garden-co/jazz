@@ -41,6 +41,7 @@ fn main() -> BenchResult<()> {
         permissioned_dashboard_probe: run_permissioned_dashboard_probe()?,
         dashboard_query_scaling_probe: run_dashboard_query_scaling_probe()?,
         recursive_tree_subscription_probe: run_recursive_tree_subscription_probe()?,
+        recursive_tree_topology_probe: run_recursive_tree_topology_probe()?,
         recursive_closure_layout_probe: run_recursive_closure_layout_probe()?,
         cold_reopen_profile_probe: run_cold_reopen_profile_probe()?,
         project_board_probe: run_project_board_probe()?,
@@ -157,6 +158,7 @@ struct BenchmarkReport {
     permissioned_dashboard_probe: PermissionedDashboardProbe,
     dashboard_query_scaling_probe: DashboardQueryScalingProbe,
     recursive_tree_subscription_probe: RecursiveTreeSubscriptionProbe,
+    recursive_tree_topology_probe: RecursiveTreeTopologyProbe,
     recursive_closure_layout_probe: RecursiveClosureLayoutProbe,
     cold_reopen_profile_probe: ColdReopenProfileProbe,
     project_board_probe: ProjectBoardProbe,
@@ -409,6 +411,36 @@ struct RecursiveTreeSubscriptionProbe {
     subscription_removed: usize,
     visible_rows_after_refresh: usize,
     core_database_bytes: i64,
+    tab_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct RecursiveTreeTopologyProbe {
+    node_count: usize,
+    branch_factor: usize,
+    root_id: String,
+    initial_core_export_ms: f64,
+    initial_edge_apply_ms: f64,
+    initial_edge_export_ms: f64,
+    initial_worker_apply_ms: f64,
+    initial_worker_export_ms: f64,
+    initial_tab_apply_ms: f64,
+    refresh_core_export_ms: f64,
+    refresh_edge_apply_ms: f64,
+    refresh_edge_export_ms: f64,
+    refresh_worker_apply_ms: f64,
+    refresh_worker_export_ms: f64,
+    refresh_tab_apply_ms: f64,
+    subscription_poll_ms: f64,
+    subscription_added: usize,
+    subscription_updated: usize,
+    subscription_removed: usize,
+    tab_visible_rows_after_refresh: usize,
+    initial_core_bundle_bytes: usize,
+    refresh_core_bundle_bytes: usize,
+    core_database_bytes: i64,
+    edge_database_bytes: i64,
+    worker_database_bytes: i64,
     tab_database_bytes: i64,
 }
 
@@ -1643,6 +1675,119 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
         subscription_removed: diff_counts.removed,
         visible_rows_after_refresh,
         core_database_bytes: core.storage_stats()?.database_bytes,
+        tab_database_bytes: tab.storage_stats()?.database_bytes,
+    })
+}
+
+fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe> {
+    let node_count = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_NODES", 2_000);
+    let branch_factor = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_BRANCH_FACTOR", 5).max(1);
+    let root_id =
+        env::var("MINI_JAZZ_PERF_RECURSIVE_TREE_ROOT_ID").unwrap_or_else(|_| "folder-0".to_owned());
+    let dir = tempdir()?;
+    let schema = folder_tree_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut edge = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("edge.sqlite")),
+        "edge",
+        schema.clone(),
+    )?;
+    let mut worker = Runtime::open_trusted_with_schema(Storage::Memory, "worker", schema.clone())?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema)?;
+
+    core.run_as_user(OWNER, |core| {
+        seed_folder_tree(core, node_count, branch_factor)
+    })?;
+
+    let initial_core_export_started = Instant::now();
+    let initial_core_bundle = core.run_as_user(OWNER, |core| {
+        core.export_recursive_refs("folders", &root_id, "parent")
+    })?;
+    let initial_core_export_elapsed = initial_core_export_started.elapsed();
+    let initial_core_summary = BundleSummary::from(&initial_core_bundle)?;
+    let initial_edge_apply = edge.profile_apply_bundle(&initial_core_bundle)?;
+
+    let initial_edge_export_started = Instant::now();
+    let initial_edge_bundles =
+        edge.run_as_user(OWNER, |edge| edge.export_observed_query_refreshes())?;
+    let initial_edge_export_elapsed = initial_edge_export_started.elapsed();
+    let initial_edge_bundle = merge_bundles(&initial_edge_bundles)?;
+    let initial_worker_apply = worker.profile_apply_bundle(&initial_edge_bundle)?;
+
+    let initial_worker_export_started = Instant::now();
+    let initial_worker_bundles =
+        worker.run_as_user(OWNER, |worker| worker.export_observed_query_refreshes())?;
+    let initial_worker_export_elapsed = initial_worker_export_started.elapsed();
+    let initial_worker_bundle = merge_bundles(&initial_worker_bundles)?;
+    let initial_tab_apply = tab.profile_apply_bundle(&initial_worker_bundle)?;
+    let mut subscription = tab.subscribe_observed_query(&tab.observed_query_reads()?[0])?;
+
+    core.run_as_user(OWNER, |core| {
+        mutate_folder_tree(core, node_count, branch_factor)
+    })?;
+
+    let refresh_core_export_started = Instant::now();
+    let refresh_core_bundles = core.run_as_user(OWNER, |core| {
+        core.export_query_read_refreshes(&edge.observed_query_reads()?)
+    })?;
+    let refresh_core_export_elapsed = refresh_core_export_started.elapsed();
+    let refresh_core_bundle = merge_bundles(&refresh_core_bundles)?;
+    let refresh_core_summary = BundleSummary::from(&refresh_core_bundle)?;
+    let refresh_edge_apply = edge.profile_apply_bundle(&refresh_core_bundle)?;
+
+    let refresh_edge_export_started = Instant::now();
+    let refresh_edge_bundles = edge.run_as_user(OWNER, |edge| {
+        edge.export_query_read_refreshes(&worker.observed_query_reads()?)
+    })?;
+    let refresh_edge_export_elapsed = refresh_edge_export_started.elapsed();
+    let refresh_edge_bundle = merge_bundles(&refresh_edge_bundles)?;
+    let refresh_worker_apply = worker.profile_apply_bundle(&refresh_edge_bundle)?;
+
+    let refresh_worker_export_started = Instant::now();
+    let refresh_worker_bundles = worker.run_as_user(OWNER, |worker| {
+        worker.export_query_read_refreshes(&tab.observed_query_reads()?)
+    })?;
+    let refresh_worker_export_elapsed = refresh_worker_export_started.elapsed();
+    let refresh_worker_bundle = merge_bundles(&refresh_worker_bundles)?;
+    let refresh_tab_apply = tab.profile_apply_bundle(&refresh_worker_bundle)?;
+
+    let poll_started = Instant::now();
+    let diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
+    let poll_elapsed = poll_started.elapsed();
+    let tab_visible_rows_after_refresh = tab
+        .read_recursive_refs("folders", &root_id, "parent")?
+        .len();
+
+    Ok(RecursiveTreeTopologyProbe {
+        node_count,
+        branch_factor,
+        root_id,
+        initial_core_export_ms: ms(initial_core_export_elapsed),
+        initial_edge_apply_ms: initial_edge_apply.total_ms,
+        initial_edge_export_ms: ms(initial_edge_export_elapsed),
+        initial_worker_apply_ms: initial_worker_apply.total_ms,
+        initial_worker_export_ms: ms(initial_worker_export_elapsed),
+        initial_tab_apply_ms: initial_tab_apply.total_ms,
+        refresh_core_export_ms: ms(refresh_core_export_elapsed),
+        refresh_edge_apply_ms: refresh_edge_apply.total_ms,
+        refresh_edge_export_ms: ms(refresh_edge_export_elapsed),
+        refresh_worker_apply_ms: refresh_worker_apply.total_ms,
+        refresh_worker_export_ms: ms(refresh_worker_export_elapsed),
+        refresh_tab_apply_ms: refresh_tab_apply.total_ms,
+        subscription_poll_ms: ms(poll_elapsed),
+        subscription_added: diff_counts.added,
+        subscription_updated: diff_counts.updated,
+        subscription_removed: diff_counts.removed,
+        tab_visible_rows_after_refresh,
+        initial_core_bundle_bytes: initial_core_summary.bytes,
+        refresh_core_bundle_bytes: refresh_core_summary.bytes,
+        core_database_bytes: core.storage_stats()?.database_bytes,
+        edge_database_bytes: edge.storage_stats()?.database_bytes,
+        worker_database_bytes: worker.storage_stats()?.database_bytes,
         tab_database_bytes: tab.storage_stats()?.database_bytes,
     })
 }

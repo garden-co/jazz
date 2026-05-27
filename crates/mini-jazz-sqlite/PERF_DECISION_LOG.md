@@ -1691,3 +1691,31 @@ recursive query scope is dominated by writing history/current rows and read-set
 rows. The benchmark should keep exposing the profile breakdown so we can tell
 whether future wins come from bundle scope reductions, faster apply mechanics,
 or transport/payload changes.
+
+## 2026-05-27 02:27 PDT
+
+Added a recursive full-topology probe: core -> durable edge -> memory worker ->
+memory tab. It exports the same recursive subscription scope through every
+tier, then mutates the core tree and forwards observed-query refreshes through
+the same path.
+
+2k-node tree:
+
+- initial core export: ~23.4 ms
+- initial edge apply: ~47.5 ms
+- initial edge export: ~24.1 ms
+- initial worker apply: ~46.0 ms
+- initial worker export: ~21.9 ms
+- initial tab apply: ~46.8 ms
+- refresh core export: ~25.1 ms
+- refresh edge apply: ~34.4 ms
+- refresh edge export: ~24.8 ms
+- refresh worker apply: ~32.8 ms
+- refresh worker export: ~22.7 ms
+- refresh tab apply: ~32.8 ms
+- subscription poll: ~6.3 ms
+
+Learning: topology multiplication matters. Even after fixing local recursive
+read time, a cold recursive scope pays full export/apply costs at each tier.
+This makes bundle delta/scoping and apply throughput at intermediaries at least
+as important as local query speed for broad subscriptions.
