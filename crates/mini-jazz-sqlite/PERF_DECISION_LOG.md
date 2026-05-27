@@ -1943,3 +1943,20 @@ but it still resends and rechecks the whole recursive scope even when nothing
 changed. For large observed queries, the next big design target is delta-shaped
 refresh/export and/or compact read-set refresh facts, not more local SQL
 micro-optimizations.
+
+## 2026-05-27 03:04 PDT
+
+Compared declared index prefixes on the 50k-row dashboard scaling probe:
+
+- default indexes: 48-query initial export ~21.5 ms, refresh export ~23.3 ms
+- `MINI_JAZZ_SQLITE_BRANCH_FIRST_INDEXES=1`: initial export ~21.4 ms, refresh
+  export ~24.0 ms
+- `MINI_JAZZ_SQLITE_POLICY_FIRST_INDEXES=1`: initial export ~545 ms, refresh
+  export ~548 ms
+
+Learning: branch-first indexes are roughly neutral in this workload, but
+policy-first index prefixes are catastrophic for owner/page queries. The earlier
+recursive CTE policy-first experiment gave only a small improvement, so the
+overall decision is: do not prefix ordinary user-declared indexes with policy
+columns by default. If we need policy-specific acceleration, it should be a
+separate targeted index/plan, not a blanket index shape.
