@@ -972,7 +972,7 @@ importers:
         specifier: catalog:default
         version: 6.0.2
 
-  examples/todo:
+  examples/mini-sqlite-todo:
     devDependencies:
       vite:
         specifier: catalog:default
