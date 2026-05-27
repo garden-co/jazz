@@ -577,3 +577,27 @@ Current default result on a 1k-row scaled-down smoke run: file-backed core,
 edge, and worker report matching page-count and file bytes; in-memory tab
 reports page-count bytes but zero file bytes. This confirms the stat is useful
 and does not change semantics. The full whole-system suite remains green.
+
+## 2026-05-26 23:24 PDT
+
+Added env-driven SQLite tuning pragmas: page size, cache size, journal mode,
+synchronous mode, and temp store. Ran a small whole-harness matrix with 1k
+primary rows but the heavier fixed probes still enabled:
+
+- default: primary first result ~41.3 ms, refresh ~46.2 ms, core file ~500 KB,
+  edge/worker file ~139 KB, storm apply ~72.9 ms, pinned query ~107 ms
+- WAL + synchronous=NORMAL: primary ~40.6 ms, refresh ~45.4 ms, but core file
+  footprint ~1.79 MB and edge/worker ~432 KB because WAL/SHM bytes are now
+  counted
+- 1 KiB pages: primary ~42.7 ms, refresh ~47.9 ms, core file ~420 KB,
+  edge/worker ~74 KB, storm apply ~75 ms, pinned query ~111 ms
+- 8 KiB pages: primary ~43.1 ms, refresh ~47.5 ms, core file ~590 KB,
+  edge/worker ~205 KB, storm apply ~74.7 ms, pinned query ~106 ms
+
+Learning: WAL/NORMAL is a small latency win in this harness but a big file
+footprint increase unless we checkpoint/truncate aggressively. 1 KiB pages save
+disk for small cached subsets but slightly hurt latency. Default 4 KiB pages
+still look like the best general default for now. Page-level compression is not
+available directly through SQLite here; if we want compression, it likely has to
+come from VFS/page-layer choices later rather than payload-level JSON
+compression.
