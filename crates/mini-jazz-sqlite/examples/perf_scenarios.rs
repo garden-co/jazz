@@ -1186,23 +1186,17 @@ fn run_project_board_probe() -> BenchResult<ProjectBoardProbe> {
         .map(|index| format!("member-{index}"))
         .collect::<Vec<_>>();
     let export_started = Instant::now();
-    let bundles = users
-        .iter()
-        .map(|user| {
-            core.run_as_user(OWNER, |core| {
-                core.export_query_where_eq_top_field_desc_with_ref_include(
-                    "tasks",
-                    "assignee",
-                    json!(user),
-                    "updated_at",
-                    page_size,
-                    "project",
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let merged_bundle = core.run_as_user(OWNER, |core| {
+        core.export_many_query_where_eq_top_field_desc_with_ref_include(
+            "tasks",
+            "assignee",
+            users.iter().map(|user| json!(user)).collect(),
+            "updated_at",
+            page_size,
+            "project",
+        )
+    })?;
     let export_elapsed = export_started.elapsed();
-    let merged_bundle = merge_bundles(&bundles)?;
     let merged_summary = BundleSummary::from(&merged_bundle)?;
     let tab_apply_elapsed = timed(|| tab.apply_bundle(&merged_bundle))?;
     let query_started = Instant::now();

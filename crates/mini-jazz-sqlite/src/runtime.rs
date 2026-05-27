@@ -2596,6 +2596,140 @@ impl Runtime {
         )
     }
 
+    pub fn export_many_query_where_eq_top_field_desc_with_ref_include(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+        order_field_name: &str,
+        limit: usize,
+        ref_field_name: &str,
+    ) -> Result<Bundle> {
+        let table = self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let mut all_rows = Vec::new();
+        let mut visible_row_nums = Vec::new();
+        let mut repair_row_nums = Vec::new();
+        let mut query_reads = Vec::new();
+        let mut rejected_tx_ids = Vec::new();
+
+        for value in values {
+            let rows = self.read_rows_where_eq_top_field_desc(
+                table_name,
+                field_name,
+                value.clone(),
+                order_field_name,
+                limit,
+            )?;
+            let row_nums = rows
+                .iter()
+                .map(|row| row_num(&self.conn, &row.id))
+                .collect::<Result<Vec<_>>>()?;
+            let query_value = json!({
+                "eq": value.clone(),
+                "order_field": order_field_name,
+                "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
+            });
+            repair_row_nums.extend(query_scope_repair_row_nums(
+                &self.conn,
+                table,
+                field_name,
+                "eq_top_field_desc",
+                &query_value,
+            )?);
+            rejected_tx_ids.extend(query_scope_rejected_tx_ids(
+                &self.conn,
+                table,
+                field_name,
+                "eq_top_field_desc",
+                &query_value,
+            )?);
+            query_reads.push(QueryReadRecord {
+                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+                table: table_name.to_owned(),
+                field: field_name.to_owned(),
+                op: "eq_top_field_desc".to_owned(),
+                value: query_value,
+            });
+            visible_row_nums.extend(row_nums);
+            all_rows.extend(rows);
+        }
+
+        visible_row_nums.sort();
+        visible_row_nums.dedup();
+        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
+        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
+        repair_row_nums.sort();
+        repair_row_nums.dedup();
+        let mut row_nums = visible_row_nums.clone();
+        row_nums.extend(repair_row_nums.iter());
+        row_nums.sort();
+        row_nums.dedup();
+        rejected_tx_ids.sort();
+        rejected_tx_ids.dedup();
+
+        let mut history = export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            table_name,
+            Some(&visible_row_nums),
+            None,
+        )?;
+        if !repair_row_nums.is_empty() {
+            history.extend(export_visible_table_history(
+                &self.conn,
+                &self.schema,
+                table_name,
+                user,
+                bypass_policy,
+                &branch_nums,
+                Some(&repair_row_nums),
+            )?);
+            history.extend(export_history_versions_for_rows(
+                &self.conn,
+                &self.schema,
+                table_name,
+                Some(&repair_row_nums),
+                None,
+            )?);
+        }
+        history.extend(export_policy_dependency_history(
+            &self.conn,
+            &self.schema,
+            PolicyDependencyExport {
+                table_name,
+                policy: &table.read_policy,
+                user,
+                bypass_policy,
+                branch_nums: &branch_nums,
+                child_row_nums: Some(&row_nums),
+            },
+        )?);
+        history.extend(self.export_ref_include_history(
+            table,
+            &all_rows,
+            ref_field_name,
+            &branch_nums,
+        )?);
+        dedupe_history_records(&mut history);
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let txs =
+            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        Ok(make_bundle(
+            &self.schema,
+            branches,
+            txs,
+            reads,
+            query_reads,
+            history,
+        ))
+    }
+
     fn export_query_where_eq_top_field_desc_with_previous_observed(
         &self,
         table_name: &str,

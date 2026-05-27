@@ -1021,3 +1021,25 @@ Learning: page-bounded board views are plausible, but multi-query export with
 policy dependencies is still the visible server-side cost. Also, adding small
 missing product-shaped APIs while building benchmarks is paying off: the new
 paged ref-include export has a focused whole-system test.
+
+## 2026-05-27 01:00 PDT
+
+Added a batched export API for a common dashboard shape: many top-field pages on
+the same table/predicate/order with different equality values and the same ref
+include. The API reads each page separately but exports visible history, policy
+dependencies, ref includes, read sets, txs, branches, and query descriptors as
+one bundle before serialization.
+
+Added a whole-system equivalence test against applying individual exports for
+the same two query descriptors.
+
+Project-board release sample improved:
+
+- paged individual exports: ~89 ms export for 10 assignee pages
+- batched export: ~66 ms for the same 10 pages
+- bundle size/rows unchanged: ~188 KB, 421 history rows, 21 txs
+- tab apply unchanged around ~14-15 ms, as expected
+
+Learning: batching before export-time dependency/read/tx collection is a real
+win and maps to product behavior (`useCoStates`/multiple subscriptions booting
+together) better than just merging bundles after the fact.
