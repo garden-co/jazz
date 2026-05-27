@@ -71,6 +71,20 @@ public transaction id.
 
 Authority rejection keeps the transaction and history rows. Visibility and
 projection repair make rejected versions disappear from ordinary reads.
+Transaction fate is monotonic under direct authority APIs and incoming sync.
+Later information may enrich a transaction with acceptance, rejection, receipts,
+global epoch, or rejection detail, but stale replay must not downgrade it.
+In particular:
+
+- repeated global acceptance for one transaction keeps the maximum known global
+  epoch for that transaction
+- stale accepted bundles cannot lower an already known global epoch
+- stale pending bundles cannot drop edge/global receipts
+- stale pending bundles cannot erase rejection code/detail or resurrect current
+  rows
+- duplicate policy-invalid untrusted applies produce one rejected transaction
+  record and one subscription-visible rejection event for a subscription
+  baseline
 
 An edge that cannot validate a mergeable transaction because required
 policy-influencing facts are missing should mark it `awaiting_deps`, request or
@@ -117,7 +131,8 @@ Waiting semantics:
 Open issues:
 
 - exact durability receipt layout
-- explicit fate partial order and merge rules for all incoming-sync cases
+- audit-grade fate/receipt history if mutable hot outcome plus side tables is
+  insufficient for debugging/compliance
 - timeout/retry behavior for transactions that remain `awaiting_deps`
 - dependency request/subscription protocol for proactively fetching missing
   policy facts

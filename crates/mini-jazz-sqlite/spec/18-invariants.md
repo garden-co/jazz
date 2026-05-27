@@ -14,6 +14,9 @@ feature exists.
 - Rehydrating the same public id on one replica returns the same physical id.
 - Different replicas may assign different physical ids to the same public id.
 - Logical row ids are globally unique.
+- Public row ids cannot be owned by two different tables. An unresolved ref may
+  mention a public row id before target ownership exists, but it does not claim
+  ownership.
 - Node ids are writer identities, not authorization users.
 - One user may write from multiple nodes.
 - Public-id/physical-id and branch-id/ordinal mappings are crash-atomic; a
@@ -49,6 +52,8 @@ feature exists.
 - Later global acceptance enriches the same public transaction id.
 - Rejected outcome is terminal for ordinary visibility.
 - Stale incoming fate cannot downgrade accepted/global or rejected state.
+- Stale incoming fate cannot lower a transaction's global epoch, drop durable
+  receipt tiers, erase rejection detail, or resurrect rejected current rows.
 - Multiple transactions may share one global epoch.
 - Transaction info APIs expose outcome, rejection, receipts, and global epoch
   consistently after sync.
@@ -80,6 +85,8 @@ feature exists.
 - Incidental SQLite row order never decides visible conflict winners.
 - Query results have deterministic order even when the user did not provide an
   explicit ordering. The default order must be stable and documented.
+- Observable tie-breakers must be semantic, not incidental physical SQLite row
+  order.
 
 ### D.4 Visibility And Snapshot Invariants
 
@@ -136,6 +143,7 @@ feature exists.
 - Edge validation of untrusted branch writes reproduces the same pinned-base
   policy decision from synced branch/base history.
 - Branch query-scope repair is scoped by branch id.
+- Stale branch-source metadata replay cannot override newer source-list state.
 - A branch delete of a pinned-base row exports a branch tombstone sufficient to
   repair peer recursive reads.
 
@@ -168,6 +176,10 @@ feature exists.
 - Query-scope refresh repairs rows that leave a predicate through an update.
 - Query-scope refresh repairs rows that leave a predicate through a delete by
   sending tombstone history.
+- Stale query refreshes cannot regress a row after a newer refresh for the same
+  public row id has already applied.
+- Refreshing one active descriptor does not eagerly evict unrelated cached rows
+  learned through other descriptors.
 - Query-scope export includes predicate observed facts with table, field, value,
   and branch context for supported predicates.
 - Query-scope repair rows may be included even when they are no longer semantic
@@ -189,11 +201,16 @@ feature exists.
 - Out-of-order history and outcome delivery eventually converges after all
   required facts arrive.
 - Duplicate, delayed, and reordered bundles do not create duplicate history.
+- Duplicate policy-invalid untrusted applies are idempotent and produce one
+  rejected transaction record plus one subscription-visible rejection event per
+  subscription baseline.
 - Reconnect replays desired subscriptions.
 - Reconnect uses replay-window recovery before full scope/frontier fallback.
 - Scope contraction removes or invalidates stale rows.
 - Scope contraction is represented with enough ordinary history/facts for the
   receiver to rerun locally; bundles are not authoritative result snapshots.
+- Scope contraction does not imply eager deletion of unrelated retained cache
+  facts.
 - Rows that leave scope because of update, delete, policy change, branch source
   change, outcome change, or catalogue/lens change eventually disappear from
   local query results after relevant repair data arrives.

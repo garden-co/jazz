@@ -194,6 +194,11 @@ Incoming transaction fate is merged monotonically. A stale pending or accepted
 bundle must not downgrade a rejected transaction; a stale pending bundle must
 not downgrade an accepted/global transaction; late global metadata enriches the
 same transaction rather than replacing it.
+This monotonic merge applies to global epochs, edge/global receipts, and
+rejection detail. A repeated or stale bundle may add information, but must not
+lower a transaction's global epoch, remove receipt tiers, erase rejection
+detail, resurrect rejected rows, or publish duplicate rejection events to a
+subscription baseline.
 
 The prototype authority path currently applies an untrusted bundle, validates
 pending transactions, rejects invalid ones, and repairs projection. Tests cover
@@ -211,6 +216,11 @@ Downstream runtimes replay active query descriptors to upstream peers after
 disconnects and upstream restarts. This replay should trickle upward through
 workers, edges, and global services. Queries are not durable disk state; app
 restart normally recreates them by resubscribing from application code.
+Until the resubscribe/query-settlement protocol is explicit, durable
+intermediaries may keep implementation-local descriptor state as a correctness
+scaffold. That state must not become product data: active interest is derived
+from downstream replay, and retained rows outside active query results are cache
+state.
 
 Open issues:
 

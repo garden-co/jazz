@@ -60,11 +60,18 @@ For mergeable transactions, concurrent upserts of the same row reconcile through
 ordinary merge/conflict semantics. For exclusive transactions, upsert is
 validated globally against the authority-visible row state and read/write set,
 so create-vs-update races resolve through exclusive acceptance or rejection.
+An explicit transaction with no staged mutations is a no-op. It should not
+create transaction/history state; the final product API should avoid exposing a
+meaningful transaction id for that no-op.
 
 Future discussion: upsert across distributed tiers deserves its own design pass
-and tests. Mergeable upsert is reconciliation-shaped; exclusive upsert is
-authority-state-shaped. The product API should make that difference predictable
-without making common idempotent writes awkward.
+and tests. Mergeable upsert is reconciliation-shaped and may restore a deleted
+row by appending a new visible version. Exclusive upsert is
+authority-state-shaped and remains underspecified for updates over an existing
+row: it may need explicit expected-version/read-set semantics rather than
+blindly treating a globally ordered same-row write as non-conflicting. The
+product API should make that difference predictable without making common
+idempotent writes awkward.
 
 Mergeable transactions are locally visible immediately and reconcile through
 merge/conflict semantics. Exclusive transactions are not visible in ordinary
@@ -79,7 +86,8 @@ operations, not storage shortcuts:
 - delete checks delete policy, or update fallback only where the schema/policy
   explicitly allows it
 - restore/undelete appends a new visible version derived from preserved history
-  and reuses insert semantics for authorization
+  and reuses insert semantics for authorization; stale delete history replay
+  must not hide a later restored row
 - conflict resolution is an ordinary transaction and may require explicit
   conflict-resolution permission where a product schema declares it
 - branch creation, source edits, and merge metadata edits are backing-row or

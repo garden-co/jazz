@@ -31,6 +31,8 @@ append-only: restoring a deleted row writes a new transaction/version derived
 from preserved deleted-row values rather than erasing or mutating the delete
 tombstone. Restore reuses insert authorization semantics over the restored
 visible row.
+Stale sync replay whose latest known version is an older delete must not hide a
+newer restored version or append duplicate history.
 
 Ordinary delete is a history row version, not physical removal. Hard delete and
 history truncate remain product-visible destructive retention operations, but

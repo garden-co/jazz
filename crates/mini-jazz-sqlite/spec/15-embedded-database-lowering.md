@@ -195,6 +195,11 @@ CREATE TABLE jazz_branch_id (
 
 The implementation may combine identity mapping with hot tables when the
 public/physical boundary remains clear.
+Public row ids are globally unique across application tables. A row id may be
+mentioned by an unresolved reference before the target row exists, but table
+ownership is claimed only when history/current state for that row is inserted.
+After a row id is owned by one table, incoming sync or local writes must reject
+attempts to use the same public row id as an owned row in another table.
 
 Identity and ordinal mapping updates must be crash-safe. A crash must not leave
 torn public-id/physical-id, branch-id/branch-ordinal, or source-list mappings
@@ -221,6 +226,12 @@ Example:
 CREATE INDEX todos_v1_current_open_created
   ON todos_v1_current(branch_num, done, j_created_at DESC, row_num);
 ```
+
+Observable query ordering must use semantic tie-breakers. Physical row numbers
+may appear in indexes and joins, but unordered reads and equal ordered-page keys
+should tie-break by public row id or an equivalent semantic key so replicas that
+apply the same history in different physical order converge on the same visible
+ordering.
 
 Performance tests should retain `EXPLAIN QUERY PLAN` output for risky lowerings.
 
