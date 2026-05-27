@@ -1296,6 +1296,55 @@ fn transaction_does_not_see_rows_committed_after_it_starts() {
 }
 
 #[test]
+fn transaction_writes_are_applied_to_start_snapshot() {
+    let schema = support::notes_schema();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("patch-base.sqlite");
+    let mut alice = Runtime::open_with_schema(
+        Storage::File(path.clone()),
+        "alice-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("A")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let tx = alice.transaction();
+
+    let mut bob =
+        Runtime::open_with_schema(Storage::File(path), "bob-node", "bob", schema).unwrap();
+    bob.update_row(
+        "notes",
+        "note-1",
+        BTreeMap::from([("pinned".to_owned(), json!(true))]),
+    )
+    .unwrap();
+
+    tx.update_row(
+        "notes",
+        "note-1",
+        BTreeMap::from([("body".to_owned(), json!("B"))]),
+    )
+    .commit()
+    .unwrap();
+
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("B"));
+    assert_eq!(rows[0].values["pinned"], json!(false));
+}
+
+#[test]
 fn transaction_reads_include_own_staged_writes() {
     let schema = support::notes_schema();
     let mut alice =

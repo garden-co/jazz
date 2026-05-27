@@ -262,6 +262,7 @@ impl Runtime {
             table_name,
             id,
             values: &values,
+            values_are_effective: false,
             tx_num,
             branch_num: self.branch_num,
             now,
@@ -2733,6 +2734,7 @@ struct InsertRowInTx<'a> {
     table_name: &'a str,
     id: &'a str,
     values: &'a BTreeMap<String, JsonValue>,
+    values_are_effective: bool,
     tx_num: i64,
     branch_num: i64,
     now: i64,
@@ -2781,16 +2783,20 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     validate_write_fields(table, args.values)?;
     let row_num = ensure_row_id(args.db, args.table_name, args.id)?;
-    let effective_values = effective_write_values(EffectiveWriteValues {
-        db: args.db,
-        schema: args.schema,
-        table_name: args.table_name,
-        id: args.id,
-        row_num,
-        branch_num: args.branch_num,
-        patch_values: args.values,
-        op: args.op,
-    })?;
+    let effective_values = if args.values_are_effective {
+        args.values.clone()
+    } else {
+        effective_write_values(EffectiveWriteValues {
+            db: args.db,
+            schema: args.schema,
+            table_name: args.table_name,
+            id: args.id,
+            row_num,
+            branch_num: args.branch_num,
+            patch_values: args.values,
+            op: args.op,
+        })?
+    };
     if args.op == 1 {
         read_set::record_tx_create_read(
             args.db,
@@ -3591,6 +3597,20 @@ enum Mutation {
     },
 }
 
+enum CommitMutation {
+    Row {
+        table: String,
+        id: String,
+        values: BTreeMap<String, JsonValue>,
+        op: i64,
+    },
+    DeleteRow {
+        table: String,
+        id: String,
+        visible_row: RowView,
+    },
+}
+
 impl<'a> TransactionBuilder<'a> {
     pub fn exclusive(mut self) -> Self {
         self.mode = TransactionMode::Exclusive { global_epoch: None };
@@ -3961,23 +3981,94 @@ impl<'a> TransactionBuilder<'a> {
         }
     }
 
+    fn materialize_commit_mutations(&self) -> Result<Vec<CommitMutation>> {
+        let mut rows_by_table = BTreeMap::<String, BTreeMap<String, RowView>>::new();
+        let mut commit_mutations = Vec::new();
+        let user = self.runtime.attribution_user().to_owned();
+
+        for mutation in &self.mutations {
+            match mutation {
+                Mutation::Row {
+                    table,
+                    id,
+                    values,
+                    op,
+                } => {
+                    let table_def = self.runtime.schema.table_def(table)?;
+                    validate_write_fields(table_def, values)?;
+                    if !rows_by_table.contains_key(table) {
+                        rows_by_table.insert(
+                            table.clone(),
+                            self.read_rows_at_start(table)?
+                                .into_iter()
+                                .map(|row| (row.id.clone(), row))
+                                .collect(),
+                        );
+                    }
+                    let rows_by_id = rows_by_table.get_mut(table).expect("table rows inserted");
+                    let effective_values = transaction_effective_values(
+                        table_def,
+                        rows_by_id.get(id),
+                        values,
+                        *op,
+                        id,
+                    )?;
+                    let created_by = if *op == 1 {
+                        user.clone()
+                    } else {
+                        rows_by_id
+                            .get(id)
+                            .map(|row| row.created_by.clone())
+                            .unwrap_or_else(|| user.clone())
+                    };
+                    rows_by_id.insert(
+                        id.clone(),
+                        RowView {
+                            table: table.clone(),
+                            id: id.clone(),
+                            values: effective_values.clone(),
+                            created_by,
+                            tx_id: "staged".to_owned(),
+                            conflict_count: 0,
+                        },
+                    );
+                    commit_mutations.push(CommitMutation::Row {
+                        table: table.clone(),
+                        id: id.clone(),
+                        values: effective_values,
+                        op: *op,
+                    });
+                }
+                Mutation::DeleteRow { table, id } => {
+                    if !rows_by_table.contains_key(table) {
+                        rows_by_table.insert(
+                            table.clone(),
+                            self.read_rows_at_start(table)?
+                                .into_iter()
+                                .map(|row| (row.id.clone(), row))
+                                .collect(),
+                        );
+                    }
+                    let rows_by_id = rows_by_table.get_mut(table).expect("table rows inserted");
+                    let visible_row = rows_by_id
+                        .remove(id)
+                        .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?;
+                    commit_mutations.push(CommitMutation::DeleteRow {
+                        table: table.clone(),
+                        id: id.clone(),
+                        visible_row,
+                    });
+                }
+            }
+        }
+
+        Ok(commit_mutations)
+    }
+
     pub fn commit(self) -> Result<String> {
-        let mutations = self.mutations;
         let user = self.runtime.attribution_user().to_owned();
         let bypass_policy = self.runtime.bypasses_policy();
-        let mut delete_snapshots = BTreeMap::new();
-        for mutation in &mutations {
-            let Mutation::DeleteRow { table, id } = mutation else {
-                continue;
-            };
-            let visible_row = self
-                .runtime
-                .read_rows(table)?
-                .into_iter()
-                .find(|row| row.id == *id)
-                .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?;
-            delete_snapshots.insert((table.clone(), id.clone()), visible_row);
-        }
+        let mutations = self.materialize_commit_mutations()?;
         let (conflict_mode, outcome, global_epoch) = match self.mode {
             TransactionMode::Mergeable => (tx::MODE_MERGEABLE, tx::OUTCOME_PENDING, None),
             TransactionMode::Exclusive {
@@ -3992,9 +4083,8 @@ impl<'a> TransactionBuilder<'a> {
         if conflict_mode == tx::MODE_EXCLUSIVE {
             for mutation in &mutations {
                 let (table, id): (&str, &str) = match mutation {
-                    Mutation::Row { table, id, .. } | Mutation::DeleteRow { table, id } => {
-                        (table.as_str(), id.as_str())
-                    }
+                    CommitMutation::Row { table, id, .. }
+                    | CommitMutation::DeleteRow { table, id, .. } => (table.as_str(), id.as_str()),
                 };
                 let row_num = ensure_row_id(&self.runtime.conn, table, id)?;
                 if exclusive_write_conflict_exists(&self.runtime.conn, table, row_num)? {
@@ -4016,7 +4106,7 @@ impl<'a> TransactionBuilder<'a> {
         let mut allowed = true;
         for mutation in mutations {
             match mutation {
-                Mutation::Row {
+                CommitMutation::Row {
                     table,
                     id,
                     values,
@@ -4028,6 +4118,7 @@ impl<'a> TransactionBuilder<'a> {
                         table_name: &table,
                         id: &id,
                         values: &values,
+                        values_are_effective: true,
                         tx_num,
                         branch_num: self.runtime.branch_num,
                         now,
@@ -4036,7 +4127,11 @@ impl<'a> TransactionBuilder<'a> {
                         op,
                     })?;
                 }
-                Mutation::DeleteRow { table, id } => {
+                CommitMutation::DeleteRow {
+                    table,
+                    id,
+                    visible_row,
+                } => {
                     let table_def = self.runtime.schema.table_def(&table)?;
                     let row_num = row_num(&db, &id)?;
                     read_set::record_tx_read(
@@ -4047,11 +4142,6 @@ impl<'a> TransactionBuilder<'a> {
                         self.runtime.branch_num,
                         2,
                     )?;
-                    let visible_row = delete_snapshots
-                        .get(&(table.clone(), id.clone()))
-                        .ok_or_else(|| {
-                            crate::Error::new(format!("missing delete snapshot {id}"))
-                        })?;
                     record_policy_read_set_for_write(
                         &db,
                         &self.runtime.schema,
@@ -4092,62 +4182,37 @@ impl<'a> TransactionBuilder<'a> {
                         "j_created_by".to_owned(),
                         "j_updated_by".to_owned(),
                     ]);
-                    let mut select_columns = vec![
-                        "row_num".to_owned(),
-                        "?".to_owned(),
-                        "j_branch_num".to_owned(),
-                        "3".to_owned(),
+                    let mut values = vec![
+                        rusqlite::types::Value::Integer(row_num),
+                        rusqlite::types::Value::Integer(tx_num),
+                        rusqlite::types::Value::Integer(self.runtime.branch_num),
+                        rusqlite::types::Value::Integer(3),
                     ];
-                    select_columns.extend(field_columns.iter().cloned());
-                    select_columns.extend([
-                        "j_created_at".to_owned(),
-                        "?".to_owned(),
-                        "j_created_by".to_owned(),
-                        "?".to_owned(),
-                    ]);
-                    let inserted = db.execute(
-                        &format!(
-                            "INSERT OR IGNORE INTO {} ({})
-                             SELECT {}
-                             FROM {}
-                             WHERE row_num = ? AND j_branch_num = ?",
-                            crate::schema::history_table(&table),
-                            insert_columns.join(", "),
-                            select_columns.join(", "),
-                            crate::schema::current_table(&table),
-                        ),
-                        params![tx_num, now, user, row_num, self.runtime.branch_num],
-                    )?;
-                    if inserted == 0 {
-                        let mut values = vec![
-                            rusqlite::types::Value::Integer(row_num),
-                            rusqlite::types::Value::Integer(tx_num),
-                            rusqlite::types::Value::Integer(self.runtime.branch_num),
-                            rusqlite::types::Value::Integer(3),
-                        ];
-                        for field in &table_def.fields {
-                            let value = visible_row.values.get(&field.name).ok_or_else(|| {
-                                crate::Error::new(format!("missing field {}", field.name))
-                            })?;
-                            values.push(crate::schema::field_sql_value(
-                                field,
-                                value,
-                                |ref_table, row_id| ensure_row_id(&db, ref_table, row_id),
-                            )?);
-                        }
-                        values.extend([
-                            rusqlite::types::Value::Integer(now),
-                            rusqlite::types::Value::Integer(now),
-                            rusqlite::types::Value::Text(user.to_owned()),
-                            rusqlite::types::Value::Text(user.to_owned()),
-                        ]);
-                        insert_dynamic(
-                            &db,
-                            &crate::schema::history_table(&table),
-                            &insert_columns,
-                            &values,
-                        )?;
+                    for field in &table_def.fields {
+                        let value = visible_row.values.get(&field.name).ok_or_else(|| {
+                            crate::Error::new(format!("missing field {}", field.name))
+                        })?;
+                        values.push(crate::schema::field_sql_value(
+                            field,
+                            value,
+                            |ref_table, row_id| ensure_row_id(&db, ref_table, row_id),
+                        )?);
                     }
+                    let (created_at, created_by) =
+                        current_creation_metadata(&db, &table, row_num, self.runtime.branch_num)?
+                            .unwrap_or((now, visible_row.created_by.clone()));
+                    values.extend([
+                        rusqlite::types::Value::Integer(created_at),
+                        rusqlite::types::Value::Integer(now),
+                        rusqlite::types::Value::Text(created_by),
+                        rusqlite::types::Value::Text(user.to_owned()),
+                    ]);
+                    insert_dynamic(
+                        &db,
+                        &crate::schema::history_table(&table),
+                        &insert_columns,
+                        &values,
+                    )?;
                     db.execute(
                         &format!(
                             "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
