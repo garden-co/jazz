@@ -340,3 +340,15 @@ from about 19.4 ms to about 18.9 ms, and mixed-mutation apply from about 34 ms
 to about 32 ms. This confirms apply cost is not primarily tx lookup overhead;
 the next apply targets should be per-history-row current projection writes,
 row-id lookups, and query-scope repair passes.
+
+## 2026-05-26 22:21 PDT
+
+Scoped the apply-time rejected-current cleanup to tables touched by the bundle
+instead of sweeping every schema table on every apply. The query-scope test suite
+passes.
+
+Result: the current document/org benchmark barely moves, as expected, because it
+only has two tables. This is still an important product-shaped guardrail for
+wide schemas: a small query refresh should not pay O(number of app tables) just
+to remove rejected current rows. A dedicated wide-schema probe is still worth
+adding to quantify the protected case.

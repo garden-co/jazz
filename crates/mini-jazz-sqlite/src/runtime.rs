@@ -636,14 +636,15 @@ impl Runtime {
                 observed_tx_num,
             )?;
         }
-        for table in schema.tables() {
+        for table_name in bundle_touched_tables(bundle) {
+            schema.table_def(&table_name)?;
             db.execute(
                 &format!(
                     "DELETE FROM {}
                      WHERE visible_tx_num IN (
                        SELECT tx_num FROM jazz_tx WHERE outcome = ?
                      )",
-                    crate::schema::current_table(&table.name)
+                    crate::schema::current_table(&table_name)
                 ),
                 params![tx::OUTCOME_REJECTED],
             )?;
@@ -5669,6 +5670,20 @@ fn observed_ids_from_query_value(value: &JsonValue) -> Result<Vec<String>> {
 fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {
     let mut tables = BTreeSet::new();
     for record in &bundle.history {
+        tables.insert(record.table.clone());
+    }
+    for query_read in &bundle.query_reads {
+        tables.insert(query_read.table.clone());
+    }
+    tables
+}
+
+fn bundle_touched_tables(bundle: &Bundle) -> BTreeSet<String> {
+    let mut tables = BTreeSet::new();
+    for record in &bundle.history {
+        tables.insert(record.table.clone());
+    }
+    for record in &bundle.reads {
         tables.insert(record.table.clone());
     }
     for query_read in &bundle.query_reads {
