@@ -69,23 +69,169 @@ describe("dev catalogue API exports", () => {
   });
 });
 
-describe("dev catalogue pending operations", () => {
-  it("deploy rejects because it is not implemented yet", async () => {
-    const { deploy } = await import("./index.js");
-
-    await expect(
-      deploy({
-        appId: APP_ID,
-        serverUrl: SERVER_URL,
-        adminSecret: ADMIN_SECRET,
-        schemaDir: "/unused",
-        migrationsDir: "/unused",
-      }),
-    ).rejects.toThrow("deploy is not implemented yet.");
-  });
-});
-
 describe("dev catalogue push behavior", () => {
+  it("deploy publishes schema and permissions and returns structured statuses", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), schemaSource());
+    await writeFile(join(root, "permissions.ts"), permissionsSource());
+
+    const permissionsHead = {
+      schemaHash: SCHEMA_HASH,
+      version: 1,
+      parentBundleObjectId: null,
+      bundleObjectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    };
+    let schemaPublishBody: any;
+    let permissionsPublishBody: any;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+          schemaPublishBody = JSON.parse(String(init?.body));
+          return new Response(
+            JSON.stringify({
+              objectId: SCHEMA_OBJECT_ID,
+              hash: SCHEMA_HASH,
+            }),
+            { status: 201 },
+          );
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+          return new Response(JSON.stringify({ head: null }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+          permissionsPublishBody = JSON.parse(String(init?.body));
+          return new Response(JSON.stringify({ head: permissionsHead }), { status: 201 });
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    const events: unknown[] = [];
+    const { deploy } = await import("./index.js");
+    const result = await deploy({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result.schema).toEqual({
+      hash: SCHEMA_HASH,
+      schemaFile: join(root, "schema.ts"),
+      status: "published",
+      objectId: SCHEMA_OBJECT_ID,
+    });
+    expect(result.permissions).toEqual({
+      schemaHash: SCHEMA_HASH,
+      permissionsFile: join(root, "permissions.ts"),
+      previousHead: null,
+      head: permissionsHead,
+    });
+    expect(result.migration).toBeUndefined();
+    expect(result.warnings).toContain(
+      'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
+    );
+    expect(schemaPublishBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+      "title",
+      "ownerId",
+    ]);
+    expect(permissionsPublishBody.schemaHash).toBe(SCHEMA_HASH);
+    expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
+    expect(Object.keys(permissionsPublishBody.permissions)).toContain("todos");
+    expect(events).toContainEqual({ type: "schema-loaded", schemaFile: join(root, "schema.ts") });
+    expect(events).toContainEqual({
+      type: "schema-published",
+      hash: SCHEMA_HASH,
+      objectId: SCHEMA_OBJECT_ID,
+    });
+    expect(events).toContainEqual({
+      type: "warning",
+      message:
+        'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
+    });
+    expect(events).toContainEqual({
+      type: "permissions-loaded",
+      permissionsFile: join(root, "permissions.ts"),
+    });
+    expect(events).toContainEqual({
+      type: "permissions-published",
+      schemaHash: SCHEMA_HASH,
+      version: 1,
+    });
+  });
+
+  it("deploy returns schema-only status when permissions.ts is missing", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), schemaSource());
+
+    const storedHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const storedSchema = s.defineApp({
+      todos: s.table({
+        title: s.string(),
+        ownerId: s.string(),
+      }),
+    }).wasmSchema;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [storedHash] }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/schema/${storedHash}`)) {
+          return new Response(JSON.stringify({ schema: storedSchema, publishedAt: 0 }), {
+            status: 200,
+          });
+        }
+        if (input.includes(`/admin/permissions`) || input.endsWith(`/admin/schemas`)) {
+          throw new Error("deploy() should not publish when schema is already stored.");
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    const events: unknown[] = [];
+    const { deploy } = await import("./index.js");
+    const result = await deploy({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toEqual({
+      schema: {
+        hash: storedHash,
+        schemaFile: join(root, "schema.ts"),
+        status: "already-stored",
+      },
+      warnings: [
+        'Warning: table "todos" has no explicit read policy in permissions.ts; enforcing runtimes default to deny.',
+        'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
+        'Warning: table "todos" has no explicit update policy in permissions.ts; enforcing runtimes default to deny.',
+        'Warning: table "todos" has no explicit delete policy in permissions.ts; enforcing runtimes default to deny.',
+      ],
+    });
+    expect(events).toContainEqual({
+      type: "schema-skipped",
+      hash: storedHash,
+      reason: "already-stored",
+    });
+    expect(events).toContainEqual({
+      type: "permissions-skipped",
+      reason: "missing-permissions-file",
+    });
+  });
+
   it("pushMigration publishes an inferred empty migration and emits a catalogue event", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");

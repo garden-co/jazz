@@ -18,6 +18,7 @@ import {
   computeSchemaHash,
   createSnapshotTimestampFromPublishedAt,
   createTimestamp,
+  deploy as deployCatalogue,
   listSnapshotEntries,
   listSnapshotEntriesForMigrations,
   normalizeSchemaHashInput,
@@ -25,23 +26,20 @@ import {
   resolveKnownSchemaHash,
   resolveLocalHistoricalSchema,
   resolveRemoteHistoricalSchema,
+  resolveStoredStructuralSchemaHash,
   resolveSnapshotEntry,
   schemaTransitionRequiresRowTransform,
   shortSchemaHash,
   snapshotFilename,
   tableSchemasEqual,
-  wasmSchemasEqual,
   writeSnapshotSchemaForMigrations,
   type ResolvedSchemaInput,
   type SnapshotEntry,
 } from "./dev/catalogue.js";
 import {
   fetchPermissionsHead,
-  fetchSchemaConnectivity,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
-  publishStoredSchema,
-  publishStoredPermissions,
   type StoredPermissionsHead,
 } from "./runtime/schema-fetch.js";
 
@@ -564,25 +562,6 @@ async function resolveStoredStructuralSchemaHashOrThrow(
   }
 
   return hash;
-}
-
-async function resolveStoredStructuralSchemaHash(
-  appId: string,
-  serverUrl: string,
-  adminSecret: string,
-  wasmSchema: WasmSchema,
-): Promise<string | null> {
-  const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
-  const storedSchemas = await Promise.all(
-    hashes.map(async (hash) => ({
-      hash,
-      schema: (await fetchStoredWasmSchema(serverUrl, { appId, adminSecret, schemaHash: hash }))
-        .schema,
-    })),
-  );
-
-  const match = storedSchemas.find(({ schema }) => wasmSchemasEqual(schema, wasmSchema));
-  return match?.hash ?? null;
 }
 
 function pickWitnessSchema(schema: WasmSchema, tableNames: readonly string[]): WasmSchema {
@@ -1202,6 +1181,20 @@ function describePermissionsHead(head: StoredPermissionsHead): string {
   return `v${head.version} on ${shortSchemaHash(head.schemaHash)}`;
 }
 
+function logDeployWarning(message: string): void {
+  if (message.startsWith("Warning: table ")) {
+    console.warn(`\x1b[33m${message}\x1b[0m`);
+    return;
+  }
+
+  if (message.startsWith("Warning: ")) {
+    console.warn(message);
+    return;
+  }
+
+  console.warn(`Warning: ${message}`);
+}
+
 export async function permissionsStatus(options: PermissionsCommandOptions): Promise<void> {
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   const localSchemaHash = await resolveStoredStructuralSchemaHashOrThrow(
@@ -1238,97 +1231,57 @@ export async function permissionsStatus(options: PermissionsCommandOptions): Pro
 }
 
 export async function deploy(options: DeployOptions): Promise<void> {
-  const compiled = await loadCompiledSchema(options.schemaDir);
-  console.log(`Loaded current schema from ${compiled.schemaFile}.`);
+  const result = await deployCatalogue({
+    ...options,
+    onEvent: (event) => {
+      switch (event.type) {
+        case "schema-loaded":
+          console.log(`Loaded current schema from ${event.schemaFile}.`);
+          break;
+        case "warning":
+          logDeployWarning(event.message);
+          break;
+        case "schema-published":
+          console.log(`Published the current schema as ${shortSchemaHash(event.hash)}.`);
+          break;
+        case "schema-skipped":
+          console.log(
+            `The current schema is already stored in the server as ${shortSchemaHash(event.hash)}; skipping publish.`,
+          );
+          break;
+        case "permissions-skipped":
+          console.log("No permissions.ts found; skipping permissions publish.");
+          break;
+        case "permissions-loaded":
+          console.log(`Loaded current permissions from ${event.permissionsFile}.`);
+          break;
+        case "migration-published":
+          if (event.filePath) {
+            console.log(
+              `Pushed migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)} from ${basename(event.filePath)}.`,
+            );
+          } else {
+            console.log(
+              `Pushed migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)} without a reviewed migration file because no row transformations are required.`,
+            );
+          }
+          break;
+        case "permissions-published":
+          break;
+      }
+    },
+  });
 
-  for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
-    compiled.schema.tables.map((table) => table.name),
-    compiled.permissions,
-  )) {
-    console.warn(`\x1b[33m${diagnostic.message}\x1b[0m`);
-  }
-
-  let localSchemaHash = await resolveStoredStructuralSchemaHash(
-    options.appId,
-    options.serverUrl,
-    options.adminSecret,
-    compiled.wasmSchema,
-  );
-
-  if (!localSchemaHash) {
-    const publishedSchema = await publishStoredSchema(options.serverUrl, {
-      appId: options.appId,
-      adminSecret: options.adminSecret,
-      schema: compiled.wasmSchema,
-    });
-    localSchemaHash = publishedSchema.hash;
-    console.log(`Published the current schema as ${shortSchemaHash(localSchemaHash)}.`);
-  } else {
-    console.log(
-      `The current schema is already stored in the server as ${shortSchemaHash(localSchemaHash)}; skipping publish.`,
-    );
-  }
-
-  if (!compiled.permissions || !compiled.permissionsFile) {
-    console.log("No permissions.ts found; skipping permissions publish.");
+  if (!result.permissions) {
     return;
   }
 
-  console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
-
-  const { head: currentHead } = await fetchPermissionsHead(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-  });
-  if (currentHead && currentHead.schemaHash !== localSchemaHash) {
-    const fromShortHash = shortSchemaHash(currentHead.schemaHash);
-    const toShortHash = shortSchemaHash(localSchemaHash);
-
-    try {
-      const { connected } = await fetchSchemaConnectivity(options.serverUrl, {
-        appId: options.appId,
-        adminSecret: options.adminSecret,
-        fromHash: currentHead.schemaHash,
-        toHash: localSchemaHash,
-      });
-
-      if (!connected) {
-        await pushMigration({
-          appId: options.appId,
-          serverUrl: options.serverUrl,
-          adminSecret: options.adminSecret,
-          migrationsDir: options.migrationsDir,
-          fromHash: currentHead.schemaHash,
-          toHash: localSchemaHash,
-        });
-      }
-    } catch (error) {
-      const migrationMissingPrefix = `No migration file found in ${options.migrationsDir}`;
-      if (!(error instanceof Error) || !error.message.startsWith(migrationMissingPrefix)) {
-        throw error;
-      }
-
-      const message = `The new permissions schema ${toShortHash} is not connected to the previous permissions schema ${fromShortHash} on the server. Reads and writes may fail until you push a migration. Run \`jazz-tools migrations create ${options.appId} --fromHash ${fromShortHash} --toHash ${toShortHash}\` to create a migration and then re-run this command.`;
-      if (options.noVerify) {
-        console.warn(`Warning: ${message}`);
-      } else {
-        throw Error(message);
-      }
-    }
-  }
-
-  const { head: publishedHead } = await publishStoredPermissions(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-    schemaHash: localSchemaHash,
-    permissions: compiled.permissions,
-    expectedParentBundleObjectId: currentHead?.bundleObjectId ?? null,
-  });
-  const nextHead = publishedHead ?? {
-    schemaHash: localSchemaHash,
-    version: currentHead ? currentHead.version + 1 : 1,
-    parentBundleObjectId: currentHead?.bundleObjectId ?? null,
-    bundleObjectId: currentHead?.bundleObjectId ?? "",
+  const previousHead = result.permissions.previousHead;
+  const nextHead = result.permissions.head ?? {
+    schemaHash: result.permissions.schemaHash,
+    version: previousHead ? previousHead.version + 1 : 1,
+    parentBundleObjectId: previousHead?.bundleObjectId ?? null,
+    bundleObjectId: previousHead?.bundleObjectId ?? "",
   };
 
   console.log(`Published permissions as ${describePermissionsHead(nextHead)}.`);

@@ -11,9 +11,11 @@ import type { DefinedMigration } from "../migrations.js";
 import { schemaDefinitionToAst } from "../migrations.js";
 import { loadWasmModule } from "../runtime/client.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
+import { collectMissingExplicitPolicyDiagnostics } from "../schema-permissions.js";
 import {
   encodePublishedMigrationValue,
   fetchPermissionsHead,
+  fetchSchemaConnectivity,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
   publishStoredMigration,
@@ -28,9 +30,12 @@ import { toValue } from "../runtime/value-converter.js";
 export type CatalogueEvent =
   | { type: "schema-loaded"; schemaFile: string }
   | { type: "schema-published"; hash: string; objectId?: string }
+  | { type: "schema-skipped"; hash: string; reason: "already-stored" }
   | { type: "permissions-loaded"; permissionsFile: string }
   | { type: "permissions-published"; schemaHash: string; version?: number }
-  | { type: "migration-published"; fromHash: string; toHash: string; filePath?: string };
+  | { type: "permissions-skipped"; reason: "missing-permissions-file" }
+  | { type: "migration-published"; fromHash: string; toHash: string; filePath?: string }
+  | { type: "warning"; message: string };
 
 export interface CatalogueProjectOptions {
   appId: string;
@@ -45,7 +50,7 @@ export interface PushSchemaOptions extends CatalogueProjectOptions {}
 export interface PushSchemaResult {
   hash: string;
   schemaFile: string;
-  status: "published";
+  status: "published" | "already-stored";
   objectId?: string;
 }
 
@@ -84,6 +89,15 @@ export interface PushMigrationResult {
   objectId?: string;
 }
 
+export interface DeployResult {
+  schema: PushSchemaResult;
+  migration?:
+    | PushMigrationResult
+    | { status: "already-connected"; fromHash: string; toHash: string };
+  permissions?: PushPermissionsResult;
+  warnings: string[];
+}
+
 export interface DeployOptions extends CatalogueProjectOptions {
   migrationsDir: string;
   noVerify?: boolean;
@@ -91,6 +105,15 @@ export interface DeployOptions extends CatalogueProjectOptions {
 
 function emit(options: { onEvent?: (event: CatalogueEvent) => void }, event: CatalogueEvent): void {
   options.onEvent?.(event);
+}
+
+function emitWarning(
+  options: { onEvent?: (event: CatalogueEvent) => void },
+  warnings: string[],
+  message: string,
+): void {
+  warnings.push(message);
+  emit(options, { type: "warning", message });
 }
 
 function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaProject & {
@@ -482,6 +505,25 @@ export function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
     }
     return tableSchemasEqual(left[tableName], right[tableName]);
   });
+}
+
+export async function resolveStoredStructuralSchemaHash(
+  appId: string,
+  serverUrl: string,
+  adminSecret: string,
+  wasmSchema: WasmSchema,
+): Promise<string | null> {
+  const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
+  const storedSchemas = await Promise.all(
+    hashes.map(async (hash) => ({
+      hash,
+      schema: (await fetchStoredWasmSchema(serverUrl, { appId, adminSecret, schemaHash: hash }))
+        .schema,
+    })),
+  );
+
+  const match = storedSchemas.find(({ schema }) => wasmSchemasEqual(schema, wasmSchema));
+  return match?.hash ?? null;
 }
 
 export function schemaTransitionRequiresRowTransform(
@@ -893,6 +935,148 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
   };
 }
 
-export async function deploy(_options: DeployOptions): Promise<never> {
-  throw new Error("deploy is not implemented yet.");
+function disconnectedSchemaMessage(
+  appId: string,
+  migrationsDir: string,
+  fromHash: string,
+  toHash: string,
+): string {
+  const fromShortHash = shortSchemaHash(fromHash);
+  const toShortHash = shortSchemaHash(toHash);
+  return `The new permissions schema ${toShortHash} is not connected to the previous permissions schema ${fromShortHash} on the server. Reads and writes may fail until you push a migration. Run \`jazz-tools migrations create ${appId} --fromHash ${fromShortHash} --toHash ${toShortHash}\` to create a migration and then re-run this command.`;
+}
+
+export async function deploy(options: DeployOptions): Promise<DeployResult> {
+  const compiled = await loadCompiledSchema(options.schemaDir);
+  emit(options, { type: "schema-loaded", schemaFile: compiled.schemaFile });
+
+  const warnings: string[] = [];
+  for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
+    compiled.schema.tables.map((table) => table.name),
+    compiled.permissions,
+  )) {
+    emitWarning(options, warnings, diagnostic.message);
+  }
+
+  const storedSchemaHash = await resolveStoredStructuralSchemaHash(
+    options.appId,
+    options.serverUrl,
+    options.adminSecret,
+    compiled.wasmSchema,
+  );
+
+  let schema: PushSchemaResult;
+  if (storedSchemaHash) {
+    emit(options, {
+      type: "schema-skipped",
+      hash: storedSchemaHash,
+      reason: "already-stored",
+    });
+    schema = {
+      hash: storedSchemaHash,
+      schemaFile: compiled.schemaFile,
+      status: "already-stored",
+    };
+  } else {
+    const publishedSchema = await publishStoredSchema(options.serverUrl, {
+      appId: options.appId,
+      adminSecret: options.adminSecret,
+      schema: compiled.wasmSchema,
+    });
+    emit(options, {
+      type: "schema-published",
+      hash: publishedSchema.hash,
+      objectId: publishedSchema.objectId,
+    });
+    schema = {
+      hash: publishedSchema.hash,
+      schemaFile: compiled.schemaFile,
+      status: "published",
+      objectId: publishedSchema.objectId,
+    };
+  }
+
+  if (!compiled.permissions || !compiled.permissionsFile) {
+    emit(options, { type: "permissions-skipped", reason: "missing-permissions-file" });
+    return { schema, warnings };
+  }
+
+  emit(options, { type: "permissions-loaded", permissionsFile: compiled.permissionsFile });
+
+  const { head: previousHead } = await fetchPermissionsHead(options.serverUrl, {
+    appId: options.appId,
+    adminSecret: options.adminSecret,
+  });
+
+  let migration: DeployResult["migration"];
+  if (previousHead && previousHead.schemaHash !== schema.hash) {
+    try {
+      const { connected } = await fetchSchemaConnectivity(options.serverUrl, {
+        appId: options.appId,
+        adminSecret: options.adminSecret,
+        fromHash: previousHead.schemaHash,
+        toHash: schema.hash,
+      });
+
+      if (connected) {
+        migration = {
+          status: "already-connected",
+          fromHash: previousHead.schemaHash,
+          toHash: schema.hash,
+        };
+      } else {
+        migration = await pushMigration({
+          appId: options.appId,
+          serverUrl: options.serverUrl,
+          adminSecret: options.adminSecret,
+          migrationsDir: options.migrationsDir,
+          fromHash: previousHead.schemaHash,
+          toHash: schema.hash,
+          onEvent: options.onEvent,
+        });
+      }
+    } catch (error) {
+      const migrationMissingPrefix = `No migration file found in ${options.migrationsDir}`;
+      if (!(error instanceof Error) || !error.message.startsWith(migrationMissingPrefix)) {
+        throw error;
+      }
+
+      const message = disconnectedSchemaMessage(
+        options.appId,
+        options.migrationsDir,
+        previousHead.schemaHash,
+        schema.hash,
+      );
+      if (!options.noVerify) {
+        throw new Error(message);
+      }
+      emitWarning(options, warnings, message);
+    }
+  }
+
+  const { head } = await publishStoredPermissions(options.serverUrl, {
+    appId: options.appId,
+    adminSecret: options.adminSecret,
+    schemaHash: schema.hash,
+    permissions: compiled.permissions,
+    expectedParentBundleObjectId: previousHead?.bundleObjectId ?? null,
+  });
+
+  emit(options, {
+    type: "permissions-published",
+    schemaHash: schema.hash,
+    version: head?.version,
+  });
+
+  return {
+    schema,
+    migration,
+    permissions: {
+      schemaHash: schema.hash,
+      permissionsFile: compiled.permissionsFile,
+      previousHead,
+      head,
+    },
+    warnings,
+  };
 }
