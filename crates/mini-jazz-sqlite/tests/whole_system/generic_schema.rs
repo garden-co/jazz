@@ -732,16 +732,26 @@ fn generic_top_created_at_query_scope_refresh_replaces_displaced_boundary_row() 
 
     peer.apply_bundle(
         &alice
-            .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+            .export_query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                2,
+            ))
             .unwrap(),
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
-            .unwrap()
-            .iter()
-            .map(|row| row.id.as_str())
-            .collect::<Vec<_>>(),
+        peer.query(support::top_created_query(
+            "notes",
+            "pinned",
+            json!(true),
+            2,
+        ))
+        .unwrap()
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>(),
         vec!["note-middle", "note-old"]
     );
 
@@ -758,17 +768,27 @@ fn generic_top_created_at_query_scope_refresh_replaces_displaced_boundary_row() 
         .unwrap();
     peer.apply_bundle(
         &alice
-            .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+            .export_query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                2,
+            ))
             .unwrap(),
     )
     .unwrap();
 
     assert_eq!(
-        peer.read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 3)
-            .unwrap()
-            .iter()
-            .map(|row| row.id.as_str())
-            .collect::<Vec<_>>(),
+        peer.query(support::top_created_query(
+            "notes",
+            "pinned",
+            json!(true),
+            3,
+        ))
+        .unwrap()
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>(),
         vec!["note-new", "note-middle"]
     );
 }

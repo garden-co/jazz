@@ -305,7 +305,7 @@ impl Runtime {
         Ok(tx_id)
     }
 
-    pub fn read_rows_where_eq_top_created_at_desc(
+    pub(crate) fn read_rows_where_eq_top_created_at_desc(
         &self,
         table_name: &str,
         field_name: &str,
@@ -1526,38 +1526,6 @@ impl Runtime {
             )?;
             return Ok(());
         }
-        if query_read.table == "todos"
-            && query_read.field == "done"
-            && query_read.op == "top_created_at_desc"
-        {
-            let Some(limit) = query_read.value.as_u64() else {
-                return Err(crate::Error::new(
-                    "top_created_at_desc expects numeric limit",
-                ));
-            };
-            let branch_num = branch::checkout(db, &query_read.branch_id)?;
-            db.execute(
-                &format!(
-                    "DELETE FROM {}
-                     WHERE j_branch_num = ?
-                       AND row_num NOT IN (
-                         SELECT todo.row_num
-                         FROM {current_table} todo
-                         JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
-                         WHERE todo.j_branch_num = ?
-                           AND todo.is_deleted = 0
-                           AND todo.done = 0
-                           AND todo_tx.outcome != ?
-                         ORDER BY todo.j_created_at DESC, todo.row_num
-                         LIMIT ?
-                       )",
-                    crate::schema::current_table("todos"),
-                    current_table = crate::schema::current_table("todos"),
-                ),
-                params![branch_num, branch_num, tx::OUTCOME_REJECTED, limit as i64],
-            )?;
-            return Ok(());
-        }
         let table = schema.table_def(&query_read.table)?;
         let field = table
             .fields
@@ -2531,7 +2499,7 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_eq_top_created_at_desc(
+    pub(crate) fn export_query_where_eq_top_created_at_desc(
         &self,
         table_name: &str,
         field_name: &str,
@@ -2574,37 +2542,6 @@ impl Runtime {
             QueryScopeOptions {
                 ref_include_fields: &[],
                 extra_row_ids: &previous_observed_ids,
-            },
-        )
-    }
-
-    pub fn export_query_where_eq_top_created_at_desc_with_ref_include(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        limit: usize,
-        ref_field_name: &str,
-    ) -> Result<Bundle> {
-        let rows = self.read_rows_where_eq_top_created_at_desc(
-            table_name,
-            field_name,
-            value.clone(),
-            limit,
-        )?;
-        self.export_query_scope(
-            table_name,
-            field_name,
-            "eq_top_created_at_desc",
-            json!({
-                "eq": value.clone(),
-                "limit": limit,
-                "observed_ids": observed_row_ids(&rows),
-            }),
-            rows,
-            QueryScopeOptions {
-                ref_include_fields: &[ref_field_name],
-                extra_row_ids: &[],
             },
         )
     }
@@ -3088,7 +3025,7 @@ impl Runtime {
         Ok((bundle, profile))
     }
 
-    fn export_query_scope(
+    pub(crate) fn export_query_scope(
         &self,
         table_name: &str,
         field_name: &str,
@@ -3353,7 +3290,7 @@ impl Runtime {
         ))
     }
 
-    pub fn subscribe_rows_where_eq_top_created_at_desc(
+    pub(crate) fn subscribe_rows_where_eq_top_created_at_desc(
         &self,
         table_name: &str,
         field_name: &str,

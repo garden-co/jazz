@@ -748,7 +748,7 @@ fn index_only_schema_changes_are_semantically_compatible() {
 
     peer.apply_bundle(
         &alice
-            .export_query_where_eq_top_created_at_desc("tasks", "done", json!(false), 1)
+            .export_query(support::top_created_query("tasks", "done", json!(false), 1))
             .unwrap(),
     )
     .unwrap();

@@ -710,7 +710,12 @@ fn restarted_ordered_page_subscription_emits_boundary_refresh_diff() {
         worker
             .apply_bundle(
                 &upstream
-                    .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+                    .export_query(support::top_created_query(
+                        "notes",
+                        "pinned",
+                        json!(true),
+                        2,
+                    ))
                     .unwrap(),
             )
             .unwrap();
@@ -882,7 +887,12 @@ fn ordered_page_subscription_replaces_displaced_boundary_row() {
         .unwrap();
 
     let mut subscription = alice
-        .subscribe_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+        .subscribe_query(support::top_created_query(
+            "notes",
+            "pinned",
+            json!(true),
+            2,
+        ))
         .unwrap();
     assert_eq!(
         subscription

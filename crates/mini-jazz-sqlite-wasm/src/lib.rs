@@ -165,22 +165,6 @@ impl MiniJazzRuntime {
         )
     }
 
-    #[wasm_bindgen(js_name = readRowsWhereEqTopCreatedAtDesc)]
-    pub fn read_rows_where_eq_top_created_at_desc(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsValue,
-        limit: usize,
-    ) -> Result<JsValue, JsValue> {
-        let value = parse_json_value(value)?;
-        to_js_value(
-            self.runtime
-                .read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)
-                .map_err(to_js_error)?,
-        )
-    }
-
     #[wasm_bindgen(js_name = exportTableHistory)]
     pub fn export_table_history(&self, table_name: &str) -> Result<JsValue, JsValue> {
         to_js_value(

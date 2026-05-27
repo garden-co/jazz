@@ -2,6 +2,13 @@ import init, { MiniJazzRuntime } from "./generated/mini-jazz-sqlite-wasm/mini_ja
 
 const PROJECT_ID = "todo-list";
 const PAGE_SIZE = 10;
+const PAGE_QUERY = {
+  table: "todos",
+  conditions: [{ column: "done", op: "eq", value: false }],
+  includes: {},
+  orderBy: [["$createdAt", "desc"]],
+  limit: PAGE_SIZE,
+};
 let db;
 
 self.onmessage = async ({ data }) => {
@@ -46,14 +53,12 @@ self.onmessage = async ({ data }) => {
 
 function postState(generateMs) {
   const startedAt = performance.now();
-  const todos = db
-    .readRowsWhereEqTopCreatedAtDesc("todos", "done", false, PAGE_SIZE)
-    .map((row) => ({
-      id: row.id,
-      title: row.values.title,
-      done: row.values.done,
-      txId: row.tx_id,
-    }));
+  const todos = db.query(PAGE_QUERY).map((row) => ({
+    id: row.id,
+    title: row.values.title,
+    done: row.values.done,
+    txId: row.tx_id,
+  }));
   postMessage({
     type: "state",
     todos,

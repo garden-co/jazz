@@ -138,14 +138,24 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
             .unwrap();
         support::apply(
             upstream
-                .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+                .export_query(support::top_created_query(
+                    "notes",
+                    "pinned",
+                    json!(true),
+                    2,
+                ))
                 .unwrap(),
             &mut worker,
         )
         .unwrap();
         assert_eq!(
             worker
-                .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+                .query(support::top_created_query(
+                    "notes",
+                    "pinned",
+                    json!(true),
+                    2,
+                ))
                 .unwrap()
                 .iter()
                 .map(|row| row.id.as_str())
@@ -173,7 +183,12 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
 
     assert_eq!(
         reopened
-            .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 3)
+            .query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                3,
+            ))
             .unwrap()
             .iter()
             .map(|row| row.id.as_str())

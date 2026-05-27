@@ -1,5 +1,6 @@
 use crate::runtime::Runtime;
 use crate::subscription::{RowsSubscription, RowsSubscriptionQuery};
+use crate::sync::Bundle;
 use crate::types::{RowView, SubscriptionDelta};
 use crate::{Error, Result};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -85,6 +86,56 @@ impl BuiltQuery {
             None
         }
     }
+
+    fn export_scope(&self) -> Result<QueryExportScope> {
+        if let Some((condition, limit)) = self.top_created_at_desc_fast_path() {
+            return Ok(QueryExportScope {
+                table: self.table.clone(),
+                field: condition.column.clone(),
+                op: "eq_top_created_at_desc",
+                value: serde_json::json!({
+                    "eq": condition.value.clone(),
+                    "limit": limit,
+                }),
+            });
+        }
+
+        if self.conditions.len() != 1
+            || !self.order_by.is_empty()
+            || self.limit.is_some()
+            || self.offset.unwrap_or(0) != 0
+        {
+            return Err(Error::new(
+                "export_query supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
+            ));
+        }
+
+        let condition = &self.conditions[0];
+        Ok(QueryExportScope {
+            table: self.table.clone(),
+            field: condition.column.clone(),
+            op: condition.op.query_read_op(),
+            value: condition.value.clone(),
+        })
+    }
+}
+
+impl QueryConditionOp {
+    fn query_read_op(&self) -> &'static str {
+        match self {
+            QueryConditionOp::Eq => "eq",
+            QueryConditionOp::Ne => "ne",
+            QueryConditionOp::In => "in",
+            QueryConditionOp::Contains => "contains",
+        }
+    }
+}
+
+struct QueryExportScope {
+    table: String,
+    field: String,
+    op: &'static str,
+    value: JsonValue,
 }
 
 impl Runtime {
@@ -109,6 +160,27 @@ impl Runtime {
 
     pub fn subscribe_query(&self, query: BuiltQuery) -> Result<RowsSubscription> {
         Ok(RowsSubscription::query(query.clone(), self.query(query)?))
+    }
+
+    pub fn export_query(&self, query: BuiltQuery) -> Result<Bundle> {
+        self.export_query_with_ref_includes(query, &[])
+    }
+
+    pub fn export_query_with_ref_includes(
+        &self,
+        query: BuiltQuery,
+        ref_include_fields: &[&str],
+    ) -> Result<Bundle> {
+        let scope = query.export_scope()?;
+        let rows = self.query(query)?;
+        self.export_query_scope(
+            &scope.table,
+            &scope.field,
+            scope.op,
+            scope.value,
+            rows,
+            ref_include_fields,
+        )
     }
 
     pub fn subscription_delta(
