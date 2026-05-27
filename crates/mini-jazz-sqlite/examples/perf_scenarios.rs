@@ -423,6 +423,13 @@ struct RecursiveTreeSubscriptionProbe {
     noop_subscription_added: usize,
     noop_subscription_updated: usize,
     noop_subscription_removed: usize,
+    repeated_noop_refresh_count: usize,
+    repeated_noop_total_export_ms: f64,
+    repeated_noop_total_apply_ms: f64,
+    repeated_noop_total_poll_ms: f64,
+    repeated_noop_total_history_rows: usize,
+    repeated_noop_total_diffs: usize,
+    rss_after_repeated_noop_refreshes_bytes: Option<i64>,
     subscription_added: usize,
     subscription_updated: usize,
     subscription_removed: usize,
@@ -1621,6 +1628,8 @@ fn run_dashboard_query_scaling_repeat(
 fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscriptionProbe> {
     let node_count = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_NODES", 2_000);
     let branch_factor = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_BRANCH_FACTOR", 5).max(1);
+    let repeated_noop_refresh_count =
+        env_usize("MINI_JAZZ_PERF_RECURSIVE_REPEATED_NOOP_REFRESHES", 3);
     let root_id =
         env::var("MINI_JAZZ_PERF_RECURSIVE_TREE_ROOT_ID").unwrap_or_else(|_| "folder-0".to_owned());
     let rss_start_bytes = process_rss_bytes();
@@ -1697,6 +1706,27 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     let noop_poll_started = Instant::now();
     let noop_diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
     let noop_poll_elapsed = noop_poll_started.elapsed();
+    let mut repeated_noop_total_export_ms = 0.0;
+    let mut repeated_noop_total_apply_ms = 0.0;
+    let mut repeated_noop_total_poll_ms = 0.0;
+    let mut repeated_noop_total_history_rows = 0;
+    let mut repeated_noop_total_diffs = 0;
+    for _ in 0..repeated_noop_refresh_count {
+        let repeated_export_started = Instant::now();
+        let repeated_bundles = core.run_as_user(OWNER, |core| {
+            core.export_query_read_refreshes(&tab.observed_query_reads()?)
+        })?;
+        repeated_noop_total_export_ms += ms(repeated_export_started.elapsed());
+        let repeated_merged = merge_bundles(&repeated_bundles)?;
+        repeated_noop_total_history_rows += repeated_merged.history.len();
+        let repeated_apply_started = Instant::now();
+        tab.apply_bundle(&repeated_merged)?;
+        repeated_noop_total_apply_ms += ms(repeated_apply_started.elapsed());
+        let repeated_poll_started = Instant::now();
+        repeated_noop_total_diffs += tab.poll_subscription(&mut subscription)?.len();
+        repeated_noop_total_poll_ms += ms(repeated_poll_started.elapsed());
+    }
+    let rss_after_repeated_noop_refreshes_bytes = process_rss_bytes();
     let visible_rows_after_refresh = tab
         .read_recursive_refs("folders", &root_id, "parent")?
         .len();
@@ -1736,6 +1766,13 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
         noop_subscription_added: noop_diff_counts.added,
         noop_subscription_updated: noop_diff_counts.updated,
         noop_subscription_removed: noop_diff_counts.removed,
+        repeated_noop_refresh_count,
+        repeated_noop_total_export_ms,
+        repeated_noop_total_apply_ms,
+        repeated_noop_total_poll_ms,
+        repeated_noop_total_history_rows,
+        repeated_noop_total_diffs,
+        rss_after_repeated_noop_refreshes_bytes,
         subscription_added: diff_counts.added,
         subscription_updated: diff_counts.updated,
         subscription_removed: diff_counts.removed,

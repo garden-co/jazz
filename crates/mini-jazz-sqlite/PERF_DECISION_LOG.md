@@ -2055,3 +2055,24 @@ Learning: memory growth is now easier to attribute per scenario. The recursive
 subscription path retains enough intermediate state across export/apply/refresh
 that memory deserves its own follow-up pass, especially for repeated large
 refreshes and merged bundle lifetimes.
+
+## 2026-05-27 03:16 PDT
+
+Added a repeated no-op recursive refresh probe. By default it runs three more
+unchanged refresh/apply/poll loops after the first no-op refresh.
+
+Default 2k recursive subscription, three repeated unchanged refreshes:
+
+- total export time ~75.7 ms
+- total apply time ~29.3 ms
+- total poll time ~17.8 ms
+- total history rows resent/re-applied: 6,210
+- total emitted diffs: 0
+- RSS after first no-op refresh ~41.1 MiB
+- RSS after three more no-op refreshes ~47.3 MiB
+
+Learning: repeated unchanged refreshes keep doing real CPU work and appear to
+ratchet memory in the benchmark process. This strengthens the case for
+delta-shaped refreshes or query-settlement/invalidation tokens; the current
+full-scope refresh model scales with observed scope size even when semantics do
+not change.
