@@ -257,6 +257,8 @@ Coverage labels:
   D.7
 - `stale_pending_bundle_cannot_drop_durable_receipts`: D.2, D.7
 - `stale_pending_bundle_cannot_erase_rejection_detail`: D.2, D.7, D.13
+- `stale_rejected_bundle_cannot_erase_later_rejection_detail`: D.2, D.7,
+  D.13
 - `rejection_then_stale_pending_replay_does_not_resurrect_current_row`: D.2,
   D.3, D.7
 - `query_scope_retains_previous_row_as_local_fact_after_predicate_exit`: D.6,
@@ -319,6 +321,7 @@ Coverage labels:
 - `missing_catalogue_state_fails_closed_without_partial_apply`: D.7, D.10,
   D.14
 - `upsert_creates_missing_row_and_updates_existing_row`: D.2
+- `insert_is_create_only_for_visible_same_table_row`: D.2
 - `transaction_upsert_normalizes_with_later_same_row_updates`: D.2, D.3
 - `mergeable_upsert_converges_across_multi_tier_sync`: D.2, D.7
 - `upsert_after_delete_restores_row_with_new_history_version`: D.2, D.3
@@ -402,6 +405,7 @@ them concrete:
 - stale pending sync bundles cannot drop durable receipt tiers already observed
   for a transaction
 - stale pending sync bundles cannot erase terminal rejection code/detail
+- stale rejected sync bundles cannot erase later enriched rejection detail
 - remote pending history cannot override durable current rows
 - branch metadata must include base epoch/source ids, not only row branch ids
 - branch-local tombstones over pinned-base rows are required
@@ -452,6 +456,7 @@ them concrete:
   row version
 - upsert is an explicit create-or-update operation and participates in
   transaction normalization
+- insert is create-only for an already visible same-table row
 - mergeable upsert converges across a multi-tier topology and preserves omitted
   fields on update
 - mergeable upsert over a deleted row uses restore/insert semantics and appends

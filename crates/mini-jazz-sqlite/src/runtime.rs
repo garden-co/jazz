@@ -766,8 +766,14 @@ impl Runtime {
                 if let Some(code) = &tx_record.rejection_code {
                     let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
                     db.execute(
-                        "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
-                         VALUES (?, ?, ?)",
+                        "INSERT INTO jazz_tx_rejection (tx_num, code, detail_json)
+                         VALUES (?, ?, ?)
+                         ON CONFLICT(tx_num) DO UPDATE SET
+                           code = excluded.code,
+                           detail_json = CASE
+                             WHEN excluded.detail_json = 'null' AND jazz_tx_rejection.detail_json != 'null' THEN jazz_tx_rejection.detail_json
+                             ELSE excluded.detail_json
+                           END",
                         params![tx_num, code, detail_json],
                     )?;
                 }
@@ -4066,14 +4072,19 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     validate_write_fields(table, args.values)?;
     let (row_num, row_id_created) = ensure_row_id_with_status(args.db, args.id)?;
-    if args.op == 1
-        && !row_id_created
-        && row_id_used_by_other_table(args.db, args.schema, args.table_name, row_num)?
-    {
-        return Err(crate::Error::new(format!(
-            "row id {} is already used by another table",
-            args.id
-        )));
+    if args.op == 1 && !row_id_created {
+        if row_id_used_by_other_table(args.db, args.schema, args.table_name, row_num)? {
+            return Err(crate::Error::new(format!(
+                "row id {} is already used by another table",
+                args.id
+            )));
+        }
+        if row_has_current_branch_value(args.db, args.table_name, row_num, args.branch_num)? {
+            return Err(crate::Error::new(format!(
+                "row id {} already exists in table {}",
+                args.id, args.table_name
+            )));
+        }
     }
     let effective_values = effective_write_values(EffectiveWriteValues {
         db: args.db,
@@ -4205,6 +4216,25 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         )?;
     }
     Ok(allowed)
+}
+
+fn row_has_current_branch_value(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {}
+             WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn row_id_used_by_other_table(

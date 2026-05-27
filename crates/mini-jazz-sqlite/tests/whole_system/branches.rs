@@ -592,7 +592,7 @@ fn branch_base_is_pinned_to_global_epoch() {
     let mut main_update = BTreeMap::new();
     main_update.insert("title".to_owned(), json!("Main after branch"));
     main_update.insert("done".to_owned(), json!(false));
-    let update_tx = alice.insert_row("tasks", "task-1", main_update).unwrap();
+    let update_tx = alice.update_row("tasks", "task-1", main_update).unwrap();
     alice.accept_transaction_at_global(&update_tx, 2).unwrap();
 
     alice.checkout_branch("draft").unwrap();
@@ -867,7 +867,7 @@ fn branch_export_includes_pinned_main_base_rows_for_receiver_view() {
     alice.create_branch("draft", Some(1)).unwrap();
 
     let update_tx = alice
-        .insert_row(
+        .update_row(
             "tasks",
             "task-1",
             BTreeMap::from([

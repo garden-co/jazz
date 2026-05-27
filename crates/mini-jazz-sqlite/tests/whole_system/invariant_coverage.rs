@@ -1174,6 +1174,44 @@ fn stale_pending_bundle_cannot_erase_rejection_detail() {
 }
 
 #[test]
+fn stale_rejected_bundle_cannot_erase_later_rejection_detail() {
+    let schema = support::notes_schema();
+    let mut source =
+        Runtime::open_with_schema(Storage::Memory, "source", "alice", schema.clone()).unwrap();
+    let mut peer = Runtime::open_with_schema(Storage::Memory, "peer", "alice", schema).unwrap();
+
+    let tx = source
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Rejected detail stays")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    source.reject_transaction(&tx, "policy_denied").unwrap();
+    let stale_rejected_without_detail = source.export_table_history("notes").unwrap();
+    source
+        .reject_transaction_with_detail(
+            &tx,
+            "policy_denied",
+            json!({"reason": "owner_mismatch", "row": "note-1"}),
+        )
+        .unwrap();
+
+    peer.apply_bundle(&source.export_table_history("notes").unwrap())
+        .unwrap();
+    peer.apply_bundle(&stale_rejected_without_detail).unwrap();
+
+    assert_eq!(
+        peer.transaction_info(&tx).unwrap().rejection_detail,
+        Some(json!({"reason": "owner_mismatch", "row": "note-1"}))
+    );
+    assert!(peer.read_rows("notes").unwrap().is_empty());
+}
+
+#[test]
 fn rejection_then_stale_pending_replay_does_not_resurrect_current_row() {
     let schema = support::notes_schema();
     let mut alice =
@@ -2609,6 +2647,40 @@ fn upsert_creates_missing_row_and_updates_existing_row() {
     assert_eq!(rows[0].values["pinned"], json!(true));
     assert_ne!(create_tx, update_tx);
     assert_eq!(alice.storage_stats().unwrap().history_rows, 2);
+}
+
+#[test]
+fn insert_is_create_only_for_visible_same_table_row() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("first")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let err = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("second")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("already exists"), "{err}");
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("first"));
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 1);
 }
 
 #[test]

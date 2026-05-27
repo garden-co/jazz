@@ -109,8 +109,14 @@ pub(crate) fn reject_with_detail_json(
         params![OUTCOME_REJECTED, tx_num],
     )?;
     conn.execute(
-        "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
-         VALUES (?, ?, ?)",
+        "INSERT INTO jazz_tx_rejection (tx_num, code, detail_json)
+         VALUES (?, ?, ?)
+         ON CONFLICT(tx_num) DO UPDATE SET
+           code = excluded.code,
+           detail_json = CASE
+             WHEN excluded.detail_json = 'null' AND jazz_tx_rejection.detail_json != 'null' THEN jazz_tx_rejection.detail_json
+             ELSE excluded.detail_json
+           END",
         params![tx_num, code, detail_json],
     )?;
     Ok(tx_num)
