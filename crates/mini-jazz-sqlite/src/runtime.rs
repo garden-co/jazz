@@ -5770,25 +5770,31 @@ fn scoped_policy_parent_row_nums(
     branch_nums: &[i64],
     child_row_nums: &[i64],
 ) -> Result<Vec<i64>> {
+    if child_row_nums.is_empty() {
+        return Ok(Vec::new());
+    }
+    let child_placeholders = sql_placeholders(child_row_nums.len());
     let mut stmt = conn.prepare(&format!(
         "SELECT current.{ref_column}
          FROM {} current
          JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
-         WHERE current.row_num = ?
+         WHERE current.row_num IN ({child_placeholders})
            AND current.is_deleted = 0
            AND {}
            AND current_tx.outcome != ?",
         crate::schema::current_table(table_name),
         branch_filter_sql("current", branch_nums),
     ))?;
+    let mut params = child_row_nums
+        .iter()
+        .copied()
+        .map(rusqlite::types::Value::Integer)
+        .collect::<Vec<_>>();
+    params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
     let mut parent_row_nums = BTreeSet::new();
-    for child_row_num in child_row_nums {
-        let rows = stmt.query_map(params![child_row_num, tx::OUTCOME_REJECTED], |row| {
-            row.get::<_, i64>(0)
-        })?;
-        for row in rows {
-            parent_row_nums.insert(row?);
-        }
+    let rows = stmt.query_map(params_from_iter(params.iter()), |row| row.get::<_, i64>(0))?;
+    for row in rows {
+        parent_row_nums.insert(row?);
     }
     Ok(parent_row_nums.into_iter().collect())
 }
@@ -6482,6 +6488,10 @@ fn branch_filter_sql(alias: &str, branch_nums: &[i64]) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn sql_placeholders(count: usize) -> String {
+    (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
 }
 
 fn export_read_policy_sql(

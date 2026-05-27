@@ -1760,3 +1760,22 @@ system `gzip` command when available.
 Learning: transport stream compression should make broad recursive JSON bundles
 much less scary on the wire. The remaining hard problem is CPU and SQLite write
 work at every forwarding tier, not raw transport bytes.
+
+## 2026-05-27 02:34 PDT
+
+Changed `scoped_policy_parent_row_nums` from one query per child row to a single
+`IN (...)` query over the child row set. Targeted policy and recursive tests
+still pass.
+
+10k recursive topology remained effectively unchanged:
+
+- initial core export: ~125.2 ms
+- refresh core export: ~131.4 ms
+
+The existing 100k export-profile probe still shows `policy_dependency_history`
+as the dominant bucket at ~23.3 ms for a 50-row page with policy dependencies.
+
+Learning: the trivial parent-row N+1 fix is correct but not a silver bullet for
+the current benchmark shapes. The remaining policy export cost is deeper in
+history extraction / policy-dependency traversal rather than just resolving
+parent row ids one at a time.
