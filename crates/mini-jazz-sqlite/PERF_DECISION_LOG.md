@@ -1922,3 +1922,24 @@ Decision: kept the code as an opt-in experiment behind
 startup matters too much to pay this cost speculatively. A real version would
 need a better signal, for example peer capability/state saying the receiver is
 warm for the scope.
+
+## 2026-05-27 03:02 PDT
+
+Added a no-op recursive refresh measurement after the mutation refresh has
+already been applied and polled.
+
+10k recursive subscription, no further mutations:
+
+- no-op refresh export: ~129.7 ms
+- no-op refresh history rows: 10,070
+- no-op apply: ~46.0 ms
+- no-op apply reads: ~30.9 ms
+- no-op apply history/current projection: ~14.6 ms
+- no-op subscription poll: ~34.3 ms
+- emitted diffs: 0 added, 0 updated, 0 removed
+
+Learning: the system is now much better at idempotently applying broad refreshes,
+but it still resends and rechecks the whole recursive scope even when nothing
+changed. For large observed queries, the next big design target is delta-shaped
+refresh/export and/or compact read-set refresh facts, not more local SQL
+micro-optimizations.

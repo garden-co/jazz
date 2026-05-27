@@ -410,6 +410,14 @@ struct RecursiveTreeSubscriptionProbe {
     refresh_apply_ms: f64,
     refresh_apply_profile: ApplyBundleProfile,
     subscription_poll_ms: f64,
+    noop_refresh_export_ms: f64,
+    noop_refresh_history_rows: usize,
+    noop_refresh_apply_ms: f64,
+    noop_refresh_apply_profile: ApplyBundleProfile,
+    noop_subscription_poll_ms: f64,
+    noop_subscription_added: usize,
+    noop_subscription_updated: usize,
+    noop_subscription_removed: usize,
     subscription_added: usize,
     subscription_updated: usize,
     subscription_removed: usize,
@@ -1664,6 +1672,17 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     let poll_started = Instant::now();
     let diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
     let poll_elapsed = poll_started.elapsed();
+    let noop_refresh_started = Instant::now();
+    let noop_refresh_bundles = core.run_as_user(OWNER, |core| {
+        core.export_query_read_refreshes(&tab.observed_query_reads()?)
+    })?;
+    let noop_refresh_elapsed = noop_refresh_started.elapsed();
+    let noop_refresh_merged = merge_bundles(&noop_refresh_bundles)?;
+    let noop_refresh_history_rows = noop_refresh_merged.history.len();
+    let noop_refresh_apply_profile = tab.profile_apply_bundle(&noop_refresh_merged)?;
+    let noop_poll_started = Instant::now();
+    let noop_diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
+    let noop_poll_elapsed = noop_poll_started.elapsed();
     let visible_rows_after_refresh = tab
         .read_recursive_refs("folders", &root_id, "parent")?
         .len();
@@ -1690,6 +1709,14 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
         refresh_apply_ms: refresh_apply_profile.total_ms,
         refresh_apply_profile,
         subscription_poll_ms: ms(poll_elapsed),
+        noop_refresh_export_ms: ms(noop_refresh_elapsed),
+        noop_refresh_history_rows,
+        noop_refresh_apply_ms: noop_refresh_apply_profile.total_ms,
+        noop_refresh_apply_profile,
+        noop_subscription_poll_ms: ms(noop_poll_elapsed),
+        noop_subscription_added: noop_diff_counts.added,
+        noop_subscription_updated: noop_diff_counts.updated,
+        noop_subscription_removed: noop_diff_counts.removed,
         subscription_added: diff_counts.added,
         subscription_updated: diff_counts.updated,
         subscription_removed: diff_counts.removed,
