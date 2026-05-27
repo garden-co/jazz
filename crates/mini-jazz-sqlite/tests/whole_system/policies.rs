@@ -817,6 +817,8 @@ fn core_validates_forwarded_exclusive_transaction_with_session_user() {
     let info = core.transaction_info(&tx).unwrap();
     assert_eq!(info.conflict_mode, "exclusive");
     assert_eq!(info.rejection_code, None);
+    assert_eq!(info.global_epoch, Some(1));
+    assert!(info.receipt_tiers.contains(&"global".to_owned()));
     assert_eq!(core.read_rows("todos").unwrap().len(), 1);
     assert_eq!(
         core.export_table_history("todos")
@@ -832,7 +834,78 @@ fn core_validates_forwarded_exclusive_transaction_with_session_user() {
 }
 
 #[test]
-fn trusted_edge_rejects_untrusted_write_when_policy_dependency_is_missing() {
+fn edge_forwards_exclusive_without_local_policy_dependency_and_core_accepts() {
+    let harness = support::Harness::new();
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice = harness
+        .memory_with_schema("alice-node", "alice", schema.clone())
+        .unwrap();
+    let mut edge = harness
+        .trusted_memory_with_schema("edge", schema.clone())
+        .unwrap();
+    let mut core = harness
+        .trusted_memory_with_schema("core", schema.clone())
+        .unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    core.apply_bundle(&alice.export_table_history("projects").unwrap())
+        .unwrap();
+    let tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Forward through cold edge")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+
+    let mut forwarded = alice
+        .export_exclusive_transaction_forwarding("todos", &tx, "alice")
+        .unwrap();
+    forwarded
+        .history
+        .retain(|record| record.table != "projects");
+
+    edge.stage_exclusive_bundle_for_forwarding(&forwarded)
+        .unwrap();
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    let edge_info = edge.transaction_info(&tx).unwrap();
+    assert_eq!(edge_info.conflict_mode, "exclusive");
+    assert_eq!(edge_info.global_epoch, None);
+    assert_eq!(edge_info.awaiting_dependency, None);
+    assert_eq!(edge_info.rejection_code, None);
+
+    support::forward_exclusive(&edge, &mut core, "todos", &tx, "alice").unwrap();
+
+    let info = core.transaction_info(&tx).unwrap();
+    assert_eq!(info.conflict_mode, "exclusive");
+    assert_eq!(info.rejection_code, None);
+    assert_eq!(info.global_epoch, Some(1));
+    assert!(info.receipt_tiers.contains(&"global".to_owned()));
+    let rows = core.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+}
+
+#[test]
+fn trusted_edge_awaits_missing_policy_dependency_then_accepts_after_it_arrives() {
     let harness = support::Harness::new();
     let schema = SchemaDef::new()
         .table("projects", |table| {
@@ -871,14 +944,11 @@ fn trusted_edge_rejects_untrusted_write_when_policy_dependency_is_missing() {
         .history
         .retain(|record| record.table != "projects");
 
-    support::apply_untrusted_as_user(incomplete_bundle, &mut edge, bob.session_user()).unwrap();
+    support::apply_untrusted_as_user(incomplete_bundle, &mut edge, "bob").unwrap();
     assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert_eq!(edge.transaction_info(&tx).unwrap().rejection_code, None);
     assert_eq!(
-        edge.transaction_info(&tx).unwrap().rejection_code,
-        Some("policy_denied".to_owned())
-    );
-    assert_eq!(
-        edge.transaction_info(&tx).unwrap().rejection_detail,
+        edge.transaction_info(&tx).unwrap().awaiting_dependency,
         Some(json!({
             "reason": "policy_dependency_unavailable",
             "table": "todos",
@@ -889,19 +959,212 @@ fn trusted_edge_rejects_untrusted_write_when_policy_dependency_is_missing() {
     );
 
     support::sync_table(&bob, &mut edge, "projects").unwrap();
-    assert!(edge.read_rows("todos").unwrap().is_empty());
 
-    support::apply_untrusted_as_user(bob.export_table_history("todos").unwrap(), &mut edge, "bob")
+    let rows = edge.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+    let info = edge.transaction_info(&tx).unwrap();
+    assert_eq!(info.rejection_code, None);
+    assert_eq!(info.awaiting_dependency, None);
+    assert_eq!(info.receipt_tiers, vec!["edge".to_owned()]);
+}
+
+#[test]
+fn durable_edge_preserves_awaiting_dependency_across_restart() {
+    let harness = support::Harness::new();
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut bob = harness
+        .trusted_memory_with_schema("bob-node", schema.clone())
         .unwrap();
-    assert!(edge.read_rows("todos").unwrap().is_empty());
+    let mut edge = harness
+        .trusted_durable_with_schema("edge.sqlite", "edge", schema.clone())
+        .unwrap();
+
+    let tx = support::run_as_user(&mut bob, "bob", |bob| {
+        bob.insert_row(
+            "projects",
+            "project-bob",
+            BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+        )?;
+        bob.insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Restart while awaiting")),
+                ("project".to_owned(), json!("project-bob")),
+            ]),
+        )
+    })
+    .unwrap();
+
+    let mut incomplete_bundle = bob.export_table_history("todos").unwrap();
+    incomplete_bundle
+        .history
+        .retain(|record| record.table != "projects");
+    support::apply_untrusted_as_user(incomplete_bundle, &mut edge, "bob").unwrap();
     assert_eq!(
-        edge.transaction_info(&tx).unwrap().rejection_detail,
+        edge.transaction_info(&tx).unwrap().awaiting_dependency,
         Some(json!({
             "reason": "policy_dependency_unavailable",
             "table": "todos",
             "row_id": "todo-1",
             "dependency_table": "projects",
             "dependency_row_id": "project-bob"
+        }))
+    );
+    drop(edge);
+
+    let mut edge = harness
+        .trusted_durable_with_schema("edge.sqlite", "edge", schema)
+        .unwrap();
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    assert!(edge
+        .transaction_info(&tx)
+        .unwrap()
+        .awaiting_dependency
+        .is_some());
+
+    support::sync_table(&bob, &mut edge, "projects").unwrap();
+
+    assert_eq!(edge.read_rows("todos").unwrap().len(), 1);
+    let info = edge.transaction_info(&tx).unwrap();
+    assert_eq!(info.awaiting_dependency, None);
+    assert_eq!(info.rejection_code, None);
+    assert_eq!(info.receipt_tiers, vec!["edge".to_owned()]);
+}
+
+#[test]
+fn direct_authority_fate_clears_awaiting_dependency_marker() {
+    let harness = support::Harness::new();
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut bob = harness
+        .trusted_memory_with_schema("bob-node", schema.clone())
+        .unwrap();
+    let mut edge = harness.trusted_memory_with_schema("edge", schema).unwrap();
+
+    let tx = support::run_as_user(&mut bob, "bob", |bob| {
+        bob.insert_row(
+            "projects",
+            "project-bob",
+            BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+        )?;
+        bob.insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Direct fate while awaiting")),
+                ("project".to_owned(), json!("project-bob")),
+            ]),
+        )
+    })
+    .unwrap();
+
+    let mut incomplete_bundle = bob.export_table_history("todos").unwrap();
+    incomplete_bundle
+        .history
+        .retain(|record| record.table != "projects");
+    support::apply_untrusted_as_user(incomplete_bundle, &mut edge, "bob").unwrap();
+    assert!(edge
+        .transaction_info(&tx)
+        .unwrap()
+        .awaiting_dependency
+        .is_some());
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+
+    edge.accept_transaction_at_global(&tx, 1).unwrap();
+
+    let info = edge.transaction_info(&tx).unwrap();
+    assert_eq!(info.awaiting_dependency, None);
+    assert_eq!(info.rejection_code, None);
+    assert_eq!(info.global_epoch, Some(1));
+    let rows = edge.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+}
+
+#[test]
+fn edge_rejects_awaiting_transaction_when_arrived_dependency_is_not_readable() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.write_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_trusted_attributing_to_user(
+        Storage::Memory,
+        "bob-node",
+        "bob",
+        schema.clone(),
+    )
+    .unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-alice",
+            BTreeMap::from([("title".to_owned(), json!("Private Alice project"))]),
+        )
+        .unwrap();
+    let tx = bob
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    json!("Should be denied after dependency arrives"),
+                ),
+                ("project".to_owned(), json!("project-alice")),
+            ]),
+        )
+        .unwrap();
+
+    edge.apply_untrusted_bundle_as_user(&bob.export_table_history("todos").unwrap(), "bob")
+        .unwrap();
+    assert!(edge
+        .transaction_info(&tx)
+        .unwrap()
+        .awaiting_dependency
+        .is_some());
+
+    edge.apply_bundle(&alice.export_table_history("projects").unwrap())
+        .unwrap();
+
+    assert!(edge.read_rows("todos").unwrap().is_empty());
+    let info = edge.transaction_info(&tx).unwrap();
+    assert_eq!(info.awaiting_dependency, None);
+    assert_eq!(info.rejection_code, Some("policy_denied".to_owned()));
+    assert_eq!(
+        info.rejection_detail,
+        Some(json!({
+            "reason": "write_policy_denied",
+            "table": "todos",
+            "row_id": "todo-1"
         }))
     );
 }
@@ -2226,7 +2489,7 @@ fn trusted_edge_reports_missing_transitive_policy_dependency() {
 
     assert!(edge.read_rows("todos").unwrap().is_empty());
     assert_eq!(
-        edge.transaction_info(&tx).unwrap().rejection_detail,
+        edge.transaction_info(&tx).unwrap().awaiting_dependency,
         Some(json!({
             "reason": "policy_dependency_unavailable",
             "table": "todos",
@@ -2235,6 +2498,17 @@ fn trusted_edge_reports_missing_transitive_policy_dependency() {
             "dependency_row_id": "org-1"
         }))
     );
+
+    edge.apply_bundle(&alice.export_table_history("orgs").unwrap())
+        .unwrap();
+
+    let rows = edge.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-1");
+    let info = edge.transaction_info(&tx).unwrap();
+    assert_eq!(info.rejection_code, None);
+    assert_eq!(info.awaiting_dependency, None);
+    assert_eq!(info.receipt_tiers, vec!["edge".to_owned()]);
 }
 
 #[test]
