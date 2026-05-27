@@ -29,6 +29,7 @@ fn main() -> BenchResult<()> {
         user_id_footprint_probe: run_user_id_footprint_probe()?,
         user_id_interning_projection_probe: run_user_id_interning_projection_probe()?,
         permissioned_dashboard_probe: run_permissioned_dashboard_probe()?,
+        project_board_probe: run_project_board_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
         wide_schema_apply_probe: run_wide_schema_apply_probe()?,
         storage_topology_probe: run_storage_topology_probe()?,
@@ -78,6 +79,7 @@ struct BenchmarkReport {
     user_id_footprint_probe: UserIdFootprintProbe,
     user_id_interning_projection_probe: UserIdInterningProjectionProbe,
     permissioned_dashboard_probe: PermissionedDashboardProbe,
+    project_board_probe: ProjectBoardProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
     wide_schema_apply_probe: WideSchemaApplyProbe,
     storage_topology_probe: StorageTopologyProbe,
@@ -256,6 +258,26 @@ struct PermissionedDashboardProbe {
     subscription_added: usize,
     subscription_updated: usize,
     subscription_removed: usize,
+    core_database_bytes: i64,
+    tab_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct ProjectBoardProbe {
+    user_count: usize,
+    project_count: usize,
+    task_count: usize,
+    comment_count: usize,
+    sampled_users: usize,
+    page_size: usize,
+    seed_ms: f64,
+    my_tasks_export_ms: f64,
+    merged_bundle_bytes: usize,
+    merged_history_rows: usize,
+    merged_transaction_rows: usize,
+    tab_apply_ms: f64,
+    tab_query_ms: f64,
+    visible_rows_returned: usize,
     core_database_bytes: i64,
     tab_database_bytes: i64,
 }
@@ -1134,6 +1156,90 @@ fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe>
     })
 }
 
+fn run_project_board_probe() -> BenchResult<ProjectBoardProbe> {
+    let user_count = 50;
+    let project_count = 100;
+    let task_count = 20_000;
+    let comments_per_task_sample = 2;
+    let sampled_users = 10;
+    let page_size = 40;
+    let dir = tempdir()?;
+    let schema = project_board_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema)?;
+
+    let seed_started = Instant::now();
+    seed_project_board(
+        &mut core,
+        user_count,
+        project_count,
+        task_count,
+        comments_per_task_sample,
+    )?;
+    let seed_elapsed = seed_started.elapsed();
+
+    let users = (0..sampled_users)
+        .map(|index| format!("member-{index}"))
+        .collect::<Vec<_>>();
+    let export_started = Instant::now();
+    let bundles = users
+        .iter()
+        .map(|user| {
+            core.run_as_user(OWNER, |core| {
+                core.export_query_where_eq_top_field_desc_with_ref_include(
+                    "tasks",
+                    "assignee",
+                    json!(user),
+                    "updated_at",
+                    page_size,
+                    "project",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let export_elapsed = export_started.elapsed();
+    let merged_bundle = merge_bundles(&bundles)?;
+    let merged_summary = BundleSummary::from(&merged_bundle)?;
+    let tab_apply_elapsed = timed(|| tab.apply_bundle(&merged_bundle))?;
+    let query_started = Instant::now();
+    let mut visible_rows = 0;
+    for user in &users {
+        visible_rows += tab
+            .read_rows_where_eq_top_field_desc(
+                "tasks",
+                "assignee",
+                json!(user),
+                "updated_at",
+                page_size,
+            )?
+            .len();
+    }
+    let query_elapsed = query_started.elapsed();
+
+    Ok(ProjectBoardProbe {
+        user_count,
+        project_count,
+        task_count,
+        comment_count: task_count.min(1_000) * comments_per_task_sample,
+        sampled_users,
+        page_size,
+        seed_ms: ms(seed_elapsed),
+        my_tasks_export_ms: ms(export_elapsed),
+        merged_bundle_bytes: merged_summary.bytes,
+        merged_history_rows: merged_bundle.history.len(),
+        merged_transaction_rows: merged_bundle.txs.len(),
+        tab_apply_ms: ms(tab_apply_elapsed),
+        tab_query_ms: ms(query_elapsed),
+        visible_rows_returned: visible_rows,
+        core_database_bytes: core.storage_stats()?.database_bytes,
+        tab_database_bytes: tab.storage_stats()?.database_bytes,
+    })
+}
+
 fn run_mixed_mutation_refresh_probe() -> BenchResult<MixedMutationRefreshProbe> {
     let config = Config {
         total_rows: 20_000,
@@ -1921,6 +2027,39 @@ fn recursive_policy_schema() -> SchemaDef {
         })
 }
 
+fn project_board_schema() -> SchemaDef {
+    SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_user();
+        })
+        .table("members", |table| {
+            table.text("name");
+            table.read_if_created_by_user();
+        })
+        .table("projects", |table| {
+            table.text("name");
+            table.ref_("org", "orgs");
+            table.read_if_ref_readable("org");
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.text("status");
+            table.text("updated_at");
+            table.ref_("project", "projects");
+            table.ref_("assignee", "members");
+            table.index("assignee_updated", ["assignee", "updated_at"]);
+            table.index("project_status", ["project", "status"]);
+            table.read_if_ref_readable("project");
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.text("created_at");
+            table.ref_("task", "tasks");
+            table.read_if_ref_readable("task");
+        })
+}
+
 struct DiffCounts {
     added: usize,
     updated: usize,
@@ -2026,6 +2165,99 @@ fn seed_recursive_policy_graph(
                 &format!("recursive-doc-{row_index}"),
                 recursive_document_values(row_index, target_owner_rows),
             );
+        }
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn seed_project_board(
+    runtime: &mut Runtime,
+    user_count: usize,
+    project_count: usize,
+    task_count: usize,
+    comments_per_task_sample: usize,
+) -> Result<()> {
+    runtime.run_attributing_to_user(OWNER, |runtime| {
+        let mut tx = runtime.transaction();
+        tx = tx.insert_row(
+            "orgs",
+            "org-main",
+            BTreeMap::from([("name".to_owned(), json!("Main organization"))]),
+        );
+        for user_index in 0..user_count {
+            tx = tx.insert_row(
+                "members",
+                &format!("member-{user_index}"),
+                BTreeMap::from([("name".to_owned(), json!(format!("Member {user_index}")))]),
+            );
+        }
+        for project_index in 0..project_count {
+            tx = tx.insert_row(
+                "projects",
+                &format!("project-{project_index}"),
+                BTreeMap::from([
+                    ("name".to_owned(), json!(format!("Project {project_index}"))),
+                    ("org".to_owned(), json!("org-main")),
+                ]),
+            );
+        }
+        tx.commit().map(|_| ())
+    })?;
+
+    for chunk_start in (0..task_count).step_by(100) {
+        let chunk_end = (chunk_start + 100).min(task_count);
+        let mut tx = runtime.transaction();
+        for task_index in chunk_start..chunk_end {
+            tx = tx.insert_row(
+                "tasks",
+                &format!("task-{task_index}"),
+                BTreeMap::from([
+                    ("title".to_owned(), json!(format!("Task {task_index}"))),
+                    (
+                        "status".to_owned(),
+                        json!(if task_index % 3 == 0 { "done" } else { "open" }),
+                    ),
+                    (
+                        "updated_at".to_owned(),
+                        json!(format!("{:020}", task_index)),
+                    ),
+                    (
+                        "project".to_owned(),
+                        json!(format!("project-{}", task_index % project_count)),
+                    ),
+                    (
+                        "assignee".to_owned(),
+                        json!(format!("member-{}", task_index % user_count)),
+                    ),
+                ]),
+            );
+        }
+        tx.commit()?;
+    }
+
+    let comment_task_count = task_count.min(1_000);
+    for chunk_start in (0..comment_task_count).step_by(100) {
+        let chunk_end = (chunk_start + 100).min(comment_task_count);
+        let mut tx = runtime.transaction();
+        for task_index in chunk_start..chunk_end {
+            for comment_index in 0..comments_per_task_sample {
+                tx = tx.insert_row(
+                    "comments",
+                    &format!("comment-{task_index}-{comment_index}"),
+                    BTreeMap::from([
+                        (
+                            "body".to_owned(),
+                            json!(format!("Comment {comment_index} on task {task_index}")),
+                        ),
+                        (
+                            "created_at".to_owned(),
+                            json!(format!("{task_index:020}-{comment_index:02}")),
+                        ),
+                        ("task".to_owned(), json!(format!("task-{task_index}"))),
+                    ]),
+                );
+            }
         }
         tx.commit()?;
     }

@@ -1421,6 +1421,37 @@ fn stale_pending_bundle_does_not_resurrect_rejected_fate_after_reconnect() {
 }
 
 #[test]
+fn top_field_query_with_ref_include_syncs_page_and_dependency() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-a", "A older", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-z", "Z newer", false, "project-1")
+        .unwrap();
+
+    let bundle = alice
+        .export_query_where_eq_top_field_desc_with_ref_include(
+            "todos",
+            "done",
+            json!(false),
+            "title",
+            1,
+            "project",
+        )
+        .unwrap();
+    peer.apply_bundle(&bundle).unwrap();
+
+    let todos = peer.open_todos_require_project().unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].id, "todo-z");
+    assert_eq!(todos[0].project_title.as_deref(), Some("Spec work"));
+}
+
+#[test]
 fn missing_optional_ref_include_observed_refresh_delivers_later_dependency() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();

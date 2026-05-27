@@ -996,3 +996,28 @@ Decision: reverted the uncommitted batched-`IN` change. The simple prepared
 point lookup is not pretty, but it is currently the faster path. Future work
 should inspect `EXPLAIN QUERY PLAN` before changing this again; a temp table of
 child row nums or a different composite index may be a better batched shape.
+
+## 2026-05-27 00:58 PDT
+
+Added a project-board shaped perf probe and the missing runtime API it wanted:
+`export_query_where_eq_top_field_desc_with_ref_include`. The probe models orgs,
+members, projects, tasks, and comments with task read policy flowing through
+`task -> project -> org`, and exports 10 assignee pages with project includes.
+
+First unpaged version was intentionally too blunt: 10 users x all matching tasks
+exported ~4k task rows, produced a ~1.7 MB bundle, and took ~135 ms to apply on
+the tab. This proved the stress path but not the product path.
+
+Paged version with 10 users x 40 tasks:
+
+- seed: 50 members, 100 projects, 20k tasks, 2k comments in ~0.79 s
+- export: ~89 ms
+- merged bundle: ~188 KB, 421 history rows, 21 transactions
+- tab apply: ~14.2 ms
+- local tab query over the 10 pages: ~2.9 ms
+- tab DB footprint: ~287 KB
+
+Learning: page-bounded board views are plausible, but multi-query export with
+policy dependencies is still the visible server-side cost. Also, adding small
+missing product-shaped APIs while building benchmarks is paying off: the new
+paged ref-include export has a focused whole-system test.

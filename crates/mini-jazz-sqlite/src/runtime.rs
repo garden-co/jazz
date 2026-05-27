@@ -2562,6 +2562,40 @@ impl Runtime {
         )
     }
 
+    pub fn export_query_where_eq_top_field_desc_with_ref_include(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+        ref_field_name: &str,
+    ) -> Result<Bundle> {
+        let rows = self.read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            order_field_name,
+            limit,
+        )?;
+        self.export_query_scope(
+            table_name,
+            field_name,
+            "eq_top_field_desc",
+            json!({
+                "eq": value.clone(),
+                "order_field": order_field_name,
+                "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
+            }),
+            rows,
+            QueryScopeOptions {
+                ref_include_fields: &[ref_field_name],
+                extra_row_ids: &[],
+            },
+        )
+    }
+
     fn export_query_where_eq_top_field_desc_with_previous_observed(
         &self,
         table_name: &str,
