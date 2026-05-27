@@ -2076,3 +2076,22 @@ ratchet memory in the benchmark process. This strengthens the case for
 delta-shaped refreshes or query-settlement/invalidation tokens; the current
 full-scope refresh model scales with observed scope size even when semantics do
 not change.
+
+## 2026-05-27 03:17 PDT
+
+Ran the repeated no-op recursive refresh probe at 10k rows.
+
+10k recursive subscription, three repeated unchanged refreshes:
+
+- total export time ~377.9 ms
+- total apply time ~142.5 ms
+- total poll time ~92.3 ms
+- total history rows resent/re-applied: 30,210
+- total emitted diffs: 0
+- RSS after first no-op refresh ~158.3 MiB
+- RSS after three more no-op refreshes ~194.8 MiB
+
+Learning: the unchanged-refresh issue is very visible at 10k. The transport
+payload compresses well, but the CPU and memory cost remains roughly proportional
+to full observed history scope. Avoiding unchanged full-scope work is likely the
+highest-leverage next performance topic for recursive subscriptions.
