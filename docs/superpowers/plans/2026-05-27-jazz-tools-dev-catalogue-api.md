@@ -166,6 +166,37 @@ export interface PushSchemaCatalogueOptions extends CatalogueProjectOptions {
   enableLogs?: boolean;
 }
 
+export interface PushMigrationOptions {
+  appId: string;
+  serverUrl: string;
+  adminSecret: string;
+  migrationsDir: string;
+  fromHash: string;
+  toHash: string;
+  onEvent?: (event: CatalogueEvent) => void;
+}
+
+export interface PushMigrationResult {
+  fromHash: string;
+  toHash: string;
+  status: "published";
+  filePath?: string;
+}
+
+export interface DeployOptions extends CatalogueProjectOptions {
+  migrationsDir: string;
+  noVerify?: boolean;
+}
+
+export interface DeployResult {
+  schema: PushSchemaResult;
+  migration?:
+    | PushMigrationResult
+    | { status: "already-connected"; fromHash: string; toHash: string };
+  permissions?: PushPermissionsResult;
+  warnings: string[];
+}
+
 function emit(options: { onEvent?: (event: CatalogueEvent) => void }, event: CatalogueEvent): void {
   options.onEvent?.(event);
 }
@@ -276,6 +307,14 @@ export async function pushSchemaCatalogue(
 
   return { hash: schema.hash };
 }
+
+export async function pushMigration(_options: PushMigrationOptions): Promise<PushMigrationResult> {
+  throw new Error("pushMigration is not implemented yet.");
+}
+
+export async function deploy(_options: DeployOptions): Promise<DeployResult> {
+  throw new Error("deploy is not implemented yet.");
+}
 ```
 
 This deliberately keeps `pushSchemaCatalogue` behavior close to the current implementation, including `enableLogs`.
@@ -300,10 +339,16 @@ Add:
 
 ```ts
 export {
+  deploy,
+  pushMigration,
   pushPermissions,
   pushSchema,
   pushSchemaCatalogue,
   type CatalogueEvent,
+  type DeployOptions,
+  type DeployResult,
+  type PushMigrationOptions,
+  type PushMigrationResult,
   type PushPermissionsOptions,
   type PushPermissionsResult,
   type PushSchemaCatalogueOptions,
