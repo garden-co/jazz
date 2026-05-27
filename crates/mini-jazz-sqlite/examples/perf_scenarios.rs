@@ -23,6 +23,7 @@ struct Config {
     total_rows: usize,
     target_owner_rows: usize,
     page_size: usize,
+    seed_batch_size: usize,
     durable_intermediaries: bool,
 }
 
@@ -32,6 +33,7 @@ impl Config {
             total_rows: env_usize("MINI_JAZZ_PERF_TOTAL_ROWS", 100_000),
             target_owner_rows: env_usize("MINI_JAZZ_PERF_TARGET_OWNER_ROWS", 10_000),
             page_size: env_usize("MINI_JAZZ_PERF_PAGE_SIZE", 50),
+            seed_batch_size: env_usize("MINI_JAZZ_PERF_SEED_BATCH_SIZE", 100),
             durable_intermediaries: env_bool("MINI_JAZZ_PERF_DURABLE_INTERMEDIARIES", true),
         }
     }
@@ -44,6 +46,7 @@ struct ScenarioReport {
     topology: &'static str,
     cache_mode: &'static str,
     seed_rows_by_table: BTreeMap<&'static str, usize>,
+    seed_batch_size: usize,
     visible_rows_returned: usize,
     history_rows_synced: usize,
     transaction_rows_synced: usize,
@@ -84,7 +87,12 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
     let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema)?;
 
     let seed_started = Instant::now();
-    seed_documents(&mut core, config.total_rows, config.target_owner_rows)?;
+    seed_documents(
+        &mut core,
+        config.total_rows,
+        config.target_owner_rows,
+        config.seed_batch_size,
+    )?;
     let seed_elapsed = seed_started.elapsed();
 
     let export_started = Instant::now();
@@ -143,6 +151,7 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
             "core_only_cold_all_memory_except_core"
         },
         seed_rows_by_table,
+        seed_batch_size: config.seed_batch_size,
         visible_rows_returned: rows.len(),
         history_rows_synced: core_bundle.history.len(),
         transaction_rows_synced: core_bundle.txs.len(),
@@ -180,25 +189,43 @@ fn seed_documents(
     runtime: &mut Runtime,
     total_rows: usize,
     target_owner_rows: usize,
+    seed_batch_size: usize,
 ) -> Result<()> {
-    for row_index in 0..total_rows {
-        let is_target_owner = row_index < target_owner_rows;
-        let owner_id = if is_target_owner {
-            OWNER.to_owned()
-        } else {
-            format!("user-{}", row_index % 10_000)
-        };
-        let mut values = BTreeMap::new();
-        values.insert("owner_id".to_owned(), json!(owner_id));
-        values.insert(
-            "org_id".to_owned(),
-            json!(format!("org-{}", row_index % 100)),
-        );
-        values.insert("updated_at".to_owned(), json!(format!("{:020}", row_index)));
-        values.insert("title".to_owned(), json!(format!("Document {row_index}")));
-        runtime.insert_row("documents", &format!("doc-{row_index}"), values)?;
+    let seed_batch_size = seed_batch_size.max(1);
+    for chunk_start in (0..total_rows).step_by(seed_batch_size) {
+        let chunk_end = (chunk_start + seed_batch_size).min(total_rows);
+        let mut tx = runtime.transaction();
+        for row_index in chunk_start..chunk_end {
+            tx = tx.insert_row(
+                "documents",
+                &format!("doc-{row_index}"),
+                document_values(row_index, target_owner_rows),
+            );
+        }
+        tx.commit()?;
     }
     Ok(())
+}
+
+fn document_values(
+    row_index: usize,
+    target_owner_rows: usize,
+) -> BTreeMap<String, serde_json::Value> {
+    let is_target_owner = row_index < target_owner_rows;
+    let owner_id = if is_target_owner {
+        OWNER.to_owned()
+    } else {
+        format!("user-{}", row_index % 10_000)
+    };
+    BTreeMap::from([
+        ("owner_id".to_owned(), json!(owner_id)),
+        (
+            "org_id".to_owned(),
+            json!(format!("org-{}", row_index % 100)),
+        ),
+        ("updated_at".to_owned(), json!(format!("{:020}", row_index))),
+        ("title".to_owned(), json!(format!("Document {row_index}"))),
+    ])
 }
 
 fn storage_for(config: &Config, dir: &tempfile::TempDir, file_name: &str) -> Storage {

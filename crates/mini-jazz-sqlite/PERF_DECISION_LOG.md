@@ -60,3 +60,12 @@ only modestly, from about 156 ms to 144 ms, because the sync bundle still
 contains the full 1k owner predicate slice. Next sharp feature gap: top-page
 query-scoped sync needs page-boundary/observed-row repair instead of broadening
 history export to the whole equality predicate.
+
+## 2026-05-26 21:20 PDT
+
+Added configurable fixture seed batching to the benchmark example. With batch
+size 100, the 10k/1k/page-50 smoke seed time dropped from about 8.5 s to
+0.87 s. Because all 1k target-owner rows now come from 10 transactions instead
+of 1k, bundle bytes dropped from about 622 KB to 402 KB and api-to-first-result
+from about 767 ms to 562 ms. This is a fixture-generation knob, not a product
+claim; reports now include `seed_batch_size` so comparisons do not mix shapes.
