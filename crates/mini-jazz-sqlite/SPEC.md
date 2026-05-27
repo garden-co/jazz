@@ -229,6 +229,12 @@ A transaction is the unified write unit. One write call creates one sealed
 transaction. Explicit transaction APIs may stage multiple row mutations before
 sealing.
 
+Committing an explicit transaction with no staged mutations is a no-op and must
+not allocate a public transaction id. Within a non-empty explicit transaction,
+multiple staged mutations to the same row are normalized to one final semantic
+row mutation before sealing. The normalized transaction still records the
+observed facts needed to justify that final mutation.
+
 Transactions have a conflict mode:
 
 - `mergeable`: can be accepted independently and reconciled later
@@ -564,6 +570,7 @@ db.todos.all(...)
 db.todos.one(...)
 db.todos.insert(...)
 db.todos.update(...)
+db.todos.upsert(...)
 db.todos.delete(...)
 db.todos.subscribeAll(...)
 ```
@@ -592,6 +599,18 @@ integer enum values, visibility temp tables, or generated SQL.
 
 Each simple write call creates one sealed mergeable transaction unless wrapped
 in an explicit transaction. Product APIs should not expose batch terminology.
+`insert` is create-only: inserting an already-visible row id fails with a
+constraint/semantic error instead of silently updating. Product APIs should also
+offer an explicit `upsert` operation for idempotent create-or-update workflows.
+For mergeable transactions, concurrent upserts of the same row reconcile through
+ordinary merge/conflict semantics. For exclusive transactions, upsert is
+validated globally against the authority-visible row state and read/write set,
+so create-vs-update races resolve through exclusive acceptance or rejection.
+
+Future discussion: upsert across distributed tiers deserves its own design pass
+and tests. Mergeable upsert is reconciliation-shaped; exclusive upsert is
+authority-state-shaped. The product API should make that difference predictable
+without making common idempotent writes awkward.
 
 Mergeable transactions are locally visible immediately and reconcile through
 merge/conflict semantics. Exclusive transactions are not visible in ordinary
@@ -1036,6 +1055,23 @@ tx.global_epoch <= requested_epoch
 ```
 
 Rejected and pending transactions are not visible.
+
+The core should support two uses of global epoch snapshots:
+
+- full-system snapshot export/backup, where the output is complete authority
+  state as of that epoch rather than a user-policy-filtered query result
+- policy-filtered historical query evaluation, useful for previews such as
+  branch creation from a historical base
+
+Applications often want wall-clock history rather than explicit authority
+epochs. The product should therefore include an `as-of time` query/export
+placeholder that resolves a timestamp to the appropriate authority snapshot.
+The exact timestamp-to-epoch mapping, clock authority, and behavior around
+transactions sharing one epoch remain open.
+
+Future discussion: `as-of time` is likely the user-facing historical query API,
+but it needs a careful clock-authority and epoch-mapping design before it can be
+specified precisely.
 
 ### 13.3 Full Vector Snapshot
 
@@ -2435,7 +2471,10 @@ Required benchmark families:
   - aggregate `COUNT`
 - **Writes and projection maintenance**
   - mergeable insert/update/delete
+  - create-only insert and explicit upsert
   - multi-row transactions
+  - empty explicit transactions as no-ops
+  - duplicate same-row mutations normalized to final semantic state
   - patch updates preserving omitted fields
   - writes with policy dependencies
   - conflict-producing concurrent writes
@@ -2458,6 +2497,7 @@ Required benchmark families:
   - transitive source graph reads
   - conflict candidate retrieval
   - historical snapshot by global epoch
+  - full-system snapshot export by global epoch
   - historical "as of wall-clock time" queries
 - **Browser topology**
   - cold open
@@ -2806,6 +2846,11 @@ feature exists.
 - One simple write creates one sealed transaction.
 - One explicit transaction may contain multiple row mutations and still seals as
   one transaction.
+- An explicit transaction with no staged mutations is a no-op and creates no
+  transaction record.
+- Multiple staged mutations to the same row in one explicit transaction
+  normalize to a single final semantic row mutation before sealing.
+- `insert` is create-only; `upsert` is the explicit create-or-update operation.
 - A sealed transaction is immutable except for outcome/receipt enrichment.
 - Authority acceptance enriches an existing transaction instead of replacing its
   public id.
@@ -2855,6 +2900,8 @@ feature exists.
 - Cross-node concurrent same-row pending writes are conflicts unless merge
   strategy resolves them.
 - Incidental SQLite row order never decides visible conflict winners.
+- Query results have deterministic order even when the user did not provide an
+  explicit ordering. The default order must be stable and documented.
 
 ### D.4 Visibility And Snapshot Invariants
 
@@ -2862,6 +2909,10 @@ feature exists.
 - Global epoch snapshots include only accepted transactions at or below the
   requested global epoch.
 - Rejected and pending transactions are excluded from global epoch snapshots.
+- Global epoch snapshot export can produce complete authority state, while
+  global epoch snapshot queries are policy-filtered through the query session.
+- `as-of time` query/export APIs are expected product surface, but their
+  timestamp-to-epoch mapping is not yet specified.
 - Full vector snapshots include global base, explicit local bases, and explicit
   dots.
 - Full vector snapshots have no excludes in v0.
@@ -2913,6 +2964,7 @@ feature exists.
 ### D.6 Query And Observed-Fact Invariants
 
 - One-shot queries and subscriptions share query semantics.
+- Query results are deterministic even without explicit user ordering.
 - Queries return semantic rows and observed facts.
 - Required includes filter out the parent when missing or unauthorized.
 - Optional includes preserve the parent and return null/absent when missing or
@@ -2973,6 +3025,8 @@ feature exists.
 - Subscription first delivery equals the corresponding one-shot query at the
   same tier.
 - Subscription updates are semantic row diffs.
+- Subscription diff ordering is deterministic and follows the same effective
+  ordering as the corresponding query result.
 - Dependency-only changes can update parent semantic rows.
 - Every subscription update is tier-gated.
 - Rows may arrive before query settlement without being published.
@@ -3488,6 +3542,10 @@ The largest gaps between Appendix D and the current prototype tests are:
   rejection detail storage outside the hot transaction row
 - explicit wait behavior for exclusive transactions at local, edge, and global
   tiers
+- explicit upsert semantics across mergeable and exclusive transactions in
+  multi-tier topologies
+- implementation/tests for empty explicit transaction no-ops and same-row
+  mutation normalization
 - forwarded exclusive transaction retry/offline transport and proactive
   dependency request/subscription mechanics for mergeable `awaiting_deps`
 - compact reconnect summaries and active query-descriptor replay protocol
@@ -3505,6 +3563,10 @@ The largest gaps between Appendix D and the current prototype tests are:
 - generated index/query-plan assertions and `WITHOUT ROWID` layout checks
 - staged untrusted authority apply before publication
 - public error object shape, global rejection callback, and redaction policy
+- stable public error machine codes across write promises, queries,
+  subscriptions, and sync errors
+- as-of-time query/export API and timestamp-to-epoch mapping
+- deterministic default ordering and subscription diff ordering
 - deterministic clock/message harness for drop/delay/reconnect scenarios
 
 This spec is serious but still evolving. New implementation results, review
