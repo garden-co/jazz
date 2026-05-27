@@ -1888,3 +1888,19 @@ read/write sets are immutable.
 Decision: reverted the code change. Even if the immutability assumption is
 mostly right, the measured benefit is not there. The read-set cost probably
 comes from index probes and per-row SQLite calls rather than replace churn.
+
+## 2026-05-27 02:55 PDT
+
+Tried batching `jazz_tx_read` writes into multi-row `INSERT OR REPLACE ...
+VALUES (...), ...` chunks of 400 rows.
+
+10k recursive subscription:
+
+- initial reads: ~34 ms -> ~35 ms
+- refresh reads: ~32 ms -> ~34 ms
+- total apply was noise-worse
+
+Decision: reverted the code change. Multi-row VALUES batches do not improve this
+path in SQLite/rusqlite as used here. The remaining read-set cost likely needs a
+representation change, such as compact query-scope read-set facts, not just
+fewer SQL statements.
