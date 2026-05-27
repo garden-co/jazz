@@ -1,4 +1,5 @@
 use super::*;
+use mini_jazz_sqlite::sync::merge_bundles;
 use std::collections::BTreeSet;
 
 #[test]
@@ -23,6 +24,39 @@ fn query_scoped_sync_converges_memory_and_durable_nodes() {
         .durable("worker.sqlite", "alice-worker", "alice")
         .unwrap();
     assert_eq!(reopened.open_todos().unwrap(), alice.open_todos().unwrap());
+}
+
+#[test]
+fn merged_query_refresh_bundle_applies_like_individual_bundles() {
+    let harness = support::Harness::new();
+    let mut upstream = harness.memory("upstream", "alice").unwrap();
+    let mut separate_peer = harness.memory("separate-peer", "alice").unwrap();
+    let mut merged_peer = harness.memory("merged-peer", "alice").unwrap();
+
+    upstream.create_project("project-1", "Spec work").unwrap();
+    upstream
+        .create_todo("todo-1", "First", false, "project-1")
+        .unwrap();
+    upstream
+        .create_todo("todo-2", "Second", false, "project-1")
+        .unwrap();
+
+    let bundles = vec![
+        upstream.export_query_scope_open_todos().unwrap(),
+        upstream.export_query_scope_newest_open_todos(1).unwrap(),
+    ];
+    for bundle in &bundles {
+        separate_peer.apply_bundle(bundle).unwrap();
+    }
+    let merged = merge_bundles(&bundles).unwrap();
+    merged_peer.apply_bundle(&merged).unwrap();
+
+    assert_eq!(merged.query_reads.len(), 2);
+    assert!(merged.txs.len() < bundles.iter().map(|bundle| bundle.txs.len()).sum());
+    assert_eq!(
+        merged_peer.open_todos().unwrap(),
+        separate_peer.open_todos().unwrap()
+    );
 }
 
 #[test]

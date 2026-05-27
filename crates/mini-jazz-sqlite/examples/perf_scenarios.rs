@@ -1,4 +1,4 @@
-use mini_jazz_sqlite::sync::Bundle;
+use mini_jazz_sqlite::sync::{merge_bundles, Bundle};
 use mini_jazz_sqlite::{Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage};
 use serde::Serialize;
 use serde_json::json;
@@ -1730,56 +1730,6 @@ impl BundleBatchSummary {
             observed_facts,
         })
     }
-}
-
-fn merge_bundles(bundles: &[Bundle]) -> BenchResult<Bundle> {
-    let Some(first) = bundles.first() else {
-        return Err("cannot merge empty bundle list".into());
-    };
-    let mut merged = Bundle {
-        protocol_version: first.protocol_version,
-        schema_fingerprint: first.schema_fingerprint.clone(),
-        policy_fingerprint: first.policy_fingerprint.clone(),
-        branches: Vec::new(),
-        txs: Vec::new(),
-        reads: Vec::new(),
-        query_reads: Vec::new(),
-        history: Vec::new(),
-    };
-    let mut branches = BTreeMap::new();
-    let mut txs = BTreeMap::new();
-    let mut reads = BTreeMap::new();
-    let mut query_reads = BTreeMap::new();
-    let mut history = BTreeMap::new();
-    for bundle in bundles {
-        if bundle.protocol_version != merged.protocol_version
-            || bundle.schema_fingerprint != merged.schema_fingerprint
-            || bundle.policy_fingerprint != merged.policy_fingerprint
-        {
-            return Err("cannot merge bundles with different metadata".into());
-        }
-        for record in &bundle.branches {
-            branches.insert(record.branch_id.clone(), record.clone());
-        }
-        for record in &bundle.txs {
-            txs.insert(record.tx_id.clone(), record.clone());
-        }
-        for record in &bundle.reads {
-            reads.insert(serde_json::to_string(record)?, record.clone());
-        }
-        for record in &bundle.query_reads {
-            query_reads.insert(serde_json::to_string(record)?, record.clone());
-        }
-        for record in &bundle.history {
-            history.insert(serde_json::to_string(record)?, record.clone());
-        }
-    }
-    merged.branches = branches.into_values().collect();
-    merged.txs = txs.into_values().collect();
-    merged.reads = reads.into_values().collect();
-    merged.query_reads = query_reads.into_values().collect();
-    merged.history = history.into_values().collect();
-    Ok(merged)
 }
 
 fn timed(f: impl FnOnce() -> Result<()>) -> Result<Duration> {

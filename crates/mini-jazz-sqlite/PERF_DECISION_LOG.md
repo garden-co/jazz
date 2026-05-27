@@ -472,3 +472,13 @@ overlay semantics work, but the current branch query path falls back to a
 materialize/filter/sort style rather than a fully SQL-lowered indexed top-page
 plan. This should become a top derisk target before we rely on branch-heavy
 product workflows.
+
+## 2026-05-26 22:44 PDT
+
+Promoted the benchmark-local bundle merge helper into `mini_jazz_sqlite::sync`
+and added a whole-system test that applying a merged multi-query refresh bundle
+produces the same visible result as applying the individual bundles separately.
+
+Result: this turns the multi-query perf learning into a reusable runtime/sync
+primitive. The first compile caught that the crate error type does not convert
+serde errors, so the merge helper now wraps JSON keying failures explicitly.
