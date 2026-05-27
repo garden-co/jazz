@@ -1671,3 +1671,23 @@ Learning: thresholds without hysteresis can create catastrophic cliffs in
 reconnect/refresh paths. The map traversal scales well enough to keep 10k-row
 tree reads plausible, but export/apply of 10k recursive history rows is now the
 dominant client-perceived cost.
+
+## 2026-05-27 02:24 PDT
+
+Added full `ApplyBundleProfile` output to the recursive tree subscription
+probe.
+
+10k-node recursive bundle apply profile:
+
+- initial total apply: ~240 ms
+- initial reads: ~36.9 ms for 10k read rows
+- initial history/current projection: ~202.7 ms for 10k history rows
+- refresh total apply: ~162.6 ms
+- refresh reads: ~33.7 ms for 10,070 read rows
+- refresh history/current projection: ~128.3 ms for 10,070 history rows
+
+Learning: once recursive reads avoid the pathological SQL CTE, receiving a large
+recursive query scope is dominated by writing history/current rows and read-set
+rows. The benchmark should keep exposing the profile breakdown so we can tell
+whether future wins come from bundle scope reductions, faster apply mechanics,
+or transport/payload changes.

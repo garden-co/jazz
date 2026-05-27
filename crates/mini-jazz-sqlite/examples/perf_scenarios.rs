@@ -394,6 +394,7 @@ struct RecursiveTreeSubscriptionProbe {
     initial_bundle_bytes: usize,
     initial_history_rows: usize,
     initial_apply_ms: f64,
+    initial_apply_profile: ApplyBundleProfile,
     subscribe_ms: f64,
     refresh_read_ms: f64,
     refresh_rows_read: usize,
@@ -401,6 +402,7 @@ struct RecursiveTreeSubscriptionProbe {
     refresh_bundle_bytes: usize,
     refresh_history_rows: usize,
     refresh_apply_ms: f64,
+    refresh_apply_profile: ApplyBundleProfile,
     subscription_poll_ms: f64,
     subscription_added: usize,
     subscription_updated: usize,
@@ -1584,7 +1586,7 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     })?;
     let export_elapsed = export_started.elapsed();
     let initial_summary = BundleSummary::from(&initial_bundle)?;
-    let initial_apply_elapsed = timed(|| tab.apply_bundle(&initial_bundle))?;
+    let initial_apply_profile = tab.profile_apply_bundle(&initial_bundle)?;
 
     let subscribe_started = Instant::now();
     let mut subscription = tab.subscribe_observed_query(&tab.observed_query_reads()?[0])?;
@@ -1605,7 +1607,7 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     let refresh_elapsed = refresh_started.elapsed();
     let refresh_merged = merge_bundles(&refresh_bundles)?;
     let refresh_summary = BundleSummary::from(&refresh_merged)?;
-    let refresh_apply_elapsed = timed(|| tab.apply_bundle(&refresh_merged))?;
+    let refresh_apply_profile = tab.profile_apply_bundle(&refresh_merged)?;
 
     let poll_started = Instant::now();
     let diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
@@ -1625,14 +1627,16 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
         initial_export_ms: ms(export_elapsed),
         initial_bundle_bytes: initial_summary.bytes,
         initial_history_rows: initial_bundle.history.len(),
-        initial_apply_ms: ms(initial_apply_elapsed),
+        initial_apply_ms: initial_apply_profile.total_ms,
+        initial_apply_profile,
         subscribe_ms: ms(subscribe_elapsed),
         refresh_read_ms: ms(refresh_read_elapsed),
         refresh_rows_read: refresh_rows.len(),
         refresh_export_ms: ms(refresh_elapsed),
         refresh_bundle_bytes: refresh_summary.bytes,
         refresh_history_rows: refresh_merged.history.len(),
-        refresh_apply_ms: ms(refresh_apply_elapsed),
+        refresh_apply_ms: refresh_apply_profile.total_ms,
+        refresh_apply_profile,
         subscription_poll_ms: ms(poll_elapsed),
         subscription_added: diff_counts.added,
         subscription_updated: diff_counts.updated,
