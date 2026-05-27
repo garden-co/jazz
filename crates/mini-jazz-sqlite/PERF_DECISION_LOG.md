@@ -1800,3 +1800,20 @@ repair.
 Learning: grouped top-query repair may still be worth doing eventually, but it
 is not tonight's dominant dashboard bottleneck. History/current projection and
 read-set writes are consistently larger apply buckets.
+
+## 2026-05-27 02:40 PDT
+
+Changed bundle apply's read-set insertion loop to reuse one prepared
+`jazz_tx_read` insert statement rather than going through a per-row helper.
+
+10k recursive subscription apply profile:
+
+- initial reads: ~36.9 ms before, ~33.4 ms after
+- refresh reads: ~33.7 ms before, ~33.3 ms after
+- total apply did not meaningfully improve because history/current projection
+  moved around in noise and still dominates
+
+Learning: statement reuse helps a little, but read-set insertion remains a
+non-trivial 33 ms for 10k rows. Meaningful improvements likely need either
+fewer read-set rows for broad query scopes or a more compact/bulk read-set
+representation, not just preparing SQL more carefully.

@@ -646,6 +646,11 @@ impl Runtime {
         let reads_started = Instant::now();
         let mut row_nums_by_id = BTreeMap::new();
         let mut user_nums_by_id = BTreeMap::new();
+        let mut insert_read_stmt = db.prepare_cached(
+            "INSERT OR REPLACE INTO jazz_tx_read
+             (tx_num, table_num, row_num, reason, observed_tx_num)
+             VALUES (?, ?, ?, ?, ?)",
+        )?;
         for read_record in &bundle.reads {
             let tx_num = tx_nums_by_id
                 .get(&read_record.tx_id)
@@ -670,15 +675,15 @@ impl Runtime {
                     })
                 })
                 .transpose()?;
-            read_set::record_tx_read_num_with_observed(
-                &db,
+            insert_read_stmt.execute(params![
                 tx_num,
                 table_num,
                 row_num,
                 read_record.reason,
-                observed_tx_num,
-            )?;
+                observed_tx_num
+            ])?;
         }
+        drop(insert_read_stmt);
         let reads_ms = duration_ms(reads_started.elapsed());
 
         let rejected_cleanup_started = Instant::now();
