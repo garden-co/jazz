@@ -164,6 +164,12 @@ The target product shape is not whole-table replication. Bundle size and
 client work should scale with observed rows and required dependencies, not with
 the full source table.
 
+For ordered pages, observed page-boundary state is part of the optimization
+model. Refresh should be bounded by the new visible page, previously observed
+page rows that may need repair or removal, dependencies, and metadata. It
+should not widen to every row matching the page predicate merely because the
+ordered scope is large.
+
 ### 33.2 Export And Read-Set Collection
 
 SQLite query planning solves local result selection, but Jazz export has a
@@ -181,6 +187,12 @@ Export/read-set collection is therefore a first-class hot path. Implementations
 should optimize it as carefully as SQL query execution. In the current
 prototype, policy-dependency history collection is often the dominant part of a
 bounded page export even when the actual SQLite current read is sub-millisecond.
+
+Same-shape query descriptors for one downstream peer should be batchable before
+bundle assembly. Dashboards often contain many similar page queries that share
+table, policy, branch, ordering, and dependency structure. Batching at export
+time can avoid repeated dependency, read-set, transaction, and branch
+collection that cannot be recovered by merging already-assembled bundles.
 
 ### 33.3 Recursive Scopes
 
@@ -252,6 +264,11 @@ to the product even when row values are otherwise unchanged.
 The current bounded page probes show local diffing is small for page-sized
 results. Broad recursive subscriptions remain the stress case.
 
+Incoming sync application should remain idempotent as both a correctness and
+performance invariant. Reapplying already-known history should be cheap enough
+for reconnect and broad refresh paths, especially while refresh bundles may
+include repair rows or previously observed recursive-scope rows.
+
 ### 33.7 Query Lowering
 
 Supported indexable current-query forms should lower to SQL over current
@@ -270,6 +287,27 @@ Current-query lowerings that should stay covered include:
 Slower fallback paths are acceptable for historical pinned-base snapshots,
 arbitrary time-travel reads, and other query-time visibility baselines, but they
 should be named in benchmarks and revisited when they become product-hot.
+
+Index order should be generated from the query being served, not from a blanket
+policy-first rule. Early measurements showed that prefixing ordinary
+user-declared current indexes with policy columns can badly regress
+owner/page-style queries, while only modestly helping some recursive policy
+cases. Policy-specific acceleration should be explicit, targeted, and checked
+against the SQL plan it is meant to serve.
+
+Local integer interning for system user fields is a recommended storage
+optimization. Public user ids still exist at API, auth, and sync boundaries,
+and ordinary app user fields remain ordinary schema fields. The storage layer
+may use local integer surrogates for row system metadata such as creator/updater
+to reduce repeated long-id footprint and keep policy/query lowering compact.
+
+SQLite tuning knobs are secondary to query/export/apply mechanics. Default page
+size is a reasonable baseline; larger pages did not clearly improve the tested
+workloads. Larger SQLite page caches may help some file-backed broad refreshes,
+but do not fix CPU-bound recursive refresh. WAL and synchronous settings are
+deployment choices rather than semantic requirements. Compression should remain
+stream-level for transport and page/range-level for future storage work, not
+per-row payload compression by default.
 
 ### 33.8 Benchmark Families
 
