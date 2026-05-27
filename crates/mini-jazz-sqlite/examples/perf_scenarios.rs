@@ -392,6 +392,11 @@ struct RecursiveTreeSubscriptionProbe {
     node_count: usize,
     branch_factor: usize,
     root_id: String,
+    rss_start_bytes: Option<i64>,
+    rss_after_seed_bytes: Option<i64>,
+    rss_after_initial_apply_bytes: Option<i64>,
+    rss_after_refresh_bytes: Option<i64>,
+    rss_after_noop_refresh_bytes: Option<i64>,
     seed_ms: f64,
     initial_read_ms: f64,
     initial_admin_read_ms: f64,
@@ -431,6 +436,10 @@ struct RecursiveTreeTopologyProbe {
     node_count: usize,
     branch_factor: usize,
     root_id: String,
+    rss_start_bytes: Option<i64>,
+    rss_after_seed_bytes: Option<i64>,
+    rss_after_initial_flow_bytes: Option<i64>,
+    rss_after_refresh_flow_bytes: Option<i64>,
     initial_core_export_ms: f64,
     initial_edge_apply_ms: f64,
     initial_edge_export_ms: f64,
@@ -1614,6 +1623,7 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     let branch_factor = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_BRANCH_FACTOR", 5).max(1);
     let root_id =
         env::var("MINI_JAZZ_PERF_RECURSIVE_TREE_ROOT_ID").unwrap_or_else(|_| "folder-0".to_owned());
+    let rss_start_bytes = process_rss_bytes();
     let dir = tempdir()?;
     let schema = folder_tree_schema();
     let mut core = Runtime::open_trusted_with_schema(
@@ -1628,6 +1638,7 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
         seed_folder_tree(core, node_count, branch_factor)
     })?;
     let seed_elapsed = seed_started.elapsed();
+    let rss_after_seed_bytes = process_rss_bytes();
 
     let initial_read_started = Instant::now();
     let initial_rows = core.run_as_user(OWNER, |core| {
@@ -1647,6 +1658,7 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     let export_elapsed = export_started.elapsed();
     let initial_summary = BundleSummary::from(&initial_bundle)?;
     let initial_apply_profile = tab.profile_apply_bundle(&initial_bundle)?;
+    let rss_after_initial_apply_bytes = process_rss_bytes();
 
     let subscribe_started = Instant::now();
     let mut subscription = tab.subscribe_observed_query(&tab.observed_query_reads()?[0])?;
@@ -1668,6 +1680,7 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     let refresh_merged = merge_bundles(&refresh_bundles)?;
     let refresh_summary = BundleSummary::from(&refresh_merged)?;
     let refresh_apply_profile = tab.profile_apply_bundle(&refresh_merged)?;
+    let rss_after_refresh_bytes = process_rss_bytes();
 
     let poll_started = Instant::now();
     let diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
@@ -1680,6 +1693,7 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     let noop_refresh_merged = merge_bundles(&noop_refresh_bundles)?;
     let noop_refresh_history_rows = noop_refresh_merged.history.len();
     let noop_refresh_apply_profile = tab.profile_apply_bundle(&noop_refresh_merged)?;
+    let rss_after_noop_refresh_bytes = process_rss_bytes();
     let noop_poll_started = Instant::now();
     let noop_diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
     let noop_poll_elapsed = noop_poll_started.elapsed();
@@ -1691,6 +1705,11 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
         node_count,
         branch_factor,
         root_id,
+        rss_start_bytes,
+        rss_after_seed_bytes,
+        rss_after_initial_apply_bytes,
+        rss_after_refresh_bytes,
+        rss_after_noop_refresh_bytes,
         seed_ms: ms(seed_elapsed),
         initial_read_ms: ms(initial_read_elapsed),
         initial_admin_read_ms: ms(initial_admin_read_elapsed),
@@ -1731,6 +1750,7 @@ fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe
     let branch_factor = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_BRANCH_FACTOR", 5).max(1);
     let root_id =
         env::var("MINI_JAZZ_PERF_RECURSIVE_TREE_ROOT_ID").unwrap_or_else(|_| "folder-0".to_owned());
+    let rss_start_bytes = process_rss_bytes();
     let dir = tempdir()?;
     let schema = folder_tree_schema();
     let mut core = Runtime::open_trusted_with_schema(
@@ -1749,6 +1769,7 @@ fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe
     core.run_as_user(OWNER, |core| {
         seed_folder_tree(core, node_count, branch_factor)
     })?;
+    let rss_after_seed_bytes = process_rss_bytes();
 
     let initial_core_export_started = Instant::now();
     let initial_core_bundle = core.run_as_user(OWNER, |core| {
@@ -1773,6 +1794,7 @@ fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe
     let initial_worker_bundle = merge_bundles(&initial_worker_bundles)?;
     let initial_tab_apply = tab.profile_apply_bundle(&initial_worker_bundle)?;
     let mut subscription = tab.subscribe_observed_query(&tab.observed_query_reads()?[0])?;
+    let rss_after_initial_flow_bytes = process_rss_bytes();
 
     core.run_as_user(OWNER, |core| {
         mutate_folder_tree(core, node_count, branch_factor)
@@ -1803,6 +1825,7 @@ fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe
     let refresh_worker_export_elapsed = refresh_worker_export_started.elapsed();
     let refresh_worker_bundle = merge_bundles(&refresh_worker_bundles)?;
     let refresh_tab_apply = tab.profile_apply_bundle(&refresh_worker_bundle)?;
+    let rss_after_refresh_flow_bytes = process_rss_bytes();
 
     let poll_started = Instant::now();
     let diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
@@ -1815,6 +1838,10 @@ fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe
         node_count,
         branch_factor,
         root_id,
+        rss_start_bytes,
+        rss_after_seed_bytes,
+        rss_after_initial_flow_bytes,
+        rss_after_refresh_flow_bytes,
         initial_core_export_ms: ms(initial_core_export_elapsed),
         initial_edge_apply_ms: initial_edge_apply.total_ms,
         initial_edge_export_ms: ms(initial_edge_export_elapsed),

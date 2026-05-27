@@ -2030,3 +2030,28 @@ Learning: 10k recursive scopes are no longer catastrophic, but the shape remains
 expensive enough that we should treat "refresh huge unchanged recursive scope"
 as a first-class design problem. Stream compression makes transport bytes look
 surprisingly good, while CPU stays dominated by full-scope export/apply/poll.
+
+## 2026-05-27 03:15 PDT
+
+Added RSS checkpoints to the recursive subscription and topology probes, then
+ran the default harness once to sanity-check the fields.
+
+Default 2k recursive subscription RSS:
+
+- start ~16.5 MiB
+- after seed ~16.6 MiB
+- after initial apply ~25.0 MiB
+- after mutation refresh apply ~34.9 MiB
+- after no-op refresh apply ~41.1 MiB
+
+Default 2k recursive topology RSS:
+
+- start ~41.2 MiB
+- after seed ~41.3 MiB
+- after initial edge/worker/tab flow ~43.0 MiB
+- after refresh flow ~55.2 MiB
+
+Learning: memory growth is now easier to attribute per scenario. The recursive
+subscription path retains enough intermediate state across export/apply/refresh
+that memory deserves its own follow-up pass, especially for repeated large
+refreshes and merged bundle lifetimes.
