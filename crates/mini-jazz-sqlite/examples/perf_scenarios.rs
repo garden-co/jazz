@@ -377,6 +377,7 @@ struct MixedMutationRefreshProbe {
     page_size: usize,
     top_inserts: usize,
     current_page_updates: usize,
+    current_page_deletes: usize,
     off_page_owner_updates: usize,
     unrelated_owner_updates: usize,
     visible_rows_returned: usize,
@@ -1523,6 +1524,7 @@ fn run_mixed_mutation_refresh_probe() -> BenchResult<MixedMutationRefreshProbe> 
 
     let top_inserts = 25;
     let current_page_updates = 10;
+    let current_page_deletes = 5;
     let off_page_owner_updates = 100;
     let unrelated_owner_updates = 100;
     apply_mixed_mutations(
@@ -1531,6 +1533,7 @@ fn run_mixed_mutation_refresh_probe() -> BenchResult<MixedMutationRefreshProbe> 
         config.target_owner_rows,
         top_inserts,
         current_page_updates,
+        current_page_deletes,
         off_page_owner_updates,
         unrelated_owner_updates,
     )?;
@@ -1557,6 +1560,7 @@ fn run_mixed_mutation_refresh_probe() -> BenchResult<MixedMutationRefreshProbe> 
         page_size: config.page_size,
         top_inserts,
         current_page_updates,
+        current_page_deletes,
         off_page_owner_updates,
         unrelated_owner_updates,
         visible_rows_returned: rows.len(),
@@ -2844,6 +2848,7 @@ fn apply_mixed_mutations(
     target_owner_rows: usize,
     top_inserts: usize,
     current_page_updates: usize,
+    current_page_deletes: usize,
     off_page_owner_updates: usize,
     unrelated_owner_updates: usize,
 ) -> Result<()> {
@@ -2864,6 +2869,10 @@ fn apply_mixed_mutations(
                 json!(format!("Current page updated {index}")),
             )]),
         );
+    }
+    for index in 0..current_page_deletes {
+        let row_index = target_owner_rows.saturating_sub(1 + current_page_updates + index);
+        tx = tx.delete_row("documents", &format!("doc-{row_index}"));
     }
     for index in 0..off_page_owner_updates {
         let row_index = index.min(target_owner_rows.saturating_sub(1));

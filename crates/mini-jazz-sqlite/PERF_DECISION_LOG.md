@@ -1194,3 +1194,22 @@ open risk shifts from "can SQLite query history fast at all?" to "can we encode
 all Jazz visibility semantics, policy dependencies, branches, rejected fates,
 and repair/export over history-only without complex plans or many bespoke
 indices?" This deserves a later focused attempt rather than an assumption.
+
+## 2026-05-27 01:17 PDT
+
+Extended the mixed mutation refresh probe to include deletes of rows from the
+currently observed page, not only inserts and updates.
+
+Release sample for the refreshed probe:
+
+- mutation mix: 25 top inserts, 10 current-page updates, 5 current-page deletes,
+  100 off-page owner updates, 100 unrelated updates
+- refresh bundle: ~81 KB, 160 history rows, 5 txs
+- export: ~2.0 ms, apply: ~4.4 ms, local query: ~0.21 ms, subscription poll:
+  ~0.22 ms
+- semantic diff: 25 added, 10 updated, 25 removed. The removals are larger than
+  the explicit delete count because top inserts also displace old page-boundary
+  rows.
+
+Learning: page-boundary churn is the right thing to measure for subscriptions;
+explicit deletes are only one cause of removals.
