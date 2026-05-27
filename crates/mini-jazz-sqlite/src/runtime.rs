@@ -351,16 +351,8 @@ impl Runtime {
         value: JsonValue,
         limit: usize,
     ) -> Result<Vec<RowView>> {
-        let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
-        let created_at_by_id = current_created_at_by_row_id(&self.conn, table_name)?;
-        rows.sort_by(|left, right| {
-            created_at_by_id
-                .get(&right.id)
-                .cmp(&created_at_by_id.get(&left.id))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        rows.truncate(limit);
-        Ok(rows)
+        self.query_context()
+            .read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)
     }
 
     pub fn read_rows_where_eq_top_field_desc(
@@ -2806,14 +2798,20 @@ impl Runtime {
         values: Vec<(JsonValue, Vec<String>)>,
         limit: usize,
     ) -> Result<Bundle> {
-        let mut items = Vec::new();
-        for (value, previous_observed_ids) in values {
-            let rows = self.read_rows_where_eq_top_created_at_desc(
+        let value_only = values
+            .iter()
+            .map(|(value, _)| value.clone())
+            .collect::<Vec<_>>();
+        let rows_by_value = self
+            .query_context()
+            .read_many_rows_where_eq_top_created_at_desc(
                 table_name,
                 field_name,
-                value.clone(),
+                &value_only,
                 limit,
             )?;
+        let mut items = Vec::new();
+        for ((value, previous_observed_ids), rows) in values.into_iter().zip(rows_by_value) {
             items.push(BatchedQueryScopeItem {
                 op: "eq_top_created_at_desc".to_owned(),
                 value: json!({
@@ -2950,15 +2948,21 @@ impl Runtime {
         limit: usize,
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
-        let mut items = Vec::new();
-        for (value, previous_observed_ids) in values {
-            let rows = self.read_rows_where_eq_top_field_desc(
+        let value_only = values
+            .iter()
+            .map(|(value, _)| value.clone())
+            .collect::<Vec<_>>();
+        let rows_by_value = self
+            .query_context()
+            .read_many_rows_where_eq_top_field_desc(
                 table_name,
                 field_name,
-                value.clone(),
+                &value_only,
                 order_field_name,
                 limit,
             )?;
+        let mut items = Vec::new();
+        for ((value, previous_observed_ids), rows) in values.into_iter().zip(rows_by_value) {
             items.push(BatchedQueryScopeItem {
                 op: "eq_top_field_desc".to_owned(),
                 value: json!({
@@ -5726,23 +5730,6 @@ fn branch_id_for_num(conn: &Connection, branch_num: i64) -> Result<String> {
         |row| row.get(0),
     )
     .map_err(Into::into)
-}
-
-fn current_created_at_by_row_id(
-    conn: &Connection,
-    table_name: &str,
-) -> Result<BTreeMap<String, i64>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT ids.row_id, current.j_created_at
-         FROM {} current
-         JOIN jazz_row_id ids ON ids.row_num = current.row_num",
-        crate::schema::current_table(table_name)
-    ))?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
-        .map_err(Into::into)
 }
 
 fn export_table_history(

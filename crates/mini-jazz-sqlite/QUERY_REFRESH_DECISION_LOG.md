@@ -132,3 +132,50 @@ does two clearer phases:
    semantics.
 
 Targeted batching tests are green after the refactor.
+
+## 2026-05-27 11:57 PDT
+
+Next goal: try true multi-value SQL lowering for at least one hot descriptor
+family. Start with ordered page refreshes because dashboard/page subscriptions
+are the most important shape. Desired end state: one SQL statement can return
+top-N rows per bound predicate value, using a `VALUES` CTE plus a window
+function, instead of looping through values and issuing one query per value.
+
+## 2026-05-27 12:01 PDT
+
+Implemented true multi-value SQL lowering for main-branch ordered page reads:
+
+- `eq_top_field_desc`: `VALUES` CTE of predicate values plus
+  `row_number() over (partition by value_index order by order_field desc,
+row_num)` to return top-N per value in one statement.
+- `eq_top_created_at_desc`: same shape, ordered by `j_created_at desc`.
+
+Branch overlays deliberately fall back to the old per-value path because sparse
+overlay visibility/source precedence is more subtle than main-branch current
+projection reads. This keeps the first SQL-lowered slice correct while still
+covering the hot dashboard/reconnect path.
+
+Targeted query refresh batching tests are green.
+
+## 2026-05-27 12:03 PDT
+
+Added `refresh_export_ms` to the multi-query refresh probe so this optimization
+has an observable metric. Release sanity:
+
+```json
+{
+  "query_count": 4,
+  "refresh_bundle_count": 1,
+  "refresh_bundle_bytes": 49373,
+  "refresh_export_ms": 25.232792,
+  "refresh_apply_ms": 1.788167,
+  "refresh_history_rows": 126,
+  "refresh_transaction_rows": 5,
+  "refresh_observed_facts": 4
+}
+```
+
+The metric is still whole-export time, not isolated SQL read time. It includes
+policy dependency export, repair history, read-set export, tx export, and bundle
+assembly. That is useful product-wise, but we may still want a more focused
+profile later if reviewers ask whether the SQL part itself improved.

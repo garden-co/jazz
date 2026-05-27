@@ -195,7 +195,10 @@ time can avoid repeated dependency, read-set, transaction, and branch
 collection that cannot be recovered by merging already-assembled bundles.
 The current prototype batches compatible ordinary predicates, ordered page
 descriptors, and recursive ref descriptors into one refresh bundle per
-compatible group.
+compatible group. Ordered page reads over the main-branch current projection
+also lower compatible bound values into one SQL statement using a values table
+and per-value window ranking. Branch overlays currently keep the conservative
+per-value read path because sparse-overlay precedence is more subtle.
 
 ### 33.3 Recursive Scopes
 

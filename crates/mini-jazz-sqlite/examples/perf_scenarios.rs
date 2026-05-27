@@ -643,6 +643,7 @@ struct MultiQueryRefreshProbe {
     refresh_bundle_count: usize,
     refresh_bundle_bytes: usize,
     equivalent_merged_bundle_bytes: usize,
+    refresh_export_ms: f64,
     refresh_apply_ms: f64,
     equivalent_merged_apply_ms: f64,
     refresh_history_rows: usize,
@@ -2559,9 +2560,11 @@ fn run_multi_query_refresh_probe() -> BenchResult<MultiQueryRefreshProbe> {
         inserted_per_query,
     )?;
 
+    let refresh_export_started = Instant::now();
     let refresh_bundles = core.run_as_user(OWNER, |core| {
         core.export_query_read_refreshes(&separate_tab.observed_query_reads()?)
     })?;
+    let refresh_export_ms = ms(refresh_export_started.elapsed());
     let separate_summary = BundleBatchSummary::from(&refresh_bundles)?;
     let merged_bundle = merge_bundles(&refresh_bundles)?;
     let merged_summary = BundleSummary::from(&merged_bundle)?;
@@ -2578,6 +2581,7 @@ fn run_multi_query_refresh_probe() -> BenchResult<MultiQueryRefreshProbe> {
         refresh_bundle_count: refresh_bundles.len(),
         refresh_bundle_bytes: separate_summary.bytes,
         equivalent_merged_bundle_bytes: merged_summary.bytes,
+        refresh_export_ms,
         refresh_apply_ms: ms(separate_apply_elapsed),
         equivalent_merged_apply_ms: ms(merged_apply_elapsed),
         refresh_history_rows: separate_summary.history_rows,
