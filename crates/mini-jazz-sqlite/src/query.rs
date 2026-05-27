@@ -77,6 +77,32 @@ impl QueryContext<'_> {
         self.read_rows_from_current_where_eq(table_name, field, &value, true)
     }
 
+    pub(crate) fn read_rows_where_eq_top_created_at_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        if field_name == "id" || field_name == "$createdBy" {
+            return self
+                .read_rows_where_eq_top_created_at_desc_slow(table_name, field_name, value, limit);
+        }
+        let table = self.schema.table_def(table_name)?;
+        let field = table
+            .fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
+        if self.branch_num != 1 {
+            return self
+                .read_rows_where_eq_top_created_at_desc_slow(table_name, field_name, value, limit);
+        }
+        self.read_main_rows_from_current_where_eq_top_created_at_desc(
+            table_name, field, &value, limit,
+        )
+    }
+
     pub(crate) fn read_rows_where_in(
         &self,
         table_name: &str,
@@ -1474,6 +1500,110 @@ impl QueryContext<'_> {
             .collect()
     }
 
+    fn read_main_rows_from_current_where_eq_top_created_at_desc(
+        &self,
+        table_name: &str,
+        field: &FieldDef,
+        value: &JsonValue,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        let table = self.schema.table_def(table_name)?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
+        select_columns.extend(
+            field_columns
+                .iter()
+                .map(|column| format!("current.{column}")),
+        );
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("current", "j_created_by")
+        ));
+        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        let (predicate_sql, predicate_value) = if value.is_null() {
+            if !field.nullable {
+                return Err(crate::Error::new(format!(
+                    "expected non-null for {}",
+                    field.name
+                )));
+            }
+            ("IS NULL".to_owned(), None)
+        } else {
+            (
+                "= ?".to_owned(),
+                Some(crate::schema::field_sql_value(
+                    field,
+                    value,
+                    |ref_table, row_id| {
+                        row_num(self.conn, row_id).map_err(|err| {
+                            crate::Error::new(format!(
+                                "failed to resolve ref {ref_table}.{row_id} for equality predicate: {err}"
+                            ))
+                        })
+                    },
+                )?),
+            )
+        };
+        let sql = format!(
+            "SELECT {}
+             FROM {} current
+             JOIN jazz_row_id ids ON ids.row_num = current.row_num
+             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             WHERE current.j_branch_num = ?
+               AND current.is_deleted = 0
+               AND tx.outcome != ?
+               AND current.{predicate_column} {predicate_sql}
+               AND {policy_sql}
+             ORDER BY current.j_created_at DESC, current.row_num
+             LIMIT ?",
+            select_columns.join(", "),
+            crate::schema::current_table(table_name),
+            policy_sql = self.read_policy_sql(table)?,
+        );
+        let mut params = vec![
+            rusqlite::types::Value::Integer(self.branch_num),
+            rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
+        ];
+        if let Some(predicate_value) = predicate_value {
+            params.push(predicate_value);
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| crate::Error::new("top created query limit is too large"))?;
+        params.push(rusqlite::types::Value::Integer(limit));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 2 + table.fields.len() + 1;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        rows.map(|row| row_to_view(self.conn, table_name, table, row?))
+            .collect()
+    }
+
+    fn read_rows_where_eq_top_created_at_desc_slow(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
+        let created_at_by_id = current_created_at_by_row_id(self.conn, table_name)?;
+        rows.sort_by(|left, right| {
+            created_at_by_id
+                .get(&right.id)
+                .cmp(&created_at_by_id.get(&left.id))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     fn read_rows_from_current_where_contains(
         &self,
         table_name: &str,
@@ -1731,6 +1861,23 @@ fn json_sort_key(value: Option<&JsonValue>) -> String {
         Some(value) => format!("j:{value}"),
         None => String::new(),
     }
+}
+
+fn current_created_at_by_row_id(
+    conn: &Connection,
+    table_name: &str,
+) -> Result<BTreeMap<String, i64>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT ids.row_id, current.j_created_at
+         FROM {} current
+         JOIN jazz_row_id ids ON ids.row_num = current.row_num",
+        crate::schema::current_table(table_name)
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
+        .map_err(Into::into)
 }
 
 fn placeholders(count: usize) -> String {
