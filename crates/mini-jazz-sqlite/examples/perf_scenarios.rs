@@ -18,6 +18,11 @@ type BenchResult<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn main() -> BenchResult<()> {
     let config = Config::from_env();
+    if let Some(repeat) = env_optional_usize("MINI_JAZZ_PERF_REPEAT_PRIMARY") {
+        let report = run_primary_repeat(&config, repeat.max(1))?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     let process_rss_start_bytes = process_rss_bytes();
     let report = BenchmarkReport {
         process_rss_start_bytes,
@@ -44,6 +49,66 @@ fn main() -> BenchResult<()> {
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+#[derive(Serialize)]
+struct PrimaryRepeatReport {
+    repeat: usize,
+    samples: Vec<PrimaryRepeatSample>,
+    median: PrimaryRepeatSample,
+}
+
+#[derive(Clone, Serialize)]
+struct PrimaryRepeatSample {
+    seed_ms: f64,
+    api_to_first_result_ms: f64,
+    refresh_ms: f64,
+    core_database_bytes: i64,
+    core_total_file_bytes: i64,
+    bundle_bytes: usize,
+}
+
+fn run_primary_repeat(config: &Config, repeat: usize) -> BenchResult<PrimaryRepeatReport> {
+    let mut samples = Vec::new();
+    for _ in 0..repeat {
+        let report = run_core_only_scoped_page(config)?;
+        samples.push(PrimaryRepeatSample {
+            seed_ms: report.seed_ms,
+            api_to_first_result_ms: report.api_to_first_result_ms,
+            refresh_ms: report.refresh_after_new_top_rows.api_to_updated_result_ms,
+            core_database_bytes: report.core_database_bytes,
+            core_total_file_bytes: report.core_total_file_bytes,
+            bundle_bytes: report.bundle_bytes,
+        });
+    }
+    let median = PrimaryRepeatSample {
+        seed_ms: median_f64(samples.iter().map(|sample| sample.seed_ms).collect()),
+        api_to_first_result_ms: median_f64(
+            samples
+                .iter()
+                .map(|sample| sample.api_to_first_result_ms)
+                .collect(),
+        ),
+        refresh_ms: median_f64(samples.iter().map(|sample| sample.refresh_ms).collect()),
+        core_database_bytes: median_i64(
+            samples
+                .iter()
+                .map(|sample| sample.core_database_bytes)
+                .collect(),
+        ),
+        core_total_file_bytes: median_i64(
+            samples
+                .iter()
+                .map(|sample| sample.core_total_file_bytes)
+                .collect(),
+        ),
+        bundle_bytes: median_usize(samples.iter().map(|sample| sample.bundle_bytes).collect()),
+    };
+    Ok(PrimaryRepeatReport {
+        repeat,
+        samples,
+        median,
+    })
 }
 
 #[derive(Debug)]
@@ -2804,10 +2869,11 @@ fn process_rss_bytes() -> Option<i64> {
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
+    env_optional_usize(name).unwrap_or(default)
+}
+
+fn env_optional_usize(name: &str) -> Option<usize> {
+    env::var(name).ok().and_then(|value| value.parse().ok())
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
@@ -2819,4 +2885,19 @@ fn env_bool(name: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+fn median_f64(mut values: Vec<f64>) -> f64 {
+    values.sort_by(|left, right| left.total_cmp(right));
+    values[values.len() / 2]
+}
+
+fn median_i64(mut values: Vec<i64>) -> i64 {
+    values.sort();
+    values[values.len() / 2]
+}
+
+fn median_usize(mut values: Vec<usize>) -> usize {
+    values.sort();
+    values[values.len() / 2]
 }

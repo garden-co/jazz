@@ -1116,3 +1116,14 @@ Validation:
 Learning: this is the first SQLite tuning knob that looked worth making default
 for durable nodes. The cost is extra WAL footprint, so storage stats must keep
 reporting total file bytes, not only main database page bytes.
+
+## 2026-05-27 01:12 PDT
+
+Added a focused repeat mode to the perf harness:
+`MINI_JAZZ_PERF_REPEAT_PRIMARY=N` runs only the primary whole-topology scoped
+page scenario N times and reports samples plus medians. This avoids rerunning all
+secondary probes when we only need a stable comparison for core page/read/apply
+work.
+
+Quick release validation with 20k rows x 3 repeats produced stable medians around
+~10.9 ms first result and ~15.7 ms refresh on the WAL default path.
