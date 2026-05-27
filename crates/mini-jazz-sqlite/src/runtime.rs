@@ -1206,6 +1206,36 @@ impl Runtime {
         db: &Connection,
         query_read: &QueryReadRecord,
     ) -> Result<()> {
+        // Query-scope repair keeps a receiver's current projection from retaining
+        // rows that used to satisfy an observed query but are no longer covered by
+        // the refresh bundle.
+        //
+        // Export side:
+        //
+        //   +------------------+      +---------------------+
+        //   | current results  | ---> | visible row history |
+        //   +------------------+      +---------------------+
+        //            |                         ^
+        //            v                         |
+        //   +------------------+      +---------------------+
+        //   | repair row nums  | ---> | old matching rows   |
+        //   +------------------+      +---------------------+
+        //
+        // Apply side:
+        //
+        //   +-------------------+      +----------------------+
+        //   | local current row | ---> | still has matching   |
+        //   | matches read      |      | history in bundle?   |
+        //   +-------------------+      +----------------------+
+        //             | yes                     | no
+        //             v                         v
+        //        keep current             delete current
+        //
+        // `apply_bundle` runs this both before and after applying incoming
+        // history. The first pass can remove stale rows using repair history
+        // already present locally; the second pass observes repair history that
+        // arrived in the bundle and catches page-boundary changes after current
+        // projection updates.
         if query_read.op == "absent" {
             let table = schema.table_def(&query_read.table)?;
             if query_read.field != "id"
@@ -1497,6 +1527,30 @@ impl Runtime {
         query_read: &QueryReadRecord,
         built_query: &BuiltQuery,
     ) -> Result<()> {
+        // Built queries are recorded as one opaque query-read value so they can
+        // be replayed exactly after reconnect:
+        //
+        //   jazz_query_read
+        //   field="$query", op="query", value=<BuiltQuery JSON>
+        //
+        // Repair does not currently understand every SQL-lowered descriptor.
+        // It maps the supported sync-repair shapes back to the smaller repair
+        // primitives used below:
+        //
+        //   +-----------------------------+
+        //   | BuiltQuery descriptor       |
+        //   +-----------------------------+
+        //        | one predicate only
+        //        v
+        //   +-----------------------------+      +--------------------------+
+        //   | QueryReadRecord predicate   | ---> | apply_query_scope_repair |
+        //   +-----------------------------+      +--------------------------+
+        //
+        //        | eq predicate + $createdAt DESC + limit
+        //        v
+        //   +-----------------------------+
+        //   | page-boundary repair        |
+        //   +-----------------------------+
         if let Some(query::QueryStoragePlan::EqCreatedAtDescPage { condition, limit }) =
             query::storage_plan(built_query)
         {
@@ -1526,6 +1580,23 @@ impl Runtime {
         condition: &QueryCondition,
         limit: usize,
     ) -> Result<()> {
+        // Ordered-page repair handles the sync case where a row is still in the
+        // predicate set but has fallen out of the materialized page.
+        //
+        // Example: top 2 open todos ordered by createdAt desc
+        //
+        //   before refresh: [C, B]        after refresh: [D, C]
+        //                         stale boundary row: B
+        //
+        // The DELETE below says:
+        //
+        //   delete local current rows that:
+        //     1. are in the observed branch
+        //     2. still match the page predicate
+        //     3. are not in SQLite's current top-N result for that predicate
+        //
+        // This is page-boundary contraction, not authorization. The refreshed
+        // top-N rows themselves arrive through normal history application.
         let table = schema.table_def(&query_read.table)?;
         let field = table
             .fields
@@ -2788,6 +2859,28 @@ impl Runtime {
         rows: Vec<RowView>,
         options: QueryScopeOptions<'_>,
     ) -> Result<Bundle> {
+        // Query-scope exports carry more than the rows currently visible in the
+        // query result. They also carry repair candidates: rows whose history
+        // previously satisfied the same query scope and may need to be removed
+        // or updated on a receiver.
+        //
+        //   +---------------------+
+        //   | query result rows   |
+        //   +---------------------+
+        //             |
+        //             v
+        //   +---------------------+      +---------------------+
+        //   | result row nums     | ---> | exported history    |
+        //   +---------------------+      +---------------------+
+        //             ^
+        //             |
+        //   +---------------------+
+        //   | repair row nums     |
+        //   +---------------------+
+        //
+        // Without the repair rows, query-scoped sync would only add or update
+        // rows that are still in the result. A receiver would not learn that a
+        // previously synced row left the predicate or page boundary.
         let table_name = &query_read.table;
         let table = self.schema.table_def(table_name)?;
         let user = self.policy_user();
@@ -5866,6 +5959,22 @@ fn query_scope_repair_row_nums(
     op: &str,
     value: &JsonValue,
 ) -> Result<Vec<i64>> {
+    // Return the physical rows whose history can affect a query-scope refresh.
+    // These are not necessarily current result rows.
+    //
+    // Predicate repair:
+    //
+    //   history rows ever matching predicate
+    //        |
+    //        v
+    //   exported repair history
+    //        |
+    //        v
+    //   receiver deletes stale current rows no longer justified by history
+    //
+    // `id` is special because the row id lives in `jazz_row_id`, not the user
+    // table history. `$createdBy` is special because it is a system column on
+    // history/current tables. User fields lower through `query_predicate`.
     if op == "eq_top_field_desc" {
         let observed_ids = observed_ids_from_query_value(value)?;
         if observed_ids.is_empty() {
@@ -6131,6 +6240,9 @@ fn query_scope_repair_row_nums_for_read(
     table: &crate::schema::TableDef,
     query_read: &QueryReadRecord,
 ) -> Result<Vec<i64>> {
+    // Dispatch from the serialized query-read shape used in bundles to the row
+    // collection shape used by export. Built queries are stored opaquely, so
+    // they need a small adapter before repair candidates can be collected.
     if query_read.op == "query" {
         let query = built_query_from_read(query_read)?;
         return query_scope_repair_row_nums_for_built_query(conn, table, &query);
@@ -6149,6 +6261,17 @@ fn query_scope_repair_row_nums_for_built_query(
     table: &crate::schema::TableDef,
     built_query: &BuiltQuery,
 ) -> Result<Vec<i64>> {
+    // Built-query repair row collection mirrors `apply_built_query_scope_repair`:
+    //
+    //   built query
+    //       |
+    //       +-- one predicate ------------------------+
+    //       |                                         v
+    //       +-- eq + createdAt desc + limit --> predicate repair rows
+    //
+    // The ordered-page case exports rows that ever matched the predicate. The
+    // receiver then recomputes the actual page boundary locally and deletes any
+    // stale rows outside that boundary.
     if built_query.table != table.name {
         return Err(crate::Error::new(
             "query read table does not match descriptor",
