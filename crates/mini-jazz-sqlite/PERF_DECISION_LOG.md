@@ -640,3 +640,10 @@ rows to about 57 KB / 150 read rows. Export time is still about 131 ms because
 the pinned branch query itself takes about 107 ms and `export_reads_for_history`
 still scans then filters the broad tx read set in Rust. The next pinned-branch
 work is SQL-lowered snapshot top-K plus SQL-filtered read-set export.
+
+Tried pushing the read-set filter into SQL with a `VALUES` CTE of exported row
+keys. It preserved the tiny bundle and kept downstream apply fast, but made the
+pinned export much slower (~280 ms total, ~169 ms in read export), likely
+because SQLite used a poor plan against the large read set. Reverted to the Rust
+filter for now. If we want SQL-side filtering, use a real temporary table or a
+persistent export-scope table, not a giant inline CTE.
