@@ -165,11 +165,13 @@ feature exists.
 - Bundle locators dedupe concrete rows/transactions even when facts repeat.
 - Normalized predicates/ranges compare deterministically for supported planner
   forms.
-- Query-scope refresh repairs rows that leave a predicate through an update.
-- Query-scope refresh repairs rows that leave a predicate through a delete by
-  sending tombstone history.
-- Query-scope export includes predicate observed facts with table, field, value,
-  and branch context for supported predicates.
+- Query-scope refresh repairs rows that leave a supported query condition set
+  through an update, including multi-filter built queries and queries with
+  ordering/windowing.
+- Query-scope refresh repairs rows that leave a supported query condition set
+  through a delete by sending tombstone history.
+- Query-scope export includes observed facts with table, condition descriptor,
+  and branch context for supported predicate reads and built-query descriptors.
 - Query-scope repair rows may be included even when they are no longer semantic
   result rows.
 - Query-scope export dedupes concrete history records included for several
