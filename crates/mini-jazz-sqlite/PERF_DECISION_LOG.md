@@ -118,3 +118,19 @@ repair rows. It used 2 transaction records, 49 KB of bundle JSON, and about 103
 ms api-to-updated-result through all three hops. This confirms the repair shape
 is bounded by page size plus previously observed page size, not by matching
 predicate cardinality.
+
+## 2026-05-26 21:32 PDT
+
+Moved the perf scenario from owner-shaped data without actual policy to a real
+policy shape: documents reference orgs, orgs are readable if created by the
+current user, and documents are readable if their org is readable. Trusted core
+and edge exports now run as `alice`, while writes are still seeded by trusted
+admin/attribution paths.
+
+On the 100k-row / 10k-owner-row / page-50 profile, cold first page now ships 100
+history records: 50 document rows plus 50 policy dependency org rows. It uses 2
+transaction records, 46 KB of bundle JSON, and about 161 ms api-to-first-result
+through core -> edge -> worker -> tab. Refresh after 50 newer rows ships 200
+history records, 3 transaction records, 79 KB, and takes about 206 ms
+api-to-updated-result. Policy dependencies are visible in the cost model but
+still scale with observed page size, not with the 10k matching owner rows.

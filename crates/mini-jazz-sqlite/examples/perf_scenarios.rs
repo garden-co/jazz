@@ -115,33 +115,15 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
     let seed_elapsed = seed_started.elapsed();
 
     let export_started = Instant::now();
-    let core_bundle = core.export_query_where_eq_top_field_desc(
-        "documents",
-        "owner_id",
-        json!(OWNER),
-        "updated_at",
-        config.page_size,
-    )?;
+    let core_bundle = export_top_owner_page(&mut core, config.page_size)?;
     let export_elapsed = export_started.elapsed();
 
     let core_bundle_summary = BundleSummary::from(&core_bundle)?;
 
     let edge_apply_elapsed = timed(|| edge.apply_bundle(&core_bundle))?;
-    let edge_bundle = edge.export_query_where_eq_top_field_desc(
-        "documents",
-        "owner_id",
-        json!(OWNER),
-        "updated_at",
-        config.page_size,
-    )?;
+    let edge_bundle = export_top_owner_page(&mut edge, config.page_size)?;
     let worker_apply_elapsed = timed(|| worker.apply_bundle(&edge_bundle))?;
-    let worker_bundle = worker.export_query_where_eq_top_field_desc(
-        "documents",
-        "owner_id",
-        json!(OWNER),
-        "updated_at",
-        config.page_size,
-    )?;
+    let worker_bundle = export_top_owner_page(&mut worker, config.page_size)?;
     let tab_apply_elapsed = timed(|| tab.apply_bundle(&worker_bundle))?;
 
     let query_started = Instant::now();
@@ -157,6 +139,7 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         run_refresh_after_new_top_rows(config, &mut core, &mut edge, &mut worker, &mut tab)?;
 
     let mut seed_rows_by_table = BTreeMap::new();
+    seed_rows_by_table.insert("orgs", 100);
     seed_rows_by_table.insert("documents", config.total_rows);
 
     Ok(ScenarioReport {
@@ -212,12 +195,17 @@ fn run_refresh_after_new_top_rows(
     )?;
 
     let export_started = Instant::now();
-    let core_bundles = core.export_query_read_refreshes(&edge.observed_query_reads()?)?;
+    let edge_reads = edge.observed_query_reads()?;
+    let core_bundles =
+        core.run_as_user(OWNER, |core| core.export_query_read_refreshes(&edge_reads))?;
     let export_elapsed = export_started.elapsed();
     let core_summary = BundleBatchSummary::from(&core_bundles)?;
 
     let edge_apply_elapsed = timed_apply_bundles(edge, core_bundles)?;
-    let edge_bundles = edge.export_query_read_refreshes(&worker.observed_query_reads()?)?;
+    let worker_reads = worker.observed_query_reads()?;
+    let edge_bundles = edge.run_as_user(OWNER, |edge| {
+        edge.export_query_read_refreshes(&worker_reads)
+    })?;
     let worker_apply_elapsed = timed_apply_bundles(worker, edge_bundles)?;
     let worker_bundles = worker.export_query_read_refreshes(&tab.observed_query_reads()?)?;
     let tab_apply_elapsed = timed_apply_bundles(tab, worker_bundles)?;
@@ -253,13 +241,19 @@ fn run_refresh_after_new_top_rows(
 }
 
 fn documents_schema() -> SchemaDef {
-    SchemaDef::new().table("documents", |table| {
-        table.text("owner_id");
-        table.text("org_id");
-        table.text("updated_at");
-        table.text("title");
-        table.index("owner_updated", ["owner_id", "updated_at"]);
-    })
+    SchemaDef::new()
+        .table("orgs", |table| {
+            table.text("name");
+            table.read_if_created_by_user();
+        })
+        .table("documents", |table| {
+            table.text("owner_id");
+            table.ref_("org", "orgs");
+            table.text("updated_at");
+            table.text("title");
+            table.index("owner_updated", ["owner_id", "updated_at"]);
+            table.read_if_ref_readable("org");
+        })
 }
 
 fn seed_documents(
@@ -268,6 +262,7 @@ fn seed_documents(
     target_owner_rows: usize,
     seed_batch_size: usize,
 ) -> Result<()> {
+    seed_orgs(runtime)?;
     let seed_batch_size = seed_batch_size.max(1);
     for chunk_start in (0..total_rows).step_by(seed_batch_size) {
         let chunk_end = (chunk_start + seed_batch_size).min(total_rows);
@@ -282,6 +277,45 @@ fn seed_documents(
         tx.commit()?;
     }
     Ok(())
+}
+
+fn seed_orgs(runtime: &mut Runtime) -> Result<()> {
+    runtime.run_attributing_to_user(OWNER, |runtime| {
+        let mut tx = runtime.transaction();
+        for org_index in 0..100 {
+            tx = tx.insert_row(
+                "orgs",
+                &format!("org-{org_index}"),
+                BTreeMap::from([(
+                    "name".to_owned(),
+                    json!(format!("Organization {org_index}")),
+                )]),
+            );
+        }
+        tx.commit().map(|_| ())
+    })
+}
+
+fn export_top_owner_page(runtime: &mut Runtime, page_size: usize) -> Result<Bundle> {
+    if runtime.is_trusted() {
+        runtime.run_as_user(OWNER, |runtime| {
+            runtime.export_query_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!(OWNER),
+                "updated_at",
+                page_size,
+            )
+        })
+    } else {
+        runtime.export_query_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!(OWNER),
+            "updated_at",
+            page_size,
+        )
+    }
 }
 
 fn insert_new_top_documents(
@@ -313,10 +347,7 @@ fn document_values(
     };
     BTreeMap::from([
         ("owner_id".to_owned(), json!(owner_id)),
-        (
-            "org_id".to_owned(),
-            json!(format!("org-{}", row_index % 100)),
-        ),
+        ("org".to_owned(), json!(format!("org-{}", row_index % 100))),
         ("updated_at".to_owned(), json!(format!("{:020}", row_index))),
         ("title".to_owned(), json!(format!("Document {row_index}"))),
     ])
