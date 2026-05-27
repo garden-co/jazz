@@ -68,7 +68,23 @@ struct ScenarioReport {
     worker_to_tab_apply_ms: f64,
     tab_query_ms: f64,
     api_to_first_result_ms: f64,
+    edge_warm_worker_cold: WarmBootReport,
+    worker_warm_tab_cold: WarmBootReport,
     refresh_after_new_top_rows: RefreshReport,
+}
+
+#[derive(Serialize)]
+struct WarmBootReport {
+    visible_rows_returned: usize,
+    history_rows_synced: usize,
+    transaction_rows_synced: usize,
+    observed_facts_synced: usize,
+    bundle_bytes: usize,
+    export_ms: f64,
+    first_apply_ms: f64,
+    second_apply_ms: Option<f64>,
+    query_ms: f64,
+    api_to_first_result_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -110,7 +126,7 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         OWNER,
         schema.clone(),
     )?;
-    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema)?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema.clone())?;
 
     let seed_started = Instant::now();
     seed_documents(
@@ -155,6 +171,8 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
         config.page_size,
     )?;
     let tab_query_elapsed = query_started.elapsed();
+    let edge_warm_worker_cold = run_edge_warm_worker_cold(config, &dir, &schema, &mut edge)?;
+    let worker_warm_tab_cold = run_worker_warm_tab_cold(config, &mut worker)?;
     let mut tab_subscription = tab.subscribe_rows_where_eq_top_field_desc(
         "documents",
         "owner_id",
@@ -215,7 +233,83 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
             + worker_apply_elapsed
             + tab_apply_elapsed
             + tab_query_elapsed),
+        edge_warm_worker_cold,
+        worker_warm_tab_cold,
         refresh_after_new_top_rows,
+    })
+}
+
+fn run_edge_warm_worker_cold(
+    config: &Config,
+    dir: &tempfile::TempDir,
+    schema: &SchemaDef,
+    edge: &mut Runtime,
+) -> BenchResult<WarmBootReport> {
+    let mut worker = Runtime::open_with_schema(
+        storage_for(config, dir, "edge-warm-worker.sqlite"),
+        "edge-warm-worker",
+        OWNER,
+        schema.clone(),
+    )?;
+    let mut tab =
+        Runtime::open_with_schema(Storage::Memory, "edge-warm-tab", OWNER, schema.clone())?;
+
+    let export_started = Instant::now();
+    let bundle = export_top_owner_page(edge, config.page_size)?;
+    let export_elapsed = export_started.elapsed();
+    let summary = BundleSummary::from(&bundle)?;
+    let worker_apply_elapsed = timed(|| worker.apply_bundle(&bundle))?;
+    let worker_bundle = export_top_owner_page(&mut worker, config.page_size)?;
+    let tab_apply_elapsed = timed(|| tab.apply_bundle(&worker_bundle))?;
+    let query_started = Instant::now();
+    let rows = read_top_owner_page(&tab, config.page_size)?;
+    let query_elapsed = query_started.elapsed();
+
+    Ok(WarmBootReport {
+        visible_rows_returned: rows.len(),
+        history_rows_synced: bundle.history.len(),
+        transaction_rows_synced: bundle.txs.len(),
+        observed_facts_synced: bundle.query_reads.len(),
+        bundle_bytes: summary.bytes,
+        export_ms: ms(export_elapsed),
+        first_apply_ms: ms(worker_apply_elapsed),
+        second_apply_ms: Some(ms(tab_apply_elapsed)),
+        query_ms: ms(query_elapsed),
+        api_to_first_result_ms: ms(export_elapsed
+            + worker_apply_elapsed
+            + tab_apply_elapsed
+            + query_elapsed),
+    })
+}
+
+fn run_worker_warm_tab_cold(config: &Config, worker: &mut Runtime) -> BenchResult<WarmBootReport> {
+    let mut tab = Runtime::open_with_schema(
+        Storage::Memory,
+        "worker-warm-tab",
+        OWNER,
+        documents_schema(),
+    )?;
+
+    let export_started = Instant::now();
+    let bundle = export_top_owner_page(worker, config.page_size)?;
+    let export_elapsed = export_started.elapsed();
+    let summary = BundleSummary::from(&bundle)?;
+    let tab_apply_elapsed = timed(|| tab.apply_bundle(&bundle))?;
+    let query_started = Instant::now();
+    let rows = read_top_owner_page(&tab, config.page_size)?;
+    let query_elapsed = query_started.elapsed();
+
+    Ok(WarmBootReport {
+        visible_rows_returned: rows.len(),
+        history_rows_synced: bundle.history.len(),
+        transaction_rows_synced: bundle.txs.len(),
+        observed_facts_synced: bundle.query_reads.len(),
+        bundle_bytes: summary.bytes,
+        export_ms: ms(export_elapsed),
+        first_apply_ms: ms(tab_apply_elapsed),
+        second_apply_ms: None,
+        query_ms: ms(query_elapsed),
+        api_to_first_result_ms: ms(export_elapsed + tab_apply_elapsed + query_elapsed),
     })
 }
 
@@ -388,6 +482,19 @@ fn export_top_owner_page(runtime: &mut Runtime, page_size: usize) -> Result<Bund
             page_size,
         )
     }
+}
+
+fn read_top_owner_page(
+    runtime: &Runtime,
+    page_size: usize,
+) -> Result<Vec<mini_jazz_sqlite::RowView>> {
+    runtime.read_rows_where_eq_top_field_desc(
+        "documents",
+        "owner_id",
+        json!(OWNER),
+        "updated_at",
+        page_size,
+    )
 }
 
 fn insert_new_top_documents(

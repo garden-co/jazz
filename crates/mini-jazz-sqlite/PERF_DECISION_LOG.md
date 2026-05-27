@@ -200,3 +200,16 @@ new top rows arrive, polling the subscription over the refreshed tab takes about
 0.7 ms and reports exactly 50 added / 50 removed / 0 updated diffs. This is a
 good sign: after sync/apply, semantic diffing of a page-sized result is cheap and
 deterministic. The expensive parts remain upstream export and per-hop apply.
+
+## 2026-05-26 21:52 PDT
+
+Added warm-cache boot subreports. After the initial cold core -> edge -> worker
+-> tab page sync, the benchmark now measures a fresh worker+tab booting from a
+warm edge and a fresh tab booting from a warm worker.
+
+On the policy-scoped 100k/10k/page-50 profile, edge-warm worker-cold is about 50
+ms api-to-first-result and worker-warm tab-cold is about 24 ms. The same bundle
+shape is exported, but warm edge/worker export is only about 3.6 ms versus
+core-cold export around 86 ms. This is an important product-shaped result: once
+an intermediate has the scoped page and policy dependencies, downstream cold
+starts are dominated by apply, not query/export.
