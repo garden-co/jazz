@@ -508,11 +508,18 @@ trusted peer does not know the authenticated user for a pending mergeable
 transaction, it must reject or await auth context rather than infer authority
 from history rows.
 
-Exclusive transactions are different: they require final fate from the global
-authority. If an edge or other intermediary forwards an exclusive transaction
-instead of deciding it locally, it must forward enough authenticated session
-context for the global authority to evaluate the transaction under the same
-user, admin/trust role, and policy context as the initiating session.
+Exclusive transactions require final fate from the global authority. If an edge
+or other intermediary forwards an exclusive transaction instead of deciding it
+locally, it must forward enough authenticated session context for the global
+authority to evaluate the transaction under the same user, admin/trust role, and
+policy context as the initiating session.
+
+The Rust prototype currently carries only an optional forwarded authenticated
+user for this authority validation path. Forwarding rewrites only the selected
+transaction record to pending exclusive, clears global/receipt state for that
+forwarded transaction, and must not mark unrelated transactions exclusive.
+Forwarded trust role, auth mode, and richer policy-context proofs remain future
+work.
 
 Non-admin sessions fail closed when required policy metadata is missing.
 
@@ -1353,7 +1360,8 @@ The current prototype bundle shape is:
 ```text
 branches: branch id, base global epoch, source branch ids
 txs: tx id, node id, local epoch, global epoch, conflict mode, outcome,
-     rejection code, receipt tiers, creation time
+     rejection code, receipt tiers, creation time, optional forwarded
+     authenticated user for pending exclusive validation
 reads: transaction row-read facts, currently scoped to exported transaction ids
 query_reads: active query descriptors with branch/table/operator/field/value
              plus ordering/window/absence/recursive-ref metadata when needed
@@ -2601,6 +2609,13 @@ The harness should mirror browser-plus-cloud product topology early:
 - optional edge SQLite runtime
 - global authority SQLite runtime
 
+The current Rust harness includes reusable trusted-edge and trusted-mesh
+topologies with client and trusted-peer nodes, in-memory and durable trusted
+edge variants, and helper sync paths for trusted apply, untrusted apply,
+user-scoped untrusted apply, and exclusive forwarding. The remaining harness
+gap is an explicit scheduler for delayed, duplicated, dropped, and reordered
+message delivery.
+
 The working prototype should keep policies and lenses in scope. The goal is to
 prove that the whole system composes, not to defer the two features most likely
 to change scope, query planning, validation, and sync.
@@ -2952,6 +2967,14 @@ feature exists.
 - Trusted peer and authority logs may contain more detail than client errors.
 - Edge policy may be stale for mergeable transactions only within the accepted
   product tradeoff.
+- Untrusted write validation uses authenticated session context, never
+  provenance fields.
+- When a trusted peer validates a transaction received directly from an
+  untrusted connection, it uses that connection's authenticated session.
+- When the global authority validates a transaction forwarded by an
+  intermediary, it uses forwarded per-transaction authenticated session context;
+  missing forwarded auth context rejects or stalls validation rather than
+  falling back to provenance fields.
 - Exclusive transactions are validated by global authority against
   authority-visible history and the authority's current trusted policy
   catalogue.
