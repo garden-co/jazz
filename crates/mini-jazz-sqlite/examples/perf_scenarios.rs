@@ -328,8 +328,15 @@ struct PermissionedDashboardProbe {
     worker_apply_ms: f64,
     tab_apply_ms: f64,
     subscribe_ms: f64,
-    refresh_export_ms: f64,
-    refresh_apply_ms: f64,
+    refresh_core_export_ms: f64,
+    refresh_edge_apply_ms: f64,
+    refresh_edge_export_ms: f64,
+    refresh_worker_apply_ms: f64,
+    refresh_worker_export_ms: f64,
+    refresh_tab_apply_ms: f64,
+    refresh_bundle_bytes: usize,
+    refresh_history_rows: usize,
+    refresh_transaction_rows: usize,
     subscription_poll_ms: f64,
     subscription_added: usize,
     subscription_updated: usize,
@@ -1263,12 +1270,29 @@ fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe>
 
     insert_new_top_recursive_documents_for_owners(&mut core, total_rows, &owners, 3)?;
     let refresh_started = Instant::now();
-    let refresh_bundles = core.run_as_user(OWNER, |core| {
-        core.export_query_read_refreshes(&tab.observed_query_reads()?)
+    let edge_reads = edge.observed_query_reads()?;
+    let core_refresh_bundles =
+        core.run_as_user(OWNER, |core| core.export_query_read_refreshes(&edge_reads))?;
+    let core_refresh_elapsed = refresh_started.elapsed();
+    let core_refresh_merged = merge_bundles(&core_refresh_bundles)?;
+    let refresh_summary = BundleSummary::from(&core_refresh_merged)?;
+    let edge_refresh_apply_elapsed = timed(|| edge.apply_bundle(&core_refresh_merged))?;
+
+    let edge_refresh_export_started = Instant::now();
+    let worker_reads = worker.observed_query_reads()?;
+    let edge_refresh_bundles = edge.run_as_user(OWNER, |edge| {
+        edge.export_query_read_refreshes(&worker_reads)
     })?;
-    let refresh_elapsed = refresh_started.elapsed();
-    let refresh_merged = merge_bundles(&refresh_bundles)?;
-    let refresh_apply_elapsed = timed(|| tab.apply_bundle(&refresh_merged))?;
+    let edge_refresh_export_elapsed = edge_refresh_export_started.elapsed();
+    let edge_refresh_merged = merge_bundles(&edge_refresh_bundles)?;
+    let worker_refresh_apply_elapsed = timed(|| worker.apply_bundle(&edge_refresh_merged))?;
+
+    let worker_refresh_export_started = Instant::now();
+    let worker_refresh_bundles =
+        worker.export_query_read_refreshes(&tab.observed_query_reads()?)?;
+    let worker_refresh_export_elapsed = worker_refresh_export_started.elapsed();
+    let worker_refresh_merged = merge_bundles(&worker_refresh_bundles)?;
+    let tab_refresh_apply_elapsed = timed(|| tab.apply_bundle(&worker_refresh_merged))?;
     let poll_started = Instant::now();
     let mut total_counts = DiffCounts {
         added: 0,
@@ -1297,8 +1321,15 @@ fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe>
         worker_apply_ms: ms(worker_apply_elapsed),
         tab_apply_ms: ms(tab_apply_elapsed),
         subscribe_ms: ms(subscribe_elapsed),
-        refresh_export_ms: ms(refresh_elapsed),
-        refresh_apply_ms: ms(refresh_apply_elapsed),
+        refresh_core_export_ms: ms(core_refresh_elapsed),
+        refresh_edge_apply_ms: ms(edge_refresh_apply_elapsed),
+        refresh_edge_export_ms: ms(edge_refresh_export_elapsed),
+        refresh_worker_apply_ms: ms(worker_refresh_apply_elapsed),
+        refresh_worker_export_ms: ms(worker_refresh_export_elapsed),
+        refresh_tab_apply_ms: ms(tab_refresh_apply_elapsed),
+        refresh_bundle_bytes: refresh_summary.bytes,
+        refresh_history_rows: core_refresh_merged.history.len(),
+        refresh_transaction_rows: core_refresh_merged.txs.len(),
         subscription_poll_ms: ms(poll_elapsed),
         subscription_added: total_counts.added,
         subscription_updated: total_counts.updated,

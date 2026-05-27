@@ -1382,3 +1382,26 @@ Two-sample 50k-row median smoke run:
 Learning: even tiny repeats make this probe much easier to reason about. The
 next useful refinement is probably explain-plan capture for the cases where
 export timing jumps with only a modest increase in delivered rows.
+
+## 2026-05-27 01:40 PDT
+
+Changed the permissioned dashboard refresh probe to propagate through the full
+core -> edge -> worker -> tab topology instead of refreshing core -> tab
+directly. This follows Zeno's review note and better matches the browser +
+cloud setup we care about.
+
+50k-row / 24-query full-topology refresh sample:
+
+- core refresh export: ~6.7 ms
+- edge refresh apply: ~7.1 ms
+- edge refresh export: ~6.3 ms
+- worker refresh apply: ~7.9 ms
+- worker refresh export: ~5.9 ms
+- tab refresh apply: ~6.5 ms
+- subscription poll: ~2.2 ms
+- refresh bundle from core: ~139 KB, 309 history rows, 8 transactions
+
+Learning: batching keeps every hop healthy, but the topology multiplies the
+budget. The useful product number is not just one export/apply pair; it is the
+sum of each durable cache's refresh/export and downstream apply. Future probes
+should report both per-hop and end-to-end API-to-visible-result latency.
