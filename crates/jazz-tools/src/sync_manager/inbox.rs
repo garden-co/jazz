@@ -1718,13 +1718,14 @@ impl SyncManager {
         fate_recording: AuthoritativeFateRecording,
     ) {
         match payload {
-            SyncPayload::CatalogueEntryUpdated { entry } => {
-                if self.persist_catalogue_entry(storage, entry.clone()) {
-                    self.pending_catalogue_updates.push(entry.clone());
-                    self.forward_catalogue_entry_to_servers(entry.clone());
-                    self.forward_catalogue_entry_to_clients(entry, Some(client_id));
-                }
+            SyncPayload::CatalogueEntryUpdated { entry }
+                if self.persist_catalogue_entry(storage, entry.clone()) =>
+            {
+                self.pending_catalogue_updates.push(entry.clone());
+                self.forward_catalogue_entry_to_servers(entry.clone());
+                self.forward_catalogue_entry_to_clients(entry, Some(client_id));
             }
+            SyncPayload::CatalogueEntryUpdated { .. } => {}
             SyncPayload::RowBatchCreated { metadata, row }
             | SyncPayload::RowBatchNeeded { metadata, row } => {
                 let object_id = row.row_id;
@@ -1816,11 +1817,10 @@ impl SyncManager {
                     submission.batch_id,
                 );
             }
-            SyncPayload::BatchFate { fate } => {
-                if self.retain_client_batch_fate(&fate) {
-                    self.pending_batch_fates.push(fate.clone());
-                }
+            SyncPayload::BatchFate { fate } if self.retain_client_batch_fate(&fate) => {
+                self.pending_batch_fates.push(fate.clone());
             }
+            SyncPayload::BatchFate { .. } => {}
             SyncPayload::BatchFateNeeded { batch_ids } => {
                 self.register_client_batch_fate_interest(client_id, &batch_ids);
                 self.respond_to_batch_fate_request(

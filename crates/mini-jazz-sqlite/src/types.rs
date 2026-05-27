@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RowView {
     pub table: String,
     pub id: String,
@@ -12,21 +13,21 @@ pub struct RowView {
     pub conflict_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum RowDiff {
     Added(RowView),
     Updated { before: RowView, after: RowView },
     Removed(RowView),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BranchInfo {
     pub id: String,
     pub base_global_epoch: Option<i64>,
     pub source_branch_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StorageStats {
     pub history_rows: i64,
     pub current_rows: i64,
@@ -37,7 +38,7 @@ pub struct StorageStats {
     tx_nums_by_id: BTreeMap<String, i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TransactionInfo {
     pub tx_id: String,
     pub global_epoch: Option<i64>,
@@ -48,7 +49,7 @@ pub struct TransactionInfo {
     pub rejection_detail: Option<JsonValue>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RejectionInfo {
     pub tx_id: String,
     pub code: String,
