@@ -300,25 +300,32 @@ impl RnScheduler {
 impl Scheduler for RnScheduler {
     fn schedule_batched_tick(&self) {
         // Debounce: only one pending tick request at a time.
-        if !self.scheduled.swap(true, Ordering::SeqCst) {
-            let called = if let Ok(guard) = self.callback.lock() {
-                if let Some(cb) = guard.as_ref() {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        cb.request_batched_tick();
-                    }))
-                    .is_ok()
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            // No callback registered; allow future scheduling attempts.
-            if !called {
-                self.scheduled.store(false, Ordering::SeqCst);
-            }
+        if self.scheduled.swap(true, Ordering::SeqCst) {
+            return;
         }
+
+        // Defer firing the JS callback through a background thread so we do
+        // not synchronously re-enter `RnRuntime::batched_tick` from inside
+        // `core.batched_tick()`. Without this delay,
+        // `cb.request_batched_tick()` enqueues a JS microtask that runs
+        // another `batched_tick` immediately, hot-looping the JS thread and
+        // starving `setInterval`/render. The 1ms sleep also coalesces bursts
+        // of schedule calls within a tick into a single follow-up callback.
+        // This mirrors `schedule_mutation_error_delivery` below and
+        // `NapiScheduler::schedule_batched_tick` in `jazz-napi`.
+        let scheduled = Arc::clone(&self.scheduled);
+        let callback = Arc::clone(&self.callback);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1));
+            scheduled.store(false, Ordering::SeqCst);
+            if let Ok(guard) = callback.lock() {
+                if let Some(cb) = guard.as_ref() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cb.request_batched_tick();
+                    }));
+                }
+            }
+        });
     }
 
     fn schedule_mutation_error_delivery(&self) {
