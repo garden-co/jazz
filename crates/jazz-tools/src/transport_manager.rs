@@ -508,6 +508,14 @@ pub(crate) fn frame_encode(payload: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) fn frame_decode(data: &[u8]) -> Option<Vec<u8>> {
+    frame_decode_capped(data, usize::MAX)
+}
+
+/// Decode a frame, rejecting one whose LZ4 header declares an uncompressed size
+/// larger than `max_decompressed` — used on the pre-auth handshake path so a
+/// decompression bomb can't be expanded before the peer is authenticated.
+pub(crate) fn frame_decode_capped(data: &[u8], max_decompressed: usize) -> Option<Vec<u8>> {
+    let _ = max_decompressed; // TODO(green): enforce the declared-size cap
     if data.len() < 4 {
         return None;
     }
@@ -1180,6 +1188,24 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn handshake_decode_rejects_oversized_frame() {
+        // A handshake frame is a few KB of JSON; one declaring megabytes is a
+        // decompression bomb arriving before the peer is authenticated.
+        let cap = 1024 * 1024;
+        let bomb = frame_encode(&vec![0u8; 2 * 1024 * 1024]);
+        assert!(
+            frame_decode_capped(&bomb, cap).is_none(),
+            "oversized handshake frame must be rejected before decompression"
+        );
+        // A normal small handshake-sized frame still decodes through the cap.
+        let ok = frame_encode(b"handshake");
+        assert_eq!(
+            frame_decode_capped(&ok, cap).as_deref(),
+            Some(&b"handshake"[..])
+        );
+    }
 
     struct MockStream {
         sent: Vec<Vec<u8>>,
