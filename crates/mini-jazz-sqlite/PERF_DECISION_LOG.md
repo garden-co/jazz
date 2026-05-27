@@ -1405,3 +1405,35 @@ Learning: batching keeps every hop healthy, but the topology multiplies the
 budget. The useful product number is not just one export/apply pair; it is the
 sum of each durable cache's refresh/export and downstream apply. Future probes
 should report both per-hop and end-to-end API-to-visible-result latency.
+
+## 2026-05-27 01:44 PDT
+
+Added a recursive tree subscription probe over a `folders(parent)` schema with
+created-by read policy. The probe cold-loads a recursive query rooted at
+`folder-0`, subscribes to the observed recursive query, then applies a mutation
+mix: 25 added descendants, 25 renamed descendants, 10 deleted descendants, and
+10 reparented descendants.
+
+Important implementation note: seeding had to run `as_user(OWNER)`, not as
+admin attribution, because the schema uses created-by read policy. This is a
+good reminder that perf fixtures need realistic authorship or they accidentally
+benchmark empty/hidden data.
+
+2k-node / branch-factor-5 release sample:
+
+- seed: ~34 ms
+- initial recursive export: ~762 ms
+- initial bundle: ~672 KB, 2000 history rows
+- initial apply: ~47 ms
+- subscribe: ~742 ms
+- refresh export: ~777 ms
+- refresh bundle: ~696 KB, 2070 history rows
+- refresh apply: ~34 ms
+- subscription poll/diff: ~759 ms
+- diff: 25 added, 35 updated, 10 removed
+
+Learning: recursive subscriptions are the first clearly bad perf shape in this
+spike. SQLite storage/apply is not the main issue here; repeated recursive
+query execution, subscription diffing, and full recursive-scope export are. We
+need explain plans and likely a more incremental recursive query/read-set
+strategy before treating large trees as product-safe.

@@ -40,6 +40,7 @@ fn main() -> BenchResult<()> {
         user_id_interning_projection_probe: run_user_id_interning_projection_probe()?,
         permissioned_dashboard_probe: run_permissioned_dashboard_probe()?,
         dashboard_query_scaling_probe: run_dashboard_query_scaling_probe()?,
+        recursive_tree_subscription_probe: run_recursive_tree_subscription_probe()?,
         project_board_probe: run_project_board_probe()?,
         current_projection_tradeoff_probe: run_current_projection_tradeoff_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
@@ -153,6 +154,7 @@ struct BenchmarkReport {
     user_id_interning_projection_probe: UserIdInterningProjectionProbe,
     permissioned_dashboard_probe: PermissionedDashboardProbe,
     dashboard_query_scaling_probe: DashboardQueryScalingProbe,
+    recursive_tree_subscription_probe: RecursiveTreeSubscriptionProbe,
     project_board_probe: ProjectBoardProbe,
     current_projection_tradeoff_probe: CurrentProjectionTradeoffProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
@@ -373,6 +375,29 @@ struct DashboardQueryScalingRepeatReport {
     repeat: usize,
     samples: Vec<DashboardQueryScalingProbe>,
     median: DashboardQueryScalingProbe,
+}
+
+#[derive(Serialize)]
+struct RecursiveTreeSubscriptionProbe {
+    node_count: usize,
+    branch_factor: usize,
+    seed_ms: f64,
+    initial_export_ms: f64,
+    initial_bundle_bytes: usize,
+    initial_history_rows: usize,
+    initial_apply_ms: f64,
+    subscribe_ms: f64,
+    refresh_export_ms: f64,
+    refresh_bundle_bytes: usize,
+    refresh_history_rows: usize,
+    refresh_apply_ms: f64,
+    subscription_poll_ms: f64,
+    subscription_added: usize,
+    subscription_updated: usize,
+    subscription_removed: usize,
+    visible_rows_after_refresh: usize,
+    core_database_bytes: i64,
+    tab_database_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -1476,6 +1501,78 @@ fn run_dashboard_query_scaling_repeat(
     })
 }
 
+fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscriptionProbe> {
+    let node_count = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_NODES", 2_000);
+    let branch_factor = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_BRANCH_FACTOR", 5).max(1);
+    let dir = tempdir()?;
+    let schema = folder_tree_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema)?;
+
+    let seed_started = Instant::now();
+    core.run_as_user(OWNER, |core| {
+        seed_folder_tree(core, node_count, branch_factor)
+    })?;
+    let seed_elapsed = seed_started.elapsed();
+
+    let export_started = Instant::now();
+    let initial_bundle = core.run_as_user(OWNER, |core| {
+        core.export_recursive_refs("folders", "folder-0", "parent")
+    })?;
+    let export_elapsed = export_started.elapsed();
+    let initial_summary = BundleSummary::from(&initial_bundle)?;
+    let initial_apply_elapsed = timed(|| tab.apply_bundle(&initial_bundle))?;
+
+    let subscribe_started = Instant::now();
+    let mut subscription = tab.subscribe_observed_query(&tab.observed_query_reads()?[0])?;
+    let subscribe_elapsed = subscribe_started.elapsed();
+
+    core.run_as_user(OWNER, |core| {
+        mutate_folder_tree(core, node_count, branch_factor)
+    })?;
+    let refresh_started = Instant::now();
+    let refresh_bundles = core.run_as_user(OWNER, |core| {
+        core.export_query_read_refreshes(&tab.observed_query_reads()?)
+    })?;
+    let refresh_elapsed = refresh_started.elapsed();
+    let refresh_merged = merge_bundles(&refresh_bundles)?;
+    let refresh_summary = BundleSummary::from(&refresh_merged)?;
+    let refresh_apply_elapsed = timed(|| tab.apply_bundle(&refresh_merged))?;
+
+    let poll_started = Instant::now();
+    let diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
+    let poll_elapsed = poll_started.elapsed();
+    let visible_rows_after_refresh = tab
+        .read_recursive_refs("folders", "folder-0", "parent")?
+        .len();
+
+    Ok(RecursiveTreeSubscriptionProbe {
+        node_count,
+        branch_factor,
+        seed_ms: ms(seed_elapsed),
+        initial_export_ms: ms(export_elapsed),
+        initial_bundle_bytes: initial_summary.bytes,
+        initial_history_rows: initial_bundle.history.len(),
+        initial_apply_ms: ms(initial_apply_elapsed),
+        subscribe_ms: ms(subscribe_elapsed),
+        refresh_export_ms: ms(refresh_elapsed),
+        refresh_bundle_bytes: refresh_summary.bytes,
+        refresh_history_rows: refresh_merged.history.len(),
+        refresh_apply_ms: ms(refresh_apply_elapsed),
+        subscription_poll_ms: ms(poll_elapsed),
+        subscription_added: diff_counts.added,
+        subscription_updated: diff_counts.updated,
+        subscription_removed: diff_counts.removed,
+        visible_rows_after_refresh,
+        core_database_bytes: core.storage_stats()?.database_bytes,
+        tab_database_bytes: tab.storage_stats()?.database_bytes,
+    })
+}
+
 fn run_project_board_probe() -> BenchResult<ProjectBoardProbe> {
     let user_count = 50;
     let project_count = 100;
@@ -2563,6 +2660,15 @@ fn recursive_policy_schema() -> SchemaDef {
         })
 }
 
+fn folder_tree_schema() -> SchemaDef {
+    SchemaDef::new().table("folders", |table| {
+        table.text("name");
+        table.optional_ref("parent", "folders");
+        table.index("parent_name", ["parent", "name"]);
+        table.read_if_created_by_user();
+    })
+}
+
 fn project_board_schema() -> SchemaDef {
     SchemaDef::new()
         .table("orgs", |table| {
@@ -3052,6 +3158,73 @@ fn insert_new_top_recursive_documents_for_owners(
                 values,
             );
         }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn seed_folder_tree(runtime: &mut Runtime, node_count: usize, branch_factor: usize) -> Result<()> {
+    runtime.insert_row(
+        "folders",
+        "folder-0",
+        BTreeMap::from([
+            ("name".to_owned(), json!("Folder 000000")),
+            ("parent".to_owned(), json!(null)),
+        ]),
+    )?;
+    let mut tx = runtime.transaction();
+    for index in 1..node_count {
+        let parent = format!("folder-{}", (index - 1) / branch_factor);
+        tx = tx.insert_row(
+            "folders",
+            &format!("folder-{index}"),
+            BTreeMap::from([
+                ("name".to_owned(), json!(format!("Folder {index:06}"))),
+                ("parent".to_owned(), json!(parent)),
+            ]),
+        );
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn mutate_folder_tree(
+    runtime: &mut Runtime,
+    node_count: usize,
+    branch_factor: usize,
+) -> Result<()> {
+    let mut tx = runtime.transaction();
+    for index in 0..25 {
+        let id = node_count + index;
+        let parent = format!("folder-{}", index % branch_factor);
+        tx = tx.insert_row(
+            "folders",
+            &format!("folder-new-{index}"),
+            BTreeMap::from([
+                ("name".to_owned(), json!(format!("New folder {id:06}"))),
+                ("parent".to_owned(), json!(parent)),
+            ]),
+        );
+    }
+    for index in 0..25 {
+        let row_index = 1 + index;
+        tx = tx.update_row(
+            "folders",
+            &format!("folder-{row_index}"),
+            BTreeMap::from([("name".to_owned(), json!(format!("Renamed folder {index}")))]),
+        );
+    }
+    for index in 0..10 {
+        let row_index = node_count.saturating_sub(1 + index);
+        tx = tx.delete_row("folders", &format!("folder-{row_index}"));
+    }
+    for index in 0..10 {
+        let row_index = node_count.saturating_sub(11 + index);
+        tx = tx.update_row(
+            "folders",
+            &format!("folder-{row_index}"),
+            BTreeMap::from([("parent".to_owned(), json!("folder-1"))]),
+        );
     }
     tx.commit()?;
     Ok(())
