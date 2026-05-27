@@ -2,6 +2,7 @@ use crate::Result;
 use rusqlite::Connection;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 
 #[derive(Clone, Debug)]
 pub struct SchemaDef {
@@ -505,6 +506,18 @@ fn validate_policy_cycle(
 }
 
 fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
+    let current_without_rowid = !env_bool("MINI_JAZZ_SQLITE_CURRENT_WITH_ROWID");
+    let current_branch_first_pk = env_bool("MINI_JAZZ_SQLITE_CURRENT_BRANCH_FIRST_PK");
+    let current_table_suffix = if current_without_rowid {
+        " WITHOUT ROWID"
+    } else {
+        ""
+    };
+    let current_primary_key = if current_branch_first_pk {
+        "j_branch_num, row_num"
+    } else {
+        "row_num, j_branch_num"
+    };
     let user_columns = table
         .fields
         .iter()
@@ -542,8 +555,8 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
           j_updated_at INTEGER NOT NULL,
           j_created_by TEXT NOT NULL,
           j_updated_by TEXT NOT NULL,
-          PRIMARY KEY (row_num, j_branch_num)
-        );
+          PRIMARY KEY ({current_primary_key})
+        ){current_table_suffix};
         "#,
         history = history_table(&table.name),
         current = current_table(&table.name),
@@ -556,14 +569,25 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
             .map(|column| storage_column_name(column))
             .collect::<Vec<_>>()
             .join(", ");
+        let index_prefix = if env_bool("MINI_JAZZ_SQLITE_BRANCH_FIRST_INDEXES") {
+            "j_branch_num, is_deleted"
+        } else {
+            "is_deleted"
+        };
         conn.execute_batch(&format!(
-            "CREATE INDEX IF NOT EXISTS {} ON {}(is_deleted, {});",
+            "CREATE INDEX IF NOT EXISTS {} ON {}({index_prefix}, {});",
             quote_ident(&format!("{}_current_{}", table.name, index.name)),
             current_table(&table.name),
             columns
         ))?;
     }
     Ok(())
+}
+
+fn env_bool(name: &str) -> bool {
+    env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 pub(crate) fn history_table(table: &str) -> String {

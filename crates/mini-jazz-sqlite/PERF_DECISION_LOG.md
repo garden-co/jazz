@@ -601,3 +601,22 @@ still look like the best general default for now. Page-level compression is not
 available directly through SQLite here; if we want compression, it likely has to
 come from VFS/page-layer choices later rather than payload-level JSON
 compression.
+
+## 2026-05-26 23:29 PDT
+
+Added layout toggles for current tables and indexes, then compared:
+
+- default rowid current table: primary ~41.4 ms, core file ~500 KB, edge ~139
+  KB, storm apply ~74 ms, branch query ~1.37 ms, pinned query ~106 ms
+- branch-first current indexes: slightly smaller branch query (~1.21 ms) but
+  slightly worse primary and no storage win
+- current table `WITHOUT ROWID`: primary ~41.2 ms, core file ~487 KB, edge ~127
+  KB, mixed apply roughly flat, pinned query noisy/slightly worse
+- branch-first primary key + `WITHOUT ROWID` + branch-first indexes: no clear
+  win and storm apply got worse in the sample
+
+Decision: make current projection tables `WITHOUT ROWID` by default with the
+existing `(row_num, j_branch_num)` primary-key order. It saves disk for cached
+subsets without meaningful latency cost in the page workload. Keep branch-first
+current indexes and branch-first primary-key order as env experiments for now;
+they are not clearly better.
