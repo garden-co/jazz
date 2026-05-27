@@ -38,6 +38,7 @@ fn main() -> BenchResult<()> {
         apply_profile_probe: run_apply_profile_probe()?,
         branch_overlay_probe: run_branch_overlay_probe()?,
         pinned_branch_snapshot_probe: run_pinned_branch_snapshot_probe()?,
+        branch_fan_in_probe: run_branch_fan_in_probe()?,
         export_profile_probe: run_export_profile_probe()?,
         process_rss_end_bytes: process_rss_bytes(),
     };
@@ -88,6 +89,7 @@ struct BenchmarkReport {
     apply_profile_probe: ApplyProfileProbe,
     branch_overlay_probe: BranchOverlayProbe,
     pinned_branch_snapshot_probe: PinnedBranchSnapshotProbe,
+    branch_fan_in_probe: BranchFanInProbe,
     export_profile_probe: ExportProfileProbe,
     process_rss_end_bytes: Option<i64>,
 }
@@ -421,6 +423,23 @@ struct PinnedBranchSnapshotProbe {
     branch_history_rows: usize,
     branch_transaction_rows: usize,
     export_profile: QueryExportProfile,
+}
+
+#[derive(Serialize)]
+struct BranchFanInProbe {
+    total_rows: usize,
+    branch_count: usize,
+    source_count: usize,
+    page_size: usize,
+    create_source_branches_ms: f64,
+    create_fan_in_branch_ms: f64,
+    branch_query_ms: f64,
+    branch_export_ms: f64,
+    visible_rows_returned: usize,
+    bundle_bytes: usize,
+    history_rows: usize,
+    transaction_rows: usize,
+    core_database_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -1793,6 +1812,76 @@ fn run_pinned_branch_snapshot_probe() -> BenchResult<PinnedBranchSnapshotProbe> 
         branch_history_rows: branch_bundle.history.len(),
         branch_transaction_rows: branch_bundle.txs.len(),
         export_profile,
+    })
+}
+
+fn run_branch_fan_in_probe() -> BenchResult<BranchFanInProbe> {
+    let total_rows = 5_000;
+    let target_owner_rows = 500;
+    let branch_count = 100;
+    let source_count = 20;
+    let page_size = 50;
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut runtime = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema,
+    )?;
+
+    seed_documents(&mut runtime, total_rows, target_owner_rows, 100)?;
+    let source_started = Instant::now();
+    for branch_index in 0..branch_count {
+        let branch_id = format!("source-{branch_index}");
+        runtime.create_branch_from_branches(&branch_id, &["main"])?;
+        runtime.checkout_branch(&branch_id)?;
+        runtime.update_row(
+            "documents",
+            &format!("doc-{}", branch_index % target_owner_rows),
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    json!(format!("Source branch update {branch_index}")),
+                ),
+                (
+                    "updated_at".to_owned(),
+                    json!(format!("{:020}", total_rows + branch_index)),
+                ),
+            ]),
+        )?;
+    }
+    let source_elapsed = source_started.elapsed();
+    let source_ids = (0..source_count)
+        .map(|index| format!("source-{index}"))
+        .collect::<Vec<_>>();
+    let source_refs = source_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let fan_in_started = Instant::now();
+    runtime.create_branch_from_branches("fan-in", &source_refs)?;
+    runtime.checkout_branch("fan-in")?;
+    let fan_in_elapsed = fan_in_started.elapsed();
+
+    let query_started = Instant::now();
+    let rows = read_top_owner_page(&runtime, page_size)?;
+    let query_elapsed = query_started.elapsed();
+    let export_started = Instant::now();
+    let bundle = export_top_owner_page(&mut runtime, page_size)?;
+    let export_elapsed = export_started.elapsed();
+    let summary = BundleSummary::from(&bundle)?;
+
+    Ok(BranchFanInProbe {
+        total_rows,
+        branch_count,
+        source_count,
+        page_size,
+        create_source_branches_ms: ms(source_elapsed),
+        create_fan_in_branch_ms: ms(fan_in_elapsed),
+        branch_query_ms: ms(query_elapsed),
+        branch_export_ms: ms(export_elapsed),
+        visible_rows_returned: rows.len(),
+        bundle_bytes: summary.bytes,
+        history_rows: bundle.history.len(),
+        transaction_rows: bundle.txs.len(),
+        core_database_bytes: runtime.storage_stats()?.database_bytes,
     })
 }
 

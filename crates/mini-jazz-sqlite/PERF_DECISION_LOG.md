@@ -1043,3 +1043,21 @@ Project-board release sample improved:
 Learning: batching before export-time dependency/read/tx collection is a real
 win and maps to product behavior (`useCoStates`/multiple subscriptions booting
 together) better than just merging bundles after the fact.
+
+## 2026-05-27 01:03 PDT
+
+Added a branch fan-in perf probe: seed 5k rows, create 100 source branches with
+sparse one-row overlays, then create a fan-in branch over 20 sources and run a
+50-row top-page query/export from that branch.
+
+Release sample:
+
+- creating 100 source branches with one update each: ~237 ms total
+- creating/checking out the 20-source fan-in branch: ~16 ms
+- fan-in branch top-page query: ~2.36 ms
+- fan-in branch export: ~5.4 ms, ~51 KB bundle, 120 history rows, 23 txs
+
+Learning: this branch shape is encouraging. Query/export over a 20-source sparse
+fan-in branch is not remotely the scary part at these cardinalities; branch
+metadata/source maintenance and larger fan-in counts are the next things to
+scale if needed.
