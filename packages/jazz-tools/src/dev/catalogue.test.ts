@@ -69,21 +69,6 @@ describe("dev catalogue API exports", () => {
 });
 
 describe("dev catalogue pending operations", () => {
-  it("pushMigration rejects because it is not implemented yet", async () => {
-    const { pushMigration } = await import("./index.js");
-
-    await expect(
-      pushMigration({
-        appId: APP_ID,
-        serverUrl: SERVER_URL,
-        adminSecret: ADMIN_SECRET,
-        migrationsDir: "/unused",
-        fromHash: "from-hash",
-        toHash: "to-hash",
-      }),
-    ).rejects.toThrow("pushMigration is not implemented yet.");
-  });
-
   it("deploy rejects because it is not implemented yet", async () => {
     const { deploy } = await import("./index.js");
 
@@ -100,6 +85,89 @@ describe("dev catalogue pending operations", () => {
 });
 
 describe("dev catalogue push behavior", () => {
+  it("pushMigration publishes a reviewed local migration file and returns a structured result", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const toHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    await writeFile(
+      join(migrationsDir, `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`),
+      `
+import { schema as s } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
+
+export default s.defineMigration({
+  migrate: {
+    users: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(fromHash.slice(0, 12))},
+  toHash: ${JSON.stringify(toHash.slice(0, 12))},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }),
+  },
+  to: {
+    users: s.table({
+      email_address: s.string(),
+    }),
+  },
+});
+`,
+    );
+
+    let migrationBody: any;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+          migrationBody = JSON.parse(String(init?.body));
+          return new Response(
+            JSON.stringify({
+              objectId: "44444444-4444-4444-4444-444444444444",
+              fromHash,
+              toHash,
+            }),
+            { status: 201 },
+          );
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    const { pushMigration } = await import("./index.js");
+    const result = await pushMigration({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      migrationsDir,
+      fromHash: fromHash.slice(0, 12),
+      toHash: toHash.slice(0, 12),
+    });
+
+    expect(result).toMatchObject({
+      fromHash,
+      toHash,
+      status: "published",
+      filePath: join(
+        migrationsDir,
+        `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`,
+      ),
+    });
+    expect(migrationBody.forward).toEqual([
+      {
+        table: "users",
+        operations: [{ type: "rename", column: "email", value: "email_address" }],
+      },
+    ]);
+  });
+
   it("pushSchema publishes the local structural schema and returns a structured result", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), schemaSource());

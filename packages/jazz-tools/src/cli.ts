@@ -3,33 +3,29 @@
 // CLI for jazz-tools schema tooling
 
 import { existsSync, readFileSync, realpathSync } from "fs";
-import { access, mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
-import { basename, dirname, join, resolve } from "path";
-import { fileURLToPath, pathToFileURL } from "url";
-import { build } from "esbuild";
+import { access, mkdir, readFile, readdir, writeFile } from "fs/promises";
+import { basename, join, resolve } from "path";
+import { fileURLToPath } from "url";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
   WasmSchema,
 } from "./drivers/types.js";
-import type { DefinedMigration } from "./migrations.js";
-import { schemaDefinitionToAst } from "./migrations.js";
-import type { Lens, SqlType } from "./schema.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "./schema-loader.js";
 import { collectMissingExplicitPolicyDiagnostics } from "./schema-permissions.js";
 import {
-  encodePublishedMigrationValue,
+  pushMigration as pushCatalogueMigration,
+  shortSchemaHash as shortCatalogueSchemaHash,
+} from "./dev/catalogue.js";
+import {
   fetchPermissionsHead,
   fetchSchemaConnectivity,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
   publishStoredSchema,
   publishStoredPermissions,
-  publishStoredMigration,
-  type PublishedTableLens,
   type StoredPermissionsHead,
 } from "./runtime/schema-fetch.js";
-import { toValue } from "./runtime/value-converter.js";
 
 export interface BuildOptions {
   jazzBin?: string;
@@ -71,24 +67,6 @@ function parseArgs(): { command: string; options: BuildOptions } {
   }
 
   return { command, options: { jazzBin, schemaDir } };
-}
-
-let importCounter = 0;
-
-async function bundleToTempFile(filePath: string): Promise<string> {
-  const sourceDir = dirname(resolve(filePath));
-  const outFile = join(sourceDir, `.jazz-bundle-${++importCounter}.mjs`);
-
-  await build({
-    entryPoints: [resolve(filePath)],
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    outfile: outFile,
-    packages: "external",
-  });
-
-  return outFile;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -928,70 +906,6 @@ function builderExpressionForColumn(column: ColumnDescriptor): string {
   return withOptional;
 }
 
-function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
-  if (typeof sqlType === "string") {
-    switch (sqlType) {
-      case "TEXT":
-        return { type: "Text" };
-      case "BOOLEAN":
-        return { type: "Boolean" };
-      case "INTEGER":
-        return { type: "Integer" };
-      case "REAL":
-        return { type: "Double" };
-      case "TIMESTAMP":
-        return { type: "Timestamp" };
-      case "UUID":
-        return { type: "Uuid" };
-      case "BYTEA":
-        return { type: "Bytea" };
-    }
-  }
-
-  if (sqlType.kind === "ENUM") {
-    return {
-      type: "Enum",
-      variants: [...sqlType.variants],
-    };
-  }
-
-  if (sqlType.kind === "JSON") {
-    return {
-      type: "Json",
-      schema: sqlType.schema,
-    };
-  }
-
-  return {
-    type: "Array",
-    element: sqlTypeToWasmColumnType(sqlType.element),
-  };
-}
-
-function serializeForwardLenses(forward: readonly Lens[]): PublishedTableLens[] {
-  return forward.map((tableLens) => ({
-    table: tableLens.table,
-    added: tableLens.added,
-    removed: tableLens.removed,
-    renamedFrom: tableLens.renamedFrom,
-    operations: tableLens.operations.map((op) => {
-      if (op.type === "rename") {
-        return op;
-      }
-
-      const columnType = sqlTypeToWasmColumnType(op.sqlType);
-      const value = encodePublishedMigrationValue(toValue(op.value, columnType));
-
-      return {
-        type: op.type,
-        column: op.column,
-        column_type: columnType,
-        value,
-      };
-    }),
-  }));
-}
-
 function renderSchemaWitness(schema: WasmSchema): string {
   const tableEntries = Object.entries(schema)
     .sort(([left], [right]) => left.localeCompare(right))
@@ -1348,90 +1262,6 @@ ${sections.join("\n")}
 `;
 }
 
-function isDefinedMigration(value: unknown): value is DefinedMigration {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate.fromHash === "string" &&
-    typeof candidate.toHash === "string" &&
-    typeof candidate.from === "object" &&
-    candidate.from !== null &&
-    typeof candidate.to === "object" &&
-    candidate.to !== null &&
-    Array.isArray(candidate.forward)
-  );
-}
-
-async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
-  const outFile = await bundleToTempFile(filePath);
-  try {
-    const loaded = (await import(pathToFileURL(outFile).href)) as {
-      default?: unknown;
-      migration?: unknown;
-    };
-    const migration = unwrapMigrationExport(loaded.default ?? loaded.migration);
-    if (!isDefinedMigration(migration)) {
-      throw new Error(
-        `Invalid migration export in ${basename(filePath)}. Export default defineMigration(...).`,
-      );
-    }
-    return migration;
-  } finally {
-    await rm(outFile, { force: true }).catch(() => undefined);
-  }
-}
-
-function unwrapMigrationExport(value: unknown): unknown {
-  let current = value;
-
-  while (
-    typeof current === "object" &&
-    current !== null &&
-    "default" in current &&
-    Object.keys(current as Record<string, unknown>).length === 1
-  ) {
-    current = (current as { default: unknown }).default;
-  }
-
-  return current;
-}
-
-async function findMigrationFile(
-  migrationsDir: string,
-  fromHash: string,
-  toHash: string,
-): Promise<string> {
-  if (!(await pathExists(migrationsDir))) {
-    throw new Error(`No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}.`);
-  }
-
-  const fromShortHash = shortSchemaHash(fromHash);
-  const toShortHash = shortSchemaHash(toHash);
-  const files = await readdir(migrationsDir);
-  const matches = files
-    .filter((file) => file.endsWith(".ts"))
-    .filter(
-      (file) =>
-        file.includes(`-${fromShortHash}-${toShortHash}.ts`) ||
-        file.includes(`-${fromHash}-${toHash}.ts`),
-    );
-
-  if (matches.length === 0) {
-    throw new Error(`No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}.`);
-  }
-
-  if (matches.length > 1) {
-    throw new Error(
-      `Multiple migration files found for ${fromHash} -> ${toHash}: ${matches.join(", ")}`,
-    );
-  }
-
-  return join(migrationsDir, matches[0]!);
-}
-
 interface ResolvedSchemaInput {
   hash: string;
   schema: WasmSchema;
@@ -1693,111 +1523,24 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
 
 export async function pushMigration(options: PushMigrationOptions): Promise<void> {
   const { appId, serverUrl, adminSecret } = requireMigrationServerOptions(options);
-  const { hashes } = await fetchSchemaHashes(serverUrl, {
+  const result = await pushCatalogueMigration({
     appId,
+    serverUrl,
     adminSecret,
+    migrationsDir: options.migrationsDir,
+    fromHash: options.fromHash,
+    toHash: options.toHash,
   });
-  const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
-  const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
-  let filePath: string | null = null;
 
-  try {
-    filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !error.message.startsWith(`No migration file found in ${options.migrationsDir}`)
-    ) {
-      throw error;
-    }
-  }
-
-  if (!filePath) {
-    const fromSchema = await resolveHistoricalSchema(
-      options.migrationsDir,
-      fromHash,
-      "fromHash",
-      appId,
-      serverUrl,
-      adminSecret,
-    );
-    const toSchema = await resolveHistoricalSchema(
-      options.migrationsDir,
-      toHash,
-      "toHash",
-      appId,
-      serverUrl,
-      adminSecret,
-    );
-
-    if (schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
-      throw new Error(
-        `No migration file found in ${options.migrationsDir} for ${fromHash} -> ${toHash}. Run \`jazz-tools migrations create ${appId} --fromHash ${shortSchemaHash(fromHash)} --toHash ${shortSchemaHash(toHash)}\` first.`,
-      );
-    }
-
-    await publishStoredMigration(serverUrl, {
-      appId,
-      adminSecret,
-      fromHash,
-      toHash,
-      forward: [],
-    });
-
+  if (result.filePath) {
     console.log(
-      `Pushed migration ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)} without a reviewed migration file because no row transformations are required.`,
+      `Pushed migration ${shortCatalogueSchemaHash(result.fromHash)} -> ${shortCatalogueSchemaHash(result.toHash)} from ${basename(result.filePath)}.`,
     );
     return;
   }
 
-  const migration = await loadDefinedMigration(filePath);
-
-  if (
-    !hashMatchesFullSchema(migration.fromHash, fromHash) ||
-    !hashMatchesFullSchema(migration.toHash, toHash)
-  ) {
-    throw new Error(
-      `Migration ${basename(filePath)} exports ${migration.fromHash} -> ${migration.toHash}, expected ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)}.`,
-    );
-  }
-
-  schemaDefinitionToAst(migration.from as any);
-  schemaDefinitionToAst(migration.to as any);
-
-  if (migration.forward.length === 0) {
-    const fromSchema = await resolveHistoricalSchema(
-      options.migrationsDir,
-      fromHash,
-      "fromHash",
-      appId,
-      serverUrl,
-      adminSecret,
-    );
-    const toSchema = await resolveHistoricalSchema(
-      options.migrationsDir,
-      toHash,
-      "toHash",
-      appId,
-      serverUrl,
-      adminSecret,
-    );
-
-    if (schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
-      throw new Error(`Migration ${basename(filePath)} has no steps. Fill in migrate before push.`);
-    }
-  }
-
-  const forward = migration.forward.length === 0 ? [] : serializeForwardLenses(migration.forward);
-  await publishStoredMigration(serverUrl, {
-    appId,
-    adminSecret,
-    fromHash,
-    toHash,
-    forward,
-  });
-
   console.log(
-    `Pushed migration ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)} from ${basename(filePath)}.`,
+    `Pushed migration ${shortCatalogueSchemaHash(result.fromHash)} -> ${shortCatalogueSchemaHash(result.toHash)} without a reviewed migration file because no row transformations are required.`,
   );
 }
 
