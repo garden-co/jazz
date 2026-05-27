@@ -665,7 +665,9 @@ impl QueryContext<'_> {
                 parent_field.name, table_name
             )));
         }
-        if self.branch_num != 1 && branch::base_global_epoch(self.conn, self.branch_num)?.is_some()
+        if std::env::var("MINI_JAZZ_SQLITE_RECURSIVE_VISIBLE_ROWS").is_ok()
+            || (self.branch_num != 1
+                && branch::base_global_epoch(self.conn, self.branch_num)?.is_some())
         {
             return self.read_recursive_refs_from_visible_rows(table_name, root_id, parent_field);
         }

@@ -1557,3 +1557,30 @@ healthy for indexed page subscriptions and durable topology refresh. Recursive
 tree subscriptions are the one severe product-shaped gap, and the raw CTE
 comparison says the issue is in Jazz's full query/materialization/export shape,
 not in SQLite recursion as a primitive.
+
+## 2026-05-27 02:06 PDT
+
+Added an experimental env switch,
+`MINI_JAZZ_SQLITE_RECURSIVE_VISIBLE_ROWS=1`, that forces recursive reads through
+the existing visible-rows + in-memory traversal fallback instead of the
+recursive SQL CTE. This is intentionally not the default yet because it scans
+all visible rows in the table, which may be bad for tiny subtrees inside huge
+tables.
+
+2k-node tree sample with the switch enabled:
+
+- direct recursive read: ~740 ms -> ~7 ms
+- initial export: ~764 ms -> ~25 ms
+- subscribe: ~758 ms -> ~7 ms
+- refresh direct read: ~765 ms -> ~7 ms
+- refresh export: ~780 ms -> ~27 ms
+- subscription poll: ~766 ms -> ~8 ms
+- apply unchanged: ~34-49 ms depending on initial vs refresh bundle
+
+Learning: this is the biggest discovery of the sprint. Recursive subscriptions
+do not require a bespoke closure table to be viable for tree-sized reads; the
+current SQL CTE shape is the problem. A table-scan + in-memory traversal is
+already dramatically faster for a 2k-row tree. The next decision is choosing a
+real strategy: improve the recursive SQL plan, use a heuristic between SQL CTE
+and visible-row traversal, or maintain a descendant/closure index for large
+tables with small subtrees.
