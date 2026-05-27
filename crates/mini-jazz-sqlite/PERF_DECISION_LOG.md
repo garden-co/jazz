@@ -1329,3 +1329,39 @@ Learning: the primary current-projection indexed page path remains stable at
 200k rows. The fixed-size dashboard probes should grow env knobs or a separate
 large-dashboard mode before we claim anything about 200k-row recursive-policy
 dashboard behavior.
+
+## 2026-05-27 01:36 PDT
+
+Added dashboard-specific env knobs:
+
+- `MINI_JAZZ_PERF_DASHBOARD_TOTAL_ROWS`
+- `MINI_JAZZ_PERF_DASHBOARD_TARGET_OWNER_ROWS`
+- `MINI_JAZZ_PERF_DASHBOARD_QUERY_COUNT`
+- `MINI_JAZZ_PERF_DASHBOARD_PAGE_SIZE`
+
+Then ran the recursive-policy dashboard probes at 200k rows / 20k target-owner
+rows.
+
+24-query full topology sample:
+
+- seed: ~5.65 s
+- initial core export: ~25.8 ms
+- initial bundle: ~231 KB, 487 history rows, 20 transactions
+- edge/worker/tab apply: ~13-14 ms each
+- refresh export: ~13.1 ms
+- refresh apply: ~12.3 ms
+- subscription poll: ~3.2 ms
+
+Scaling sample at 200k:
+
+- 1 query: refresh export ~1.1 ms, apply ~1.1 ms
+- 4 queries: refresh export ~17.1 ms, apply ~2.2 ms
+- 12 queries: refresh export ~21.3 ms, apply ~5.8 ms
+- 24 queries: refresh export ~12.5 ms, apply ~10.5 ms
+- 48 queries: refresh export ~22.7 ms, apply ~19.4 ms
+
+Learning: the 200k recursive-policy dashboard path is still usable but no longer
+"basically free". Export timing is noisy and sometimes non-monotonic, likely
+from cache shape and shared policy dependency reuse. Apply scales more
+predictably with history rows. Repeats/medians and explain plans are now worth
+adding for this probe.

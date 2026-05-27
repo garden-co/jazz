@@ -1173,10 +1173,10 @@ fn run_user_id_interning_projection_case(
 }
 
 fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe> {
-    let total_rows = 50_000;
-    let target_owner_rows = 5_000;
-    let query_count = 24;
-    let page_size = 20;
+    let total_rows = env_usize("MINI_JAZZ_PERF_DASHBOARD_TOTAL_ROWS", 50_000);
+    let target_owner_rows = env_usize("MINI_JAZZ_PERF_DASHBOARD_TARGET_OWNER_ROWS", 5_000);
+    let query_count = env_usize("MINI_JAZZ_PERF_DASHBOARD_QUERY_COUNT", 24);
+    let page_size = env_usize("MINI_JAZZ_PERF_DASHBOARD_PAGE_SIZE", 20);
     let dir = tempdir()?;
     let schema = recursive_policy_schema();
     let mut core = Runtime::open_trusted_with_schema(
@@ -1297,9 +1297,9 @@ fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe>
 }
 
 fn run_dashboard_query_scaling_probe() -> BenchResult<DashboardQueryScalingProbe> {
-    let total_rows = 50_000;
-    let target_owner_rows = 5_000;
-    let page_size = 20;
+    let total_rows = env_usize("MINI_JAZZ_PERF_DASHBOARD_TOTAL_ROWS", 50_000);
+    let target_owner_rows = env_usize("MINI_JAZZ_PERF_DASHBOARD_TARGET_OWNER_ROWS", 5_000);
+    let page_size = env_usize("MINI_JAZZ_PERF_DASHBOARD_PAGE_SIZE", 20);
     let dir = tempdir()?;
     let schema = recursive_policy_schema();
     let mut core = Runtime::open_trusted_with_schema(
