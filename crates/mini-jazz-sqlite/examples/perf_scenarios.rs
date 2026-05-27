@@ -34,6 +34,7 @@ fn main() -> BenchResult<()> {
         user_id_footprint_probe: run_user_id_footprint_probe()?,
         user_id_interning_projection_probe: run_user_id_interning_projection_probe()?,
         permissioned_dashboard_probe: run_permissioned_dashboard_probe()?,
+        dashboard_query_scaling_probe: run_dashboard_query_scaling_probe()?,
         project_board_probe: run_project_board_probe()?,
         current_projection_tradeoff_probe: run_current_projection_tradeoff_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
@@ -146,6 +147,7 @@ struct BenchmarkReport {
     user_id_footprint_probe: UserIdFootprintProbe,
     user_id_interning_projection_probe: UserIdInterningProjectionProbe,
     permissioned_dashboard_probe: PermissionedDashboardProbe,
+    dashboard_query_scaling_probe: DashboardQueryScalingProbe,
     project_board_probe: ProjectBoardProbe,
     current_projection_tradeoff_probe: CurrentProjectionTradeoffProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
@@ -329,6 +331,29 @@ struct PermissionedDashboardProbe {
     subscription_removed: usize,
     core_database_bytes: i64,
     tab_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct DashboardQueryScalingProbe {
+    total_rows: usize,
+    target_owner_rows: usize,
+    page_size: usize,
+    cases: Vec<DashboardQueryScalingCase>,
+}
+
+#[derive(Serialize)]
+struct DashboardQueryScalingCase {
+    query_count: usize,
+    initial_export_ms: f64,
+    initial_bundle_bytes: usize,
+    initial_history_rows: usize,
+    initial_transaction_rows: usize,
+    tab_apply_ms: f64,
+    refresh_export_ms: f64,
+    refresh_bundle_count: usize,
+    refresh_bundle_bytes: usize,
+    refresh_history_rows: usize,
+    refresh_apply_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -1268,6 +1293,81 @@ fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe>
         subscription_removed: total_counts.removed,
         core_database_bytes: core.storage_stats()?.database_bytes,
         tab_database_bytes: tab.storage_stats()?.database_bytes,
+    })
+}
+
+fn run_dashboard_query_scaling_probe() -> BenchResult<DashboardQueryScalingProbe> {
+    let total_rows = 50_000;
+    let target_owner_rows = 5_000;
+    let page_size = 20;
+    let dir = tempdir()?;
+    let schema = recursive_policy_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    seed_recursive_policy_graph(&mut core, total_rows, target_owner_rows, 100)?;
+
+    let mut cases = Vec::new();
+    for (case_index, query_count) in [1, 4, 12, 24, 48].into_iter().enumerate() {
+        let owners = dashboard_owner_filters(query_count);
+        let mut tab = Runtime::open_with_schema(
+            Storage::Memory,
+            &format!("scaling-tab-{query_count}"),
+            OWNER,
+            schema.clone(),
+        )?;
+
+        let initial_started = Instant::now();
+        let initial_bundle = core.run_as_user(OWNER, |core| {
+            core.export_many_query_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                owners.iter().map(|owner| json!(owner)).collect(),
+                "updated_at",
+                page_size,
+            )
+        })?;
+        let initial_elapsed = initial_started.elapsed();
+        let initial_summary = BundleSummary::from(&initial_bundle)?;
+        let tab_apply_elapsed = timed(|| tab.apply_bundle(&initial_bundle))?;
+
+        insert_new_top_recursive_documents_for_owners(
+            &mut core,
+            total_rows + case_index * 10_000,
+            &owners,
+            1,
+        )?;
+        let refresh_started = Instant::now();
+        let refresh_bundles = core.run_as_user(OWNER, |core| {
+            core.export_query_read_refreshes(&tab.observed_query_reads()?)
+        })?;
+        let refresh_elapsed = refresh_started.elapsed();
+        let refresh_summary = BundleBatchSummary::from(&refresh_bundles)?;
+        let refresh_bundle_count = refresh_bundles.len();
+        let refresh_apply_elapsed = timed_apply_bundles(&mut tab, refresh_bundles)?;
+
+        cases.push(DashboardQueryScalingCase {
+            query_count,
+            initial_export_ms: ms(initial_elapsed),
+            initial_bundle_bytes: initial_summary.bytes,
+            initial_history_rows: initial_bundle.history.len(),
+            initial_transaction_rows: initial_bundle.txs.len(),
+            tab_apply_ms: ms(tab_apply_elapsed),
+            refresh_export_ms: ms(refresh_elapsed),
+            refresh_bundle_count,
+            refresh_bundle_bytes: refresh_summary.bytes,
+            refresh_history_rows: refresh_summary.history_rows,
+            refresh_apply_ms: ms(refresh_apply_elapsed),
+        });
+    }
+
+    Ok(DashboardQueryScalingProbe {
+        total_rows,
+        target_owner_rows,
+        page_size,
+        cases,
     })
 }
 
@@ -2843,7 +2943,7 @@ fn insert_new_top_recursive_documents_for_owners(
             values.insert("owner_id".to_owned(), json!(owner));
             tx = tx.insert_row(
                 "documents",
-                &format!("recursive-dashboard-new-{owner_index}-{index}"),
+                &format!("recursive-dashboard-new-{total_rows}-{owner_index}-{index}"),
                 values,
             );
         }

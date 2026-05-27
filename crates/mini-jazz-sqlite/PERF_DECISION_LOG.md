@@ -1284,3 +1284,23 @@ Release sample for the same 50k-row / 24-query dashboard probe:
 Learning: observed query refresh must be a batched operation. Replaying each
 query descriptor independently reproduces the exact perf trap that hurt initial
 sync, just later in the reconnect/subscription lifecycle.
+
+## 2026-05-27 01:33 PDT
+
+Added a dashboard query-count scaling probe over the same recursive-policy
+schema and 50k-row core. It reuses one seeded core and measures fresh memory
+tabs subscribing to 1, 4, 12, 24, and 48 owner pages, then refreshes each tab
+after one new top row per subscribed owner.
+
+Release sample:
+
+- 1 query: initial export ~1.0 ms, refresh export ~1.0 ms, refresh apply ~1.0 ms
+- 4 queries: initial export ~4.9 ms, refresh export ~4.9 ms, refresh apply ~1.5 ms
+- 12 queries: initial export ~6.0 ms, refresh export ~6.6 ms, refresh apply ~2.7 ms
+- 24 queries: initial export ~4.8 ms, refresh export ~5.6 ms, refresh apply ~4.5 ms
+- 48 queries: initial export ~8.4 ms, refresh export ~10.4 ms, refresh apply ~8.3 ms
+
+Learning: after batching, dashboard perf scales with delivered rows/history and
+not catastrophically with the number of logical page subscriptions. The
+non-monotonic export timings suggest cache/planner noise at this size, so this
+probe should eventually gain repeats/medians.
