@@ -1836,3 +1836,17 @@ Learning: cold-cache apply was paying a huge cost to prove new rows were safe to
 project. This is a strong win for the "only core has data, client/worker cold"
 case. Warm refresh still needs separate work because existing rows cannot use
 this proof.
+
+## 2026-05-27 02:46 PDT
+
+Reran the 10k recursive full-topology probe after the cold-apply fast path.
+
+- initial edge apply: ~249 ms -> ~150 ms
+- initial worker apply: ~236 ms -> ~142 ms
+- initial tab apply: ~238 ms -> ~141 ms
+- refresh applies remain ~159-195 ms, as expected
+
+Learning: the cold-apply fast path compounds across the topology and removes
+roughly 280 ms of total initial forwarding latency for a 10k recursive scope.
+The remaining warm-refresh cost is still history/read-set work for existing row
+ids.
