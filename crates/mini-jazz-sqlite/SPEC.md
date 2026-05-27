@@ -30,3 +30,46 @@ The full spec is split across focused files.
 - [Open Areas, Strategy, And Rationale](spec/17-open-areas-strategy-rationale.md): Known undefined areas, research discipline, implementation strategy, rationale, and future revisits.
 - [Invariants To Test](spec/18-invariants.md): The exhaustive invariant catalogue for implementation and whole-system tests.
 - [Prototype Test Traceability](spec/19-prototype-test-traceability.md): Mapping from current prototype tests to invariant groups and remaining gaps.
+
+## Prototype Delta: Branch Permissions And Direct Branch Queries
+
+The mini SQLite prototype now treats branch policy as an explicit context, not
+as a fallback to normal table policy.
+
+### Design
+
+- A schema table may declare `forBranch` read/write rules against a branch
+  backing table.
+- Branch backing rows are ordinary rows whose public id equals the branch id.
+  Branch metadata still lives in `jazz_branch`; the backing row supplies policy
+  data and ordinary row visibility.
+- A branch read or write first checks that the branch backing row is readable by
+  the session under the backing table's normal read policy.
+- If a table declares any `forBranch` policy, branch reads/writes for that table
+  must use the matching branch policy. Missing branch read/write rules deny.
+- Schemas that do not declare `forBranch` policy keep the existing prototype
+  behavior: branch reads and writes use the normal table policy.
+- Branch policies may compare a row field to a backing-row field, matching the
+  product `forBranch`/`$branch` shape.
+- A branch policy may explicitly inherit the table's main read or write policy.
+  Inheritance is opt-in per operation and still requires the branch backing row
+  to be visible.
+- Direct branch query APIs evaluate a single query against an explicit branch id
+  without changing the runtime's checked-out branch.
+
+### Invariants
+
+- Normal reads never use `forBranch` policy.
+- Branch reads for a table with `forBranch` policy never fall back to normal
+  read policy.
+- Branch writes for a table with `forBranch` policy never fall back to normal
+  write policy.
+- Missing `forBranch` read/write rules deny once that table declares any
+  branch policy.
+- Explicit inherited branch rules evaluate the main table policy in the branch
+  view context.
+- Hidden or missing branch backing rows deny branch-scoped row access.
+- A branch-field policy evaluates against the backing row for the branch being
+  queried or written.
+- Direct branch queries return the same rows as checking out that branch and
+  querying, while preserving the caller's current checkout.

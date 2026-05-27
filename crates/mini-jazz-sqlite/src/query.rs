@@ -474,6 +474,8 @@ impl QueryContext<'_> {
                     None => Ok(false),
                 }
             }
+            PolicyDef::BranchFieldEquals { .. } => Ok(false),
+            PolicyDef::InheritMain => Ok(false),
         }
     }
 
@@ -887,11 +889,12 @@ impl QueryContext<'_> {
         let policy_sql = if self.bypass_policy {
             "1 = 1".to_owned()
         } else {
-            policy::snapshot_read_policy_sql_for_alias(
+            policy::branch_snapshot_read_policy_sql_for_alias(
                 self.schema,
                 table,
                 "h",
                 self.user,
+                self.branch_num,
                 base_epoch,
             )?
         };

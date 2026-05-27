@@ -2024,6 +2024,12 @@ impl Runtime {
         self.query_context().read_rows(table_name)
     }
 
+    pub fn read_rows_on_branch(&self, branch_id: &str, table_name: &str) -> Result<Vec<RowView>> {
+        let branch_num = branch::checkout(&self.conn, branch_id)?;
+        self.query_context_for_branch(branch_num)
+            .read_rows(table_name)
+    }
+
     pub fn read_rows_require_ref(
         &self,
         table_name: &str,
@@ -2073,6 +2079,18 @@ impl Runtime {
         value: JsonValue,
     ) -> Result<Vec<RowView>> {
         self.query_context()
+            .read_rows_where_eq(table_name, field_name, value)
+    }
+
+    pub fn read_rows_where_eq_on_branch(
+        &self,
+        branch_id: &str,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+    ) -> Result<Vec<RowView>> {
+        let branch_num = branch::checkout(&self.conn, branch_id)?;
+        self.query_context_for_branch(branch_num)
             .read_rows_where_eq(table_name, field_name, value)
     }
 
@@ -2707,10 +2725,14 @@ impl Runtime {
     }
 
     fn query_context(&self) -> query::QueryContext<'_> {
+        self.query_context_for_branch(self.branch_num)
+    }
+
+    fn query_context_for_branch(&self, branch_num: i64) -> query::QueryContext<'_> {
         query::QueryContext {
             conn: &self.conn,
             schema: &self.schema,
-            branch_num: self.branch_num,
+            branch_num,
             user: self.policy_user(),
             bypass_policy: self.bypasses_policy(),
         }
