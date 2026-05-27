@@ -1817,3 +1817,22 @@ Learning: statement reuse helps a little, but read-set insertion remains a
 non-trivial 33 ms for 10k rows. Meaningful improvements likely need either
 fewer read-set rows for broad query scopes or a more compact/bulk read-set
 representation, not just preparing SQL more carefully.
+
+## 2026-05-27 02:44 PDT
+
+Added a cold-apply fast path for row ids first created during the current bundle
+apply. If a history record has no current row and its public row id was created
+while applying this bundle, then there cannot be an older local current row or a
+newer local history version to protect, so we skip the per-row
+`is_newest_version_for_current` scan.
+
+10k recursive subscription:
+
+- initial apply total: ~240 ms before, ~145 ms after
+- initial history/current projection: ~203-209 ms before, ~109 ms after
+- refresh apply stayed ~160 ms because those row ids already exist locally
+
+Learning: cold-cache apply was paying a huge cost to prove new rows were safe to
+project. This is a strong win for the "only core has data, client/worker cold"
+case. Warm refresh still needs separate work because existing rows cannot use
+this proof.

@@ -645,6 +645,7 @@ impl Runtime {
 
         let reads_started = Instant::now();
         let mut row_nums_by_id = BTreeMap::new();
+        let mut row_nums_created_in_apply = BTreeSet::new();
         let mut user_nums_by_id = BTreeMap::new();
         let mut insert_read_stmt = db.prepare_cached(
             "INSERT OR REPLACE INTO jazz_tx_read
@@ -656,9 +657,10 @@ impl Runtime {
                 .get(&read_record.tx_id)
                 .copied()
                 .ok_or_else(|| crate::Error::new("bundle read references missing tx"))?;
-            let row_num = cached_ensure_row_id(
+            let row_num = cached_ensure_row_id_with_status(
                 &db,
                 &mut row_nums_by_id,
+                &mut row_nums_created_in_apply,
                 &read_record.table,
                 &read_record.row_id,
             )?;
@@ -724,6 +726,7 @@ impl Runtime {
             branch_nums_by_id: &branch_nums_by_id,
             table_nums_by_name: &table_nums_by_name,
             row_nums_by_id: &mut row_nums_by_id,
+            row_nums_created_in_apply: &mut row_nums_created_in_apply,
             user_nums_by_id: &mut user_nums_by_id,
         };
         for record in &bundle.history {
@@ -1611,9 +1614,10 @@ impl Runtime {
         record: &HistoryRecord,
     ) -> Result<()> {
         let table = context.schema.table_def(&record.table)?;
-        let row_num = cached_ensure_row_id(
+        let row_num = cached_ensure_row_id_with_status(
             context.db,
             context.row_nums_by_id,
+            context.row_nums_created_in_apply,
             &record.table,
             &record.row_id,
         )?;
@@ -1723,13 +1727,15 @@ impl Runtime {
                 )? {
                     return Ok(());
                 }
-            } else if !is_newest_version_for_current(
-                context.db,
-                &record.table,
-                row_num,
-                branch_num,
-                tx_num,
-            )? {
+            } else if !context.row_nums_created_in_apply.contains(&row_num)
+                && !is_newest_version_for_current(
+                    context.db,
+                    &record.table,
+                    row_num,
+                    branch_num,
+                    tx_num,
+                )?
+            {
                 return Ok(());
             }
         }
@@ -4853,6 +4859,7 @@ struct ApplyHistoryContext<'a> {
     branch_nums_by_id: &'a BTreeMap<String, i64>,
     table_nums_by_name: &'a BTreeMap<String, i64>,
     row_nums_by_id: &'a mut BTreeMap<(String, String), i64>,
+    row_nums_created_in_apply: &'a mut BTreeSet<i64>,
     user_nums_by_id: &'a mut BTreeMap<String, i64>,
 }
 
@@ -6569,6 +6576,25 @@ fn cached_ensure_row_id(
         return Ok(*row_num);
     }
     let row_num = ensure_row_id(conn, table, row_id)?;
+    cache.insert(key, row_num);
+    Ok(row_num)
+}
+
+fn cached_ensure_row_id_with_status(
+    conn: &Connection,
+    cache: &mut BTreeMap<(String, String), i64>,
+    created_in_apply: &mut BTreeSet<i64>,
+    table: &str,
+    row_id: &str,
+) -> Result<i64> {
+    let key = (table.to_owned(), row_id.to_owned());
+    if let Some(row_num) = cache.get(&key) {
+        return Ok(*row_num);
+    }
+    let (row_num, created) = ensure_row_id_with_status(conn, row_id)?;
+    if created {
+        created_in_apply.insert(row_num);
+    }
     cache.insert(key, row_num);
     Ok(row_num)
 }
