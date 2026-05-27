@@ -1158,3 +1158,24 @@ catalog overhead is now secondary. Further large storage wins require either
 compressing/co-locating SQLite pages below SQLite, changing projection strategy,
 or reducing duplicated app/system columns in current/history, not shaving small
 system tables.
+
+## 2026-05-27 01:14 PDT
+
+Added a raw SQLite current-projection tradeoff probe. It compares a simplified
+`docs_history + docs_current` layout against history-only latest-row querying for
+100k rows plus 10k updates.
+
+Release sample:
+
+- current projection: ~23.7 MB, seed/build ~419 ms, top page query ~0.062 ms
+- history-only: ~13.2 MB, seed ~264 ms, latest top page query ~0.078 ms
+- storage saved without current: ~10.5 MB
+- simple query slowdown: only ~1.26x in this narrow shape
+
+Learning: this is more nuanced than expected. For a simple indexed current-page
+query with only one update wave, history-only can be quite fast and saves a lot
+of space. This does not invalidate the main-branch current projection yet,
+because the real runtime also needs policy filtering, rejected/pending fate,
+branch overlays, repair/export, and arbitrary update depth. But it makes a
+hybrid strategy worth exploring: current projection for hot/main tables or hot
+queries, history-only for cold tables/snapshots, or lazily maintained projections.

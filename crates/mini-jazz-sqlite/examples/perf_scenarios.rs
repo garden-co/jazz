@@ -35,6 +35,7 @@ fn main() -> BenchResult<()> {
         user_id_interning_projection_probe: run_user_id_interning_projection_probe()?,
         permissioned_dashboard_probe: run_permissioned_dashboard_probe()?,
         project_board_probe: run_project_board_probe()?,
+        current_projection_tradeoff_probe: run_current_projection_tradeoff_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
         wide_schema_apply_probe: run_wide_schema_apply_probe()?,
         storage_topology_probe: run_storage_topology_probe()?,
@@ -146,6 +147,7 @@ struct BenchmarkReport {
     user_id_interning_projection_probe: UserIdInterningProjectionProbe,
     permissioned_dashboard_probe: PermissionedDashboardProbe,
     project_board_probe: ProjectBoardProbe,
+    current_projection_tradeoff_probe: CurrentProjectionTradeoffProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
     wide_schema_apply_probe: WideSchemaApplyProbe,
     storage_topology_probe: StorageTopologyProbe,
@@ -347,6 +349,24 @@ struct ProjectBoardProbe {
     visible_rows_returned: usize,
     core_database_bytes: i64,
     tab_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct CurrentProjectionTradeoffProbe {
+    current_projection: CurrentProjectionTradeoffCase,
+    history_only: CurrentProjectionTradeoffCase,
+    saved_bytes_without_current: i64,
+    history_only_query_slowdown: f64,
+}
+
+#[derive(Serialize)]
+struct CurrentProjectionTradeoffCase {
+    row_count: usize,
+    update_count: usize,
+    database_bytes: i64,
+    seed_ms: f64,
+    query_ms: f64,
+    rows_returned: usize,
 }
 
 #[derive(Serialize)]
@@ -1315,6 +1335,151 @@ fn run_project_board_probe() -> BenchResult<ProjectBoardProbe> {
         visible_rows_returned: visible_rows,
         core_database_bytes: core.storage_stats()?.database_bytes,
         tab_database_bytes: tab.storage_stats()?.database_bytes,
+    })
+}
+
+fn run_current_projection_tradeoff_probe() -> BenchResult<CurrentProjectionTradeoffProbe> {
+    let row_count = 100_000;
+    let update_count = 10_000;
+    let current_projection = run_current_projection_tradeoff_case(row_count, update_count, true)?;
+    let history_only = run_current_projection_tradeoff_case(row_count, update_count, false)?;
+    Ok(CurrentProjectionTradeoffProbe {
+        saved_bytes_without_current: current_projection.database_bytes
+            - history_only.database_bytes,
+        history_only_query_slowdown: history_only.query_ms / current_projection.query_ms.max(0.001),
+        current_projection,
+        history_only,
+    })
+}
+
+fn run_current_projection_tradeoff_case(
+    row_count: usize,
+    update_count: usize,
+    with_current: bool,
+) -> BenchResult<CurrentProjectionTradeoffCase> {
+    let dir = tempdir()?;
+    let path = dir.path().join(if with_current {
+        "current.sqlite"
+    } else {
+        "history-only.sqlite"
+    });
+    let mut conn = Connection::open(path)?;
+    conn.pragma_update(None, "journal_mode", "OFF")?;
+    conn.pragma_update(None, "synchronous", "OFF")?;
+    conn.execute_batch(
+        "CREATE TABLE docs_history (
+           row_num INTEGER NOT NULL,
+           tx_num INTEGER NOT NULL,
+           owner_id TEXT NOT NULL,
+           updated_at TEXT NOT NULL,
+           title TEXT NOT NULL,
+           PRIMARY KEY (row_num, tx_num)
+         ) WITHOUT ROWID;
+         CREATE INDEX docs_history_owner_updated
+           ON docs_history(owner_id, updated_at DESC, row_num, tx_num);
+         CREATE INDEX docs_history_latest
+           ON docs_history(row_num, tx_num DESC);",
+    )?;
+    if with_current {
+        conn.execute_batch(
+            "CREATE TABLE docs_current (
+               row_num INTEGER PRIMARY KEY,
+               tx_num INTEGER NOT NULL,
+               owner_id TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               title TEXT NOT NULL
+             );
+             CREATE INDEX docs_current_owner_updated
+               ON docs_current(owner_id, updated_at DESC, row_num);",
+        )?;
+    }
+
+    let seed_started = Instant::now();
+    let tx = conn.transaction()?;
+    {
+        let mut insert_history = tx.prepare(
+            "INSERT INTO docs_history (row_num, tx_num, owner_id, updated_at, title)
+             VALUES (?, ?, ?, ?, ?)",
+        )?;
+        for row_index in 0..row_count {
+            insert_history.execute(params![
+                row_index as i64 + 1,
+                1_i64,
+                if row_index < row_count / 10 {
+                    OWNER.to_owned()
+                } else {
+                    format!("user-{}", row_index % 10_000)
+                },
+                format!("{row_index:020}"),
+                format!("Document {row_index}")
+            ])?;
+        }
+        for row_index in 0..update_count {
+            insert_history.execute(params![
+                row_index as i64 + 1,
+                2_i64,
+                OWNER,
+                format!("{:020}", row_count + row_index),
+                format!("Updated document {row_index}")
+            ])?;
+        }
+    }
+    if with_current {
+        tx.execute(
+            "INSERT INTO docs_current (row_num, tx_num, owner_id, updated_at, title)
+             SELECT row_num, tx_num, owner_id, updated_at, title
+             FROM docs_history h
+             WHERE NOT EXISTS (
+               SELECT 1 FROM docs_history newer
+               WHERE newer.row_num = h.row_num
+                 AND newer.tx_num > h.tx_num
+             )",
+            [],
+        )?;
+    }
+    tx.commit()?;
+    let seed_elapsed = seed_started.elapsed();
+
+    let query_started = Instant::now();
+    let rows = if with_current {
+        let mut stmt = conn.prepare(
+            "SELECT row_num
+             FROM docs_current
+             WHERE owner_id = ?
+             ORDER BY updated_at DESC, row_num
+             LIMIT 50",
+        )?;
+        let rows = stmt
+            .query_map(params![OWNER], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT h.row_num
+             FROM docs_history h
+             WHERE h.owner_id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM docs_history newer
+                 WHERE newer.row_num = h.row_num
+                   AND newer.tx_num > h.tx_num
+               )
+             ORDER BY h.updated_at DESC, h.row_num
+             LIMIT 50",
+        )?;
+        let rows = stmt
+            .query_map(params![OWNER], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let query_elapsed = query_started.elapsed();
+
+    Ok(CurrentProjectionTradeoffCase {
+        row_count,
+        update_count,
+        database_bytes: sqlite_database_bytes(&conn)?,
+        seed_ms: ms(seed_elapsed),
+        query_ms: ms(query_elapsed),
+        rows_returned: rows.len(),
     })
 }
 
