@@ -1873,3 +1873,18 @@ Learning: this is the warm-refresh counterpart to the cold-apply fast path.
 Because broad recursive refresh bundles currently resend mostly already-known
 history, idempotent apply must be cheap. The next remaining warm-refresh apply
 cost is read-set insertion for the repeated 10k-row scope.
+
+## 2026-05-27 02:52 PDT
+
+Tried changing `jazz_tx_read` / `jazz_tx_write` inserts from
+`INSERT OR REPLACE` to `INSERT OR IGNORE`, based on the idea that transaction
+read/write sets are immutable.
+
+10k recursive subscription:
+
+- refresh read-set writes stayed ~32 ms
+- refresh total apply was noise-worse (~42 ms -> ~48 ms)
+
+Decision: reverted the code change. Even if the immutability assumption is
+mostly right, the measured benefit is not there. The read-set cost probably
+comes from index probes and per-row SQLite calls rather than replace churn.
