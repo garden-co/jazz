@@ -213,3 +213,12 @@ shape is exported, but warm edge/worker export is only about 3.6 ms versus
 core-cold export around 86 ms. This is an important product-shaped result: once
 an intermediate has the scoped page and policy dependencies, downstream cold
 starts are dominated by apply, not query/export.
+
+## 2026-05-26 21:54 PDT
+
+Bathed tx receipt lookup in `export_txs_by_ids` so scoped tx metadata export no
+longer runs a receipt query per tx. For the current page benchmark this did not
+move the main numbers: cold export is still about 87 ms and refresh export about
+98 ms. That makes sense because these scoped bundles only include 2-3 tx records.
+Keep the change because it removes an obvious N+1 shape for larger scoped tx
+sets, but the current bottleneck is elsewhere.

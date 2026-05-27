@@ -4336,6 +4336,26 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
         return Ok(Vec::new());
     }
     let tx_ids = tx_ids.into_iter().collect::<Vec<_>>();
+    let mut receipt_stmt = conn.prepare(&format!(
+        "SELECT tx.tx_id, receipt.tier
+         FROM jazz_tx tx
+         JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
+         WHERE tx.tx_id IN ({placeholders})
+         ORDER BY tx.tx_num, receipt.tier",
+        placeholders = (0..tx_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))?;
+    let receipt_rows = receipt_stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut receipt_tiers_by_tx = BTreeMap::<String, Vec<i64>>::new();
+    for receipt_row in receipt_rows {
+        let (tx_id, tier) = receipt_row?;
+        receipt_tiers_by_tx.entry(tx_id).or_default().push(tier);
+    }
+
     let mut stmt = conn.prepare(&format!(
         "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
          FROM jazz_tx tx
@@ -4350,16 +4370,7 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
     ))?;
     let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
         let tx_id = row.get::<_, String>(0)?;
-        let mut receipt_stmt = conn.prepare(
-            "SELECT receipt.tier
-             FROM jazz_tx_receipt receipt
-             JOIN jazz_tx tx ON tx.tx_num = receipt.tx_num
-             WHERE tx.tx_id = ?
-             ORDER BY receipt.tier",
-        )?;
-        let receipt_tiers = receipt_stmt
-            .query_map(params![tx_id], |row| row.get::<_, i64>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let receipt_tiers = receipt_tiers_by_tx.get(&tx_id).cloned().unwrap_or_default();
         Ok(TxRecord {
             tx_id,
             node_id: row.get(1)?,
