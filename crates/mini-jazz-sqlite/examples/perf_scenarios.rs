@@ -4,7 +4,7 @@ use mini_jazz_sqlite::{
     Storage,
 };
 use rusqlite::{params, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::env;
@@ -20,6 +20,11 @@ type BenchResult<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn main() -> BenchResult<()> {
     let config = Config::from_env();
+    if let Ok(kind) = env::var("MINI_JAZZ_PERF_ONLY_DEEP_HISTORY") {
+        let report = run_deep_history_probe(&kind)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     if let Some(repeat) = env_optional_usize("MINI_JAZZ_PERF_REPEAT_PRIMARY") {
         let report = run_primary_repeat(&config, repeat.max(1))?;
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -185,6 +190,49 @@ struct BenchmarkReport {
     branch_fan_in_probe: BranchFanInProbe,
     export_profile_probe: ExportProfileProbe,
     process_rss_end_bytes: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "scenario")]
+enum DeepHistoryReport {
+    AppendStream(DeepHistoryCaseReport),
+    AutomergePaper(DeepHistoryCaseReport),
+    CanvasPositions(DeepHistoryCaseReport),
+}
+
+#[derive(Serialize)]
+struct DeepHistoryCaseReport {
+    target_updates: usize,
+    completed_updates: usize,
+    stopped_early: bool,
+    stop_reason: Option<String>,
+    elapsed_write_ms: f64,
+    average_write_ms: f64,
+    live_receive_sample_count: usize,
+    live_receive_average_ms: Option<f64>,
+    live_receive_p50_ms: Option<f64>,
+    live_receive_p95_ms: Option<f64>,
+    live_receive_p99_ms: Option<f64>,
+    live_receive_last_ms: Option<f64>,
+    cold_load_ms: f64,
+    current_read_ms: f64,
+    final_payload_bytes: usize,
+    extrapolated_final_payload_bytes_for_target: Option<usize>,
+    reference_gzip_bytes: Option<usize>,
+    bundle_bytes: usize,
+    database_bytes: i64,
+    total_file_bytes: i64,
+    history_rows: i64,
+    current_rows: i64,
+    database_to_final_payload_ratio: Option<f64>,
+    total_file_to_final_payload_ratio: Option<f64>,
+    database_to_extrapolated_final_payload_ratio: Option<f64>,
+    total_file_to_extrapolated_final_payload_ratio: Option<f64>,
+    database_to_reference_gzip_ratio: Option<f64>,
+    bundle_to_reference_gzip_ratio: Option<f64>,
+    extrapolated_write_ms_for_target: Option<f64>,
+    extrapolated_database_bytes_for_target: Option<i64>,
+    notes: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -4033,6 +4081,429 @@ fn timed_apply_bundles(runtime: &mut Runtime, bundles: Vec<Bundle>) -> Result<Du
         }
         Ok(())
     })
+}
+
+fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
+    match kind {
+        "append" | "append-stream" => Ok(DeepHistoryReport::AppendStream(run_append_stream_probe()?)),
+        "automerge" | "automerge-paper" => {
+            Ok(DeepHistoryReport::AutomergePaper(run_automerge_paper_probe()?))
+        }
+        "canvas" | "canvas-positions" => {
+            Ok(DeepHistoryReport::CanvasPositions(run_canvas_positions_probe()?))
+        }
+        other => Err(format!(
+            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected append, automerge-paper, or canvas"
+        )
+        .into()),
+    }
+}
+
+fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
+    let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 100_000);
+    let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
+    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
+    let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
+    let mut state = String::new();
+    run_naive_deep_history_case(DeepHistoryCaseInput {
+        target_updates,
+        max_seconds,
+        sample_every,
+        schema: text_document_schema(),
+        table: "documents",
+        row_id: "stream",
+        field: "body",
+        initial_value: String::new(),
+        reference_gzip_bytes: None,
+        next_value: Box::new(move |_| {
+            state.push_str(&token);
+            Ok(state.clone())
+        }),
+        final_reference_json: None,
+        compare_to_final_payload: true,
+        notes: vec!["Naive baseline: one full-row text update per token-like append.".to_owned()],
+    })
+}
+
+fn run_automerge_paper_probe() -> BenchResult<DeepHistoryCaseReport> {
+    let trace_path = automerge_trace_path()?;
+    let trace_bytes = std::fs::metadata(&trace_path)?.len() as usize;
+    let trace_json = gzip_decode_to_string(&trace_path)?;
+    let trace: AutomergeTrace = serde_json::from_str(&trace_json)?;
+    let target_updates = env_optional_usize("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_UPDATES")
+        .unwrap_or(trace.txns.len())
+        .min(trace.txns.len());
+    let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
+    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
+    let mut state = trace.start_content;
+    let txns = trace.txns;
+    let available_txns = txns.len();
+    run_naive_deep_history_case(DeepHistoryCaseInput {
+        target_updates,
+        max_seconds,
+        sample_every,
+        schema: text_document_schema(),
+        table: "documents",
+        row_id: "automerge-paper",
+        field: "body",
+        initial_value: state.clone(),
+        reference_gzip_bytes: Some(trace_bytes),
+        next_value: Box::new(move |index| {
+            apply_automerge_patches(&mut state, &txns[index].patches)?;
+            Ok(state.clone())
+        }),
+        final_reference_json: None,
+        compare_to_final_payload: true,
+        notes: vec![
+            format!("Source trace transactions available: {available_txns}"),
+            "Naive baseline: apply trace patch locally, then write whole document body.".to_owned(),
+        ],
+    })
+}
+
+fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
+    let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES", 60 * 60 * 60);
+    let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
+    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
+    let mut all_positions = Vec::with_capacity(target_updates);
+    for frame in 0..target_updates {
+        all_positions.push(canvas_position_json(frame));
+    }
+    let reference_json = serde_json::to_string(&all_positions)?;
+    let reference_gzip_bytes = Some(gzip_bytes(reference_json.as_bytes())?);
+    run_naive_deep_history_case(DeepHistoryCaseInput {
+        target_updates,
+        max_seconds,
+        sample_every,
+        schema: text_document_schema(),
+        table: "documents",
+        row_id: "canvas-object",
+        field: "body",
+        initial_value: canvas_position_json(0),
+        reference_gzip_bytes,
+        next_value: Box::new(move |index| Ok(all_positions[index].clone())),
+        final_reference_json: Some(reference_json),
+        compare_to_final_payload: false,
+        notes: vec![
+            "Naive baseline: one full-row position JSON text update per 60 FPS frame.".to_owned(),
+            "Final-payload ratios are not meaningful for presence-like coordinates and are emitted as null.".to_owned(),
+        ],
+    })
+}
+
+struct DeepHistoryCaseInput {
+    target_updates: usize,
+    max_seconds: u64,
+    sample_every: usize,
+    schema: SchemaDef,
+    table: &'static str,
+    row_id: &'static str,
+    field: &'static str,
+    initial_value: String,
+    reference_gzip_bytes: Option<usize>,
+    next_value: Box<dyn FnMut(usize) -> BenchResult<String>>,
+    final_reference_json: Option<String>,
+    compare_to_final_payload: bool,
+    notes: Vec<String>,
+}
+
+fn run_naive_deep_history_case(
+    mut input: DeepHistoryCaseInput,
+) -> BenchResult<DeepHistoryCaseReport> {
+    let tmp = tempdir()?;
+    let db_path = tmp.path().join("writer.sqlite");
+    let mut writer = Runtime::open_with_schema(
+        Storage::File(db_path),
+        "writer-node",
+        "alice",
+        input.schema.clone(),
+    )?;
+    let mut receiver = Runtime::open_with_schema(
+        Storage::Memory,
+        "receiver-node",
+        "bob",
+        input.schema.clone(),
+    )?;
+    writer.insert_row(
+        input.table,
+        input.row_id,
+        map1(input.field, json!(input.initial_value)),
+    )?;
+    receiver.apply_bundle(&writer.export_table_history(input.table)?)?;
+    let mut subscription = receiver.subscribe_rows(input.table)?;
+
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(input.max_seconds);
+    let mut receive_samples = Vec::new();
+    let mut completed_updates = 0;
+    let mut last_value = String::new();
+    let mut stopped_early = false;
+    let mut stop_reason = None;
+
+    for index in 0..input.target_updates {
+        if Instant::now() >= deadline {
+            stopped_early = true;
+            stop_reason = Some(format!("stopped after {} seconds", input.max_seconds));
+            break;
+        }
+        let value = (input.next_value)(index)?;
+        last_value = value.clone();
+        writer.update_row(input.table, input.row_id, map1(input.field, json!(value)))?;
+        completed_updates += 1;
+
+        if index == 0 || (index + 1) % input.sample_every == 0 || index + 1 == input.target_updates
+        {
+            let receive_started = Instant::now();
+            let bundle = writer.export_table_history(input.table)?;
+            receiver.profile_apply_bundle(&bundle)?;
+            let diffs = receiver.poll_subscription(&mut subscription)?;
+            if diffs.is_empty() {
+                return Err("live listener did not observe sampled edit".into());
+            }
+            receive_samples.push(ms(receive_started.elapsed()));
+        }
+    }
+
+    let elapsed_write_ms = ms(started.elapsed());
+    let bundle = writer.export_table_history(input.table)?;
+    let bundle_summary = BundleSummary::from(&bundle)?;
+    let cold_schema = input.schema.clone();
+    let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", cold_schema)?;
+    let cold_started = Instant::now();
+    cold.profile_apply_bundle(&bundle)?;
+    let cold_rows = cold.read_rows(input.table)?;
+    let cold_load_ms = ms(cold_started.elapsed());
+    if cold_rows.len() != 1 {
+        return Err(format!("expected one cold-loaded row, got {}", cold_rows.len()).into());
+    }
+    let current_started = Instant::now();
+    let rows = writer.read_rows(input.table)?;
+    let current_read_ms = ms(current_started.elapsed());
+    let final_payload = rows
+        .first()
+        .and_then(|row| row.values.get(input.field))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or(last_value);
+    let final_payload_bytes = final_payload.len();
+    let stats = writer.storage_stats()?;
+    let extrapolated_final_payload_bytes_for_target =
+        if input.compare_to_final_payload && stopped_early && completed_updates > 0 {
+            Some(
+                (final_payload_bytes as f64 * input.target_updates as f64
+                    / completed_updates as f64)
+                    .round() as usize,
+            )
+        } else if input.compare_to_final_payload {
+            Some(final_payload_bytes)
+        } else {
+            None
+        };
+    let extrapolated_write_ms_for_target = if stopped_early && completed_updates > 0 {
+        Some(elapsed_write_ms * input.target_updates as f64 / completed_updates as f64)
+    } else {
+        None
+    };
+    let extrapolated_database_bytes_for_target = if stopped_early && completed_updates > 0 {
+        Some(
+            (stats.database_bytes as f64 * input.target_updates as f64 / completed_updates as f64)
+                as i64,
+        )
+    } else {
+        None
+    };
+    let mut notes = input.notes;
+    if let Some(reference_json) = input.final_reference_json {
+        notes.push(format!(
+            "Reference uncompressed JSON bytes: {}",
+            reference_json.len()
+        ));
+    }
+
+    Ok(DeepHistoryCaseReport {
+        target_updates: input.target_updates,
+        completed_updates,
+        stopped_early,
+        stop_reason,
+        elapsed_write_ms,
+        average_write_ms: if completed_updates == 0 {
+            0.0
+        } else {
+            elapsed_write_ms / completed_updates as f64
+        },
+        live_receive_sample_count: receive_samples.len(),
+        live_receive_average_ms: average(&receive_samples),
+        live_receive_p50_ms: percentile(receive_samples.clone(), 0.50),
+        live_receive_p95_ms: percentile(receive_samples.clone(), 0.95),
+        live_receive_p99_ms: percentile(receive_samples.clone(), 0.99),
+        live_receive_last_ms: receive_samples.last().copied(),
+        cold_load_ms,
+        current_read_ms,
+        final_payload_bytes,
+        extrapolated_final_payload_bytes_for_target,
+        reference_gzip_bytes: input.reference_gzip_bytes,
+        bundle_bytes: bundle_summary.bytes,
+        database_bytes: stats.database_bytes,
+        total_file_bytes: stats.total_file_bytes,
+        history_rows: stats.history_rows,
+        current_rows: stats.current_rows,
+        database_to_final_payload_ratio: if input.compare_to_final_payload {
+            ratio_i64_usize(stats.database_bytes, final_payload_bytes)
+        } else {
+            None
+        },
+        total_file_to_final_payload_ratio: if input.compare_to_final_payload {
+            ratio_i64_usize(stats.total_file_bytes, final_payload_bytes)
+        } else {
+            None
+        },
+        database_to_extrapolated_final_payload_ratio: extrapolated_final_payload_bytes_for_target
+            .and_then(|bytes| ratio_i64_usize(stats.database_bytes, bytes)),
+        total_file_to_extrapolated_final_payload_ratio: extrapolated_final_payload_bytes_for_target
+            .and_then(|bytes| ratio_i64_usize(stats.total_file_bytes, bytes)),
+        database_to_reference_gzip_ratio: input
+            .reference_gzip_bytes
+            .and_then(|bytes| ratio_i64_usize(stats.database_bytes, bytes)),
+        bundle_to_reference_gzip_ratio: input
+            .reference_gzip_bytes
+            .and_then(|bytes| ratio_usize(bundle_summary.bytes, bytes)),
+        extrapolated_write_ms_for_target,
+        extrapolated_database_bytes_for_target,
+        notes,
+    })
+}
+
+#[derive(Deserialize)]
+struct AutomergeTrace {
+    #[serde(rename = "startContent")]
+    start_content: String,
+    txns: Vec<AutomergeTxn>,
+}
+
+#[derive(Deserialize)]
+struct AutomergeTxn {
+    patches: Vec<(usize, usize, String)>,
+}
+
+fn apply_automerge_patches(
+    state: &mut String,
+    patches: &[(usize, usize, String)],
+) -> BenchResult<()> {
+    for (pos, del, ins) in patches {
+        let start = byte_index_for_char(state, *pos)?;
+        let end = byte_index_for_char(state, pos + del)?;
+        state.replace_range(start..end, ins);
+    }
+    Ok(())
+}
+
+fn byte_index_for_char(value: &str, char_index: usize) -> BenchResult<usize> {
+    if char_index == value.chars().count() {
+        return Ok(value.len());
+    }
+    value
+        .char_indices()
+        .nth(char_index)
+        .map(|(idx, _)| idx)
+        .ok_or_else(|| format!("edit position {char_index} out of bounds").into())
+}
+
+fn automerge_trace_path() -> BenchResult<std::path::PathBuf> {
+    if let Ok(path) = env::var("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_TRACE") {
+        return Ok(path.into());
+    }
+    let path = std::env::temp_dir().join("mini-jazz-automerge-paper.json.gz");
+    if path.exists() {
+        return Ok(path);
+    }
+    let status = Command::new("curl")
+        .args([
+            "-L",
+            "-sS",
+            "--fail",
+            "https://raw.githubusercontent.com/josephg/diamond-types/master/benchmark_data/automerge-paper.json.gz",
+            "-o",
+        ])
+        .arg(&path)
+        .status()?;
+    if !status.success() {
+        return Err("failed to download automerge paper trace".into());
+    }
+    Ok(path)
+}
+
+fn gzip_decode_to_string(path: &std::path::Path) -> BenchResult<String> {
+    let output = Command::new("gzip").arg("-dc").arg(path).output()?;
+    if !output.status.success() {
+        return Err(format!("gzip -dc failed for {}", path.display()).into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn gzip_bytes(input: &[u8]) -> BenchResult<usize> {
+    let mut child = Command::new("gzip")
+        .arg("-c")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    child.stdin.as_mut().unwrap().write_all(input)?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err("gzip -c failed".into());
+    }
+    Ok(output.stdout.len())
+}
+
+fn canvas_position_json(frame: usize) -> String {
+    let t = frame as f64 / 60.0;
+    let x = 500.0 + (t * 1.7).sin() * 320.0 + t * 0.05;
+    let y = 300.0 + (t * 2.3).cos() * 180.0;
+    serde_json::json!({ "x": x, "y": y }).to_string()
+}
+
+fn text_document_schema() -> SchemaDef {
+    SchemaDef::new().table("documents", |table| {
+        table.text("body");
+    })
+}
+
+fn map1(key: &str, value: serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+    let mut map = BTreeMap::new();
+    map.insert(key.to_owned(), value);
+    map
+}
+
+fn average(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
+}
+
+fn percentile(mut values: Vec<f64>, percentile: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|left, right| left.total_cmp(right));
+    let idx = ((values.len() - 1) as f64 * percentile).round() as usize;
+    values.get(idx).copied()
+}
+
+fn ratio_i64_usize(numerator: i64, denominator: usize) -> Option<f64> {
+    if denominator == 0 {
+        None
+    } else {
+        Some(numerator as f64 / denominator as f64)
+    }
+}
+
+fn ratio_usize(numerator: usize, denominator: usize) -> Option<f64> {
+    if denominator == 0 {
+        None
+    } else {
+        Some(numerator as f64 / denominator as f64)
+    }
 }
 
 fn profile_apply_bundles(
