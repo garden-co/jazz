@@ -68,6 +68,37 @@ describe("dev catalogue API exports", () => {
   });
 });
 
+describe("dev catalogue pending operations", () => {
+  it("pushMigration rejects because it is not implemented yet", async () => {
+    const { pushMigration } = await import("./index.js");
+
+    await expect(
+      pushMigration({
+        appId: APP_ID,
+        serverUrl: SERVER_URL,
+        adminSecret: ADMIN_SECRET,
+        migrationsDir: "/unused",
+        fromHash: "from-hash",
+        toHash: "to-hash",
+      }),
+    ).rejects.toThrow("pushMigration is not implemented yet.");
+  });
+
+  it("deploy rejects because it is not implemented yet", async () => {
+    const { deploy } = await import("./index.js");
+
+    await expect(
+      deploy({
+        appId: APP_ID,
+        serverUrl: SERVER_URL,
+        adminSecret: ADMIN_SECRET,
+        schemaDir: "/unused",
+        migrationsDir: "/unused",
+      }),
+    ).rejects.toThrow("deploy is not implemented yet.");
+  });
+});
+
 describe("dev catalogue push behavior", () => {
   it("pushSchema publishes the local structural schema and returns a structured result", async () => {
     const { root } = await createWorkspace();

@@ -9,10 +9,8 @@ import {
 export type CatalogueEvent =
   | { type: "schema-loaded"; schemaFile: string }
   | { type: "schema-published"; hash: string; objectId?: string }
-  | { type: "schema-skipped"; hash: string; reason: "already-stored" }
   | { type: "permissions-loaded"; permissionsFile: string }
   | { type: "permissions-published"; schemaHash: string; version?: number }
-  | { type: "permissions-skipped"; reason: "missing-permissions-file" }
   | { type: "warning"; message: string };
 
 export interface CatalogueProjectOptions {
@@ -23,19 +21,17 @@ export interface CatalogueProjectOptions {
   onEvent?: (event: CatalogueEvent) => void;
 }
 
-export interface PushSchemaOptions extends CatalogueProjectOptions {
-  skipIfStored?: boolean;
-}
+export interface PushSchemaOptions extends CatalogueProjectOptions {}
 
 export interface PushSchemaResult {
   hash: string;
   schemaFile: string;
-  status: "published" | "already-stored";
+  status: "published";
   objectId?: string;
 }
 
 export interface PushPermissionsOptions extends CatalogueProjectOptions {
-  schemaHash?: string;
+  schemaHash: string;
 }
 
 export interface PushPermissionsResult {
@@ -128,13 +124,6 @@ export async function pushPermissions(
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   emit(options, { type: "permissions-loaded", permissionsFile: compiled.permissionsFile });
 
-  const schemaHash = options.schemaHash;
-  if (!schemaHash) {
-    throw new Error(
-      "Missing schema hash. Push or resolve the structural schema before pushing permissions.",
-    );
-  }
-
   const { head: previousHead } = await fetchPermissionsHead(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
@@ -143,15 +132,19 @@ export async function pushPermissions(
   const { head } = await publishStoredPermissions(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
-    schemaHash,
+    schemaHash: options.schemaHash,
     permissions: compiled.permissions,
     expectedParentBundleObjectId: previousHead?.bundleObjectId ?? null,
   });
 
-  emit(options, { type: "permissions-published", schemaHash, version: head?.version });
+  emit(options, {
+    type: "permissions-published",
+    schemaHash: options.schemaHash,
+    version: head?.version,
+  });
 
   return {
-    schemaHash,
+    schemaHash: options.schemaHash,
     permissionsFile: compiled.permissionsFile,
     previousHead,
     head,
