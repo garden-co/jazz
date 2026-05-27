@@ -203,6 +203,7 @@ feature exists.
 - Subscription first delivery equals the corresponding one-shot query at the
   same tier.
 - Subscription updates are semantic row diffs.
+- Ordered subscriptions emit deterministic moved diffs for order-only changes.
 - Subscription diff ordering is deterministic and follows the same effective
   ordering as the corresponding query result.
 - Dependency-only changes can update parent semantic rows.

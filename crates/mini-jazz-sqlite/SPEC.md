@@ -27,6 +27,6 @@ The full spec is split across focused files.
 - [Runtime And Public Boundary](spec/14-runtime-boundary.md): Semantic system fields, runtime topology, files, errors, and wire/public boundaries.
 - [Embedded Database Lowering](spec/15-embedded-database-lowering.md): SQLite-oriented physical lowering details and indexes.
 - [Operations, Platform, And Tooling](spec/16-operations-platform-tooling.md): Security, export/backup, bindings, packaging, developer tooling, and admin workflows.
-- [Open Areas, Strategy, And Rationale](spec/17-open-areas-strategy-rationale.md): Known undefined areas, research discipline, implementation strategy, rationale, and future revisits.
+- [Open Areas, Strategy, And Rationale](spec/17-open-areas-strategy-rationale.md): Known undefined areas, research discipline, optimization recommendations, implementation strategy, rationale, and future revisits.
 - [Invariants To Test](spec/18-invariants.md): The exhaustive invariant catalogue for implementation and whole-system tests.
 - [Prototype Test Traceability](spec/19-prototype-test-traceability.md): Mapping from current prototype tests to invariant groups and remaining gaps.
