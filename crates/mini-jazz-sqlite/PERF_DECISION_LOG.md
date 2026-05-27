@@ -1179,3 +1179,18 @@ because the real runtime also needs policy filtering, rejected/pending fate,
 branch overlays, repair/export, and arbitrary update depth. But it makes a
 hybrid strategy worth exploring: current projection for hot/main tables or hot
 queries, history-only for cold tables/snapshots, or lazily maintained projections.
+
+## 2026-05-27 01:16 PDT
+
+Extended the raw current-projection tradeoff probe with a deeper history-only
+case: 20k logical rows and 100k update versions. The indexed latest-row top-page
+query still stayed fast in the raw model (~0.066 ms in the sample), while the
+100k-row shallow current-vs-history comparison remained around ~0.058 ms current
+projection vs ~0.075 ms history-only.
+
+Learning: for one very narrow query shape, a good history index can make
+history-only reads surprisingly competitive even with deeper version chains. The
+open risk shifts from "can SQLite query history fast at all?" to "can we encode
+all Jazz visibility semantics, policy dependencies, branches, rejected fates,
+and repair/export over history-only without complex plans or many bespoke
+indices?" This deserves a later focused attempt rather than an assumption.

@@ -355,6 +355,7 @@ struct ProjectBoardProbe {
 struct CurrentProjectionTradeoffProbe {
     current_projection: CurrentProjectionTradeoffCase,
     history_only: CurrentProjectionTradeoffCase,
+    deep_versions_history_only: CurrentProjectionTradeoffCase,
     saved_bytes_without_current: i64,
     history_only_query_slowdown: f64,
 }
@@ -1343,12 +1344,14 @@ fn run_current_projection_tradeoff_probe() -> BenchResult<CurrentProjectionTrade
     let update_count = 10_000;
     let current_projection = run_current_projection_tradeoff_case(row_count, update_count, true)?;
     let history_only = run_current_projection_tradeoff_case(row_count, update_count, false)?;
+    let deep_versions_history_only = run_current_projection_tradeoff_case(20_000, 100_000, false)?;
     Ok(CurrentProjectionTradeoffProbe {
         saved_bytes_without_current: current_projection.database_bytes
             - history_only.database_bytes,
         history_only_query_slowdown: history_only.query_ms / current_projection.query_ms.max(0.001),
         current_projection,
         history_only,
+        deep_versions_history_only,
     })
 }
 
@@ -1415,12 +1418,13 @@ fn run_current_projection_tradeoff_case(
             ])?;
         }
         for row_index in 0..update_count {
+            let updated_row_index = row_index % row_count;
             insert_history.execute(params![
-                row_index as i64 + 1,
-                2_i64,
+                updated_row_index as i64 + 1,
+                row_index as i64 + 2,
                 OWNER,
                 format!("{:020}", row_count + row_index),
-                format!("Updated document {row_index}")
+                format!("Updated document {updated_row_index} version {row_index}")
             ])?;
         }
     }
