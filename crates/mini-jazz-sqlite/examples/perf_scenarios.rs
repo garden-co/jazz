@@ -30,6 +30,15 @@ fn main() -> BenchResult<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
+    if env_bool("MINI_JAZZ_PERF_ONLY_RECURSIVE_TREE", false) {
+        let report = RecursiveTreeOnlyReport {
+            recursive_tree_subscription_probe: run_recursive_tree_subscription_probe()?,
+            recursive_tree_topology_probe: run_recursive_tree_topology_probe()?,
+            process_rss_end_bytes: process_rss_bytes(),
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     let process_rss_start_bytes = process_rss_bytes();
     let report = BenchmarkReport {
         process_rss_start_bytes,
@@ -385,6 +394,13 @@ struct DashboardQueryScalingRepeatReport {
     repeat: usize,
     samples: Vec<DashboardQueryScalingProbe>,
     median: DashboardQueryScalingProbe,
+}
+
+#[derive(Serialize)]
+struct RecursiveTreeOnlyReport {
+    recursive_tree_subscription_probe: RecursiveTreeSubscriptionProbe,
+    recursive_tree_topology_probe: RecursiveTreeTopologyProbe,
+    process_rss_end_bytes: Option<i64>,
 }
 
 #[derive(Serialize)]

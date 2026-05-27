@@ -2116,3 +2116,23 @@ Compared to the immediately previous default run:
 Learning: row-id preload may be useful for warm broad applies, but it does not
 change the underlying problem and the full-harness noise makes it hard to judge
 without a narrower repeated-refresh benchmark. Keep it experimental, not default.
+
+## 2026-05-27 03:19 PDT
+
+Added `MINI_JAZZ_PERF_ONLY_RECURSIVE_TREE=1` so recursive subscription/topology
+stress can be run without the rest of the benchmark harness.
+
+Focused 10k recursive-only comparison:
+
+- default initial apply ~149.4 ms; preload initial apply ~156.0 ms
+- default mutation refresh apply ~48.4 ms; preload ~41.1 ms
+- default first no-op apply ~48.0 ms; preload ~40.8 ms
+- default three repeated no-op applies ~142.9 ms; preload ~120.0 ms
+- default three repeated no-op polls ~92.8 ms; preload ~90.6 ms
+- RSS after repeated no-ops was similar: ~184.9 MiB default, ~183.4 MiB preload
+
+Learning: in the isolated recursive benchmark, row-id preload consistently helps
+warm refresh apply by about 15-17%, while still slightly hurting cold initial
+apply. That suggests a real optimization opportunity if peers can know a scope is
+warm, but it is still not a substitute for avoiding unchanged full-scope
+refreshes.
