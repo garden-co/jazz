@@ -1,6 +1,7 @@
 use mini_jazz_sqlite::sync::{merge_bundles, Bundle};
 use mini_jazz_sqlite::{
-    QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage,
+    ApplyBundleProfile, QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef,
+    Storage,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -26,6 +27,7 @@ fn main() -> BenchResult<()> {
         storage_topology_probe: run_storage_topology_probe()?,
         multi_query_refresh_probe: run_multi_query_refresh_probe()?,
         subscription_storm_probe: run_subscription_storm_probe()?,
+        apply_profile_probe: run_apply_profile_probe()?,
         branch_overlay_probe: run_branch_overlay_probe()?,
         pinned_branch_snapshot_probe: run_pinned_branch_snapshot_probe()?,
         export_profile_probe: run_export_profile_probe()?,
@@ -69,6 +71,7 @@ struct BenchmarkReport {
     storage_topology_probe: StorageTopologyProbe,
     multi_query_refresh_probe: MultiQueryRefreshProbe,
     subscription_storm_probe: SubscriptionStormProbe,
+    apply_profile_probe: ApplyProfileProbe,
     branch_overlay_probe: BranchOverlayProbe,
     pinned_branch_snapshot_probe: PinnedBranchSnapshotProbe,
     export_profile_probe: ExportProfileProbe,
@@ -271,6 +274,16 @@ struct SubscriptionStormProbe {
     total_added: usize,
     total_updated: usize,
     total_removed: usize,
+}
+
+#[derive(Serialize)]
+struct ApplyProfileProbe {
+    subscription_count: usize,
+    total_rows: usize,
+    page_size: usize,
+    inserted_per_subscription: usize,
+    bundle_bytes: usize,
+    profile: ApplyBundleProfile,
 }
 
 #[derive(Serialize)]
@@ -1034,6 +1047,60 @@ fn run_subscription_storm_probe() -> BenchResult<SubscriptionStormProbe> {
         total_added: total_counts.added,
         total_updated: total_counts.updated,
         total_removed: total_counts.removed,
+    })
+}
+
+fn run_apply_profile_probe() -> BenchResult<ApplyProfileProbe> {
+    let owner_count = 50;
+    let rows_per_owner = 200;
+    let total_rows = owner_count * rows_per_owner;
+    let subscription_count = 20;
+    let page_size = 10;
+    let inserted_per_subscription = 5;
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema.clone())?;
+
+    seed_shared_readable_owner_documents(&mut core, owner_count, rows_per_owner, 100)?;
+    let owners = (0..subscription_count)
+        .map(|index| format!("user-{index}"))
+        .collect::<Vec<_>>();
+    for owner in &owners {
+        let bundle = export_top_owner_page_for(&mut core, OWNER, owner, page_size)?;
+        tab.apply_bundle(&bundle)?;
+        tab.subscribe_rows_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!(owner),
+            "updated_at",
+            page_size,
+        )?;
+    }
+    insert_new_top_documents_for_shared_readable_owners(
+        &mut core,
+        total_rows,
+        &owners,
+        inserted_per_subscription,
+    )?;
+    let refresh_bundles = core.run_as_user(OWNER, |core| {
+        core.export_query_read_refreshes(&tab.observed_query_reads()?)
+    })?;
+    let merged_bundle = merge_bundles(&refresh_bundles)?;
+    let merged_summary = BundleSummary::from(&merged_bundle)?;
+    let profile = tab.profile_apply_bundle(&merged_bundle)?;
+
+    Ok(ApplyProfileProbe {
+        subscription_count,
+        total_rows,
+        page_size,
+        inserted_per_subscription,
+        bundle_bytes: merged_summary.bytes,
+        profile,
     })
 }
 

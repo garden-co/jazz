@@ -6,7 +6,8 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::types::{
-    BranchInfo, QueryExportProfile, RejectionInfo, RowView, StorageStats, TransactionInfo,
+    ApplyBundleProfile, BranchInfo, QueryExportProfile, RejectionInfo, RowView, StorageStats,
+    TransactionInfo,
 };
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
@@ -500,6 +501,10 @@ impl Runtime {
     }
 
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
+        self.apply_bundle_inner(bundle, true).map(|_| ())
+    }
+
+    pub fn profile_apply_bundle(&mut self, bundle: &Bundle) -> Result<ApplyBundleProfile> {
         self.apply_bundle_inner(bundle, true)
     }
 
@@ -507,7 +512,9 @@ impl Runtime {
         &mut self,
         bundle: &Bundle,
         check_policy_fingerprint: bool,
-    ) -> Result<()> {
+    ) -> Result<ApplyBundleProfile> {
+        let total_started = Instant::now();
+        let validation_started = Instant::now();
         if bundle.protocol_version != BUNDLE_PROTOCOL_VERSION {
             return Err(crate::Error::new(format!(
                 "unsupported bundle protocol version {}",
@@ -536,8 +543,13 @@ impl Runtime {
                 }
             }
         }
+        let validation_ms = duration_ms(validation_started.elapsed());
         let schema = self.schema.clone();
+        let begin_tx_started = Instant::now();
         let db = self.conn.transaction()?;
+        let begin_tx_ms = duration_ms(begin_tx_started.elapsed());
+
+        let branches_started = Instant::now();
         for branch_record in &bundle.branches {
             let branch_num = branch::ensure(
                 &db,
@@ -557,7 +569,11 @@ impl Runtime {
             let branch_num = branch::checkout(&db, &branch_record.branch_id)?;
             branch_nums_by_id.insert(branch_record.branch_id.clone(), branch_num);
         }
+        let branches_ms = duration_ms(branches_started.elapsed());
+
+        let txs_started = Instant::now();
         let mut tx_nums_by_id = BTreeMap::new();
+        let mut tx_info_by_num = BTreeMap::new();
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
             let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
@@ -587,6 +603,7 @@ impl Runtime {
             )?;
             let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
             tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
+            tx_info_by_num.insert(tx_num, tx_apply_info(&db, tx_num)?);
             if tx_record.outcome == tx::OUTCOME_REJECTED {
                 if let Some(code) = &tx_record.rejection_code {
                     let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
@@ -619,6 +636,9 @@ impl Runtime {
                 )?;
             }
         }
+        let txs_ms = duration_ms(txs_started.elapsed());
+
+        let reads_started = Instant::now();
         let mut row_nums_by_id = BTreeMap::new();
         for read_record in &bundle.reads {
             let tx_num = tx_nums_by_id
@@ -649,6 +669,9 @@ impl Runtime {
                 observed_tx_num,
             )?;
         }
+        let reads_ms = duration_ms(reads_started.elapsed());
+
+        let rejected_cleanup_started = Instant::now();
         for table_name in bundle_touched_tables(bundle) {
             schema.table_def(&table_name)?;
             db.execute(
@@ -662,26 +685,62 @@ impl Runtime {
                 params![tx::OUTCOME_REJECTED],
             )?;
         }
+        let rejected_cleanup_ms = duration_ms(rejected_cleanup_started.elapsed());
+
+        let query_reads_started = Instant::now();
         for query_read in &bundle.query_reads {
             Self::record_query_read(&db, query_read)?;
         }
+        let query_reads_ms = duration_ms(query_reads_started.elapsed());
+
+        let history_started = Instant::now();
+        let mut history_context = ApplyHistoryContext {
+            schema: &schema,
+            db: &db,
+            local_node_num: self.node_num,
+            tx_nums_by_id: &tx_nums_by_id,
+            tx_info_by_num: &tx_info_by_num,
+            branch_nums_by_id: &branch_nums_by_id,
+            row_nums_by_id: &mut row_nums_by_id,
+        };
         for record in &bundle.history {
-            Self::apply_history_record(
-                &schema,
-                &db,
-                self.node_num,
-                record,
-                &tx_nums_by_id,
-                &branch_nums_by_id,
-                &mut row_nums_by_id,
-            )?;
+            Self::apply_history_record(&mut history_context, record)?;
         }
+        let history_ms = duration_ms(history_started.elapsed());
+
+        let query_scope_repair_started = Instant::now();
         for query_read in &bundle.query_reads {
             Self::apply_query_scope_repair(&schema, &db, query_read)?;
         }
+        let query_scope_repair_ms = duration_ms(query_scope_repair_started.elapsed());
+
+        let commit_started = Instant::now();
         db.commit()?;
+        let commit_ms = duration_ms(commit_started.elapsed());
+
+        let revalidate_started = Instant::now();
         self.revalidate_awaiting_dependencies()?;
-        Ok(())
+        let revalidate_awaiting_ms = duration_ms(revalidate_started.elapsed());
+
+        Ok(ApplyBundleProfile {
+            total_ms: duration_ms(total_started.elapsed()),
+            validation_ms,
+            begin_tx_ms,
+            branches_ms,
+            txs_ms,
+            reads_ms,
+            rejected_cleanup_ms,
+            query_reads_ms,
+            history_ms,
+            query_scope_repair_ms,
+            commit_ms,
+            revalidate_awaiting_ms,
+            branch_rows: bundle.branches.len(),
+            tx_rows: bundle.txs.len(),
+            read_rows: bundle.reads.len(),
+            query_read_rows: bundle.query_reads.len(),
+            history_rows: bundle.history.len(),
+        })
     }
 
     pub fn observed_query_reads(&self) -> Result<Vec<QueryReadRecord>> {
@@ -1488,26 +1547,28 @@ impl Runtime {
     }
 
     fn apply_history_record(
-        schema: &SchemaDef,
-        db: &Connection,
-        local_node_num: i64,
+        context: &mut ApplyHistoryContext<'_>,
         record: &HistoryRecord,
-        tx_nums_by_id: &BTreeMap<String, i64>,
-        branch_nums_by_id: &BTreeMap<String, i64>,
-        row_nums_by_id: &mut BTreeMap<(String, String), i64>,
     ) -> Result<()> {
-        let table = schema.table_def(&record.table)?;
-        let row_num = cached_ensure_row_id(db, row_nums_by_id, &record.table, &record.row_id)?;
-        let tx_num = tx_nums_by_id
+        let table = context.schema.table_def(&record.table)?;
+        let row_num = cached_ensure_row_id(
+            context.db,
+            context.row_nums_by_id,
+            &record.table,
+            &record.row_id,
+        )?;
+        let tx_num = context
+            .tx_nums_by_id
             .get(&record.tx_id)
             .copied()
             .map(Ok)
-            .unwrap_or_else(|| tx::tx_num(db, &record.tx_id))?;
-        let branch_num = branch_nums_by_id
+            .unwrap_or_else(|| tx::tx_num(context.db, &record.tx_id))?;
+        let branch_num = context
+            .branch_nums_by_id
             .get(&record.branch_id)
             .copied()
             .map(Ok)
-            .unwrap_or_else(|| branch::ensure(db, &record.branch_id, None, now_ms()))?;
+            .unwrap_or_else(|| branch::ensure(context.db, &record.branch_id, None, now_ms()))?;
 
         let mut columns = vec![
             "row_num".to_owned(),
@@ -1533,7 +1594,9 @@ impl Runtime {
             values.push(crate::schema::field_sql_value(
                 field,
                 value,
-                |ref_table, row_id| cached_ensure_row_id(db, row_nums_by_id, ref_table, row_id),
+                |ref_table, row_id| {
+                    cached_ensure_row_id(context.db, context.row_nums_by_id, ref_table, row_id)
+                },
             )?);
         }
         columns.extend([
@@ -1549,29 +1612,42 @@ impl Runtime {
             rusqlite::types::Value::Text(record.updated_by.clone()),
         ]);
         insert_dynamic(
-            db,
+            context.db,
             &crate::schema::history_table(&record.table),
             &columns,
             &values,
         )?;
-        record_tx_write(db, tx_num, &record.table, row_num, record.op)?;
+        record_tx_write(context.db, tx_num, &record.table, row_num, record.op)?;
 
-        let outcome = tx_outcome(db, tx_num)?;
-        if outcome == tx::OUTCOME_PENDING && tx_conflict_mode(db, tx_num)? == tx::MODE_EXCLUSIVE {
+        let tx_info = context
+            .tx_info_by_num
+            .get(&tx_num)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| tx_apply_info(context.db, tx_num))?;
+        let outcome = tx_info.outcome;
+        if outcome == tx::OUTCOME_PENDING && tx_info.conflict_mode == tx::MODE_EXCLUSIVE {
             return Ok(());
         }
-        if tx_is_remote_pending(db, tx_num, local_node_num)?
-            && durable_version_exists_for_row(db, &record.table, row_num, branch_num)?
+        if tx_info.outcome == tx::OUTCOME_PENDING
+            && tx_info.node_num != context.local_node_num
+            && durable_version_exists_for_row(context.db, &record.table, row_num, branch_num)?
         {
             return Ok(());
         }
         if outcome != tx::OUTCOME_REJECTED
-            && !is_newest_version_for_current(db, &record.table, row_num, branch_num, tx_num)?
+            && !is_newest_version_for_current(
+                context.db,
+                &record.table,
+                row_num,
+                branch_num,
+                tx_num,
+            )?
         {
             return Ok(());
         }
         if outcome != tx::OUTCOME_REJECTED && record.op == 3 {
-            db.execute(
+            context.db.execute(
                 &format!(
                     "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
                     crate::schema::current_table(&record.table)
@@ -1594,7 +1670,7 @@ impl Runtime {
                 current_columns.extend(columns.iter().skip(4).cloned());
                 current_values.extend(values.iter().skip(4).cloned());
                 insert_dynamic(
-                    db,
+                    context.db,
                     &crate::schema::current_table(&record.table),
                     &current_columns,
                     &current_values,
@@ -1616,7 +1692,7 @@ impl Runtime {
             current_columns.extend(columns.iter().skip(4).cloned());
             current_values.extend(values.iter().skip(4).cloned());
             insert_dynamic(
-                db,
+                context.db,
                 &crate::schema::current_table(&record.table),
                 &current_columns,
                 &current_values,
@@ -4048,11 +4124,11 @@ fn record_tx_write(
     row_num: i64,
     op: i64,
 ) -> Result<()> {
-    conn.execute(
+    let mut stmt = conn.prepare_cached(
         "INSERT OR REPLACE INTO jazz_tx_write (tx_num, table_name, row_num, op)
          VALUES (?, ?, ?, ?)",
-        params![tx_num, table_name, row_num, op],
     )?;
+    stmt.execute(params![tx_num, table_name, row_num, op])?;
     Ok(())
 }
 
@@ -4397,21 +4473,43 @@ fn tx_conflict_mode(conn: &Connection, tx_num: i64) -> Result<i64> {
     )?)
 }
 
+#[derive(Clone, Copy)]
+struct ApplyTxInfo {
+    node_num: i64,
+    outcome: i64,
+    conflict_mode: i64,
+}
+
+struct ApplyHistoryContext<'a> {
+    schema: &'a SchemaDef,
+    db: &'a Connection,
+    local_node_num: i64,
+    tx_nums_by_id: &'a BTreeMap<String, i64>,
+    tx_info_by_num: &'a BTreeMap<i64, ApplyTxInfo>,
+    branch_nums_by_id: &'a BTreeMap<String, i64>,
+    row_nums_by_id: &'a mut BTreeMap<(String, String), i64>,
+}
+
+fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {
+    Ok(conn.query_row(
+        "SELECT node_num, outcome, conflict_mode FROM jazz_tx WHERE tx_num = ?",
+        params![tx_num],
+        |row| {
+            Ok(ApplyTxInfo {
+                node_num: row.get(0)?,
+                outcome: row.get(1)?,
+                conflict_mode: row.get(2)?,
+            })
+        },
+    )?)
+}
+
 fn next_global_epoch(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COALESCE(MAX(global_epoch), 0) + 1 FROM jazz_tx",
         [],
         |row| row.get(0),
     )?)
-}
-
-fn tx_is_remote_pending(conn: &Connection, tx_num: i64, local_node_num: i64) -> Result<bool> {
-    let (node_num, outcome): (i64, i64) = conn.query_row(
-        "SELECT node_num, outcome FROM jazz_tx WHERE tx_num = ?",
-        params![tx_num],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok(outcome == tx::OUTCOME_PENDING && node_num != local_node_num)
 }
 
 fn durable_version_exists_for_row(

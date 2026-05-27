@@ -79,6 +79,27 @@ pub struct QueryExportProfile {
     pub branch_rows: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ApplyBundleProfile {
+    pub total_ms: f64,
+    pub validation_ms: f64,
+    pub begin_tx_ms: f64,
+    pub branches_ms: f64,
+    pub txs_ms: f64,
+    pub reads_ms: f64,
+    pub rejected_cleanup_ms: f64,
+    pub query_reads_ms: f64,
+    pub history_ms: f64,
+    pub query_scope_repair_ms: f64,
+    pub commit_ms: f64,
+    pub revalidate_awaiting_ms: f64,
+    pub branch_rows: usize,
+    pub tx_rows: usize,
+    pub read_rows: usize,
+    pub query_read_rows: usize,
+    pub history_rows: usize,
+}
+
 impl StorageStats {
     pub(crate) fn new(
         history_rows: i64,

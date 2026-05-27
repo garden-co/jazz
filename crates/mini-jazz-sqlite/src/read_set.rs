@@ -43,12 +43,18 @@ pub(crate) fn record_tx_read_with_observed(
     reason: i64,
     observed_tx_num: Option<i64>,
 ) -> Result<()> {
-    conn.execute(
+    let mut stmt = conn.prepare_cached(
         "INSERT OR REPLACE INTO jazz_tx_read
          (tx_num, table_name, row_num, reason, observed_tx_num)
          VALUES (?, ?, ?, ?, ?)",
-        params![tx_num, table_name, row_num, reason, observed_tx_num],
     )?;
+    stmt.execute(params![
+        tx_num,
+        table_name,
+        row_num,
+        reason,
+        observed_tx_num
+    ])?;
     Ok(())
 }
 

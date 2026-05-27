@@ -541,3 +541,27 @@ lookups but not yet good enough for page-shaped branch workflows. The broad
 history payload is especially suspicious: the page result is 50 rows, but export
 pulls the whole 1000-row owner base plus policy dependencies. This makes pinned
 branch query/export the next branch-specific optimization target.
+
+## 2026-05-26 23:15 PDT
+
+Added an apply profiler and used it on the 20-subscription storm merged refresh
+bundle. Before the small optimization, the 381 KB bundle took about 78 ms to
+apply: reads were about 36.5 ms, history/current maintenance about 37.7 ms,
+query-scope repair about 1.7 ms, and commit/revalidation were effectively
+noise.
+
+Applied two conservative changes: cache prepared statements for read/write-set
+inserts, and cache each bundle transaction's node/outcome/conflict-mode metadata
+so the history loop does not re-query it for every row.
+
+Result: primary cold API-to-first-result improves from roughly 46-48 ms to about
+43 ms, mixed mutation apply from roughly 22-23 ms to about 20.5 ms, subscription
+storm apply from roughly 79 ms to about 73.6 ms. The apply profile now shows
+reads still at about 36.2 ms and history/current maintenance down to about
+32.9 ms.
+
+Learning: per-row transaction metadata was a real but modest cost. The remaining
+apply bottleneck is mostly raw read-set insertion volume plus per-history-row
+current maintenance/newest checks. The next serious apply optimization is likely
+bulk read-set insert and/or bulk current repair by touched `(table, row,
+branch)`, not more tiny statement-cache tweaks.
