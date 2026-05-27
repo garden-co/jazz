@@ -2095,3 +2095,24 @@ Learning: the unchanged-refresh issue is very visible at 10k. The transport
 payload compresses well, but the CPU and memory cost remains roughly proportional
 to full observed history scope. Avoiding unchanged full-scope work is likely the
 highest-leverage next performance topic for recursive subscriptions.
+
+## 2026-05-27 03:18 PDT
+
+Reran the 10k repeated no-op recursive probe with
+`MINI_JAZZ_SQLITE_PRELOAD_ROW_IDS=1`.
+
+Compared to the immediately previous default run:
+
+- initial apply was ~156.7 ms with preload
+- mutation refresh apply was ~39.8 ms with preload
+- first no-op refresh apply was ~38.6 ms with preload
+- three repeated no-op applies totaled ~120.2 ms with preload, versus ~142.5 ms
+  without preload
+- three repeated no-op polls were noisy/worse in this run: ~189.5 ms with preload
+  versus ~92.3 ms without preload
+- repeated no-op RSS ended ~187.1 MiB with preload versus ~194.8 MiB without
+  preload
+
+Learning: row-id preload may be useful for warm broad applies, but it does not
+change the underlying problem and the full-harness noise makes it hard to judge
+without a narrower repeated-refresh benchmark. Keep it experimental, not default.
