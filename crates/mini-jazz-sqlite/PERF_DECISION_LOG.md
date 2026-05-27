@@ -733,3 +733,18 @@ baseline (~38.1 ms total, `history_ms` ~27.8 ms, `reads_ms` ~6.6 ms).
 Decision: keep table numbers for tx read/write sets. Do not yet convert
 `jazz_row_id.table_name`; that table has different public identity semantics
 and its unique row-id index is the larger share of its footprint.
+
+## 2026-05-27 00:10 PDT
+
+Revisited SQL-side read-set filtering using real temporary scope tables instead
+of the earlier inline `VALUES` CTE. This works: the pinned branch snapshot
+export keeps the same 150 read rows but `reads_ms` drops from ~20.0 ms to ~8.8
+ms, and total profiled export drops from ~30.3 ms to ~18.7 ms.
+
+The same broad perf run showed primary first-result/refresh numbers noisier and
+slower (~51 ms / ~70 ms in that sample), so this may need a heuristic later
+rather than unconditional temp-table use for every scoped export. For now the
+code keeps the temp-table path as the default because it fixes the worst
+observed broad-transaction read-set case, keeps whole-system tests green, and
+the next step is to collect more scenario-specific numbers before deciding
+whether to gate it by scope size or broad-read detection.

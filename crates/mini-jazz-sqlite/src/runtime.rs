@@ -4895,40 +4895,51 @@ fn export_reads_for_history(
     conn: &Connection,
     history: &[HistoryRecord],
 ) -> Result<Vec<ReadRecord>> {
-    let history_keys = history
-        .iter()
-        .map(|record| {
-            (
-                record.tx_id.as_str(),
-                record.table.as_str(),
-                record.row_id.as_str(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    let mut tx_ids = history
-        .iter()
-        .map(|record| record.tx_id.clone())
-        .collect::<Vec<_>>();
-    tx_ids.sort();
-    tx_ids.dedup();
-    if tx_ids.is_empty() {
+    if history.is_empty() {
         return Ok(Vec::new());
     }
-    let mut stmt = conn.prepare(&format!(
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS jazz_export_tx_scope (
+           tx_id TEXT PRIMARY KEY
+         ) WITHOUT ROWID;
+         CREATE TEMP TABLE IF NOT EXISTS jazz_export_history_scope (
+           tx_id TEXT NOT NULL,
+           table_name TEXT NOT NULL,
+           row_id TEXT NOT NULL,
+           PRIMARY KEY (tx_id, table_name, row_id)
+         ) WITHOUT ROWID;
+         DELETE FROM jazz_export_tx_scope;
+         DELETE FROM jazz_export_history_scope;",
+    )?;
+    {
+        let mut tx_stmt =
+            conn.prepare_cached("INSERT OR IGNORE INTO jazz_export_tx_scope (tx_id) VALUES (?)")?;
+        let mut scope_stmt = conn.prepare_cached(
+            "INSERT OR IGNORE INTO jazz_export_history_scope (tx_id, table_name, row_id)
+             VALUES (?, ?, ?)",
+        )?;
+        for record in history {
+            tx_stmt.execute(params![record.tx_id])?;
+            scope_stmt.execute(params![record.tx_id, record.table, record.row_id])?;
+        }
+    }
+    let mut stmt = conn.prepare(
         "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
-         FROM jazz_tx_read reads
-         JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+         FROM jazz_export_tx_scope tx_scope
+         JOIN jazz_tx tx ON tx.tx_id = tx_scope.tx_id
+         JOIN jazz_tx_read reads ON reads.tx_num = tx.tx_num
          JOIN jazz_table tables ON tables.table_num = reads.table_num
          LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
-         WHERE tx.tx_id IN ({placeholders})
+         LEFT JOIN jazz_export_history_scope history_scope
+           ON history_scope.tx_id = tx.tx_id
+          AND history_scope.table_name = tables.table_name
+          AND history_scope.row_id = ids.row_id
+         WHERE reads.reason != ?
+            OR history_scope.tx_id IS NOT NULL
          ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
-        placeholders = (0..tx_ids.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(", "),
-    ))?;
-    let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
+    )?;
+    let records = stmt.query_map(params![read_set::REASON_ABSENT], |row| {
         Ok(ReadRecord {
             tx_id: row.get(0)?,
             table: row.get(1)?,
@@ -4937,19 +4948,9 @@ fn export_reads_for_history(
             observed_tx_id: row.get(4)?,
         })
     })?;
-    let records = records
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|record| {
-            record.reason != read_set::REASON_ABSENT
-                || history_keys.contains(&(
-                    record.tx_id.as_str(),
-                    record.table.as_str(),
-                    record.row_id.as_str(),
-                ))
-        })
-        .collect();
-    Ok(records)
+    records
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn export_branch_records_for_history(
