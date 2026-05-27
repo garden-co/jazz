@@ -699,3 +699,16 @@ indexes, use `EXPLAIN QUERY PLAN` against the exact snapshot CTEs and try a
 more targeted shape, likely involving predicate/order columns without leading
 low-selectivity `op`, or partial indexes if the embedded targets support them
 well enough.
+
+## 2026-05-26 23:56 PDT
+
+Added observability for the next layout experiments: `StorageStats` now reports
+per-object page bytes from SQLite `dbstat` when available, and the perf harness
+reports process RSS at start/end. On the small 1k-row smoke run, `dbstat` is
+available and shows object-level entries such as
+`documents__schema_v1_history`, `documents__schema_v1_current`, and
+`documents_current_owner_updated`.
+
+The RSS number is coarse process-level memory, not per-node memory, but it is
+good enough to catch large representation regressions while we run full-topology
+benchmarks.

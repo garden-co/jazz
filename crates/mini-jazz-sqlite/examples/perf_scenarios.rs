@@ -8,6 +8,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
+use std::process::Command;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
@@ -16,7 +17,9 @@ type BenchResult<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn main() -> BenchResult<()> {
     let config = Config::from_env();
+    let process_rss_start_bytes = process_rss_bytes();
     let report = BenchmarkReport {
+        process_rss_start_bytes,
         primary: run_core_only_scoped_page(&config)?,
         tx_granularity_probe: run_tx_granularity_probe()?,
         recursive_policy_probe: run_recursive_policy_probe()?,
@@ -31,6 +34,7 @@ fn main() -> BenchResult<()> {
         branch_overlay_probe: run_branch_overlay_probe()?,
         pinned_branch_snapshot_probe: run_pinned_branch_snapshot_probe()?,
         export_profile_probe: run_export_profile_probe()?,
+        process_rss_end_bytes: process_rss_bytes(),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -61,6 +65,7 @@ impl Config {
 
 #[derive(Serialize)]
 struct BenchmarkReport {
+    process_rss_start_bytes: Option<i64>,
     primary: ScenarioReport,
     tx_granularity_probe: TxGranularityProbe,
     recursive_policy_probe: RecursivePolicyProbe,
@@ -75,6 +80,7 @@ struct BenchmarkReport {
     branch_overlay_probe: BranchOverlayProbe,
     pinned_branch_snapshot_probe: PinnedBranchSnapshotProbe,
     export_profile_probe: ExportProfileProbe,
+    process_rss_end_bytes: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -94,12 +100,16 @@ struct ScenarioReport {
     core_database_to_raw_payload_ratio: f64,
     core_database_bytes: i64,
     core_total_file_bytes: i64,
+    core_table_page_bytes: BTreeMap<String, i64>,
     edge_database_bytes: i64,
     edge_total_file_bytes: i64,
+    edge_table_page_bytes: BTreeMap<String, i64>,
     worker_database_bytes: i64,
     worker_total_file_bytes: i64,
+    worker_table_page_bytes: BTreeMap<String, i64>,
     tab_database_bytes: i64,
     tab_total_file_bytes: i64,
+    tab_table_page_bytes: BTreeMap<String, i64>,
     seed_ms: f64,
     core_query_ms: f64,
     export_ms: f64,
@@ -482,12 +492,16 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
             / approx_raw_json_payload_bytes as f64,
         core_database_bytes,
         core_total_file_bytes: core_stats.total_file_bytes,
+        core_table_page_bytes: core_stats.table_page_bytes,
         edge_database_bytes: edge_stats.database_bytes,
         edge_total_file_bytes: edge_stats.total_file_bytes,
+        edge_table_page_bytes: edge_stats.table_page_bytes,
         worker_database_bytes: worker_stats.database_bytes,
         worker_total_file_bytes: worker_stats.total_file_bytes,
+        worker_table_page_bytes: worker_stats.table_page_bytes,
         tab_database_bytes: tab_stats.database_bytes,
         tab_total_file_bytes: tab_stats.total_file_bytes,
+        tab_table_page_bytes: tab_stats.table_page_bytes,
         seed_ms: ms(seed_elapsed),
         core_query_ms: ms(core_query_elapsed),
         export_ms: ms(export_elapsed),
@@ -1993,6 +2007,22 @@ fn timed_apply_bundles(runtime: &mut Runtime, bundles: Vec<Bundle>) -> Result<Du
 
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+fn process_rss_bytes() -> Option<i64> {
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let rss_kib = String::from_utf8(output.stdout)
+        .ok()?
+        .trim()
+        .parse::<i64>()
+        .ok()?;
+    Some(rss_kib * 1024)
 }
 
 fn env_usize(name: &str, default: usize) -> usize {

@@ -27,7 +27,7 @@ pub struct BranchInfo {
     pub source_branch_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StorageStats {
     pub history_rows: i64,
     pub current_rows: i64,
@@ -39,6 +39,8 @@ pub struct StorageStats {
     pub wal_file_bytes: i64,
     pub shm_file_bytes: i64,
     pub total_file_bytes: i64,
+    pub table_page_bytes: BTreeMap<String, i64>,
+    #[serde(skip)]
     tx_nums_by_id: BTreeMap<String, i64>,
 }
 
@@ -46,6 +48,12 @@ pub(crate) struct StorageFileBytes {
     pub main: i64,
     pub wal: i64,
     pub shm: i64,
+}
+
+pub(crate) struct StoragePageBytes {
+    pub count: i64,
+    pub size: i64,
+    pub object_bytes: BTreeMap<String, i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,8 +123,7 @@ impl StorageStats {
         history_rows: i64,
         current_rows: i64,
         rejected_transactions: i64,
-        page_count: i64,
-        page_size: i64,
+        page_bytes: StoragePageBytes,
         file_bytes: StorageFileBytes,
         tx_nums_by_id: BTreeMap<String, i64>,
     ) -> Self {
@@ -125,13 +132,14 @@ impl StorageStats {
             history_rows,
             current_rows,
             rejected_transactions,
-            page_count,
-            page_size,
-            database_bytes: page_count * page_size,
+            page_count: page_bytes.count,
+            page_size: page_bytes.size,
+            database_bytes: page_bytes.count * page_bytes.size,
             main_file_bytes: file_bytes.main,
             wal_file_bytes: file_bytes.wal,
             shm_file_bytes: file_bytes.shm,
             total_file_bytes,
+            table_page_bytes: page_bytes.object_bytes,
             tx_nums_by_id,
         }
     }
