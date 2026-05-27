@@ -1618,6 +1618,55 @@ fn top_field_query_read_refresh_batches_same_shape_queries() {
 }
 
 #[test]
+fn top_created_at_query_read_refresh_batches_same_shape_queries() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-open-old", "Old open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-open-new", "New open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-old", "Old done", true, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-new", "New done", true, "project-1")
+        .unwrap();
+
+    let open = alice
+        .export_query_where_eq_top_created_at_desc("todos", "done", json!(false), 1)
+        .unwrap();
+    let done = alice
+        .export_query_where_eq_top_created_at_desc("todos", "done", json!(true), 1)
+        .unwrap();
+    peer.apply_bundle(&open).unwrap();
+    peer.apply_bundle(&done).unwrap();
+    assert_eq!(peer.observed_query_reads().unwrap().len(), 2);
+
+    alice
+        .create_todo("todo-open-newest", "Newest open", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-done-newest", "Newest done", true, "project-1")
+        .unwrap();
+
+    let refreshes = alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap();
+    assert_eq!(refreshes.len(), 1);
+    peer.apply_bundle(&refreshes[0]).unwrap();
+
+    let rows = peer.read_rows("todos").unwrap();
+    assert!(rows.iter().any(|row| row.id == "todo-open-newest"));
+    assert!(rows.iter().any(|row| row.id == "todo-done-newest"));
+    assert!(!rows.iter().any(|row| row.id == "todo-open-new"));
+    assert!(!rows.iter().any(|row| row.id == "todo-done-new"));
+}
+
+#[test]
 fn missing_optional_ref_include_observed_refresh_delivers_later_dependency() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
