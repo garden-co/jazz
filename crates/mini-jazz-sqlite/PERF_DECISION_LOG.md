@@ -761,3 +761,11 @@ while the pinned broad-read case keeps most of the temp-table win (`reads_ms`
 ~9.3 ms, total export ~19.1 ms). Full whole-system tests remain green. The
 primary refresh sample was still noisy/high in one run, so more repeated
 scenario sampling is needed before calling the heuristic final.
+
+## 2026-05-27 00:13 PDT
+
+Bumped the prototype storage format from 4 to 5 after changing the physical
+layout of `jazz_tx_read` and `jazz_tx_write` from table names to table numbers.
+The storage-format tests now assert version 5 and reject future version 6. This
+keeps durable spike databases honest while we are still free to break format
+compatibility between experiments.
