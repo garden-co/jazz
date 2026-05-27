@@ -2334,3 +2334,25 @@ Learning: `temp_store=MEMORY` did not help. A larger SQLite page cache may help
 warm broad refresh apply materially, though this needs repeated isolated runs to
 separate signal from noise. This is a plausible runtime tuning knob for
 edge/worker processes, but still secondary to avoiding full-scope no-op work.
+
+## 2026-05-27 03:34 PDT
+
+Reran the focused 10k recursive-only benchmark three times each for default
+cache and `MINI_JAZZ_SQLITE_CACHE_SIZE=-64000`.
+
+Three-sample averages:
+
+- default refresh edge apply ~75.4 ms
+- cache64m refresh edge apply ~49.8 ms
+- default refresh worker apply ~47.7 ms
+- cache64m refresh worker apply ~48.0 ms
+- default three repeated no-op applies ~142.7 ms
+- cache64m three repeated no-op applies ~143.7 ms
+- default three repeated no-op polls ~91.2 ms
+- cache64m three repeated no-op polls ~91.9 ms
+
+Learning: the larger cache seems to help durable edge refresh apply, but not
+memory worker apply, repeated no-op apply, or polling. The likely interpretation
+is that cache size can reduce file-backed page churn on broad refreshes, but it
+does not address CPU work or in-memory nodes. Useful deployment knob, not a core
+design fix.
