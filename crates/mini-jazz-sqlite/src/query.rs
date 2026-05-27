@@ -474,8 +474,6 @@ impl QueryContext<'_> {
                     None => Ok(false),
                 }
             }
-            PolicyDef::BranchFieldEquals { .. } => Ok(false),
-            PolicyDef::InheritMain => Ok(false),
         }
     }
 

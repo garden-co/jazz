@@ -155,17 +155,19 @@ pub(crate) enum PolicyDef {
     RefReadable {
         field: String,
     },
-    BranchFieldEquals {
-        field: String,
-        branch_field: String,
-    },
-    InheritMain,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BranchPolicyDef {
-    pub(crate) read_policy: Option<PolicyDef>,
-    pub(crate) write_policy: Option<PolicyDef>,
+    pub(crate) read_policy: Option<BranchPolicyRule>,
+    pub(crate) write_policy: Option<BranchPolicyRule>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BranchPolicyRule {
+    AllowAll,
+    InheritMain,
+    FieldMatchesBranch { field: String, branch_field: String },
 }
 
 impl PolicyDef {
@@ -182,7 +184,16 @@ impl PolicyDef {
                     .unwrap_or(field);
                 format!("ref_readable:{storage_field}")
             }
-            PolicyDef::BranchFieldEquals {
+        }
+    }
+}
+
+impl BranchPolicyRule {
+    fn fingerprint_for_table(&self, table: &TableDef) -> String {
+        match self {
+            BranchPolicyRule::AllowAll => "allow_all".to_owned(),
+            BranchPolicyRule::InheritMain => "inherit_main".to_owned(),
+            BranchPolicyRule::FieldMatchesBranch {
                 field,
                 branch_field,
             } => {
@@ -194,7 +205,6 @@ impl PolicyDef {
                     .unwrap_or(field);
                 format!("branch_field_eq:{storage_field}:{branch_field}")
             }
-            PolicyDef::InheritMain => "inherit_main".to_owned(),
         }
     }
 }
@@ -346,10 +356,11 @@ impl TableBuilder {
         field: &str,
         branch_field: &str,
     ) {
-        self.branch_policy_mut(branch_table).read_policy = Some(PolicyDef::BranchFieldEquals {
-            field: field.to_owned(),
-            branch_field: branch_field.to_owned(),
-        });
+        self.branch_policy_mut(branch_table).read_policy =
+            Some(BranchPolicyRule::FieldMatchesBranch {
+                field: field.to_owned(),
+                branch_field: branch_field.to_owned(),
+            });
     }
 
     pub fn write_for_branch_if_field_matches(
@@ -358,26 +369,27 @@ impl TableBuilder {
         field: &str,
         branch_field: &str,
     ) {
-        self.branch_policy_mut(branch_table).write_policy = Some(PolicyDef::BranchFieldEquals {
-            field: field.to_owned(),
-            branch_field: branch_field.to_owned(),
-        });
+        self.branch_policy_mut(branch_table).write_policy =
+            Some(BranchPolicyRule::FieldMatchesBranch {
+                field: field.to_owned(),
+                branch_field: branch_field.to_owned(),
+            });
     }
 
     pub fn read_for_branch_allow_all(&mut self, branch_table: &str) {
-        self.branch_policy_mut(branch_table).read_policy = Some(PolicyDef::AllowAll);
+        self.branch_policy_mut(branch_table).read_policy = Some(BranchPolicyRule::AllowAll);
     }
 
     pub fn write_for_branch_allow_all(&mut self, branch_table: &str) {
-        self.branch_policy_mut(branch_table).write_policy = Some(PolicyDef::AllowAll);
+        self.branch_policy_mut(branch_table).write_policy = Some(BranchPolicyRule::AllowAll);
     }
 
     pub fn read_for_branch_inherit_main(&mut self, branch_table: &str) {
-        self.branch_policy_mut(branch_table).read_policy = Some(PolicyDef::InheritMain);
+        self.branch_policy_mut(branch_table).read_policy = Some(BranchPolicyRule::InheritMain);
     }
 
     pub fn write_for_branch_inherit_main(&mut self, branch_table: &str) {
-        self.branch_policy_mut(branch_table).write_policy = Some(PolicyDef::InheritMain);
+        self.branch_policy_mut(branch_table).write_policy = Some(BranchPolicyRule::InheritMain);
     }
 
     fn branch_policy_mut(&mut self, branch_table: &str) -> &mut BranchPolicyDef {
@@ -556,12 +568,10 @@ fn validate_policy_cycles(schema: &SchemaDef) -> Result<()> {
         for (branch_table_name, branch_policy) in &table.branch_policies {
             let branch_table = schema.table_def(branch_table_name)?;
             if let Some(read_policy) = &branch_policy.read_policy {
-                validate_branch_policy(schema, table, branch_table, read_policy)?;
-                validate_policy_cycle(schema, table, read_policy, &mut BTreeSet::new())?;
+                validate_branch_policy(table, branch_table, read_policy)?;
             }
             if let Some(write_policy) = &branch_policy.write_policy {
-                validate_branch_policy(schema, table, branch_table, write_policy)?;
-                validate_policy_cycle(schema, table, write_policy, &mut BTreeSet::new())?;
+                validate_branch_policy(table, branch_table, write_policy)?;
             }
         }
     }
@@ -569,12 +579,11 @@ fn validate_policy_cycles(schema: &SchemaDef) -> Result<()> {
 }
 
 fn validate_branch_policy(
-    _schema: &SchemaDef,
     table: &TableDef,
     branch_table: &TableDef,
-    policy: &PolicyDef,
+    policy: &BranchPolicyRule,
 ) -> Result<()> {
-    let PolicyDef::BranchFieldEquals {
+    let BranchPolicyRule::FieldMatchesBranch {
         field,
         branch_field,
     } = policy

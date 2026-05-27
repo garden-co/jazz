@@ -1,5 +1,7 @@
 use crate::rows::row_num;
-use crate::schema::{BranchPolicyDef, FieldDef, FieldKind, PolicyDef, SchemaDef, TableDef};
+use crate::schema::{
+    BranchPolicyDef, BranchPolicyRule, FieldDef, FieldKind, PolicyDef, SchemaDef, TableDef,
+};
 use crate::{branch, tx, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
@@ -23,33 +25,54 @@ struct BranchPolicyContext<'a> {
     branch_table: &'a str,
 }
 
+#[derive(Clone, Copy)]
+struct BranchReadSqlContext<'a> {
+    schema: &'a SchemaDef,
+    table: &'a TableDef,
+    alias: &'a str,
+    user: &'a str,
+    branch: BranchPolicyContext<'a>,
+    depth: usize,
+}
+
 pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
     if let Some((branch_table, branch_policy)) = active_branch_policy(check.table, check.branch_num)
     {
         let Some(write_policy) = branch_policy.write_policy.as_ref() else {
             return Ok(false);
         };
-        let write_policy = match write_policy {
-            PolicyDef::InheritMain => &check.table.write_policy,
-            policy => policy,
-        };
         let context = BranchPolicyContext {
             branch_num: check.branch_num,
             branch_table,
         };
-        if !branch_backing_row_is_visible(check.db, check.schema, check.user, context)? {
-            return Ok(false);
-        }
-        return write_policy_allowed(&check, write_policy, Some(context));
+        return branch_write_allowed(&check, write_policy, context);
     }
-    write_policy_allowed(&check, &check.table.write_policy, None)
+    write_policy_allowed(&check, &check.table.write_policy)
 }
 
-fn write_policy_allowed(
+fn branch_write_allowed(
     check: &WriteCheck<'_>,
-    policy: &PolicyDef,
-    branch_context: Option<BranchPolicyContext<'_>>,
+    policy: &BranchPolicyRule,
+    context: BranchPolicyContext<'_>,
 ) -> Result<bool> {
+    match policy {
+        BranchPolicyRule::AllowAll => {
+            branch_backing_row_is_visible(check.db, check.schema, check.user, context)
+        }
+        BranchPolicyRule::InheritMain => {
+            if !branch_backing_row_is_visible(check.db, check.schema, check.user, context)? {
+                return Ok(false);
+            }
+            write_policy_allowed(check, &check.table.write_policy)
+        }
+        BranchPolicyRule::FieldMatchesBranch {
+            field,
+            branch_field,
+        } => branch_field_matches(check, context, field, branch_field),
+    }
+}
+
+fn write_policy_allowed(check: &WriteCheck<'_>, policy: &PolicyDef) -> Result<bool> {
     match policy {
         PolicyDef::AllowAll => Ok(true),
         PolicyDef::CreatedByUser => {
@@ -117,7 +140,6 @@ fn write_policy_allowed(
                 &ref_table.read_policy,
                 check.user,
                 Some(check.branch_num),
-                None,
                 0,
             )?;
             let count: i64 = check.db.query_row(
@@ -139,59 +161,57 @@ fn write_policy_allowed(
             )?;
             Ok(count > 0)
         }
-        PolicyDef::BranchFieldEquals {
-            field,
-            branch_field,
-        } => {
-            let context = branch_context
-                .ok_or_else(|| crate::Error::new("branch field policy requires branch context"))?;
-            let field_def = check
-                .table
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == *field)
-                .ok_or_else(|| crate::Error::new(format!("unknown branch policy field {field}")))?;
-            let branch_table = check.schema.table_def(context.branch_table)?;
-            let branch_field_def = branch_table
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == *branch_field)
-                .ok_or_else(|| {
-                    crate::Error::new(format!(
-                        "unknown branch policy field {}.{branch_field}",
-                        branch_table.name
-                    ))
-                })?;
-            let Some(value) = check
-                .values
-                .get(field)
-                .or_else(|| check.values.get(&field_def.storage_name))
-            else {
-                return Ok(false);
-            };
-            let value = crate::schema::field_sql_value(field_def, value, |ref_table, row_id| {
-                row_num(check.db, row_id).map_err(|err| {
-                    crate::Error::new(format!(
-                        "failed to resolve ref {ref_table}.{row_id} for branch policy: {err}"
-                    ))
-                })
-            })?;
-            let Some(branch_value) = branch_backing_field_value(
-                check.db,
-                check.schema,
-                check.user,
-                context,
-                branch_field_def,
-            )?
-            else {
-                return Ok(false);
-            };
-            Ok(value == branch_value)
-        }
-        PolicyDef::InheritMain => Err(crate::Error::new(
-            "inherit main is only valid inside branch policy",
-        )),
     }
+}
+
+fn branch_field_matches(
+    check: &WriteCheck<'_>,
+    context: BranchPolicyContext<'_>,
+    field: &str,
+    branch_field: &str,
+) -> Result<bool> {
+    let field_def = check
+        .table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *field)
+        .ok_or_else(|| crate::Error::new(format!("unknown branch policy field {field}")))?;
+    let branch_table = check.schema.table_def(context.branch_table)?;
+    let branch_field_def = branch_table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *branch_field)
+        .ok_or_else(|| {
+            crate::Error::new(format!(
+                "unknown branch policy field {}.{branch_field}",
+                branch_table.name
+            ))
+        })?;
+    let Some(value) = check
+        .values
+        .get(field)
+        .or_else(|| check.values.get(&field_def.storage_name))
+    else {
+        return Ok(false);
+    };
+    let value = crate::schema::field_sql_value(field_def, value, |ref_table, row_id| {
+        row_num(check.db, row_id).map_err(|err| {
+            crate::Error::new(format!(
+                "failed to resolve ref {ref_table}.{row_id} for branch policy: {err}"
+            ))
+        })
+    })?;
+    let Some(branch_value) = branch_backing_field_value(
+        check.db,
+        check.schema,
+        check.user,
+        context,
+        branch_field_def,
+    )?
+    else {
+        return Ok(false);
+    };
+    Ok(value == branch_value)
 }
 
 fn branch_current_row_exists(
@@ -301,7 +321,6 @@ fn branch_backing_field_value(
         &branch_table.read_policy,
         user,
         Some(1),
-        None,
         0,
     )?;
     let sql = format!(
@@ -348,7 +367,6 @@ fn branch_backing_row_visible_sql(
         &branch_table.read_policy,
         user,
         Some(1),
-        None,
         depth + 1,
     )?;
     let field_match_sql = field_match
@@ -404,16 +422,7 @@ fn effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> Strin
 }
 
 pub(crate) fn read_policy_sql(schema: &SchemaDef, table: &TableDef, user: &str) -> Result<String> {
-    lower_policy(
-        schema,
-        table,
-        "current",
-        &table.read_policy,
-        user,
-        None,
-        None,
-        0,
-    )
+    lower_policy(schema, table, "current", &table.read_policy, user, None, 0)
 }
 
 pub(crate) fn branch_read_policy_sql_for_alias(
@@ -427,26 +436,28 @@ pub(crate) fn branch_read_policy_sql_for_alias(
         let Some(read_policy) = branch_policy.read_policy.as_ref() else {
             return Ok("0 = 1".to_owned());
         };
-        let read_policy = match read_policy {
-            PolicyDef::InheritMain => &table.read_policy,
-            policy => policy,
-        };
-        let context = BranchPolicyContext {
-            branch_num,
-            branch_table,
-        };
-        let backing_sql = branch_backing_row_visible_sql(schema, user, context, 0, None)?;
-        let policy_sql = lower_policy(
+        let context = BranchReadSqlContext {
             schema,
             table,
             alias,
-            read_policy,
             user,
-            Some(branch_num),
-            Some(context),
-            0,
-        )?;
-        return Ok(format!("({backing_sql}) AND ({policy_sql})"));
+            branch: BranchPolicyContext {
+                branch_num,
+                branch_table,
+            },
+            depth: 0,
+        };
+        return branch_read_rule_sql(context, read_policy, |depth| {
+            lower_policy(
+                schema,
+                table,
+                alias,
+                &table.read_policy,
+                user,
+                Some(branch_num),
+                depth,
+            )
+        });
     }
     lower_policy(
         schema,
@@ -455,7 +466,6 @@ pub(crate) fn branch_read_policy_sql_for_alias(
         &table.read_policy,
         user,
         Some(branch_num),
-        None,
         0,
     )
 }
@@ -472,26 +482,31 @@ pub(crate) fn branch_snapshot_read_policy_sql_for_alias(
         let Some(read_policy) = branch_policy.read_policy.as_ref() else {
             return Ok("0 = 1".to_owned());
         };
-        let read_policy = match read_policy {
-            PolicyDef::InheritMain => &table.read_policy,
-            policy => policy,
-        };
-        let context = BranchPolicyContext {
-            branch_num,
-            branch_table,
-        };
-        let backing_sql = branch_backing_row_visible_sql(schema, user, context, 0, None)?;
-        let policy_sql = lower_snapshot_policy(
-            schema,
-            table,
-            alias,
+        return branch_read_rule_sql(
+            BranchReadSqlContext {
+                schema,
+                table,
+                alias,
+                user,
+                branch: BranchPolicyContext {
+                    branch_num,
+                    branch_table,
+                },
+                depth: 0,
+            },
             read_policy,
-            user,
-            base_epoch,
-            Some(context),
-            0,
-        )?;
-        return Ok(format!("({backing_sql}) AND ({policy_sql})"));
+            |depth| {
+                lower_snapshot_policy(
+                    schema,
+                    table,
+                    alias,
+                    &table.read_policy,
+                    user,
+                    base_epoch,
+                    depth,
+                )
+            },
+        );
     }
     snapshot_read_policy_sql_for_alias(schema, table, alias, user, base_epoch)
 }
@@ -510,9 +525,70 @@ pub(crate) fn snapshot_read_policy_sql_for_alias(
         &table.read_policy,
         user,
         base_epoch,
-        None,
         0,
     )
+}
+
+fn branch_field_match_sql(
+    context: BranchReadSqlContext<'_>,
+    field: &str,
+    branch_field: &str,
+) -> Result<String> {
+    let field = context
+        .table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *field)
+        .ok_or_else(|| crate::Error::new(format!("unknown branch policy field {field}")))?;
+    let branch_table = context.schema.table_def(context.branch.branch_table)?;
+    let branch_field = branch_table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *branch_field)
+        .ok_or_else(|| {
+            crate::Error::new(format!(
+                "unknown branch policy field {}.{branch_field}",
+                branch_table.name
+            ))
+        })?;
+    branch_backing_row_visible_sql(
+        context.schema,
+        context.user,
+        context.branch,
+        context.depth,
+        Some((context.alias, field, branch_field)),
+    )
+}
+
+fn branch_read_rule_sql(
+    context: BranchReadSqlContext<'_>,
+    policy: &BranchPolicyRule,
+    inherit_main_sql: impl FnOnce(usize) -> Result<String>,
+) -> Result<String> {
+    match policy {
+        BranchPolicyRule::AllowAll => branch_backing_row_visible_sql(
+            context.schema,
+            context.user,
+            context.branch,
+            context.depth,
+            None,
+        ),
+        BranchPolicyRule::InheritMain => {
+            let backing_sql = branch_backing_row_visible_sql(
+                context.schema,
+                context.user,
+                context.branch,
+                context.depth,
+                None,
+            )?;
+            let policy_sql = inherit_main_sql(context.depth)?;
+            Ok(format!("({backing_sql}) AND ({policy_sql})"))
+        }
+        BranchPolicyRule::FieldMatchesBranch {
+            field,
+            branch_field,
+        } => branch_field_match_sql(context, field, branch_field),
+    }
 }
 
 fn lower_policy(
@@ -522,7 +598,6 @@ fn lower_policy(
     policy: &PolicyDef,
     user: &str,
     branch_num: Option<i64>,
-    branch_context: Option<BranchPolicyContext<'_>>,
     depth: usize,
 ) -> Result<String> {
     if depth > MAX_POLICY_RECURSION_DEPTH {
@@ -559,7 +634,6 @@ fn lower_policy(
                 &ref_table.read_policy,
                 user,
                 branch_num,
-                None,
                 depth + 1,
             )?;
             let branch_filter = branch_num
@@ -587,39 +661,6 @@ fn lower_policy(
                 tx::OUTCOME_REJECTED,
             ))
         }
-        PolicyDef::BranchFieldEquals {
-            field,
-            branch_field,
-        } => {
-            let context = branch_context
-                .ok_or_else(|| crate::Error::new("branch field policy requires branch context"))?;
-            let field = table
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == *field)
-                .ok_or_else(|| crate::Error::new(format!("unknown branch policy field {field}")))?;
-            let branch_table = schema.table_def(context.branch_table)?;
-            let branch_field = branch_table
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == *branch_field)
-                .ok_or_else(|| {
-                    crate::Error::new(format!(
-                        "unknown branch policy field {}.{branch_field}",
-                        branch_table.name
-                    ))
-                })?;
-            branch_backing_row_visible_sql(
-                schema,
-                user,
-                context,
-                depth,
-                Some((alias, field, branch_field)),
-            )
-        }
-        PolicyDef::InheritMain => Err(crate::Error::new(
-            "inherit main is only valid inside branch policy",
-        )),
     }
 }
 
@@ -630,7 +671,6 @@ fn lower_snapshot_policy(
     policy: &PolicyDef,
     user: &str,
     base_epoch: i64,
-    branch_context: Option<BranchPolicyContext<'_>>,
     depth: usize,
 ) -> Result<String> {
     if depth > MAX_POLICY_RECURSION_DEPTH {
@@ -671,7 +711,6 @@ fn lower_snapshot_policy(
                 &ref_table.read_policy,
                 user,
                 base_epoch,
-                None,
                 depth + 1,
             )?;
             Ok(format!(
@@ -707,38 +746,5 @@ fn lower_snapshot_policy(
                 tx::OUTCOME_REJECTED,
             ))
         }
-        PolicyDef::BranchFieldEquals {
-            field,
-            branch_field,
-        } => {
-            let context = branch_context
-                .ok_or_else(|| crate::Error::new("branch field policy requires branch context"))?;
-            let field = table
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == *field)
-                .ok_or_else(|| crate::Error::new(format!("unknown branch policy field {field}")))?;
-            let branch_table = schema.table_def(context.branch_table)?;
-            let branch_field = branch_table
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == *branch_field)
-                .ok_or_else(|| {
-                    crate::Error::new(format!(
-                        "unknown branch policy field {}.{branch_field}",
-                        branch_table.name
-                    ))
-                })?;
-            branch_backing_row_visible_sql(
-                schema,
-                user,
-                context,
-                depth,
-                Some((alias, field, branch_field)),
-            )
-        }
-        PolicyDef::InheritMain => Err(crate::Error::new(
-            "inherit main is only valid inside branch policy",
-        )),
     }
 }
