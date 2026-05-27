@@ -1584,3 +1584,20 @@ already dramatically faster for a 2k-row tree. The next decision is choosing a
 real strategy: improve the recursive SQL plan, use a heuristic between SQL CTE
 and visible-row traversal, or maintain a descendant/closure index for large
 tables with small subtrees.
+
+## 2026-05-27 02:08 PDT
+
+Added `MINI_JAZZ_PERF_RECURSIVE_TREE_ROOT_ID` so the recursive tree probe can
+measure small subtrees inside the same table.
+
+2k-node table, leaf root `folder-1999`:
+
+- default SQL CTE direct read: ~0.8 ms for 1 row
+- visible-row traversal direct read: ~5.2 ms for 1 row
+- default SQL CTE export: ~1.7 ms
+- visible-row traversal export: ~6.3 ms
+
+Learning: the visible-row traversal is a rescue path for broad recursive reads,
+not a universal replacement. For tiny subtrees, the SQL CTE is clearly better.
+The likely product strategy is adaptive: use SQL CTE for narrow subtrees, use
+visible-row traversal or a closure/descendant index for broad observed trees.

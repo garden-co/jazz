@@ -385,6 +385,7 @@ struct DashboardQueryScalingRepeatReport {
 struct RecursiveTreeSubscriptionProbe {
     node_count: usize,
     branch_factor: usize,
+    root_id: String,
     seed_ms: f64,
     initial_read_ms: f64,
     initial_admin_read_ms: f64,
@@ -1549,6 +1550,8 @@ fn run_dashboard_query_scaling_repeat(
 fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscriptionProbe> {
     let node_count = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_NODES", 2_000);
     let branch_factor = env_usize("MINI_JAZZ_PERF_RECURSIVE_TREE_BRANCH_FACTOR", 5).max(1);
+    let root_id =
+        env::var("MINI_JAZZ_PERF_RECURSIVE_TREE_ROOT_ID").unwrap_or_else(|_| "folder-0".to_owned());
     let dir = tempdir()?;
     let schema = folder_tree_schema();
     let mut core = Runtime::open_trusted_with_schema(
@@ -1566,18 +1569,18 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
 
     let initial_read_started = Instant::now();
     let initial_rows = core.run_as_user(OWNER, |core| {
-        core.read_recursive_refs("folders", "folder-0", "parent")
+        core.read_recursive_refs("folders", &root_id, "parent")
     })?;
     let initial_read_elapsed = initial_read_started.elapsed();
     let initial_admin_read_started = Instant::now();
     core.run_attributing_to_user(OWNER, |core| {
-        core.read_recursive_refs("folders", "folder-0", "parent")
+        core.read_recursive_refs("folders", &root_id, "parent")
     })?;
     let initial_admin_read_elapsed = initial_admin_read_started.elapsed();
 
     let export_started = Instant::now();
     let initial_bundle = core.run_as_user(OWNER, |core| {
-        core.export_recursive_refs("folders", "folder-0", "parent")
+        core.export_recursive_refs("folders", &root_id, "parent")
     })?;
     let export_elapsed = export_started.elapsed();
     let initial_summary = BundleSummary::from(&initial_bundle)?;
@@ -1592,7 +1595,7 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     })?;
     let refresh_read_started = Instant::now();
     let refresh_rows = core.run_as_user(OWNER, |core| {
-        core.read_recursive_refs("folders", "folder-0", "parent")
+        core.read_recursive_refs("folders", &root_id, "parent")
     })?;
     let refresh_read_elapsed = refresh_read_started.elapsed();
     let refresh_started = Instant::now();
@@ -1608,12 +1611,13 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
     let diff_counts = DiffCounts::from(&tab.poll_subscription(&mut subscription)?);
     let poll_elapsed = poll_started.elapsed();
     let visible_rows_after_refresh = tab
-        .read_recursive_refs("folders", "folder-0", "parent")?
+        .read_recursive_refs("folders", &root_id, "parent")?
         .len();
 
     Ok(RecursiveTreeSubscriptionProbe {
         node_count,
         branch_factor,
+        root_id,
         seed_ms: ms(seed_elapsed),
         initial_read_ms: ms(initial_read_elapsed),
         initial_admin_read_ms: ms(initial_admin_read_elapsed),
