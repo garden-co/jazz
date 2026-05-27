@@ -1,7 +1,5 @@
 # Visibility, Snapshots, And Branches
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 13. Visibility And Snapshots
 
 Reads are defined by visibility, not by physical storage location.

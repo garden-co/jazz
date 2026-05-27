@@ -1,7 +1,5 @@
 # Terminology
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 5. Terminology
 
 ### 5.1 Public Id

@@ -1,7 +1,5 @@
 # Orientation
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## Overview
 
 This document describes how to implement Jazz as a local-first relational

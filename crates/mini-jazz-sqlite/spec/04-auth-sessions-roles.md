@@ -1,7 +1,5 @@
 # Auth, Sessions, And Roles
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 7. Auth, Users, Sessions, And Roles
 
 Every query, write, and incoming sync application is evaluated under a session.

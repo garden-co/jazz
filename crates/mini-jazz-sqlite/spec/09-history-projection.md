@@ -1,7 +1,5 @@
 # History And Projection
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 12. Row History And Current Projection
 
 For each structural storage layout of each application table, the engine creates

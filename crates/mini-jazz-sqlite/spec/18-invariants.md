@@ -1,7 +1,5 @@
 # Invariants To Test
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## Appendix D: Invariants To Test
 
 Ongoing work should turn as many of these as practical into integration tests. A

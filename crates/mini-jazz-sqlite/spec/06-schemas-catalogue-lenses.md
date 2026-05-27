@@ -1,7 +1,5 @@
 # Schemas, Catalogue, And Lenses
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 9. Schemas, Catalogue, Migrations, And Lenses
 
 Catalogue state tells the runtime how to interpret rows, policies, indexes,

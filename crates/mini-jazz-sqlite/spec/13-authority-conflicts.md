@@ -1,7 +1,5 @@
 # Authority And Conflicts
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 19. Authority Validation
 
 Exclusive transactions must be validated by an authority before global

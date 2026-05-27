@@ -9,7 +9,7 @@ Jazz internals.
 
 ## Reading Map
 
-The full spec is split across focused files. Original section numbers are preserved inside those files so references remain stable during this cleanup.
+The full spec is split across focused files.
 
 - [Orientation](spec/01-orientation.md): Reader orientation, product motivation, the running example, and top-level invariant frame.
 - [Terminology](spec/02-terminology.md): The shared vocabulary for the semantic model and physical lowering.

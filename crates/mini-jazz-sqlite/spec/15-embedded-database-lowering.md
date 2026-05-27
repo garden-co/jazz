@@ -1,7 +1,5 @@
 # Embedded Database Lowering
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 26. Embedded Database Lowering
 
 This section describes the selected lowering strategy for SQLite-like embedded

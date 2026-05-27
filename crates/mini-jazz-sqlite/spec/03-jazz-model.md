@@ -1,7 +1,5 @@
 # Jazz Model
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 6. Jazz Model
 
 A Jazz database is a relational database with application tables, row history,

@@ -1,7 +1,5 @@
 # Sync And Subscriptions
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 16. Sync Bundles
 
 Sync is query-scoped. It is not table replication.

@@ -1,7 +1,5 @@
 # Open Areas, Strategy, And Rationale
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 31. Undefined Areas
 
 The following areas remain intentionally underspecified:

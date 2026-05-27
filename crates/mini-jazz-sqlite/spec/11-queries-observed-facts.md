@@ -1,7 +1,5 @@
 # Queries And Observed Facts
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 15. Queries And Observed Facts
 
 Queries are relational plans that produce semantic rows and observed facts.

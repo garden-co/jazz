@@ -1,7 +1,5 @@
 # Runtime And Public Boundary
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## 21. Semantic System Fields
 
 Semantic system fields may be exposed with `$` names:

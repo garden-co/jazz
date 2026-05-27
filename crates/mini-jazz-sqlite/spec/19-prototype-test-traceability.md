@@ -1,7 +1,5 @@
 # Prototype Test Traceability
 
-_Part of the Jazz relational core embedded-database spec. The original section numbering is preserved._
-
 ## Appendix E: Prototype Test Traceability
 
 This appendix maps the current `crates/mini-jazz-sqlite/tests/whole_system`
