@@ -496,6 +496,14 @@ pub fn notes_schema() -> SchemaDef {
     })
 }
 
+pub fn eq_query(table: &str, field: &str, value: JsonValue) -> BuiltQuery {
+    BuiltQuery::from_json_value(json!({
+        "table": table,
+        "conditions": [{"column": field, "op": "eq", "value": value}],
+    }))
+    .unwrap()
+}
+
 pub fn top_created_query(table: &str, field: &str, value: JsonValue, limit: usize) -> BuiltQuery {
     BuiltQuery::from_json_value(json!({
         "table": table,

@@ -132,6 +132,25 @@ impl QueryDirection {
     }
 }
 
+pub(crate) fn predicate_query(
+    table: &str,
+    column: &str,
+    op: QueryConditionOp,
+    value: JsonValue,
+) -> BuiltQuery {
+    BuiltQuery {
+        table: table.to_owned(),
+        conditions: vec![QueryCondition {
+            column: column.to_owned(),
+            op,
+            value,
+        }],
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+    }
+}
+
 impl Runtime {
     pub fn query(&self, query: BuiltQuery) -> Result<Vec<RowView>> {
         self.read_rows_for_built_query(&query)
@@ -165,7 +184,12 @@ impl Runtime {
         let rows = match &subscription.query {
             RowsSubscriptionQuery::Table { table } => self.read_rows(table)?,
             RowsSubscriptionQuery::Predicate(query) if query.op == "eq" => {
-                self.read_rows_where_eq(&query.table, &query.field, query.value.clone())?
+                self.query(predicate_query(
+                    &query.table,
+                    &query.field,
+                    QueryConditionOp::Eq,
+                    query.value.clone(),
+                ))?
             }
             RowsSubscriptionQuery::Predicate(query) if query.op == "ne" => {
                 self.read_rows_where_ne(&query.table, &query.field, query.value.clone())?

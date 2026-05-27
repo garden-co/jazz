@@ -1,4 +1,4 @@
-use crate::query_api::{BuiltQuery, QueryCondition};
+use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
@@ -911,11 +911,12 @@ impl Runtime {
                         return Err(crate::Error::new("absent id expects string value"));
                     };
                     if self
-                        .read_rows_where_eq(
+                        .query(predicate_query(
                             &read.table,
                             &read.field,
+                            QueryConditionOp::Eq,
                             JsonValue::String(row_id.to_owned()),
-                        )?
+                        ))?
                         .is_empty()
                     {
                         let mut branches = Vec::new();
@@ -2450,16 +2451,6 @@ impl Runtime {
             .collect())
     }
 
-    pub fn read_rows_where_eq(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-    ) -> Result<Vec<RowView>> {
-        self.query_context()
-            .read_rows_where_eq(table_name, field_name, value)
-    }
-
     pub(crate) fn read_rows_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<RowView>> {
         self.query_context().read_rows_for_built_query(query)
     }
@@ -2500,12 +2491,18 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
     ) -> Result<Bundle> {
+        let rows = self.query(predicate_query(
+            table_name,
+            field_name,
+            QueryConditionOp::Eq,
+            value.clone(),
+        ))?;
         self.export_query_scope(
             table_name,
             field_name,
             "eq",
-            value.clone(),
-            self.read_rows_where_eq(table_name, field_name, value)?,
+            value,
+            rows,
             QueryScopeOptions::empty(),
         )
     }
@@ -2517,12 +2514,18 @@ impl Runtime {
         value: JsonValue,
         ref_field_name: &str,
     ) -> Result<Bundle> {
+        let rows = self.query(predicate_query(
+            table_name,
+            field_name,
+            QueryConditionOp::Eq,
+            value.clone(),
+        ))?;
         self.export_query_scope(
             table_name,
             field_name,
             "eq",
-            value.clone(),
-            self.read_rows_where_eq(table_name, field_name, value)?,
+            value,
+            rows,
             QueryScopeOptions {
                 ref_include_fields: &[ref_field_name],
                 extra_row_ids: &[],
@@ -3327,11 +3330,14 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
     ) -> Result<RowsSubscription> {
-        Ok(RowsSubscription::where_eq(
+        let rows = self.query(predicate_query(
             table_name,
             field_name,
+            QueryConditionOp::Eq,
             value.clone(),
-            self.read_rows_where_eq(table_name, field_name, value)?,
+        ))?;
+        Ok(RowsSubscription::where_eq(
+            table_name, field_name, value, rows,
         ))
     }
 
@@ -3492,30 +3498,6 @@ impl Runtime {
         Ok(rows)
     }
 
-    pub fn read_rows_where_eq_with_conflict_meta(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-    ) -> Result<Vec<RowView>> {
-        if field_name == "id" {
-            let Some(id) = value.as_str() else {
-                return Err(crate::Error::new("id equality expects a string"));
-            };
-            return Ok(self
-                .read_rows_with_conflict_meta(table_name)?
-                .into_iter()
-                .filter(|row| row.id == id)
-                .collect());
-        }
-        self.schema.table_def(table_name)?;
-        Ok(self
-            .read_rows_with_conflict_meta(table_name)?
-            .into_iter()
-            .filter(|row| row.values.get(field_name) == Some(&value))
-            .collect())
-    }
-
     fn row_has_current_branch_value(&self, table_name: &str, id: &str) -> Result<bool> {
         self.schema.table_def(table_name)?;
         let row_num = row_num(&self.conn, id)?;
@@ -3560,7 +3542,12 @@ impl Runtime {
         let next_rows = match &subscription.query {
             RowsSubscriptionQuery::Table { table } => self.read_rows(table)?,
             RowsSubscriptionQuery::Predicate(query) if query.op == "eq" => {
-                self.read_rows_where_eq(&query.table, &query.field, query.value.clone())?
+                self.query(predicate_query(
+                    &query.table,
+                    &query.field,
+                    QueryConditionOp::Eq,
+                    query.value.clone(),
+                ))?
             }
             RowsSubscriptionQuery::Predicate(query) if query.op == "ne" => {
                 self.read_rows_where_ne(&query.table, &query.field, query.value.clone())?

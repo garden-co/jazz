@@ -303,7 +303,7 @@ fn branch_query_scope_refresh_removes_base_row_shadowed_by_branch_overlay() {
     .unwrap();
     peer.checkout_branch("draft").unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -327,7 +327,7 @@ fn branch_query_scope_refresh_removes_base_row_shadowed_by_branch_overlay() {
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -372,7 +372,7 @@ fn durable_branch_query_read_refreshes_after_restart() {
         worker.checkout_branch("draft").unwrap();
         assert_eq!(
             worker
-                .read_rows_where_eq("tasks", "done", json!(false))
+                .query(support::eq_query("tasks", "done", json!(false)))
                 .unwrap()
                 .len(),
             1
@@ -407,7 +407,7 @@ fn durable_branch_query_read_refreshes_after_restart() {
     }
 
     assert!(reopened
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -1134,7 +1134,7 @@ fn branch_equality_query_uses_effective_branch_policy() {
     alice.session_user_for_test("alice");
 
     assert!(alice
-        .read_rows_where_eq("todos", "title", json!("Find me"))
+        .query(support::eq_query("todos", "title", json!("Find me")))
         .unwrap()
         .is_empty());
 }
@@ -1302,8 +1302,11 @@ fn branch_conflict_metadata_surfaces_through_filtered_query() {
     alice.checkout_branch("merge").unwrap();
 
     let rows = alice
-        .read_rows_where_eq_with_conflict_meta("tasks", "title", json!("Shared title"))
-        .unwrap();
+        .read_rows_with_conflict_meta("tasks")
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.values.get("title") == Some(&json!("Shared title")))
+        .collect::<Vec<_>>();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row.id == "task-1"));
     assert!(rows.iter().all(|row| row.conflict_count == 2));
@@ -1871,7 +1874,7 @@ fn branch_observed_query_refresh_includes_later_source_branch_rows() {
     peer.apply_bundle(&initial).unwrap();
     peer.checkout_branch("merge").unwrap();
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 
@@ -1896,7 +1899,7 @@ fn branch_observed_query_refresh_includes_later_source_branch_rows() {
     }
 
     let rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-left");
@@ -1947,7 +1950,7 @@ fn branch_observed_query_refresh_includes_newly_added_source_branch() {
     .unwrap();
     peer.checkout_branch("merge").unwrap();
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 
@@ -1960,7 +1963,7 @@ fn branch_observed_query_refresh_includes_newly_added_source_branch() {
     }
 
     let rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-left");
@@ -2009,7 +2012,7 @@ fn branch_observed_query_refresh_removes_detached_source_branch_rows() {
     .unwrap();
     peer.checkout_branch("merge").unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -2024,7 +2027,7 @@ fn branch_observed_query_refresh_removes_detached_source_branch_rows() {
     }
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
     let merge = peer
@@ -2144,7 +2147,7 @@ fn durable_branch_source_removal_survives_reopen() {
         worker.checkout_branch("merge").unwrap();
         assert_eq!(
             worker
-                .read_rows_where_eq("tasks", "done", json!(false))
+                .query(support::eq_query("tasks", "done", json!(false)))
                 .unwrap()
                 .len(),
             1
@@ -2163,7 +2166,7 @@ fn durable_branch_source_removal_survives_reopen() {
     }
 
     assert!(reopened
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
     let merge = reopened
@@ -2555,7 +2558,7 @@ fn durable_merge_branch_refresh_preserves_pinned_source_branch_bases_after_resta
             .unwrap();
         worker.checkout_branch("merge").unwrap();
         assert!(worker
-            .read_rows_where_eq("tasks", "done", json!(false))
+            .query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .is_empty());
     }
@@ -2587,7 +2590,7 @@ fn durable_merge_branch_refresh_preserves_pinned_source_branch_bases_after_resta
     reopened.checkout_branch("merge").unwrap();
 
     let rows = reopened
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-left");

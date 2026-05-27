@@ -149,21 +149,6 @@ impl MiniJazzRuntime {
         to_js_value(self.runtime.read_rows(table_name).map_err(to_js_error)?)
     }
 
-    #[wasm_bindgen(js_name = readRowsWhereEq)]
-    pub fn read_rows_where_eq(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let value = parse_json_value(value)?;
-        to_js_value(
-            self.runtime
-                .read_rows_where_eq(table_name, field_name, value)
-                .map_err(to_js_error)?,
-        )
-    }
-
     #[wasm_bindgen(js_name = storageStats)]
     pub fn storage_stats(&self) -> Result<JsValue, JsValue> {
         to_js_value(self.runtime.storage_stats().map_err(to_js_error)?)

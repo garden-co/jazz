@@ -153,15 +153,15 @@ fn id_magic_field_query_matches_public_row_id() {
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("notes", "id", json!("note-public-id"))
+        .query(support::eq_query("notes", "id", json!("note-public-id")))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "note-public-id");
     assert!(alice
-        .read_rows_where_eq("notes", "id", json!(7))
+        .query(support::eq_query("notes", "id", json!(7)))
         .unwrap_err()
         .to_string()
-        .contains("id equality expects a string"));
+        .contains("query system field expects a string"));
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn id_magic_field_query_scope_syncs_and_repairs_delete() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("notes", "id", json!("note-public-id"))
+        peer.query(support::eq_query("notes", "id", json!("note-public-id")))
             .unwrap()
             .len(),
         1
@@ -203,7 +203,7 @@ fn id_magic_field_query_scope_syncs_and_repairs_delete() {
     )
     .unwrap();
     assert!(peer
-        .read_rows_where_eq("notes", "id", json!("note-public-id"))
+        .query(support::eq_query("notes", "id", json!("note-public-id")))
         .unwrap()
         .is_empty());
 }
@@ -523,15 +523,15 @@ fn created_by_magic_field_query_matches_creator_user() {
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("notes", "$createdBy", json!("bob"))
+        .query(support::eq_query("notes", "$createdBy", json!("bob")))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "note-bob");
     assert!(alice
-        .read_rows_where_eq("notes", "$createdBy", json!(true))
+        .query(support::eq_query("notes", "$createdBy", json!(true)))
         .unwrap_err()
         .to_string()
-        .contains("$createdBy equality expects a string"));
+        .contains("query system field expects a string"));
 }
 
 #[test]
@@ -559,7 +559,7 @@ fn created_by_magic_field_query_scope_syncs_and_repairs_delete() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("notes", "$createdBy", json!("alice"))
+        peer.query(support::eq_query("notes", "$createdBy", json!("alice")))
             .unwrap()
             .len(),
         1
@@ -573,7 +573,7 @@ fn created_by_magic_field_query_scope_syncs_and_repairs_delete() {
     )
     .unwrap();
     assert!(peer
-        .read_rows_where_eq("notes", "$createdBy", json!("alice"))
+        .query(support::eq_query("notes", "$createdBy", json!("alice")))
         .unwrap()
         .is_empty());
 }
@@ -889,7 +889,7 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-open");
@@ -913,7 +913,7 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
 
     peer.apply_bundle(&bundle).unwrap();
     let peer_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(peer_rows.len(), 1);
     assert_eq!(peer_rows[0].id, "task-open");
@@ -980,7 +980,7 @@ fn query_scope_bundle_dedupes_shared_policy_dependency_history() {
 
     peer.apply_bundle(&bundle).unwrap();
     let peer_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(peer_rows.len(), 2);
     assert!(peer_rows
@@ -1016,7 +1016,7 @@ fn equality_query_scope_resync_removes_row_that_left_predicate() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -1040,7 +1040,7 @@ fn equality_query_scope_resync_removes_row_that_left_predicate() {
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -1073,7 +1073,7 @@ fn equality_query_scope_resync_removes_deleted_matching_row() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -1088,7 +1088,7 @@ fn equality_query_scope_resync_removes_deleted_matching_row() {
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -1124,7 +1124,7 @@ fn nullable_text_round_trips_and_filters_with_is_null_semantics() {
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("notes", "tag", json!(null))
+        .query(support::eq_query("notes", "tag", json!(null)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "note-2");
@@ -1176,7 +1176,7 @@ fn nullable_ref_round_trips_filters_and_is_skipped_by_require_ref() {
         .unwrap();
 
     let floating = alice
-        .read_rows_where_eq("todos", "project", json!(null))
+        .query(support::eq_query("todos", "project", json!(null)))
         .unwrap();
     assert_eq!(floating.len(), 1);
     assert_eq!(floating[0].id, "todo-floating");
@@ -1778,7 +1778,7 @@ fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_delete
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -1799,7 +1799,7 @@ fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_delete
 
     peer.apply_bundle(&bundle).unwrap();
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -1832,7 +1832,7 @@ fn empty_equality_query_scope_later_delivers_inserted_match_without_table_replic
     assert_eq!(initial.query_reads.len(), 1);
     peer.apply_bundle(&initial).unwrap();
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
     assert_eq!(peer.observed_query_reads().unwrap(), initial.query_reads);
@@ -1863,7 +1863,7 @@ fn empty_equality_query_scope_later_delivers_inserted_match_without_table_replic
     }
 
     let rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-open");
@@ -1914,7 +1914,7 @@ fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() 
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -1937,7 +1937,7 @@ fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() 
         )
         .unwrap();
     assert!(alice
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 
@@ -1949,7 +1949,7 @@ fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() 
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -2010,7 +2010,7 @@ fn durable_query_read_refresh_repairs_policy_dependency_change_after_restart() {
             .unwrap();
         assert_eq!(
             worker
-                .read_rows_where_eq("tasks", "done", json!(false))
+                .query(support::eq_query("tasks", "done", json!(false)))
                 .unwrap()
                 .len(),
             1
@@ -2050,7 +2050,7 @@ fn durable_query_read_refresh_repairs_policy_dependency_change_after_restart() {
     }
 
     assert!(reopened
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -2120,7 +2120,7 @@ fn branch_equality_query_scope_resync_repairs_row_that_left_predicate() {
     .unwrap();
     peer.checkout_branch("draft").unwrap();
     let draft_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(draft_rows.len(), 1);
     assert_eq!(draft_rows[0].id, "task-1");
@@ -2143,7 +2143,7 @@ fn branch_equality_query_scope_resync_repairs_row_that_left_predicate() {
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -2233,7 +2233,7 @@ fn branch_query_scope_repair_does_not_delete_same_predicate_row_on_main() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -2259,7 +2259,7 @@ fn branch_query_scope_repair_does_not_delete_same_predicate_row_on_main() {
     .unwrap();
     peer.checkout_branch("draft").unwrap();
     let draft_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(draft_rows.len(), 2);
     assert!(draft_rows.iter().any(|row| row.id == "task-main"));
@@ -2280,13 +2280,13 @@ fn branch_query_scope_repair_does_not_delete_same_predicate_row_on_main() {
     .unwrap();
 
     let draft_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(draft_rows.len(), 1);
     assert_eq!(draft_rows[0].id, "task-main");
     peer.checkout_branch("main").unwrap();
     let main_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(main_rows.len(), 1);
     assert_eq!(main_rows[0].id, "task-main");
@@ -2389,7 +2389,7 @@ fn generic_equality_query_lowers_public_ref_ids_to_physical_row_ids() {
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("tasks", "project", json!("project-2"))
+        .query(support::eq_query("tasks", "project", json!("project-2")))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-2");

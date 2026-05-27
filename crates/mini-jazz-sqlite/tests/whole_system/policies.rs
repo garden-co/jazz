@@ -2258,7 +2258,7 @@ fn trusted_as_user_enforces_policy_while_attribution_mode_bypasses_it() {
     );
     assert_eq!(
         worker
-            .read_rows_where_eq("docs", "id", json!("doc-alice"))
+            .query(support::eq_query("docs", "id", json!("doc-alice")))
             .unwrap()[0]
             .values["title"],
         json!("Alice doc")
@@ -2273,7 +2273,7 @@ fn trusted_as_user_enforces_policy_while_attribution_mode_bypasses_it() {
     })
     .unwrap();
     let row = worker
-        .read_rows_where_eq("docs", "id", json!("doc-alice"))
+        .query(support::eq_query("docs", "id", json!("doc-alice")))
         .unwrap()
         .pop()
         .unwrap();
