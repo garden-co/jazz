@@ -658,6 +658,68 @@ fn branch_base_snapshot_chooses_latest_row_version_within_same_global_epoch() {
 }
 
 #[test]
+fn branch_top_query_uses_pinned_base_plus_sparse_overlay() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("owner");
+        table.text("rank");
+        table.text("title");
+        table.index("owner_rank", ["owner", "rank"]);
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let mut base_tx = alice.transaction().exclusive_at_global(1);
+    for index in 0..6 {
+        base_tx = base_tx.insert_row(
+            "tasks",
+            &format!("task-{index}"),
+            BTreeMap::from([
+                ("owner".to_owned(), json!("alice")),
+                ("rank".to_owned(), json!(format!("{index:03}"))),
+                ("title".to_owned(), json!(format!("Base {index}"))),
+            ]),
+        );
+    }
+    base_tx.commit().unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+
+    alice
+        .transaction()
+        .exclusive_at_global(2)
+        .insert_row(
+            "tasks",
+            "main-after-base",
+            BTreeMap::from([
+                ("owner".to_owned(), json!("alice")),
+                ("rank".to_owned(), json!("999")),
+                ("title".to_owned(), json!("Invisible after base")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .update_row(
+            "tasks",
+            "task-2",
+            BTreeMap::from([
+                ("rank".to_owned(), json!("998")),
+                ("title".to_owned(), json!("Draft overlay")),
+            ]),
+        )
+        .unwrap();
+
+    let rows = alice
+        .read_rows_where_eq_top_field_desc("tasks", "owner", json!("alice"), "rank", 3)
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["task-2", "task-5", "task-4"]
+    );
+}
+
+#[test]
 fn branch_delete_shadows_pinned_base_row() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

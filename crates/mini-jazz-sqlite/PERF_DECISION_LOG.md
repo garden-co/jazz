@@ -647,3 +647,19 @@ pinned export much slower (~280 ms total, ~169 ms in read export), likely
 because SQLite used a poor plan against the large read set. Reverted to the Rust
 filter for now. If we want SQL-side filtering, use a real temporary table or a
 persistent export-scope table, not a giant inline CTE.
+
+## 2026-05-26 23:45 PDT
+
+Added a SQL-lowered top-K equality query for pinned-base branches with no extra
+source branches. It unions a small current-branch overlay with the latest main
+history rows at `base_global_epoch`, excludes branch-shadowed base rows, applies
+snapshot policy to base rows, and orders/limits in SQLite.
+
+Regression covered: top query over a pinned branch must combine base rows and a
+sparse overlay, ignore later main rows beyond the base epoch, and preserve
+deterministic ordering.
+
+Result on the pinned snapshot probe: branch query dropped from roughly 107 ms to
+~5.9 ms; profiled export dropped from roughly 132 ms to ~30 ms. The remaining
+export cost is now dominated by read-set export (~20 ms), not query evaluation.
+Full whole-system tests remained green.

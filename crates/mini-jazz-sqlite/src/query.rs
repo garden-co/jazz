@@ -107,6 +107,15 @@ impl QueryContext<'_> {
         limit: usize,
     ) -> Result<Vec<RowView>> {
         if self.branch_num != 1 {
+            if let Some(rows) = self.read_rows_where_eq_top_field_desc_from_pinned_base_branch(
+                table_name,
+                field_name,
+                value.clone(),
+                order_field_name,
+                limit,
+            )? {
+                return Ok(rows);
+            }
             if let Some(rows) = self.read_rows_where_eq_top_field_desc_from_main_source_branch(
                 table_name,
                 field_name,
@@ -190,6 +199,169 @@ impl QueryContext<'_> {
         )?;
         rows.map(|row| row_to_view(self.conn, table_name, table, row?))
             .collect()
+    }
+
+    fn read_rows_where_eq_top_field_desc_from_pinned_base_branch(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<RowView>>> {
+        let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? else {
+            return Ok(None);
+        };
+        if !branch::direct_source_nums(self.conn, self.branch_num)?.is_empty() {
+            return Ok(None);
+        }
+        let table = self.schema.table_def(table_name)?;
+        let field = table
+            .fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let order_field = table
+            .fields
+            .iter()
+            .find(|field| field.name == order_field_name)
+            .ok_or_else(|| {
+                crate::Error::new(format!(
+                    "unknown order field {table_name}.{order_field_name}"
+                ))
+            })?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let current_field_columns = field_columns
+            .iter()
+            .map(|column| format!("current.{column} AS {column}"))
+            .collect::<Vec<_>>();
+        let history_field_columns = field_columns
+            .iter()
+            .map(|column| format!("h.{column} AS {column}"))
+            .collect::<Vec<_>>();
+        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        let order_column = crate::schema::quote_ident(&crate::schema::storage_column(order_field));
+        let predicate_value =
+            crate::schema::field_sql_value(field, &value, |ref_table, row_id| {
+                row_num(self.conn, row_id).map_err(|err| {
+                    crate::Error::new(format!(
+                        "failed to resolve ref {ref_table}.{row_id} for equality predicate: {err}"
+                    ))
+                })
+            })?;
+        let current_row_columns = format!(
+            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, current.j_created_by AS j_created_by, current.{order_column} AS sort_value, current.row_num AS sort_row_num",
+            current_field_columns.join(", ")
+        );
+        let history_row_columns = format!(
+            "ids.row_id AS row_id, tx.tx_id AS tx_id, {}, h.j_created_by AS j_created_by, h.{order_column} AS sort_value, h.row_num AS sort_row_num",
+            history_field_columns.join(", ")
+        );
+        let outer_columns = format!("row_id, tx_id, {}, j_created_by", field_columns.join(", "));
+        let current_table = crate::schema::current_table(table_name);
+        let history_table = crate::schema::history_table(table_name);
+        let current_policy_sql = self.read_policy_sql(table)?;
+        let snapshot_policy_sql = if self.bypass_policy {
+            "1 = 1".to_owned()
+        } else {
+            policy::snapshot_read_policy_sql_for_alias(
+                self.schema,
+                table,
+                "h",
+                self.user,
+                base_epoch,
+            )?
+        };
+        let sql = format!(
+            "WITH
+             overlay_rows AS (
+               SELECT {current_row_columns}
+               FROM {current_table} current
+               JOIN jazz_row_id ids ON ids.row_num = current.row_num
+               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               WHERE current.j_branch_num = ?
+                 AND current.is_deleted = 0
+                 AND tx.outcome != ?
+                 AND current.{predicate_column} = ?
+                 AND {current_policy_sql}
+               ORDER BY current.{order_column} DESC, current.row_num
+               LIMIT ?
+             ),
+             base_rows AS (
+               SELECT {history_row_columns}
+               FROM {history_table} h
+               JOIN jazz_row_id ids ON ids.row_num = h.row_num
+               JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+               WHERE h.j_branch_num = 1
+                 AND tx.outcome != ?
+                 AND tx.global_epoch IS NOT NULL
+                 AND tx.global_epoch <= ?
+                 AND h.op != 3
+                 AND h.{predicate_column} = ?
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM {history_table} newer
+                   JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                   WHERE newer.row_num = h.row_num
+                     AND newer.j_branch_num = 1
+                     AND newer_tx.outcome != ?
+                     AND newer_tx.global_epoch IS NOT NULL
+                     AND newer_tx.global_epoch <= ?
+                     AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM {current_table} shadow
+                   WHERE shadow.row_num = h.row_num
+                     AND shadow.j_branch_num = ?
+                 )
+                 AND {snapshot_policy_sql}
+               ORDER BY h.{order_column} DESC, h.row_num
+               LIMIT ?
+             ),
+             merged AS (
+               SELECT * FROM overlay_rows
+               UNION ALL
+               SELECT * FROM base_rows
+               ORDER BY sort_value DESC, sort_row_num
+               LIMIT ?
+             )
+             SELECT {outer_columns}
+             FROM merged
+             ORDER BY sort_value DESC, sort_row_num"
+        );
+        let params = vec![
+            rusqlite::types::Value::Integer(self.branch_num),
+            rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
+            predicate_value.clone(),
+            rusqlite::types::Value::Integer(limit as i64),
+            rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
+            rusqlite::types::Value::Integer(base_epoch),
+            predicate_value,
+            rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
+            rusqlite::types::Value::Integer(base_epoch),
+            rusqlite::types::Value::Integer(self.branch_num),
+            rusqlite::types::Value::Integer(limit as i64),
+            rusqlite::types::Value::Integer(limit as i64),
+        ];
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 2 + table.fields.len() + 1;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        Ok(Some(
+            rows.map(|row| row_to_view(self.conn, table_name, table, row?))
+                .collect::<Result<Vec<_>>>()?,
+        ))
     }
 
     fn read_rows_where_eq_top_field_desc_from_main_source_branch(
