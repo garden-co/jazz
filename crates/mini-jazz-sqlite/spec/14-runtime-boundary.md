@@ -45,6 +45,17 @@ subscriptions. Platform bindings should expose generic query/subscription entry
 points over the runtime's semantic descriptor shape instead of duplicating query
 semantics in each host language.
 
+The default browser/app binding surface should stay at the semantic API level:
+writes, `query`, `one`, `subscribe`, and storage/runtime administration. Lower
+level peer-transport hooks belong behind an explicit sync topology API rather
+than appearing as ordinary application methods.
+
+Query descriptor values crossing JS/WASM boundaries must be parsed as bounded
+values before execution. Numeric window fields such as limit and offset must be
+finite, non-negative integers representable by the runtime and SQLite execution
+types. Invalid or oversized values fail at the boundary instead of wrapping,
+truncating, or changing the requested page.
+
 Browser durable mode may use:
 
 - main-thread in-memory runtime

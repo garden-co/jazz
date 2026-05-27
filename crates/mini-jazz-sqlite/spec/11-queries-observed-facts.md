@@ -27,6 +27,12 @@ contract. Unsupported semantic features are outside that contract until they
 have a generic lowering, and should not be exposed through binding-specific
 shortcuts.
 
+Supported descriptors should lower into the embedded database query engine.
+Predicate evaluation, ordering, limit, and offset belong in compiled SQL or an
+equivalent backend relational plan. The runtime may decode semantic rows after
+the backend returns candidates, but it should not fetch broad row sets and
+reimplement query filtering, sorting, or pagination in host-language code.
+
 Includes follow ordinary relational semantics:
 
 - required includes lower to inner joins
