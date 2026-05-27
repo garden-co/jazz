@@ -221,7 +221,9 @@ feature exists.
 - Subscription diff ordering is deterministic and follows the same effective
   ordering as the corresponding query result.
 - Subscription row changes identify public row ids, change kind, and stable
-  result positions; added and updated changes carry the new semantic item.
+  result positions; added changes carry the new semantic item. Updated changes
+  carry the new semantic item when the semantic row changed, and may omit it
+  when only the result position changed.
 - Dependency-only changes can update parent semantic rows.
 - Every subscription update is tier-gated.
 - Rows may arrive before query settlement without being published.

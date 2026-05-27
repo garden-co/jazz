@@ -136,8 +136,10 @@ not only the set of rows.
 Row diffs identify the semantic row by public id, describe the change kind, and
 carry the row's deterministic position in the newly delivered result for added
 or updated rows, or in the previous delivered result for removed rows. Added and
-updated diffs carry the new semantic item. Removed diffs do not need to carry
-the old item unless a higher-level binding chooses to retain it for ergonomics.
+updated diffs carry the new semantic item when the semantic row changed. An
+updated diff may omit the item when only the row position changed and the
+semantic row payload is unchanged. Removed diffs do not need to carry the old
+item unless a higher-level binding chooses to retain it for ergonomics.
 
 Tiered delivery:
 
