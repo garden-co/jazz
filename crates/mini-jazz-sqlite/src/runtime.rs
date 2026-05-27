@@ -571,6 +571,8 @@ impl Runtime {
         }
         let branches_ms = duration_ms(branches_started.elapsed());
 
+        let table_nums_by_name = crate::schema::table_nums(&db)?;
+
         let txs_started = Instant::now();
         let mut tx_nums_by_id = BTreeMap::new();
         let mut tx_info_by_num = BTreeMap::new();
@@ -651,6 +653,10 @@ impl Runtime {
                 &read_record.table,
                 &read_record.row_id,
             )?;
+            let table_num = table_nums_by_name
+                .get(&read_record.table)
+                .copied()
+                .ok_or_else(|| crate::Error::new("bundle read references missing table"))?;
             let observed_tx_num = read_record
                 .observed_tx_id
                 .as_deref()
@@ -660,10 +666,10 @@ impl Runtime {
                     })
                 })
                 .transpose()?;
-            read_set::record_tx_read_with_observed(
+            read_set::record_tx_read_num_with_observed(
                 &db,
                 tx_num,
-                &read_record.table,
+                table_num,
                 row_num,
                 read_record.reason,
                 observed_tx_num,
@@ -707,6 +713,7 @@ impl Runtime {
             tx_nums_by_id: &tx_nums_by_id,
             tx_info_by_num: &tx_info_by_num,
             branch_nums_by_id: &branch_nums_by_id,
+            table_nums_by_name: &table_nums_by_name,
             row_nums_by_id: &mut row_nums_by_id,
         };
         for record in &bundle.history {
@@ -1623,7 +1630,12 @@ impl Runtime {
             &columns,
             &values,
         )?;
-        record_tx_write(context.db, tx_num, &record.table, row_num, record.op)?;
+        let table_num = context
+            .table_nums_by_name
+            .get(&record.table)
+            .copied()
+            .ok_or_else(|| crate::Error::new("history record references missing table"))?;
+        record_tx_write_num(context.db, tx_num, table_num, row_num, record.op)?;
 
         let tx_info = context
             .tx_info_by_num
@@ -1865,12 +1877,13 @@ impl Runtime {
 
     pub fn transaction_write_rows(&self, tx_id: &str) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT writes.table_name, ids.row_id
+            "SELECT tables.table_name, ids.row_id
              FROM jazz_tx_write writes
              JOIN jazz_tx tx ON tx.tx_num = writes.tx_num
+             JOIN jazz_table tables ON tables.table_num = writes.table_num
              JOIN jazz_row_id ids ON ids.row_num = writes.row_num
              WHERE tx.tx_id = ?
-             ORDER BY writes.table_name, ids.row_id",
+             ORDER BY tables.table_name, ids.row_id",
         )?;
         let rows = stmt.query_map(params![tx_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1892,13 +1905,14 @@ impl Runtime {
         tx_id: &str,
     ) -> Result<Vec<(String, String, Option<String>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT reads.table_name, ids.row_id, observed.tx_id
+            "SELECT tables.table_name, ids.row_id, observed.tx_id
              FROM jazz_tx_read reads
              JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             JOIN jazz_table tables ON tables.table_num = reads.table_num
              JOIN jazz_row_id ids ON ids.row_num = reads.row_num
              LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
              WHERE tx.tx_id = ?
-             ORDER BY reads.table_name, ids.row_id",
+             ORDER BY tables.table_name, ids.row_id",
         )?;
         let rows = stmt.query_map(params![tx_id], |row| {
             Ok((
@@ -1917,13 +1931,14 @@ impl Runtime {
         reason: i64,
     ) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT reads.table_name, ids.row_id
+            "SELECT tables.table_name, ids.row_id
              FROM jazz_tx_read reads
              JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             JOIN jazz_table tables ON tables.table_num = reads.table_num
              JOIN jazz_row_id ids ON ids.row_num = reads.row_num
              WHERE tx.tx_id = ?
                AND reads.reason = ?
-             ORDER BY reads.table_name, ids.row_id",
+             ORDER BY tables.table_name, ids.row_id",
         )?;
         let rows = stmt.query_map(params![tx_id, reason], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -3758,12 +3773,13 @@ fn unavailable_recorded_policy_dependency(
     branch_num: i64,
 ) -> Result<Option<(String, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT reads.table_name, ids.row_id, reads.row_num, reads.observed_tx_num
+        "SELECT tables.table_name, ids.row_id, reads.row_num, reads.observed_tx_num
          FROM jazz_tx_read reads
+         JOIN jazz_table tables ON tables.table_num = reads.table_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
          WHERE reads.tx_num = ?
            AND reads.reason = ?
-         ORDER BY reads.table_name, ids.row_id",
+         ORDER BY tables.table_name, ids.row_id",
     )?;
     let rows = stmt.query_map(params![tx_num, 1], |row| {
         Ok((
@@ -3841,10 +3857,14 @@ fn unavailable_policy_dependency(
         "SELECT COUNT(*)
          FROM jazz_tx_read
          WHERE tx_num = ?
-           AND table_name = ?
+           AND table_num = ?
            AND row_num = ?
            AND observed_tx_num IS NULL",
-        params![tx_num, ref_table_name, dependency_row_num],
+        params![
+            tx_num,
+            crate::schema::table_num(conn, ref_table_name)?,
+            dependency_row_num
+        ],
         |row| row.get(0),
     )?;
     if missing_observed_read_count > 0 {
@@ -3885,10 +3905,15 @@ fn repair_missing_observed_policy_read(
             "UPDATE jazz_tx_read
              SET observed_tx_num = ?
              WHERE tx_num = ?
-               AND table_name = ?
+               AND table_num = ?
                AND row_num = ?
                AND observed_tx_num IS NULL",
-            params![observed_tx_num, tx_num, table_name, row_num],
+            params![
+                observed_tx_num,
+                tx_num,
+                crate::schema::table_num(conn, table_name)?,
+                row_num
+            ],
         )?;
     }
     Ok(())
@@ -3923,12 +3948,12 @@ fn exclusive_write_conflict_exists(
         "SELECT COUNT(*)
          FROM jazz_tx_write writes
          JOIN jazz_tx tx ON tx.tx_num = writes.tx_num
-         WHERE writes.table_name = ?
+         WHERE writes.table_num = ?
            AND writes.row_num = ?
            AND tx.conflict_mode = ?
            AND tx.outcome = ?",
         params![
-            table_name,
+            crate::schema::table_num(conn, table_name)?,
             row_num,
             tx::MODE_EXCLUSIVE,
             tx::OUTCOME_ACCEPTED
@@ -4148,11 +4173,22 @@ fn record_tx_write(
     row_num: i64,
     op: i64,
 ) -> Result<()> {
+    let table_num = crate::schema::table_num(conn, table_name)?;
+    record_tx_write_num(conn, tx_num, table_num, row_num, op)
+}
+
+fn record_tx_write_num(
+    conn: &Connection,
+    tx_num: i64,
+    table_num: i64,
+    row_num: i64,
+    op: i64,
+) -> Result<()> {
     let mut stmt = conn.prepare_cached(
-        "INSERT OR REPLACE INTO jazz_tx_write (tx_num, table_name, row_num, op)
+        "INSERT OR REPLACE INTO jazz_tx_write (tx_num, table_num, row_num, op)
          VALUES (?, ?, ?, ?)",
     )?;
-    stmt.execute(params![tx_num, table_name, row_num, op])?;
+    stmt.execute(params![tx_num, table_num, row_num, op])?;
     Ok(())
 }
 
@@ -4511,6 +4547,7 @@ struct ApplyHistoryContext<'a> {
     tx_nums_by_id: &'a BTreeMap<String, i64>,
     tx_info_by_num: &'a BTreeMap<i64, ApplyTxInfo>,
     branch_nums_by_id: &'a BTreeMap<String, i64>,
+    table_nums_by_name: &'a BTreeMap<String, i64>,
     row_nums_by_id: &'a mut BTreeMap<(String, String), i64>,
 }
 
@@ -4878,13 +4915,14 @@ fn export_reads_for_history(
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(&format!(
-        "SELECT tx.tx_id, reads.table_name, ids.row_id, reads.reason, observed.tx_id
+        "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
          FROM jazz_tx_read reads
          JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+         JOIN jazz_table tables ON tables.table_num = reads.table_num
          LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
          WHERE tx.tx_id IN ({placeholders})
-         ORDER BY tx.tx_num, reads.table_name, ids.row_id, reads.reason",
+         ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
         placeholders = (0..tx_ids.len())
             .map(|_| "?")
             .collect::<Vec<_>>()

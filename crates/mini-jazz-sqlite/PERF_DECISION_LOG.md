@@ -712,3 +712,24 @@ available and shows object-level entries such as
 The RSS number is coarse process-level memory, not per-node memory, but it is
 good enough to catch large representation regressions while we run full-topology
 benchmarks.
+
+## 2026-05-27 00:05 PDT
+
+Replaced textual table names in `jazz_tx_read` and `jazz_tx_write` with small
+integer `table_num`s backed by a `jazz_table` catalog. This directly tests the
+"tiny system representation" hypothesis for read/write sets, which showed up in
+`dbstat` as a meaningful part of core storage.
+
+First version was semantically green but slowed apply because every read/write
+record did a catalog lookup. Added table-number caching for bundle apply/import
+paths and numeric write/read recording helpers.
+
+Result on the 100k-row primary core: `jazz_tx_read` dropped from ~2.71 MB to
+~1.68 MB and `jazz_tx_write` from ~2.48 MB to ~1.45 MB, with only a 4 KiB
+`jazz_table` catalog. Total core file footprint dropped from ~37.7 MB to
+~35.7 MB. After caching, apply profile is roughly back to the optimized
+baseline (~38.1 ms total, `history_ms` ~27.8 ms, `reads_ms` ~6.6 ms).
+
+Decision: keep table numbers for tx read/write sets. Do not yet convert
+`jazz_row_id.table_name`; that table has different public identity semantics
+and its unique row-id index is the larger share of its footprint.

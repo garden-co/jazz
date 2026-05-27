@@ -43,18 +43,24 @@ pub(crate) fn record_tx_read_with_observed(
     reason: i64,
     observed_tx_num: Option<i64>,
 ) -> Result<()> {
+    let table_num = schema::table_num(conn, table_name)?;
+    record_tx_read_num_with_observed(conn, tx_num, table_num, row_num, reason, observed_tx_num)
+}
+
+pub(crate) fn record_tx_read_num_with_observed(
+    conn: &Connection,
+    tx_num: i64,
+    table_num: i64,
+    row_num: i64,
+    reason: i64,
+    observed_tx_num: Option<i64>,
+) -> Result<()> {
     let mut stmt = conn.prepare_cached(
         "INSERT OR REPLACE INTO jazz_tx_read
-         (tx_num, table_name, row_num, reason, observed_tx_num)
+         (tx_num, table_num, row_num, reason, observed_tx_num)
          VALUES (?, ?, ?, ?, ?)",
     )?;
-    stmt.execute(params![
-        tx_num,
-        table_name,
-        row_num,
-        reason,
-        observed_tx_num
-    ])?;
+    stmt.execute(params![tx_num, table_num, row_num, reason, observed_tx_num])?;
     Ok(())
 }
 
@@ -65,10 +71,11 @@ pub(crate) fn tx_read_set_is_stale(
 ) -> Result<bool> {
     let branch_num = branch::ensure(conn, branch_id, None, now_ms())?;
     let mut stmt = conn.prepare(
-        "SELECT table_name, row_num, reason, observed_tx_num
-         FROM jazz_tx_read
-         WHERE tx_num = ?
-         ORDER BY table_name, row_num",
+        "SELECT tables.table_name, reads.row_num, reads.reason, reads.observed_tx_num
+         FROM jazz_tx_read reads
+         JOIN jazz_table tables ON tables.table_num = reads.table_num
+         WHERE reads.tx_num = ?
+         ORDER BY tables.table_name, reads.row_num",
     )?;
     let reads = stmt.query_map(params![tx_num], |row| {
         Ok((

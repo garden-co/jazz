@@ -350,21 +350,26 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           updated_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS jazz_table (
+          table_num INTEGER PRIMARY KEY,
+          table_name TEXT NOT NULL UNIQUE
+        );
+
         CREATE TABLE IF NOT EXISTS jazz_tx_write (
           tx_num INTEGER NOT NULL,
-          table_name TEXT NOT NULL,
+          table_num INTEGER NOT NULL,
           row_num INTEGER NOT NULL,
           op INTEGER NOT NULL,
-          PRIMARY KEY (tx_num, table_name, row_num)
+          PRIMARY KEY (tx_num, table_num, row_num)
         ) WITHOUT ROWID;
 
         CREATE TABLE IF NOT EXISTS jazz_tx_read (
           tx_num INTEGER NOT NULL,
-          table_name TEXT NOT NULL,
+          table_num INTEGER NOT NULL,
           row_num INTEGER NOT NULL,
           reason INTEGER NOT NULL,
           observed_tx_num INTEGER,
-          PRIMARY KEY (tx_num, table_name, row_num, reason)
+          PRIMARY KEY (tx_num, table_num, row_num, reason)
         ) WITHOUT ROWID;
 
         CREATE TABLE IF NOT EXISTS jazz_query_read (
@@ -414,7 +419,11 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
         "#,
     )?;
 
-    for table in schema.tables() {
+    for (idx, table) in schema.tables().enumerate() {
+        conn.execute(
+            "INSERT OR IGNORE INTO jazz_table (table_num, table_name) VALUES (?, ?)",
+            rusqlite::params![idx as i64 + 1, table.name],
+        )?;
         install_table(conn, table)?;
     }
     Ok(())
@@ -596,6 +605,23 @@ pub(crate) fn history_table(table: &str) -> String {
 
 pub(crate) fn current_table(table: &str) -> String {
     quote_ident(&format!("{table}__schema_v1_current"))
+}
+
+pub(crate) fn table_num(conn: &Connection, table_name: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT table_num FROM jazz_table WHERE table_name = ?",
+        rusqlite::params![table_name],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn table_nums(conn: &Connection) -> Result<BTreeMap<String, i64>> {
+    let mut stmt = conn.prepare("SELECT table_name, table_num FROM jazz_table")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
+        .map_err(Into::into)
 }
 
 pub(crate) fn storage_column(field: &FieldDef) -> String {
