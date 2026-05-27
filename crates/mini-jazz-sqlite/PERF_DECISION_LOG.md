@@ -2265,3 +2265,22 @@ cleaner now: export time grows slowly with query count while apply scales more
 linearly with delivered rows. The recursive topology story is sharper too:
 per-hop export is as expensive as apply and must be included in perceived
 latency discussions.
+
+## 2026-05-27 03:30 PDT
+
+Second subagent review flagged an existing current-Jazz Criterion benchmark:
+`crates/jazz-tools/benches/server_authorization_scope_benchmark.rs`.
+
+Findings:
+
+- the "wide schema catalogue" cases add 256 metadata columns to every benchmark
+  row and then subscribe to full rows, so they measure row materialization and
+  outbox payload size in addition to schema catalogue overhead
+- each Criterion batch rebuilds 500 schemas and 2k wide rows, which may create
+  allocator/cache noise around each sample even if setup is outside the measured
+  closure
+
+Decision: did not change the current-Jazz benchmark during this SQLite-core
+sprint. It is still useful as an inspiration/source signal, but if we use it as
+a direct comparator we should split "many known schemas" from "wide returned row
+payload" so the measured bottleneck is unambiguous.
