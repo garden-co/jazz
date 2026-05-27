@@ -1504,7 +1504,7 @@ impl Runtime {
                 schema, db, query_read, condition, limit,
             );
         }
-        let Some(condition) = built_query.single_predicate_export_condition()? else {
+        let Some(condition) = query::query_scope_predicate(built_query)? else {
             return Err(crate::Error::new(
                 "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
             ));
@@ -6164,7 +6164,7 @@ fn query_scope_repair_row_nums_for_built_query(
             &condition.value,
         );
     }
-    let Some(condition) = built_query.single_predicate_export_condition()? else {
+    let Some(condition) = query::query_scope_predicate(built_query)? else {
         return Err(crate::Error::new(
             "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
         ));

@@ -42,6 +42,20 @@ pub(crate) fn storage_plan(query: &BuiltQuery) -> Option<QueryStoragePlan<'_>> {
     }
 }
 
+pub(crate) fn query_scope_predicate(query: &BuiltQuery) -> Result<Option<&QueryCondition>> {
+    if query.conditions.len() != 1
+        || !query.order_by.is_empty()
+        || query.limit.is_some()
+        || query.offset.unwrap_or(0) != 0
+    {
+        return Err(crate::Error::new(
+            "export_query supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
+        ));
+    }
+
+    Ok(query.conditions.first())
+}
+
 impl QueryContext<'_> {
     pub(crate) fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
         if self.branch_num != 1 {

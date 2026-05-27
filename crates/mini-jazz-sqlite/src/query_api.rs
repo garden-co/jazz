@@ -71,20 +71,6 @@ impl BuiltQuery {
         })
     }
 
-    pub(crate) fn single_predicate_export_condition(&self) -> Result<Option<&QueryCondition>> {
-        if self.conditions.len() != 1
-            || !self.order_by.is_empty()
-            || self.limit.is_some()
-            || self.offset.unwrap_or(0) != 0
-        {
-            return Err(Error::new(
-                "export_query supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
-            ));
-        }
-
-        Ok(self.conditions.first())
-    }
-
     pub(crate) fn to_json_value(&self) -> JsonValue {
         let mut object = JsonMap::new();
         object.insert("table".to_owned(), JsonValue::String(self.table.clone()));
