@@ -113,3 +113,22 @@ Spec updates made:
   assembly;
 - prototype-proven batchable families are ordinary predicates, ordered pages,
   and recursive ref descriptors.
+
+## 2026-05-27 11:46 PDT
+
+PR pushed and description updated. One more architecture cleanup before calling
+this done: the behavior is now planner-shaped, but the code still has the
+planner logic inline in `export_query_read_refreshes`. I want the implementation
+to expose an explicit refresh plan enum so adding new descriptor families does
+not mean growing a pile of ad hoc maps in the runtime method.
+
+## 2026-05-27 11:50 PDT
+
+Added `QueryRefreshPlan` and `plan_query_read_refreshes`. The runtime method now
+does two clearer phases:
+
+1. classify compatible observed query descriptors into refresh plans;
+2. lower each plan into one bundle using descriptor-family-specific export
+   semantics.
+
+Targeted batching tests are green after the refactor.

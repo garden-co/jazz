@@ -53,6 +53,34 @@ type TopFieldRefreshValue = (JsonValue, Vec<String>);
 type TopCreatedAtRefreshKey = (String, String, String, usize);
 type TopCreatedAtRefreshValue = (JsonValue, Vec<String>);
 
+enum QueryRefreshPlan {
+    Predicate {
+        table: String,
+        field: String,
+        op: String,
+        values: Vec<PredicateRefreshValue>,
+    },
+    RecursiveRefs {
+        table: String,
+        field: String,
+        root_ids: Vec<String>,
+    },
+    TopCreatedAt {
+        table: String,
+        field: String,
+        values: Vec<TopCreatedAtRefreshValue>,
+        limit: usize,
+    },
+    TopField {
+        table: String,
+        field: String,
+        values: Vec<TopFieldRefreshValue>,
+        order_field: String,
+        limit: usize,
+    },
+    Single(QueryReadRecord),
+}
+
 impl QueryScopeOptions<'_> {
     fn empty() -> Self {
         Self {
@@ -918,120 +946,51 @@ impl Runtime {
 
     pub fn export_query_read_refreshes(&self, reads: &[QueryReadRecord]) -> Result<Vec<Bundle>> {
         let current_branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
-        let mut predicate_groups: BTreeMap<PredicateRefreshKey, Vec<PredicateRefreshValue>> =
-            BTreeMap::new();
-        let mut recursive_groups: BTreeMap<RecursiveRefreshKey, Vec<String>> = BTreeMap::new();
-        let mut top_created_at_groups: BTreeMap<
-            TopCreatedAtRefreshKey,
-            Vec<TopCreatedAtRefreshValue>,
-        > = BTreeMap::new();
-        let mut top_field_groups: BTreeMap<TopFieldRefreshKey, Vec<TopFieldRefreshValue>> =
-            BTreeMap::new();
         let mut bundles = Vec::new();
 
-        for read in reads {
-            if read.branch_id == current_branch_id
-                && matches!(read.op.as_str(), "eq" | "ne" | "contains" | "in")
-            {
-                predicate_groups
-                    .entry((
-                        read.table.clone(),
-                        read.field.clone(),
-                        read.branch_id.clone(),
-                        read.op.clone(),
-                    ))
-                    .or_default()
-                    .push((read.value.clone(), Vec::new()));
-                continue;
-            }
-            if read.branch_id == current_branch_id && read.op == "recursive_refs" {
-                let Some(root_id) = read.value.as_str() else {
-                    return Err(crate::Error::new("recursive refs expects root id string"));
-                };
-                recursive_groups
-                    .entry((
-                        read.table.clone(),
-                        read.field.clone(),
-                        read.branch_id.clone(),
-                    ))
-                    .or_default()
-                    .push(root_id.to_owned());
-                continue;
-            }
-            if read.branch_id == current_branch_id && read.op == "eq_top_created_at_desc" {
-                let value = read
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-                let limit = read
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-                top_created_at_groups
-                    .entry((
-                        read.table.clone(),
-                        read.field.clone(),
-                        read.branch_id.clone(),
-                        limit as usize,
-                    ))
-                    .or_default()
-                    .push((value.clone(), observed_ids_from_query_value(&read.value)?));
-                continue;
-            }
-            if read.branch_id == current_branch_id && read.op == "eq_top_field_desc" {
-                let value = read
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
-                let order_field = read
-                    .value
-                    .get("order_field")
-                    .and_then(JsonValue::as_str)
-                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
-                let limit = read
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
-                top_field_groups
-                    .entry((
-                        read.table.clone(),
-                        read.field.clone(),
-                        read.branch_id.clone(),
-                        order_field.to_owned(),
-                        limit as usize,
-                    ))
-                    .or_default()
-                    .push((value.clone(), observed_ids_from_query_value(&read.value)?));
-                continue;
-            }
-            bundles.push(self.export_query_read_refresh(read)?);
-        }
-
-        for ((table, field, _branch, op), values) in predicate_groups {
-            bundles.push(self.export_many_predicate_query_refreshes(&table, &field, &op, values)?);
-        }
-        for ((table, field, _branch), root_ids) in recursive_groups {
-            bundles.push(self.export_many_recursive_refs(&table, &field, root_ids)?);
-        }
-        for ((table, field, _branch, limit), values) in top_created_at_groups {
-            bundles.push(
-                self.export_many_query_where_eq_top_created_at_desc_with_previous_observed(
-                    &table, &field, values, limit,
-                )?,
-            );
-        }
-        for ((table, field, _branch, order_field, limit), values) in top_field_groups {
-            bundles.push(
-                self.export_many_query_where_eq_top_field_desc_with_previous_observed(
-                    &table,
-                    &field,
+        for plan in plan_query_read_refreshes(&current_branch_id, reads)? {
+            match plan {
+                QueryRefreshPlan::Predicate {
+                    table,
+                    field,
+                    op,
                     values,
-                    &order_field,
+                } => bundles
+                    .push(self.export_many_predicate_query_refreshes(&table, &field, &op, values)?),
+                QueryRefreshPlan::RecursiveRefs {
+                    table,
+                    field,
+                    root_ids,
+                } => bundles.push(self.export_many_recursive_refs(&table, &field, root_ids)?),
+                QueryRefreshPlan::TopCreatedAt {
+                    table,
+                    field,
+                    values,
                     limit,
-                )?,
-            );
+                } => bundles.push(
+                    self.export_many_query_where_eq_top_created_at_desc_with_previous_observed(
+                        &table, &field, values, limit,
+                    )?,
+                ),
+                QueryRefreshPlan::TopField {
+                    table,
+                    field,
+                    values,
+                    order_field,
+                    limit,
+                } => bundles.push(
+                    self.export_many_query_where_eq_top_field_desc_with_previous_observed(
+                        &table,
+                        &field,
+                        values,
+                        &order_field,
+                        limit,
+                    )?,
+                ),
+                QueryRefreshPlan::Single(read) => {
+                    bundles.push(self.export_query_read_refresh(&read)?);
+                }
+            }
         }
         Ok(bundles)
     }
@@ -6976,6 +6935,144 @@ fn observed_ids_from_query_value(value: &JsonValue) -> Result<Vec<String>> {
                 .ok_or_else(|| crate::Error::new("observed_ids expects string row ids"))
         })
         .collect()
+}
+
+fn plan_query_read_refreshes(
+    current_branch_id: &str,
+    reads: &[QueryReadRecord],
+) -> Result<Vec<QueryRefreshPlan>> {
+    let mut predicate_groups: BTreeMap<PredicateRefreshKey, Vec<PredicateRefreshValue>> =
+        BTreeMap::new();
+    let mut recursive_groups: BTreeMap<RecursiveRefreshKey, Vec<String>> = BTreeMap::new();
+    let mut top_created_at_groups: BTreeMap<TopCreatedAtRefreshKey, Vec<TopCreatedAtRefreshValue>> =
+        BTreeMap::new();
+    let mut top_field_groups: BTreeMap<TopFieldRefreshKey, Vec<TopFieldRefreshValue>> =
+        BTreeMap::new();
+    let mut singles = Vec::new();
+
+    for read in reads {
+        if read.branch_id == current_branch_id
+            && matches!(read.op.as_str(), "eq" | "ne" | "contains" | "in")
+        {
+            predicate_groups
+                .entry((
+                    read.table.clone(),
+                    read.field.clone(),
+                    read.branch_id.clone(),
+                    read.op.clone(),
+                ))
+                .or_default()
+                .push((read.value.clone(), Vec::new()));
+            continue;
+        }
+        if read.branch_id == current_branch_id && read.op == "recursive_refs" {
+            let Some(root_id) = read.value.as_str() else {
+                return Err(crate::Error::new("recursive refs expects root id string"));
+            };
+            recursive_groups
+                .entry((
+                    read.table.clone(),
+                    read.field.clone(),
+                    read.branch_id.clone(),
+                ))
+                .or_default()
+                .push(root_id.to_owned());
+            continue;
+        }
+        if read.branch_id == current_branch_id && read.op == "eq_top_created_at_desc" {
+            let value = read
+                .value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
+            let limit = read
+                .value
+                .get("limit")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
+            top_created_at_groups
+                .entry((
+                    read.table.clone(),
+                    read.field.clone(),
+                    read.branch_id.clone(),
+                    limit as usize,
+                ))
+                .or_default()
+                .push((value.clone(), observed_ids_from_query_value(&read.value)?));
+            continue;
+        }
+        if read.branch_id == current_branch_id && read.op == "eq_top_field_desc" {
+            let value = read
+                .value
+                .get("eq")
+                .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+            let order_field = read
+                .value
+                .get("order_field")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+            let limit = read
+                .value
+                .get("limit")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+            top_field_groups
+                .entry((
+                    read.table.clone(),
+                    read.field.clone(),
+                    read.branch_id.clone(),
+                    order_field.to_owned(),
+                    limit as usize,
+                ))
+                .or_default()
+                .push((value.clone(), observed_ids_from_query_value(&read.value)?));
+            continue;
+        }
+        singles.push(QueryRefreshPlan::Single(read.clone()));
+    }
+
+    let mut plans = Vec::new();
+    plans.extend(
+        predicate_groups
+            .into_iter()
+            .map(
+                |((table, field, _branch, op), values)| QueryRefreshPlan::Predicate {
+                    table,
+                    field,
+                    op,
+                    values,
+                },
+            ),
+    );
+    plans.extend(
+        recursive_groups
+            .into_iter()
+            .map(
+                |((table, field, _branch), root_ids)| QueryRefreshPlan::RecursiveRefs {
+                    table,
+                    field,
+                    root_ids,
+                },
+            ),
+    );
+    plans.extend(top_created_at_groups.into_iter().map(
+        |((table, field, _branch, limit), values)| QueryRefreshPlan::TopCreatedAt {
+            table,
+            field,
+            values,
+            limit,
+        },
+    ));
+    plans.extend(top_field_groups.into_iter().map(
+        |((table, field, _branch, order_field, limit), values)| QueryRefreshPlan::TopField {
+            table,
+            field,
+            values,
+            order_field,
+            limit,
+        },
+    ));
+    plans.extend(singles);
+    Ok(plans)
 }
 
 fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {
