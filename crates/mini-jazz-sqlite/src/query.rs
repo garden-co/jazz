@@ -19,45 +19,6 @@ pub(crate) struct QueryContext<'a> {
     pub(crate) bypass_policy: bool,
 }
 
-pub(crate) enum QueryStoragePlan<'a> {
-    EqCreatedAtDescPage {
-        condition: &'a QueryCondition,
-        limit: usize,
-    },
-}
-
-pub(crate) fn storage_plan(query: &BuiltQuery) -> Option<QueryStoragePlan<'_>> {
-    if query.offset.unwrap_or(0) != 0 || query.conditions.len() != 1 || query.order_by.len() != 1 {
-        return None;
-    }
-    let condition = query.conditions.first()?;
-    if condition.op != QueryConditionOp::Eq {
-        return None;
-    }
-    let order = query.order_by.first()?;
-    if order.column == "$createdAt" && order.direction == QueryDirection::Desc {
-        query
-            .limit
-            .map(|limit| QueryStoragePlan::EqCreatedAtDescPage { condition, limit })
-    } else {
-        None
-    }
-}
-
-pub(crate) fn query_scope_predicate(query: &BuiltQuery) -> Result<Option<&QueryCondition>> {
-    if query.conditions.len() != 1
-        || !query.order_by.is_empty()
-        || query.limit.is_some()
-        || query.offset.unwrap_or(0) != 0
-    {
-        return Err(crate::Error::new(
-            "export_query supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
-        ));
-    }
-
-    Ok(query.conditions.first())
-}
-
 struct LoweredCondition {
     sql: String,
     params: Vec<SqlValue>,

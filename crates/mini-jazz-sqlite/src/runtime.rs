@@ -1,4 +1,6 @@
-use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
+use crate::query_api::{
+    predicate_query, BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection,
+};
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
@@ -1552,26 +1554,21 @@ impl Runtime {
         //   +-----------------------------+
         //   | page-boundary repair        |
         //   +-----------------------------+
-        if let Some(query::QueryStoragePlan::EqCreatedAtDescPage { condition, limit }) =
-            query::storage_plan(built_query)
-        {
-            return Self::apply_created_at_desc_page_repair(
-                schema, db, query_read, condition, limit,
-            );
+        match built_query_repair_scope(built_query)? {
+            BuiltQueryRepairScope::CreatedAtDescPage { condition, limit } => {
+                Self::apply_created_at_desc_page_repair(schema, db, query_read, condition, limit)
+            }
+            BuiltQueryRepairScope::Predicate(condition) => {
+                let predicate_read = QueryReadRecord {
+                    branch_id: query_read.branch_id.clone(),
+                    table: built_query.table.clone(),
+                    field: condition.column.clone(),
+                    op: condition.op.as_str().to_owned(),
+                    value: condition.value.clone(),
+                };
+                Self::apply_query_scope_repair(schema, db, &predicate_read)
+            }
         }
-        let Some(condition) = query::query_scope_predicate(built_query)? else {
-            return Err(crate::Error::new(
-                "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
-            ));
-        };
-        let predicate_read = QueryReadRecord {
-            branch_id: query_read.branch_id.clone(),
-            table: built_query.table.clone(),
-            field: condition.column.clone(),
-            op: condition.op.as_str().to_owned(),
-            value: condition.value.clone(),
-        };
-        Self::apply_query_scope_repair(schema, db, &predicate_read)
     }
 
     fn apply_created_at_desc_page_repair(
@@ -6264,23 +6261,12 @@ fn query_scope_repair_row_nums_for_built_query(
             "query read table does not match descriptor",
         ));
     }
-    if let Some(query::QueryStoragePlan::EqCreatedAtDescPage {
-        condition,
-        limit: _,
-    }) = query::storage_plan(built_query)
-    {
-        return query_scope_repair_row_nums(
-            conn,
-            table,
-            &condition.column,
-            condition.op.as_str(),
-            &condition.value,
-        );
-    }
-    let Some(condition) = query::query_scope_predicate(built_query)? else {
-        return Err(crate::Error::new(
-            "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
-        ));
+    let condition = match built_query_repair_scope(built_query)? {
+        BuiltQueryRepairScope::CreatedAtDescPage {
+            condition,
+            limit: _,
+        }
+        | BuiltQueryRepairScope::Predicate(condition) => condition,
     };
     query_scope_repair_row_nums(
         conn,
@@ -6319,23 +6305,12 @@ fn query_scope_rejected_tx_ids_for_built_query(
             "query read table does not match descriptor",
         ));
     }
-    if let Some(query::QueryStoragePlan::EqCreatedAtDescPage {
-        condition,
-        limit: _,
-    }) = query::storage_plan(built_query)
-    {
-        return query_scope_rejected_tx_ids(
-            conn,
-            table,
-            &condition.column,
-            condition.op.as_str(),
-            &condition.value,
-        );
-    }
-    let Some(condition) = query::query_scope_predicate(built_query)? else {
-        return Err(crate::Error::new(
-            "query read rejection tracking supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
-        ));
+    let condition = match built_query_repair_scope(built_query)? {
+        BuiltQueryRepairScope::CreatedAtDescPage {
+            condition,
+            limit: _,
+        }
+        | BuiltQueryRepairScope::Predicate(condition) => condition,
     };
     query_scope_rejected_tx_ids(
         conn,
@@ -6343,6 +6318,43 @@ fn query_scope_rejected_tx_ids_for_built_query(
         &condition.column,
         condition.op.as_str(),
         &condition.value,
+    )
+}
+
+enum BuiltQueryRepairScope<'a> {
+    Predicate(&'a QueryCondition),
+    CreatedAtDescPage {
+        condition: &'a QueryCondition,
+        limit: usize,
+    },
+}
+
+fn built_query_repair_scope(query: &BuiltQuery) -> Result<BuiltQueryRepairScope<'_>> {
+    if query.conditions.len() != 1 || query.offset.unwrap_or(0) != 0 {
+        return Err(unsupported_built_query_repair_scope());
+    }
+
+    let condition = query
+        .conditions
+        .first()
+        .ok_or_else(unsupported_built_query_repair_scope)?;
+
+    match (query.order_by.as_slice(), query.limit) {
+        ([], None) => Ok(BuiltQueryRepairScope::Predicate(condition)),
+        ([order], Some(limit))
+            if condition.op == QueryConditionOp::Eq
+                && order.column == "$createdAt"
+                && order.direction == QueryDirection::Desc =>
+        {
+            Ok(BuiltQueryRepairScope::CreatedAtDescPage { condition, limit })
+        }
+        _ => Err(unsupported_built_query_repair_scope()),
+    }
+}
+
+fn unsupported_built_query_repair_scope() -> crate::Error {
+    crate::Error::new(
+        "query read repair supports one predicate, or one eq predicate ordered by $createdAt desc with a limit",
     )
 }
 
