@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { schema as s } from "../index.js";
 
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
@@ -85,6 +86,74 @@ describe("dev catalogue pending operations", () => {
 });
 
 describe("dev catalogue push behavior", () => {
+  it("pushMigration publishes an inferred empty migration and emits a catalogue event", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const toHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const objectId = "55555555-5555-5555-5555-555555555555";
+    const fromSchema = s.defineApp({
+      todos: s.table({
+        title: s.string(),
+        done: s.boolean(),
+      }),
+    }).wasmSchema;
+    const toSchema = s.defineApp({
+      todos: s.table({
+        done: s.boolean(),
+        title: s.string(),
+      }),
+    }).wasmSchema;
+
+    let migrationBody: any;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+          return new Response(JSON.stringify({ schema: fromSchema, publishedAt: 0 }), {
+            status: 200,
+          });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+          return new Response(JSON.stringify({ schema: toSchema, publishedAt: 0 }), {
+            status: 200,
+          });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+          migrationBody = JSON.parse(String(init?.body));
+          return new Response(JSON.stringify({ objectId, fromHash, toHash }), { status: 201 });
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    const events: unknown[] = [];
+    const { pushMigration } = await import("./index.js");
+    const result = await pushMigration({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      migrationsDir,
+      fromHash: fromHash.slice(0, 12),
+      toHash: toHash.slice(0, 12),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toEqual({
+      fromHash,
+      toHash,
+      status: "published",
+      objectId,
+    });
+    expect(migrationBody.forward).toEqual([]);
+    expect(events).toEqual([{ type: "migration-published", fromHash, toHash }]);
+  });
+
   it("pushMigration publishes a reviewed local migration file and returns a structured result", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");

@@ -81,6 +81,7 @@ export interface PushMigrationResult {
   toHash: string;
   status: "published";
   filePath?: string;
+  objectId?: string;
 }
 
 export interface DeployOptions extends CatalogueProjectOptions {
@@ -258,7 +259,7 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-function snapshotsDirForMigrations(migrationsDir: string): string {
+export function snapshotsDirForMigrations(migrationsDir: string): string {
   return join(migrationsDir, "snapshots");
 }
 
@@ -267,7 +268,7 @@ export interface ResolvedSchemaInput {
   schema: WasmSchema;
 }
 
-interface SnapshotEntry {
+export interface SnapshotEntry {
   hash: string;
   fileName: string;
   filePath: string;
@@ -360,7 +361,7 @@ async function loadCatalogueWasmModule(): Promise<any> {
   return wasmModulePromise;
 }
 
-async function computeSchemaHash(schema: WasmSchema): Promise<string> {
+export async function computeSchemaHash(schema: WasmSchema): Promise<string> {
   const wasmModule = await loadCatalogueWasmModule();
   const runtime = new wasmModule.WasmRuntime(
     JSON.stringify(schema),
@@ -671,7 +672,56 @@ export async function findMigrationFile(
   return join(migrationsDir, matches[0]!);
 }
 
-export async function resolveHistoricalSchema(
+export async function resolveSnapshotEntry(
+  dir: string,
+  hash: string,
+  label: string,
+): Promise<SnapshotEntry | null> {
+  const entries = await listSnapshotEntries(dir);
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const normalized = normalizeSchemaHashInput(hash, label);
+  if (normalized.length === 64) {
+    return entries.find((entry) => entry.hash === normalized) ?? null;
+  }
+
+  const matches = entries.filter((entry) => entry.hash.startsWith(normalized));
+  if (matches.length === 0) {
+    return null;
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `${label} prefix ${normalized} is ambiguous: ${matches
+        .map((entry) => shortSchemaHash(entry.hash))
+        .join(", ")}`,
+    );
+  }
+  return matches[0]!;
+}
+
+export async function resolveLocalHistoricalSchema(
+  migrationsDir: string,
+  hash: string,
+  label: string,
+): Promise<ResolvedSchemaInput | null> {
+  const localEntry = await resolveSnapshotEntry(
+    snapshotsDirForMigrations(migrationsDir),
+    hash,
+    label,
+  );
+  if (!localEntry) {
+    return null;
+  }
+
+  return {
+    hash: localEntry.hash,
+    schema: localEntry.schema,
+  };
+}
+
+export async function resolveRemoteHistoricalSchema(
   migrationsDir: string,
   hash: string,
   label: string,
@@ -679,33 +729,7 @@ export async function resolveHistoricalSchema(
   serverUrl: string,
   adminSecret: string,
 ): Promise<ResolvedSchemaInput> {
-  const localEntries = await listSnapshotEntriesForMigrations(migrationsDir);
   const normalized = normalizeSchemaHashInput(hash, label);
-  const localFullHash =
-    normalized.length === 64
-      ? localEntries.find((entry) => entry.hash === normalized)?.hash
-      : (() => {
-          const matches = localEntries.filter((entry) => entry.hash.startsWith(normalized));
-          if (matches.length === 0) {
-            return null;
-          }
-          if (matches.length > 1) {
-            throw new Error(
-              `${label} prefix ${normalized} is ambiguous: ${matches
-                .map((entry) => shortSchemaHash(entry.hash))
-                .join(", ")}`,
-            );
-          }
-          return matches[0]!.hash;
-        })();
-
-  if (localFullHash) {
-    return {
-      hash: localFullHash,
-      schema: localEntries.find((entry) => entry.hash === localFullHash)!.schema,
-    };
-  }
-
   const resolvedHash =
     normalized.length === 64
       ? normalized
@@ -736,6 +760,20 @@ export async function resolveHistoricalSchema(
     }
     throw error;
   }
+}
+
+export async function resolveHistoricalSchema(
+  migrationsDir: string,
+  hash: string,
+  label: string,
+  appId: string,
+  serverUrl: string,
+  adminSecret: string,
+): Promise<ResolvedSchemaInput> {
+  return (
+    (await resolveLocalHistoricalSchema(migrationsDir, hash, label)) ??
+    resolveRemoteHistoricalSchema(migrationsDir, hash, label, appId, serverUrl, adminSecret)
+  );
 }
 
 export async function pushMigration(options: PushMigrationOptions): Promise<PushMigrationResult> {
@@ -782,7 +820,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
       );
     }
 
-    await publishStoredMigration(options.serverUrl, {
+    const published = await publishStoredMigration(options.serverUrl, {
       appId: options.appId,
       adminSecret: options.adminSecret,
       fromHash,
@@ -795,6 +833,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
       fromHash,
       toHash,
       status: "published",
+      objectId: published.objectId,
     };
   }
 
@@ -836,7 +875,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
   }
 
   const forward = migration.forward.length === 0 ? [] : serializeForwardLenses(migration.forward);
-  await publishStoredMigration(options.serverUrl, {
+  const published = await publishStoredMigration(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
     fromHash,
@@ -850,6 +889,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
     toHash,
     status: "published",
     filePath,
+    objectId: published.objectId,
   };
 }
 
