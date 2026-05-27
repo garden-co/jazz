@@ -193,6 +193,9 @@ bundle assembly. Dashboards often contain many similar page queries that share
 table, policy, branch, ordering, and dependency structure. Batching at export
 time can avoid repeated dependency, read-set, transaction, and branch
 collection that cannot be recovered by merging already-assembled bundles.
+The current prototype batches compatible ordinary predicates, ordered page
+descriptors, and recursive ref descriptors into one refresh bundle per
+compatible group.
 
 ### 33.3 Recursive Scopes
 

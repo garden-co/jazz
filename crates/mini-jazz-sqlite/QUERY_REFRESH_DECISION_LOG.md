@@ -59,3 +59,57 @@ forced through the ordinary predicate export primitive. Recursive exports have
 extra semantics: deleted descendant tombstones and recursive scope repair
 history. Added a separate same-shape recursive grouping path and a regression
 test with two subscribed roots refreshing through one bundle.
+
+## 2026-05-27 11:43 PDT
+
+Release perf sanity: the existing `multi_query_refresh_probe` now naturally
+reports one exported refresh bundle for four same-shape page subscriptions:
+
+```json
+{
+  "query_count": 4,
+  "separate_bundle_count": 1,
+  "separate_bundle_bytes": 49373,
+  "merged_bundle_bytes": 49373,
+  "separate_apply_ms": 1.551542,
+  "merged_apply_ms": 1.683125,
+  "separate_history_rows": 126,
+  "merged_history_rows": 126,
+  "separate_transaction_rows": 5,
+  "merged_transaction_rows": 5,
+  "merged_observed_facts": 4
+}
+```
+
+The old field names are now misleading: this is no longer "separate bundles
+then merge" for same-shape refreshes. Next small cleanup is to rename those
+metrics so the benchmark describes the new planner behavior directly.
+
+## 2026-05-27 11:45 PDT
+
+Renamed the multi-query refresh probe metrics from "separate" to "refresh" /
+"equivalent merged" so the benchmark matches the planner behavior. Re-ran the
+release probe:
+
+```json
+{
+  "query_count": 4,
+  "refresh_bundle_count": 1,
+  "refresh_bundle_bytes": 49373,
+  "equivalent_merged_bundle_bytes": 49373,
+  "refresh_apply_ms": 1.526792,
+  "equivalent_merged_apply_ms": 1.431542,
+  "refresh_history_rows": 126,
+  "equivalent_merged_history_rows": 126,
+  "refresh_transaction_rows": 5,
+  "equivalent_merged_transaction_rows": 5,
+  "refresh_observed_facts": 4
+}
+```
+
+Spec updates made:
+
+- query descriptors should be planned in compatible groups before bundle
+  assembly;
+- prototype-proven batchable families are ordinary predicates, ordered pages,
+  and recursive ref descriptors.
