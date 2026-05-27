@@ -365,3 +365,16 @@ Result: benchmark movement is modest in the current page-shaped workload: cold
 first-result stays around 130-131 ms and mixed refresh apply is around 32.5 ms.
 Still, this removes a whole duplicate repair phase from every scoped apply, so
 it should matter more as the number or complexity of observed queries grows.
+
+## 2026-05-26 22:23 PDT
+
+Added a wide-schema apply probe: 42 schema tables installed, but the synced page
+touches only `documents` and `orgs`. This is the product shape behind the
+touched-table rejected cleanup optimization: a screen should not pay per-table
+maintenance costs for unrelated relations.
+
+Result after the scoped cleanup and post-only repair changes: applying a
+page-50 bundle with 100 history rows and 2 tx rows in the 42-table schema takes
+about 19 ms, essentially the same as the narrower schema. This validates the
+direction: current apply cost is dominated by rows actually synced, not by total
+schema width.

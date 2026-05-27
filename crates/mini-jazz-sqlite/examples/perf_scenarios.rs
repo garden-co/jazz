@@ -20,6 +20,7 @@ fn main() -> BenchResult<()> {
         multi_tab_fanout_probe: run_multi_tab_fanout_probe()?,
         many_user_page_probe: run_many_user_page_probe()?,
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
+        wide_schema_apply_probe: run_wide_schema_apply_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -56,6 +57,7 @@ struct BenchmarkReport {
     multi_tab_fanout_probe: MultiTabFanoutProbe,
     many_user_page_probe: ManyUserPageProbe,
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
+    wide_schema_apply_probe: WideSchemaApplyProbe,
 }
 
 #[derive(Serialize)]
@@ -180,6 +182,22 @@ struct MixedMutationRefreshProbe {
     subscription_added: usize,
     subscription_updated: usize,
     subscription_removed: usize,
+}
+
+#[derive(Serialize)]
+struct WideSchemaApplyProbe {
+    total_tables: usize,
+    synced_tables: usize,
+    total_rows: usize,
+    target_owner_rows: usize,
+    page_size: usize,
+    visible_rows_returned: usize,
+    history_rows_synced: usize,
+    transaction_rows_synced: usize,
+    bundle_bytes: usize,
+    apply_ms: f64,
+    query_ms: f64,
+    tab_database_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -648,6 +666,44 @@ fn run_mixed_mutation_refresh_probe() -> BenchResult<MixedMutationRefreshProbe> 
     })
 }
 
+fn run_wide_schema_apply_probe() -> BenchResult<WideSchemaApplyProbe> {
+    let total_rows = 20_000;
+    let target_owner_rows = 2_000;
+    let page_size = 50;
+    let filler_table_count = 40;
+    let dir = tempdir()?;
+    let schema = wide_documents_schema(filler_table_count);
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut tab = Runtime::open_with_schema(Storage::Memory, "tab", OWNER, schema.clone())?;
+
+    seed_documents(&mut core, total_rows, target_owner_rows, 100)?;
+    let bundle = export_top_owner_page(&mut core, page_size)?;
+    let summary = BundleSummary::from(&bundle)?;
+    let apply_elapsed = timed(|| tab.apply_bundle(&bundle))?;
+    let query_started = Instant::now();
+    let rows = read_top_owner_page(&tab, page_size)?;
+    let query_elapsed = query_started.elapsed();
+
+    Ok(WideSchemaApplyProbe {
+        total_tables: filler_table_count + 2,
+        synced_tables: 2,
+        total_rows,
+        target_owner_rows,
+        page_size,
+        visible_rows_returned: rows.len(),
+        history_rows_synced: bundle.history.len(),
+        transaction_rows_synced: bundle.txs.len(),
+        bundle_bytes: summary.bytes,
+        apply_ms: ms(apply_elapsed),
+        query_ms: ms(query_elapsed),
+        tab_database_bytes: tab.storage_stats()?.database_bytes,
+    })
+}
+
 fn run_edge_warm_worker_cold(
     config: &Config,
     dir: &tempfile::TempDir,
@@ -805,6 +861,20 @@ fn documents_schema() -> SchemaDef {
             table.index("owner_updated", ["owner_id", "updated_at"]);
             table.read_if_ref_readable("org");
         })
+}
+
+fn wide_documents_schema(filler_table_count: usize) -> SchemaDef {
+    let mut schema = documents_schema();
+    for table_index in 0..filler_table_count {
+        schema = schema.table(&format!("filler_{table_index}"), |table| {
+            table.text("owner_id");
+            table.text("status");
+            table.text("updated_at");
+            table.index("owner_updated", ["owner_id", "updated_at"]);
+            table.read_if_created_by_user();
+        });
+    }
+    schema
 }
 
 fn recursive_policy_schema() -> SchemaDef {
