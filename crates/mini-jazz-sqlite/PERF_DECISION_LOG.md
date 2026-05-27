@@ -2167,3 +2167,23 @@ Learning: larger SQLite page sizes did not reduce disk footprint for this
 history-heavy recursive workload and did not clearly improve speed. The default
 page size looks at least competitive here; page-size tuning is not an obvious
 early win.
+
+## 2026-05-27 03:21 PDT
+
+Compared the focused 10k recursive topology with unsafe durability pragmas:
+`MINI_JAZZ_SQLITE_JOURNAL_MODE=OFF MINI_JAZZ_SQLITE_SYNCHRONOUS=OFF`.
+
+Default WAL/NORMAL from the previous focused run:
+
+- initial edge apply ~162.6 ms
+- refresh edge apply ~71.2 ms
+
+Unsafe OFF/OFF:
+
+- initial edge apply ~156.5 ms
+- refresh edge apply ~67.6 ms
+- core/edge DB bytes were unchanged in the logical page-count measurement
+
+Learning: disabling SQLite durability only improved this workload by a few
+milliseconds. The hot costs are CPU/query/application mechanics, not fsync or WAL
+overhead. This is good news for keeping normal durable settings on edges/core.
