@@ -101,6 +101,34 @@ impl QueryContext<'_> {
         Ok(rows)
     }
 
+    pub(crate) fn repair_row_nums_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<i64>> {
+        let table = self.schema.table_def(&query.table)?;
+        let (condition_sql, mut params) =
+            self.lower_query_conditions(table, &query.conditions, "h", "ids")?;
+        let mut query_params = vec![
+            SqlValue::Text(table.name.clone()),
+            SqlValue::Integer(tx::OUTCOME_REJECTED),
+        ];
+        query_params.append(&mut params);
+        let sql = format!(
+            "SELECT DISTINCT h.row_num
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE ids.table_name = ?
+               AND tx.outcome != ?
+               AND {condition_sql}
+             ORDER BY h.row_num",
+            crate::schema::history_table(&query.table),
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     fn read_current_built_query(
         &self,
         query: &BuiltQuery,

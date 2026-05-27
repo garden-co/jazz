@@ -1536,9 +1536,9 @@ impl Runtime {
         //   jazz_query_read
         //   field="$query", op="query", value=<BuiltQuery JSON>
         //
-        // Repair does not currently understand every SQL-lowered descriptor.
-        // It maps the supported sync-repair shapes back to the smaller repair
-        // primitives used below:
+        // Repair keeps the old narrow fast paths for simple predicates and the
+        // original createdAt page shape, then falls back to a generic
+        // SQL-lowered pass for the wider built-query language:
         //
         //   +-----------------------------+
         //   | BuiltQuery descriptor       |
@@ -1558,7 +1558,7 @@ impl Runtime {
         //        | every other SQL-lowered shape
         //        v
         //   +-----------------------------+
-        //   | no contraction repair yet   |
+        //   | generic SQL-lowered repair  |
         //   +-----------------------------+
         match built_query_repair_scope(built_query)? {
             BuiltQueryRepairScope::CreatedAtDescPage { condition, limit } => {
@@ -1574,8 +1574,55 @@ impl Runtime {
                 };
                 Self::apply_query_scope_repair(schema, db, &predicate_read)
             }
-            BuiltQueryRepairScope::Unsupported => Ok(()),
+            BuiltQueryRepairScope::Generic => {
+                Self::apply_generic_built_query_scope_repair(schema, db, query_read, built_query)
+            }
         }
+    }
+
+    fn apply_generic_built_query_scope_repair(
+        schema: &SchemaDef,
+        db: &Connection,
+        query_read: &QueryReadRecord,
+        built_query: &BuiltQuery,
+    ) -> Result<()> {
+        if built_query.limit.is_none() && built_query.offset.unwrap_or(0) == 0 {
+            return Ok(());
+        }
+
+        let branch_num = branch::checkout(db, &query_read.branch_id)?;
+        let context = query::QueryContext {
+            conn: db,
+            schema,
+            branch_num,
+            user: ADMIN_SYSTEM_USER,
+            bypass_policy: true,
+        };
+        let mut scope_query = built_query.clone();
+        scope_query.limit = None;
+        scope_query.offset = None;
+        let scope_row_nums = context
+            .read_rows_for_built_query(&scope_query)?
+            .iter()
+            .map(|row| row_num(db, &row.id))
+            .collect::<Result<Vec<_>>>()?;
+        if scope_row_nums.is_empty() {
+            return Ok(());
+        }
+
+        let keep_query = built_query_repair_keep_query(built_query)?;
+        let keep_row_nums = context
+            .read_rows_for_built_query(&keep_query)?
+            .iter()
+            .map(|row| row_num(db, &row.id))
+            .collect::<Result<Vec<_>>>()?;
+        delete_current_rows_outside_keep_set(
+            db,
+            &built_query.table,
+            branch_num,
+            &scope_row_nums,
+            &keep_row_nums,
+        )
     }
 
     fn apply_created_at_desc_page_repair(
@@ -2894,6 +2941,7 @@ impl Runtime {
         }
         repair_row_nums.extend(query_scope_repair_row_nums_for_read(
             &self.conn,
+            &self.schema,
             table,
             &query_read,
         )?);
@@ -2973,7 +3021,8 @@ impl Runtime {
         }
         dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
-        let rejected_tx_ids = query_scope_rejected_tx_ids_for_read(&self.conn, table, &query_read)?;
+        let rejected_tx_ids =
+            query_scope_rejected_tx_ids_for_read(&self.conn, &self.schema, table, &query_read)?;
         let txs =
             export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
@@ -6269,6 +6318,7 @@ fn rejected_tx_ids_for_row_nums(
 
 fn query_scope_repair_row_nums_for_read(
     conn: &Connection,
+    schema: &SchemaDef,
     table: &crate::schema::TableDef,
     query_read: &QueryReadRecord,
 ) -> Result<Vec<i64>> {
@@ -6277,7 +6327,7 @@ fn query_scope_repair_row_nums_for_read(
     // they need a small adapter before repair candidates can be collected.
     if query_read.op == "query" {
         let query = built_query_from_read(query_read)?;
-        return query_scope_repair_row_nums_for_built_query(conn, table, &query);
+        return query_scope_repair_row_nums_for_built_query(conn, schema, table, &query);
     }
     query_scope_repair_row_nums(
         conn,
@@ -6290,6 +6340,7 @@ fn query_scope_repair_row_nums_for_read(
 
 fn query_scope_repair_row_nums_for_built_query(
     conn: &Connection,
+    schema: &SchemaDef,
     table: &crate::schema::TableDef,
     built_query: &BuiltQuery,
 ) -> Result<Vec<i64>> {
@@ -6301,11 +6352,11 @@ fn query_scope_repair_row_nums_for_built_query(
     //       |                                         v
     //       +-- eq + createdAt desc + limit --> predicate repair rows
     //       |
-    //       +-- other SQL-lowered shape ------> exported result/support rows only
+    //       +-- other SQL-lowered shape ------> SQL-lowered history scope
     //
-    // The ordered-page case exports rows that ever matched the predicate. The
-    // receiver then recomputes the actual page boundary locally and deletes any
-    // stale rows outside that boundary.
+    // Generic built-query repair asks SQLite for rows whose history matched the
+    // query conditions. Export then sends those row histories so peers learn
+    // about rows that left a multi-filter or custom-ordered query.
     if built_query.table != table.name {
         return Err(crate::Error::new(
             "query read table does not match descriptor",
@@ -6317,7 +6368,16 @@ fn query_scope_repair_row_nums_for_built_query(
             limit: _,
         }
         | BuiltQueryRepairScope::Predicate(condition) => condition,
-        BuiltQueryRepairScope::Unsupported => return Ok(Vec::new()),
+        BuiltQueryRepairScope::Generic => {
+            let context = query::QueryContext {
+                conn,
+                schema,
+                branch_num: 1,
+                user: ADMIN_SYSTEM_USER,
+                bypass_policy: true,
+            };
+            return context.repair_row_nums_for_built_query(built_query);
+        }
     };
     query_scope_repair_row_nums(
         conn,
@@ -6330,12 +6390,13 @@ fn query_scope_repair_row_nums_for_built_query(
 
 fn query_scope_rejected_tx_ids_for_read(
     conn: &Connection,
+    schema: &SchemaDef,
     table: &crate::schema::TableDef,
     query_read: &QueryReadRecord,
 ) -> Result<Vec<String>> {
     if query_read.op == "query" {
         let query = built_query_from_read(query_read)?;
-        return query_scope_rejected_tx_ids_for_built_query(conn, table, &query);
+        return query_scope_rejected_tx_ids_for_built_query(conn, schema, table, &query);
     }
     query_scope_rejected_tx_ids(
         conn,
@@ -6348,6 +6409,7 @@ fn query_scope_rejected_tx_ids_for_read(
 
 fn query_scope_rejected_tx_ids_for_built_query(
     conn: &Connection,
+    schema: &SchemaDef,
     table: &crate::schema::TableDef,
     built_query: &BuiltQuery,
 ) -> Result<Vec<String>> {
@@ -6362,6 +6424,17 @@ fn query_scope_rejected_tx_ids_for_built_query(
             limit: _,
         }
         | BuiltQueryRepairScope::Predicate(condition) => condition,
+        BuiltQueryRepairScope::Generic => {
+            let context = query::QueryContext {
+                conn,
+                schema,
+                branch_num: 1,
+                user: ADMIN_SYSTEM_USER,
+                bypass_policy: true,
+            };
+            let row_nums = context.repair_row_nums_for_built_query(built_query)?;
+            return rejected_tx_ids_for_row_nums(conn, &built_query.table, &row_nums);
+        }
     };
     query_scope_rejected_tx_ids(
         conn,
@@ -6378,29 +6451,102 @@ enum BuiltQueryRepairScope<'a> {
         condition: &'a QueryCondition,
         limit: usize,
     },
-    Unsupported,
+    Generic,
 }
 
 fn built_query_repair_scope(query: &BuiltQuery) -> Result<BuiltQueryRepairScope<'_>> {
-    if query.conditions.len() != 1 || query.offset.unwrap_or(0) != 0 {
-        return Ok(BuiltQueryRepairScope::Unsupported);
-    }
-
-    let Some(condition) = query.conditions.first() else {
-        return Ok(BuiltQueryRepairScope::Unsupported);
-    };
-
-    match (query.order_by.as_slice(), query.limit) {
-        ([], None) => Ok(BuiltQueryRepairScope::Predicate(condition)),
-        ([order], Some(limit))
-            if condition.op == QueryConditionOp::Eq
-                && order.column == "$createdAt"
-                && order.direction == QueryDirection::Desc =>
-        {
-            Ok(BuiltQueryRepairScope::CreatedAtDescPage { condition, limit })
+    if query.conditions.len() == 1 && query.offset.unwrap_or(0) == 0 {
+        let condition = &query.conditions[0];
+        match (query.order_by.as_slice(), query.limit) {
+            ([], None) => return Ok(BuiltQueryRepairScope::Predicate(condition)),
+            ([order], Some(limit))
+                if condition.op == QueryConditionOp::Eq
+                    && order.column == "$createdAt"
+                    && order.direction == QueryDirection::Desc =>
+            {
+                return Ok(BuiltQueryRepairScope::CreatedAtDescPage { condition, limit });
+            }
+            _ => {}
         }
-        _ => Ok(BuiltQueryRepairScope::Unsupported),
     }
+    Ok(BuiltQueryRepairScope::Generic)
+}
+
+fn built_query_repair_keep_query(query: &BuiltQuery) -> Result<BuiltQuery> {
+    let offset = query.offset.unwrap_or(0);
+    if offset == 0 {
+        return Ok(query.clone());
+    }
+
+    let mut keep_query = query.clone();
+    keep_query.offset = None;
+    keep_query.limit = query
+        .limit
+        .map(|limit| {
+            offset
+                .checked_add(limit)
+                .ok_or_else(|| crate::Error::new("query limit plus offset is too large"))
+        })
+        .transpose()?;
+    Ok(keep_query)
+}
+
+fn delete_current_rows_outside_keep_set(
+    db: &Connection,
+    table_name: &str,
+    branch_num: i64,
+    scope_row_nums: &[i64],
+    keep_row_nums: &[i64],
+) -> Result<()> {
+    if scope_row_nums.is_empty() {
+        return Ok(());
+    }
+
+    // Generic window repair is a contraction pass:
+    //
+    //   rows matching query filters, without LIMIT/OFFSET
+    //             |
+    //             v
+    //   +------------------+        +----------------------+
+    //   | scope row nums   |  minus | rows to keep locally |
+    //   +------------------+        +----------------------+
+    //             |
+    //             v
+    //   DELETE stale current rows from the observed branch
+    //
+    // For offset queries, "keep" is the exported support window
+    // [0, offset + limit). Those prefix rows must stay local so SQLite can
+    // still evaluate the original OFFSET query correctly after the refresh.
+    let mut sql = format!(
+        "DELETE FROM {}
+         WHERE j_branch_num = ?
+           AND is_deleted = 0
+           AND row_num IN ({})",
+        crate::schema::current_table(table_name),
+        sql_placeholders(scope_row_nums.len()),
+    );
+    let mut params = Vec::with_capacity(1 + scope_row_nums.len() + keep_row_nums.len());
+    params.push(rusqlite::types::Value::Integer(branch_num));
+    params.extend(
+        scope_row_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer),
+    );
+    if !keep_row_nums.is_empty() {
+        sql.push_str(&format!(
+            " AND row_num NOT IN ({})",
+            sql_placeholders(keep_row_nums.len())
+        ));
+        params.extend(
+            keep_row_nums
+                .iter()
+                .copied()
+                .map(rusqlite::types::Value::Integer),
+        );
+    }
+    db.execute(&sql, params_from_iter(params.iter()))?;
+    Ok(())
 }
 
 fn built_query_from_read(read: &QueryReadRecord) -> Result<BuiltQuery> {
@@ -6636,13 +6782,7 @@ fn history_epoch_filter_sql(max_global_epoch: Option<i64>) -> String {
 fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
     match row_nums {
         Some([]) => "0 = 1".to_owned(),
-        Some(row_nums) => format!(
-            "h.row_num IN ({})",
-            (0..row_nums.len())
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Some(row_nums) => format!("h.row_num IN ({})", sql_placeholders(row_nums.len())),
         None => "1 = 1".to_owned(),
     }
 }
