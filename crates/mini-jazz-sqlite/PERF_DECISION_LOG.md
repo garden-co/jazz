@@ -836,3 +836,20 @@ Release seed numbers improved:
   granularity dominates that case
 
 Full whole-system tests remained green.
+
+## 2026-05-27 00:30 PDT
+
+Tried changing `jazz_row_id` to a `WITHOUT ROWID` table keyed by public row id,
+with `row_num` assigned manually. The hope was to remove one btree from the row
+identity mapping after we had already dropped table names.
+
+Result: worse on both space and speed. On the paired release sample, the current
+`row_num INTEGER PRIMARY KEY, row_id UNIQUE` layout used ~34.6 MB total with
+`jazz_row_id` ~1.8 MB and the row-id index ~1.95 MB. The `WITHOUT ROWID` shape
+used ~34.9 MB total with the table ~1.95 MB and the row-num index ~2.0 MB, and
+seed/page timings also regressed. Reverted the hook and kept the row-num-primary
+layout.
+
+Learning: for our hot lookup directions we need both public-row-id -> row-num
+and row-num -> public-row-id. SQLite's ordinary integer primary key table is the
+right primitive here for now.
