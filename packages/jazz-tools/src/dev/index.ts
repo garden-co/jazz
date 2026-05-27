@@ -1,10 +1,26 @@
 export {
   startLocalJazzServer,
-  pushSchemaCatalogue,
   type StartLocalJazzServerOptions,
   type LocalJazzServerHandle,
-  type PushSchemaCatalogueOptions,
 } from "./dev-server.js";
+
+export {
+  deploy,
+  pushMigration,
+  pushPermissions,
+  pushSchema,
+  pushSchemaCatalogue,
+  type CatalogueEvent,
+  type DeployOptions,
+  type DeployResult,
+  type PushMigrationOptions,
+  type PushMigrationResult,
+  type PushPermissionsOptions,
+  type PushPermissionsResult,
+  type PushSchemaCatalogueOptions,
+  type PushSchemaOptions,
+  type PushSchemaResult,
+} from "./catalogue.js";
 
 export { watchSchema, type SchemaWatcherOptions } from "./schema-watcher.js";
 
