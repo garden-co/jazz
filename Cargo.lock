@@ -2311,6 +2311,7 @@ dependencies = [
  "sqlite-wasm-vfs",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

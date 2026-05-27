@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, Storage, SubscriptionDelta};
+use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, Storage};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
@@ -171,20 +171,18 @@ impl MiniJazzRuntime {
 
     fn notify_subscriptions(&mut self) -> Result<(), JsValue> {
         let runtime = &self.runtime;
-        let mut notifications: Vec<(js_sys::Function, SubscriptionDelta)> = Vec::new();
 
         for entry in self.subscriptions.values_mut() {
+            let mut next_subscription = entry.subscription.clone();
             let delta = runtime
-                .subscription_delta(&mut entry.subscription)
+                .subscription_delta(&mut next_subscription)
                 .map_err(to_js_error)?;
             if !delta.delta.is_empty() {
-                notifications.push((entry.callback.clone(), delta));
+                let value = to_js_value(delta)?;
+                entry.callback.call1(&JsValue::UNDEFINED, &value)?;
             }
-        }
 
-        for (callback, delta) in notifications {
-            let value = to_js_value(delta)?;
-            let _ = callback.call1(&JsValue::UNDEFINED, &value);
+            entry.subscription = next_subscription;
         }
 
         Ok(())
@@ -216,6 +214,105 @@ fn to_js_value<T: Serialize>(value: T) -> Result<JsValue, JsValue> {
 
 fn to_js_error(error: mini_jazz_sqlite::Error) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_test::*;
+
+    fn reset_test_globals() {
+        let global = js_sys::global();
+        js_sys::Reflect::set(
+            &global,
+            &JsValue::from_str("__miniJazzDeltas"),
+            &js_sys::Array::new(),
+        )
+        .unwrap();
+        js_sys::Reflect::set(
+            &global,
+            &JsValue::from_str("__miniJazzThrowNext"),
+            &JsValue::FALSE,
+        )
+        .unwrap();
+    }
+
+    fn observed_deltas() -> js_sys::Array {
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("__miniJazzDeltas"))
+            .unwrap()
+            .dyn_into()
+            .unwrap()
+    }
+
+    fn set_throw_next() {
+        js_sys::Reflect::set(
+            &js_sys::global(),
+            &JsValue::from_str("__miniJazzThrowNext"),
+            &JsValue::TRUE,
+        )
+        .unwrap();
+    }
+
+    fn project_values(title: &str) -> JsValue {
+        to_js_value(BTreeMap::from([("title".to_owned(), json!(title))])).unwrap()
+    }
+
+    #[wasm_bindgen_test]
+    fn subscription_callback_error_is_returned_and_delta_retried() {
+        reset_test_globals();
+        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let callback = js_sys::Function::new_with_args(
+            "delta",
+            r#"
+            if (globalThis.__miniJazzThrowNext) {
+                globalThis.__miniJazzThrowNext = false;
+                throw new Error("callback failed");
+            }
+            globalThis.__miniJazzDeltas.push({
+                all: delta.all.map((row) => row.id),
+                kinds: delta.delta.map((change) => change.kind),
+                titles: delta.all.map((row) => row.values.title),
+            });
+            "#,
+        );
+
+        runtime
+            .subscribe(JsValue::from_str(r#"{"table":"projects"}"#), callback)
+            .unwrap();
+        assert_eq!(observed_deltas().length(), 1);
+
+        set_throw_next();
+        let err = runtime
+            .insert_row("projects", "project-1", project_values("First"))
+            .unwrap_err();
+        let message = js_sys::Reflect::get(&err, &JsValue::from_str("message"))
+            .unwrap()
+            .as_string()
+            .unwrap();
+        assert_eq!(message, "callback failed");
+        assert_eq!(observed_deltas().length(), 1);
+
+        runtime
+            .update_row("projects", "project-1", project_values("Retried"))
+            .unwrap();
+        let deltas = observed_deltas();
+        assert_eq!(deltas.length(), 2);
+        let retried = deltas.get(1);
+        let kinds: js_sys::Array = js_sys::Reflect::get(&retried, &JsValue::from_str("kinds"))
+            .unwrap()
+            .dyn_into()
+            .unwrap();
+        let titles: js_sys::Array = js_sys::Reflect::get(&retried, &JsValue::from_str("titles"))
+            .unwrap()
+            .dyn_into()
+            .unwrap();
+
+        assert_eq!(kinds.get(0).as_f64(), Some(0.0));
+        assert_eq!(titles.get(0).as_string().as_deref(), Some("Retried"));
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
