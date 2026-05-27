@@ -674,6 +674,13 @@ impl QueryContext<'_> {
         let root_num = row_num(self.conn, root_id)?;
         let parent_column =
             crate::schema::quote_ident(&crate::schema::storage_column(parent_field));
+        if self.should_read_recursive_refs_from_visible_rows(
+            table_name,
+            &parent_column,
+            root_num,
+        )? {
+            return self.read_recursive_refs_from_visible_rows(table_name, root_id, parent_field);
+        }
         let field_columns = table
             .fields
             .iter()
@@ -749,6 +756,48 @@ impl QueryContext<'_> {
         )?;
         rows.map(|row| row_to_view(self.conn, table_name, table, row?))
             .collect()
+    }
+
+    fn should_read_recursive_refs_from_visible_rows(
+        &self,
+        table_name: &str,
+        parent_column: &str,
+        root_num: i64,
+    ) -> Result<bool> {
+        let threshold = std::env::var("MINI_JAZZ_SQLITE_RECURSIVE_VISIBLE_ROWS_MAX_TABLE_ROWS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(10_000);
+        if threshold <= 0 {
+            return Ok(false);
+        }
+        let current_table = crate::schema::current_table(table_name);
+        let current_rows = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*)
+                 FROM {current_table} current
+                 WHERE current.j_branch_num = ?
+                   AND current.is_deleted = 0"
+            ),
+            params![self.branch_num],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if current_rows > threshold {
+            return Ok(false);
+        }
+        let child_count = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*)
+                 FROM {current_table} child
+                 WHERE child.j_branch_num = ?
+                   AND child.is_deleted = 0
+                   AND child.{parent_column} = ?
+                 LIMIT 1"
+            ),
+            params![self.branch_num, root_num],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(child_count > 0)
     }
 
     fn read_recursive_refs_from_visible_rows(

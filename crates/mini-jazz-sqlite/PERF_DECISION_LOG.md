@@ -1619,3 +1619,28 @@ that prefixes declared current-table indexes with
 Learning: policy-first indexes help a little, but only by roughly 8-9% in this
 shape. They are not the explanation for the 700 ms recursive CTE. The larger
 issue is still the recursive SQL/materialization strategy.
+
+## 2026-05-27 02:15 PDT
+
+Turned the recursive visible-row fallback into a default heuristic:
+
+- if the branch is a pinned-base branch, use visible-row traversal as before;
+- if the local current table has at most 10k visible rows and the root has at
+  least one direct child, use visible-row traversal;
+- otherwise keep the SQL CTE path.
+
+The threshold is overrideable via
+`MINI_JAZZ_SQLITE_RECURSIVE_VISIBLE_ROWS_MAX_TABLE_ROWS`; `0` disables the
+heuristic.
+
+2k-node tree:
+
+- root `folder-0`: direct read ~741 ms -> ~7.0 ms, export ~765 ms -> ~24.5 ms
+- leaf `folder-1999`: direct read remains ~1.2 ms, export ~2.2 ms
+
+Learning: this crude heuristic already captures the most important distinction
+from the experiments: broad small/medium local trees want visible-row
+traversal; tiny subtrees want the SQL CTE. It is not the final planner. It will
+be wrong for large tables with broad subtrees and for small tables where a
+recursive CTE can be made cheap, but it makes the prototype much more honest for
+client-perceived recursive subscriptions.
