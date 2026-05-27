@@ -874,3 +874,21 @@ Learning: user-id interning is likely a real storage win for production-shaped
 JWT/account ids, but it will touch query lowering, policy SQL, sync encoding, row
 materialization, and the current/history write paths. This is worth trying with
 tests rather than assuming text ids are good enough.
+
+## 2026-05-27 00:36 PDT
+
+Sampled SQLite page-size tuning on a 50k-row release profile with the existing
+`MINI_JAZZ_SQLITE_PAGE_SIZE` hook:
+
+- 4096 bytes: core ~17.21 MB, first result ~11.39 ms, refresh ~15.65 ms,
+  pinned branch export ~7.34 ms
+- 8192 bytes: core ~17.31 MB, first result ~11.41 ms, refresh ~15.97 ms,
+  pinned branch export ~7.18 ms
+- 16384 bytes: core ~17.55 MB, first result ~13.59 ms, refresh ~16.16 ms,
+  pinned branch export ~7.40 ms
+
+Learning: larger pages do not look like an easy win for this shape. The default
+4K page size is smallest and at least as fast for client-perceived page work.
+SQLite core itself also does not give us transparent page compression as a
+portable pragma; useful compression likely belongs either below SQLite in a VFS
+or at the transport stream layer.
