@@ -22,6 +22,7 @@ fn main() -> BenchResult<()> {
         mixed_mutation_refresh_probe: run_mixed_mutation_refresh_probe()?,
         wide_schema_apply_probe: run_wide_schema_apply_probe()?,
         storage_topology_probe: run_storage_topology_probe()?,
+        multi_query_refresh_probe: run_multi_query_refresh_probe()?,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -60,6 +61,7 @@ struct BenchmarkReport {
     mixed_mutation_refresh_probe: MixedMutationRefreshProbe,
     wide_schema_apply_probe: WideSchemaApplyProbe,
     storage_topology_probe: StorageTopologyProbe,
+    multi_query_refresh_probe: MultiQueryRefreshProbe,
 }
 
 #[derive(Serialize)]
@@ -225,6 +227,25 @@ struct StorageTopologyCase {
     api_to_first_result_ms: f64,
     edge_database_bytes: i64,
     worker_database_bytes: i64,
+}
+
+#[derive(Serialize)]
+struct MultiQueryRefreshProbe {
+    query_count: usize,
+    total_rows: usize,
+    target_owner_rows: usize,
+    page_size: usize,
+    inserted_per_query: usize,
+    separate_bundle_count: usize,
+    separate_bundle_bytes: usize,
+    merged_bundle_bytes: usize,
+    separate_apply_ms: f64,
+    merged_apply_ms: f64,
+    separate_history_rows: usize,
+    merged_history_rows: usize,
+    separate_transaction_rows: usize,
+    merged_transaction_rows: usize,
+    merged_observed_facts: usize,
 }
 
 #[derive(Serialize)]
@@ -816,6 +837,67 @@ fn run_storage_topology_case(durable_intermediaries: bool) -> BenchResult<Storag
     })
 }
 
+fn run_multi_query_refresh_probe() -> BenchResult<MultiQueryRefreshProbe> {
+    let total_rows = 20_000;
+    let target_owner_rows = 2_000;
+    let page_size = 20;
+    let inserted_per_query = 10;
+    let owners = ["alice", "user-2000", "user-2001", "user-2002"];
+    let dir = tempdir()?;
+    let schema = documents_schema();
+    let mut core = Runtime::open_trusted_with_schema(
+        Storage::File(dir.path().join("core.sqlite")),
+        "core",
+        schema.clone(),
+    )?;
+    let mut separate_tab =
+        Runtime::open_with_schema(Storage::Memory, "separate-tab", OWNER, schema.clone())?;
+    let mut merged_tab =
+        Runtime::open_with_schema(Storage::Memory, "merged-tab", OWNER, schema.clone())?;
+
+    seed_documents(&mut core, total_rows, target_owner_rows, 100)?;
+    for owner in owners {
+        let bundle = export_top_owner_page_for(&mut core, OWNER, owner, page_size)?;
+        separate_tab.apply_bundle(&bundle)?;
+        merged_tab.apply_bundle(&bundle)?;
+    }
+    insert_new_top_documents_for_owners(
+        &mut core,
+        total_rows,
+        target_owner_rows,
+        &owners,
+        inserted_per_query,
+    )?;
+
+    let refresh_bundles = core.run_as_user(OWNER, |core| {
+        core.export_query_read_refreshes(&separate_tab.observed_query_reads()?)
+    })?;
+    let separate_summary = BundleBatchSummary::from(&refresh_bundles)?;
+    let merged_bundle = merge_bundles(&refresh_bundles)?;
+    let merged_summary = BundleSummary::from(&merged_bundle)?;
+
+    let separate_apply_elapsed = timed_apply_bundles(&mut separate_tab, refresh_bundles.clone())?;
+    let merged_apply_elapsed = timed(|| merged_tab.apply_bundle(&merged_bundle))?;
+
+    Ok(MultiQueryRefreshProbe {
+        query_count: owners.len(),
+        total_rows,
+        target_owner_rows,
+        page_size,
+        inserted_per_query,
+        separate_bundle_count: refresh_bundles.len(),
+        separate_bundle_bytes: separate_summary.bytes,
+        merged_bundle_bytes: merged_summary.bytes,
+        separate_apply_ms: ms(separate_apply_elapsed),
+        merged_apply_ms: ms(merged_apply_elapsed),
+        separate_history_rows: separate_summary.history_rows,
+        merged_history_rows: merged_bundle.history.len(),
+        separate_transaction_rows: separate_summary.transaction_rows,
+        merged_transaction_rows: merged_bundle.txs.len(),
+        merged_observed_facts: merged_bundle.query_reads.len(),
+    })
+}
+
 fn run_edge_warm_worker_cold(
     config: &Config,
     dir: &tempfile::TempDir,
@@ -1233,6 +1315,31 @@ fn insert_new_top_documents(
     Ok(())
 }
 
+fn insert_new_top_documents_for_owners(
+    runtime: &mut Runtime,
+    total_rows: usize,
+    target_owner_rows: usize,
+    owners: &[&str],
+    count_per_owner: usize,
+) -> Result<()> {
+    let mut tx = runtime.transaction();
+    for (owner_index, owner) in owners.iter().enumerate() {
+        for index in 0..count_per_owner {
+            let row_index = total_rows + owner_index * count_per_owner + index;
+            let mut values = document_values(row_index, target_owner_rows);
+            values.insert("owner_id".to_owned(), json!(owner));
+            values.insert("org".to_owned(), json!(format!("org-{}", row_index % 100)));
+            tx = tx.insert_row(
+                "documents",
+                &format!("doc-multi-query-new-{owner_index}-{index}"),
+                values,
+            );
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 fn apply_mixed_mutations(
     runtime: &mut Runtime,
     total_rows: usize,
@@ -1389,6 +1496,56 @@ impl BundleBatchSummary {
             observed_facts,
         })
     }
+}
+
+fn merge_bundles(bundles: &[Bundle]) -> BenchResult<Bundle> {
+    let Some(first) = bundles.first() else {
+        return Err("cannot merge empty bundle list".into());
+    };
+    let mut merged = Bundle {
+        protocol_version: first.protocol_version,
+        schema_fingerprint: first.schema_fingerprint.clone(),
+        policy_fingerprint: first.policy_fingerprint.clone(),
+        branches: Vec::new(),
+        txs: Vec::new(),
+        reads: Vec::new(),
+        query_reads: Vec::new(),
+        history: Vec::new(),
+    };
+    let mut branches = BTreeMap::new();
+    let mut txs = BTreeMap::new();
+    let mut reads = BTreeMap::new();
+    let mut query_reads = BTreeMap::new();
+    let mut history = BTreeMap::new();
+    for bundle in bundles {
+        if bundle.protocol_version != merged.protocol_version
+            || bundle.schema_fingerprint != merged.schema_fingerprint
+            || bundle.policy_fingerprint != merged.policy_fingerprint
+        {
+            return Err("cannot merge bundles with different metadata".into());
+        }
+        for record in &bundle.branches {
+            branches.insert(record.branch_id.clone(), record.clone());
+        }
+        for record in &bundle.txs {
+            txs.insert(record.tx_id.clone(), record.clone());
+        }
+        for record in &bundle.reads {
+            reads.insert(serde_json::to_string(record)?, record.clone());
+        }
+        for record in &bundle.query_reads {
+            query_reads.insert(serde_json::to_string(record)?, record.clone());
+        }
+        for record in &bundle.history {
+            history.insert(serde_json::to_string(record)?, record.clone());
+        }
+    }
+    merged.branches = branches.into_values().collect();
+    merged.txs = txs.into_values().collect();
+    merged.reads = reads.into_values().collect();
+    merged.query_reads = query_reads.into_values().collect();
+    merged.history = history.into_values().collect();
+    Ok(merged)
 }
 
 fn timed(f: impl FnOnce() -> Result<()>) -> Result<Duration> {

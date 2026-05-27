@@ -404,3 +404,16 @@ intermediaries about 82 ms. The difference is only about 4 ms for page-sized
 bundles. This suggests the current main-thread latency is dominated by SQL work
 and repeated bundle apply/export mechanics rather than SQLite file I/O for
 edge/worker caches.
+
+## 2026-05-26 22:28 PDT
+
+Added a multi-query refresh probe for a screen with four observed page queries.
+The probe compares applying four refresh bundles separately with merging and
+deduping them into one bundle before apply.
+
+Result: separate bundles total about 162 KB and apply in about 40 ms; the merged
+bundle is about 79 KB and applies in about 27 ms. Deduping collapses tx rows from
+15 to 5 and keeps all 4 observed query facts. This is a strong architectural
+signal: brokers/edges/workers should batch refreshes for a downstream peer into
+one deduped apply unit whenever possible, especially for dashboards with several
+live queries sharing policy dependencies and transaction metadata.
