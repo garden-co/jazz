@@ -672,18 +672,24 @@ impl Runtime {
         let reads_ms = duration_ms(reads_started.elapsed());
 
         let rejected_cleanup_started = Instant::now();
-        for table_name in bundle_touched_tables(bundle) {
-            schema.table_def(&table_name)?;
-            db.execute(
-                &format!(
-                    "DELETE FROM {}
-                     WHERE visible_tx_num IN (
-                       SELECT tx_num FROM jazz_tx WHERE outcome = ?
-                     )",
-                    crate::schema::current_table(&table_name)
-                ),
-                params![tx::OUTCOME_REJECTED],
-            )?;
+        if bundle
+            .txs
+            .iter()
+            .any(|tx| tx.outcome == tx::OUTCOME_REJECTED)
+        {
+            for table_name in bundle_touched_tables(bundle) {
+                schema.table_def(&table_name)?;
+                db.execute(
+                    &format!(
+                        "DELETE FROM {}
+                         WHERE visible_tx_num IN (
+                           SELECT tx_num FROM jazz_tx WHERE outcome = ?
+                         )",
+                        crate::schema::current_table(&table_name)
+                    ),
+                    params![tx::OUTCOME_REJECTED],
+                )?;
+            }
         }
         let rejected_cleanup_ms = duration_ms(rejected_cleanup_started.elapsed());
 
@@ -1635,16 +1641,34 @@ impl Runtime {
         {
             return Ok(());
         }
-        if outcome != tx::OUTCOME_REJECTED
-            && !is_newest_version_for_current(
+        if outcome != tx::OUTCOME_REJECTED {
+            if let Some(current_tx_num) =
+                current_visible_tx_num(context.db, &record.table, row_num, branch_num)?
+            {
+                if let Some(is_newer) =
+                    tx_is_newer_than_current_fast_path(context.db, tx_num, current_tx_num)?
+                {
+                    if !is_newer {
+                        return Ok(());
+                    }
+                } else if !is_newest_version_for_current(
+                    context.db,
+                    &record.table,
+                    row_num,
+                    branch_num,
+                    tx_num,
+                )? {
+                    return Ok(());
+                }
+            } else if !is_newest_version_for_current(
                 context.db,
                 &record.table,
                 row_num,
                 branch_num,
                 tx_num,
-            )?
-        {
-            return Ok(());
+            )? {
+                return Ok(());
+            }
         }
         if outcome != tx::OUTCOME_REJECTED && record.op == 3 {
             context.db.execute(
@@ -4595,6 +4619,49 @@ fn is_newest_version_for_current(
         |row| row.get(0),
     )?;
     Ok(count == 0)
+}
+
+fn current_visible_tx_num(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<Option<i64>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT visible_tx_num
+         FROM {}
+         WHERE row_num = ?
+           AND j_branch_num = ?",
+        crate::schema::current_table(table_name)
+    ))?;
+    let mut rows = stmt.query(params![row_num, branch_num])?;
+    rows.next()?
+        .map(|row| row.get(0))
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn tx_is_newer_than_current_fast_path(
+    conn: &Connection,
+    candidate_tx_num: i64,
+    current_tx_num: i64,
+) -> Result<Option<bool>> {
+    let comparison: Option<i64> = conn.query_row(
+        "SELECT CASE
+           WHEN (candidate.global_epoch IS NULL) != (current.global_epoch IS NULL)
+             THEN NULL
+           WHEN candidate.global_epoch IS NOT NULL
+             THEN candidate.global_epoch > current.global_epoch
+               OR (candidate.global_epoch = current.global_epoch AND candidate.tx_num > current.tx_num)
+           ELSE candidate.tx_num > current.tx_num
+         END
+         FROM jazz_tx candidate
+         JOIN jazz_tx current ON current.tx_num = ?
+         WHERE candidate.tx_num = ?",
+        params![current_tx_num, candidate_tx_num],
+        |row| row.get(0),
+    )?;
+    Ok(comparison.map(|is_newer| is_newer != 0))
 }
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {

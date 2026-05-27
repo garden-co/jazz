@@ -663,3 +663,24 @@ Result on the pinned snapshot probe: branch query dropped from roughly 107 ms to
 ~5.9 ms; profiled export dropped from roughly 132 ms to ~30 ms. The remaining
 export cost is now dominated by read-set export (~20 ms), not query evaluation.
 Full whole-system tests remained green.
+
+## 2026-05-26 23:50 PDT
+
+Optimized bundle apply current-maintenance conservatively. First, skipped the
+rejected-current cleanup scan entirely for bundles that do not carry rejected
+transaction fates. Second, added a current-projection comparison fast path:
+when an incoming history row competes with an existing current row and both
+transactions have the same global-epoch shape, compare against the current
+visible tx directly instead of scanning all history for a newer version.
+
+Important semantic catch: edge-accepted transactions with no global epoch can
+still supersede a globally accepted current row in current prototype semantics.
+A first attempt at direct global-epoch ordering broke
+`edge_accepted_remote_pending_update_repairs_peer_current_projection`, so the
+fast path now falls back to the existing full scan whenever one side has a
+global epoch and the other does not.
+
+Result on the apply profile probe: apply dropped from ~42.7 ms to ~37.8 ms,
+with `history_ms` dropping from ~32.5 ms to ~28.1 ms and rejected cleanup from
+~0.16 ms to effectively zero. This is a useful win but confirms that dynamic
+per-row history/current inserts remain the larger apply cost.
