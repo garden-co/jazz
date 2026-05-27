@@ -800,3 +800,21 @@ range (~38.8 ms, ~56.9 ms, ~38.2 ms). Whole-system tests remained green.
 This means row identity is now much closer to the spec's "globally unique row
 id" assumption physically as well as semantically. Bumped storage format again
 from 5 to 6.
+
+## 2026-05-27 00:24 PDT
+
+Ran a release-mode full perf sample to separate debug overhead from the actual
+shape:
+
+- primary 100k-row core-only cold page: seed ~3.8 s, API-to-first-result ~11.2
+  ms, refresh ~15.4 ms, core file ~34.6 MB
+- many-user permissioned page: 50k-row seed ~1.85 s, average export over 20
+  users ~0.87 ms
+- pinned branch snapshot export: ~7.5 ms total, with read-set export ~3.65 ms
+- apply profile probe: ~9.4 ms
+- mixed mutation refresh: export ~2.6 ms, apply ~3.6 ms
+
+Learning: debug numbers are useful for relative deltas, but the release numbers
+are much more encouraging for the product story. The remaining obvious
+non-release outlier is bulk seeding/import speed, not steady-state page read,
+permissioned export, or client apply.
