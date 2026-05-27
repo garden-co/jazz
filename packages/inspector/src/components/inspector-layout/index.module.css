@@ -92,6 +92,24 @@
   color: #d4dae3;
 }
 
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #1c2430;
+  background: #161b24;
+  color: #9ca8b9;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.iconButton:hover {
+  background: #1c2430;
+  color: #d4dae3;
+}
+
 .content {
   flex: 1;
   min-height: 0;
