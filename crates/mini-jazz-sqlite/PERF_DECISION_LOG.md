@@ -1061,3 +1061,19 @@ Learning: this branch shape is encouraging. Query/export over a 20-source sparse
 fan-in branch is not remotely the scary part at these cardinalities; branch
 metadata/source maintenance and larger fan-in counts are the next things to
 scale if needed.
+
+## 2026-05-27 01:06 PDT
+
+Sampled SQLite cache-size tuning on a 50k-row release profile:
+
+- default-ish `cache_size=2000`: first ~12.8 ms, refresh ~17.9 ms, dashboard
+  export ~88.3 ms, board export ~58.1 ms, RSS delta ~30.6 MB
+- `cache_size=-8000` (~8 MB): first ~12.5 ms, refresh ~17.6 ms, dashboard
+  export ~87.9 ms, board export ~58.2 ms, RSS delta ~30.4 MB
+- `cache_size=-32000` (~32 MB): first ~12.4 ms, refresh ~18.0 ms, dashboard
+  export ~89.2 ms, board export ~59.8 ms, RSS delta ~55.9 MB
+
+Learning: larger SQLite page cache does not materially improve the current
+benchmarks, and the 32 MB setting just spends memory. Default/small cache is a
+reasonable posture for now; our bottlenecks are query/export shape, not page
+cache starvation.
