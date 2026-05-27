@@ -24,7 +24,7 @@ Coverage labels:
 | D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                      |
 | D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                     |
 | D.6 Queries/observed facts | partial               | Equality, contains, IN, not-equal, null-present, selected system fields, ordered pages, absence facts, recursive query scopes, policy dependencies, query-scope repair, and predicate serialization are tested. Range and catalogue facts are not. |
-| D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, scope contraction, active query refresh, and reconnect-shaped repair are tested. Compact reconnect summaries are not.                                   |
+| D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, scope contraction, active query refresh, and reconnect-shaped repair are tested. Compact reconnect summaries and ephemeral observed interests are not.  |
 | D.8 Subscriptions          | partial               | Rerun-and-diff, policy dependency diffs, branch checkout diffs, pinned branch stability, pagination, and reconnect-shaped observed subscription recovery are tested. Tier gating and settled state are not.                                        |
 | D.9 Policies               | covered for prototype | Read/write policies, ref-readable policies, recursive acyclic policies, cycle rejection, branch/pinned-base contexts, trusted bypass, and transitive policy read sets are tested. Full policy language and diagnostics are not.                    |
 | D.10 Catalogue/lenses      | partial               | Narrow storage-name rename lenses, ref lenses, system prefix escaping, and index-only compatibility are tested. Catalogue revision graph, migrations directory semantics, inverse lenses, and copy-forward are not.                                |
@@ -217,6 +217,177 @@ Coverage labels:
 - `subscription_on_pinned_branch_ignores_later_main_updates_until_overlay_changes`:
   D.5, D.8
 
+#### `invariant_coverage.rs`
+
+- `batched_refresh_matches_individual_refresh_for_mixed_predicates_and_pages`:
+  D.6, D.7
+- `refresh_planner_does_not_batch_across_descriptor_boundaries`: D.6, D.14
+- `large_same_shape_page_refreshes_survive_multi_value_sql_chunking`: D.6,
+  D.14
+- `query_scope_refresh_is_idempotent_after_scope_contraction`: D.6, D.7
+- `semantic_system_field_page_refresh_matches_individual_application`: D.1,
+  D.6
+- `transaction_causality_is_recorded_at_row_granularity`: D.2, D.11
+- `rejected_fate_repairs_query_scope_and_survives_replay`: D.2, D.3, D.7,
+  D.13
+- `branch_observed_refreshes_are_scoped_to_checked_out_branch`: D.5, D.6,
+  D.7
+- `renamed_lens_query_refresh_keeps_observed_row_current_across_schema_versions`:
+  D.6, D.7, D.10
+- `observed_query_subscription_emits_deterministic_diff_after_batched_refresh`:
+  D.6, D.8
+- `recursive_batched_refresh_matches_individual_refresh_after_subtree_changes`:
+  D.6, D.7
+- `multi_hop_topology_refreshes_cold_client_query_after_upstream_change`:
+  D.7, D.17
+- `repeated_observed_query_descriptor_is_deduped`: D.6, D.7
+- `forgotten_observed_query_descriptor_is_not_refreshed`: D.6, D.7
+- `empty_observed_refresh_request_is_noop`: D.6, D.7
+- `subscribing_to_observed_query_requires_checked_out_branch`: D.5, D.8
+- `in_query_duplicate_values_are_semantically_idempotent`: D.6
+- `not_equal_null_matches_present_optional_values_only`: D.6
+- `repeated_bundle_replay_does_not_duplicate_history_or_current_rows`: D.3,
+  D.7
+- `projection_rebuild_is_semantically_identical_to_current_reads_after_mixed_fate`:
+  D.2, D.3
+- `durable_reopen_preserves_projection_without_rebuild`: D.3, D.17
+- `accepting_same_tx_at_edge_and_global_is_monotonic`: D.2, D.7
+- `repeated_global_acceptance_cannot_regress_transaction_epoch`: D.2, D.7
+- `stale_global_acceptance_bundle_cannot_regress_transaction_epoch`: D.2,
+  D.7
+- `stale_pending_bundle_cannot_drop_durable_receipts`: D.2, D.7
+- `stale_pending_bundle_cannot_erase_rejection_detail`: D.2, D.7, D.13
+- `rejection_then_stale_pending_replay_does_not_resurrect_current_row`: D.2,
+  D.3, D.7
+- `query_scope_retains_previous_row_as_local_fact_after_predicate_exit`: D.6,
+  D.7
+- `stale_query_refresh_cannot_regress_row_after_later_update`: D.6, D.7
+- `query_refresh_for_deleted_result_row_keeps_unrelated_cached_rows`: D.6,
+  D.7
+- `duplicate_overlapping_query_refreshes_dedupe_history_and_query_reads`: D.6,
+  D.7
+- `branch_source_metadata_updates_are_idempotent`: D.5
+- `branch_backing_rows_match_branch_api_after_mutations`: D.5
+- `branch_query_refresh_after_source_removal_removes_detached_source_rows`:
+  D.5, D.6, D.7
+- `stale_branch_source_removal_bundle_cannot_drop_readded_source_rows`: D.5,
+  D.6, D.7
+- `trusted_as_user_enforces_read_policy_while_attribution_bypasses_it`: D.9
+- `exclusive_forwarding_uses_forwarded_user_for_global_policy`: D.2, D.9,
+  D.11
+- `trusted_admin_write_bypasses_policy_but_keeps_attributed_user`: D.1, D.9
+- `untrusted_apply_policy_failure_is_atomic_for_multi_row_transaction`: D.2,
+  D.9, D.11
+- `declared_defaults_are_materialized_and_survive_sync_rebuild`: D.3, D.7,
+  D.14
+- `ordered_page_subscription_emits_deterministic_diff_for_order_only_change`:
+  D.8
+- `query_read_order_is_deterministic_after_mixed_descriptor_application`: D.6,
+  D.7
+- `exclusive_without_global_epoch_fails_without_writing_history`: D.2, D.11
+- `mergeable_same_row_updates_can_follow_each_other`: D.2, D.3
+- `update_preserves_omitted_fields_across_sync_and_rebuild`: D.2, D.3, D.7
+- `deleting_invisible_row_fails_without_creating_transaction`: D.2, D.3
+- `checked_out_unknown_branch_fails_without_changing_current_branch`: D.5
+- `branch_base_epoch_mismatch_fails_idempotently`: D.5
+- `direct_branch_source_cycle_fails_without_partial_source_change`: D.5
+- `query_export_with_unknown_table_fails_without_recording_interest`: D.6,
+  D.7
+- `query_export_with_unknown_field_fails_without_recording_interest`: D.6,
+  D.7
+- `contains_query_is_case_sensitive_substring_match`: D.6
+- `id_magic_field_query_is_not_confused_with_user_id_column`: D.1, D.6
+- `created_by_filter_uses_authorship_not_mutable_user_column`: D.1, D.6
+- `rejection_subscription_reports_detail_once_and_then_quiets`: D.8, D.13
+- `duplicate_untrusted_rejection_bundle_is_idempotent_and_quiet_after_first_event`:
+  D.8, D.9, D.11, D.13
+- `same_global_epoch_tie_breaker_is_stable_after_rebuild`: D.3, D.14
+- `accepted_global_fate_arriving_before_history_later_materializes_row`: D.2,
+  D.7
+- `durable_reopen_preserves_rejection_info_and_no_current_row`: D.2, D.3,
+  D.13, D.17
+- `empty_explicit_transaction_is_noop_without_history`: D.2
+- `same_row_updates_in_one_transaction_normalize_to_one_history_version`: D.2,
+  D.3
+- `insert_then_update_same_row_in_one_transaction_seals_final_created_row`:
+  D.2, D.3
+- `awaiting_dependency_does_not_publish_subscription_until_dependency_arrives`:
+  D.2, D.8, D.9, D.17
+- `durable_node_recovers_when_fate_arrives_before_history`: D.2, D.7, D.17
+- `duplicated_and_reordered_table_bundles_converge_across_topology`: D.7,
+  D.17
+- `missing_catalogue_state_fails_closed_without_partial_apply`: D.7, D.10,
+  D.14
+- `upsert_creates_missing_row_and_updates_existing_row`: D.2
+- `transaction_upsert_normalizes_with_later_same_row_updates`: D.2, D.3
+- `mergeable_upsert_converges_across_multi_tier_sync`: D.2, D.7
+- `upsert_after_delete_restores_row_with_new_history_version`: D.2, D.3
+- `conflict_resolution_records_semantic_choice_and_clears_current_conflict_meta`:
+  D.12
+- `default_query_order_converges_across_different_apply_orders`: D.3, D.6,
+  D.7
+- `unordered_predicate_query_order_converges_across_apply_orders`: D.6, D.7,
+  D.14
+- `ordered_page_tie_breaker_converges_across_apply_orders`: D.6, D.7, D.14
+- `policy_denial_for_hidden_parent_has_safe_public_shape`: D.9, D.13
+- `deterministic_replay_schedule_converges_after_duplicate_and_delayed_steps`:
+  D.7, D.17
+- `seeded_duplicate_reorder_schedules_converge_to_source_state`: D.7, D.17
+- `simple_write_calls_and_explicit_transactions_have_expected_tx_granularity`:
+  D.2
+- `query_scope_export_includes_full_history_for_result_rows`: D.3, D.6, D.7
+- `accepted_transaction_history_cannot_be_rewritten_by_same_tx_id_replay`:
+  D.2, D.3, D.7
+- `subscription_diff_order_is_deterministic_for_mixed_add_update_remove`: D.8
+- `restore_deleted_row_reuses_insert_semantics_and_creates_new_history_version`:
+  D.2, D.3
+- `stale_delete_bundle_cannot_hide_restored_row`: D.3, D.7
+- `public_row_ids_are_globally_unique_across_tables`: D.1
+- `unresolved_ref_ids_can_later_be_claimed_by_the_target_table`: D.1
+- `synced_history_cannot_reuse_public_row_id_in_another_table`: D.1, D.7,
+  D.11
+- ignored placeholders:
+  `file_blob_bytes_do_not_bypass_row_policy_placeholder` (D.15),
+  `encrypted_fields_do_not_participate_in_server_plaintext_querying_placeholder`
+  (D.16), and
+  `catalogue_publication_requires_admin_and_fails_closed_without_permissions_placeholder`
+  (D.10, D.18)
+- ignored placeholders:
+  `exclusive_predicate_read_set_rejects_when_matching_row_is_inserted_later_placeholder`
+  (D.11) and
+  `unreadable_branch_backing_row_prevents_checkout_and_export_placeholder`
+  (D.5)
+- ignored placeholder:
+  `durable_observed_query_reads_are_connection_local_not_persisted` (D.6,
+  D.7, D.17)
+- ignored placeholder:
+  `exclusive_global_upsert_can_create_and_then_update_same_row` (D.2, D.11)
+- ignored placeholders:
+  `range_query_refresh_repairs_rows_that_enter_and_leave_boundaries_placeholder`
+  (D.6, D.11),
+  `evicting_uninteresting_local_facts_preserves_history_needed_for_active_queries_placeholder`
+  (D.7, D.14),
+  `as_of_time_query_maps_timestamp_to_stable_global_snapshot_placeholder`
+  (D.4), and
+  `public_errors_use_stable_codes_and_redacted_details_across_surfaces_placeholder`
+  (D.13)
+- ignored placeholder:
+  `merging_overlapping_query_bundles_is_order_independent_and_deduped` (D.7)
+- ignored placeholders:
+  `observed_query_refresh_reports_settled_state_after_all_descriptors_refresh_placeholder`
+  (D.8),
+  `compact_reconnect_summary_refreshes_only_active_query_descriptors_placeholder`
+  (D.7),
+  `catalogue_observed_fact_invalidates_query_when_schema_head_changes_placeholder`
+  (D.6, D.10),
+  `missing_permission_catalogue_fails_closed_for_query_export_placeholder`
+  (D.9, D.10),
+  `staged_untrusted_apply_is_not_visible_until_authority_publication_placeholder`
+  (D.11),
+  `conflict_resolution_preserves_resolved_candidate_provenance_placeholder`
+  (D.12), and
+  `generated_indexes_are_used_for_ordered_page_query_plan_placeholder` (D.14)
+
 ### E.3 Tests That Added Or Sharpened Invariants
 
 The following behaviors are now represented in Appendix D because the tests made
@@ -224,6 +395,13 @@ them concrete:
 
 - edge-accepted mergeables are accepted/visible without global epochs
 - global epochs are not unique per transaction
+- repeated global acceptance for one transaction cannot regress its global
+  epoch
+- stale sync bundles carrying older fate metadata cannot regress a transaction's
+  global epoch
+- stale pending sync bundles cannot drop durable receipt tiers already observed
+  for a transaction
+- stale pending sync bundles cannot erase terminal rejection code/detail
 - remote pending history cannot override durable current rows
 - branch metadata must include base epoch/source ids, not only row branch ids
 - branch-local tombstones over pinned-base rows are required
@@ -233,32 +411,120 @@ them concrete:
 - recursive query-scope export must include deleted descendant subtrees
 - recursive write-policy read sets are transitive
 - historical and branch policy evaluation must use the correct read context
+- batched observed-query refresh must be semantically equivalent to refreshing
+  each descriptor individually
+- multi-value SQL chunking must not change page-refresh semantics
+- observed query refreshes are scoped to the checked-out branch context
+- query-scope refresh can keep previously observed rows current even after they
+  leave the predicate, because local-first caches retain useful facts until
+  explicit eviction
+- stale query-scope refreshes cannot regress a row after a newer refresh has
+  already applied later content for the same public row id
+- query refresh repairs the active descriptor result without eagerly evicting
+  unrelated cached rows learned through other descriptors
+- duplicate overlapping query refreshes dedupe current rows/history and retain
+  one descriptor per logical query
 - `write_if_created_by_user` has distinct create and update ownership
   semantics
 - generic schema installation must not be defined by the todo fixture
 - trusted infrastructure peers may read applied policy-scoped facts without a
-  user user
+  scoped user
 - transaction-info APIs must propagate receipts, global epochs, and rejection
   details consistently after sync
+- observed query descriptors dedupe, forget, and refresh in deterministic order
+- failed query export must not create observed-query interest
+- magic `id` and `$createdBy` filters use semantic system fields even if a user
+  column has the same surface name
+- branch catalogue updates are idempotent and cycle-safe without partial source
+  mutation
+- stale branch-source removal refreshes cannot override newer source re-addition
+  metadata or hide rows from the re-added source branch
+- ordered subscription diffs must be deterministic, while exact diff variant
+  shape is still implementation-defined
+- duplicate policy-invalid untrusted applies are idempotent and produce one
+  rejection notification for a subscription baseline
+- partial or policy-invalid untrusted applies are atomic: no subset of a
+  rejected transaction may become current
+- durable reopen preserves rejection outcome and current invisibility without
+  relying on test-only projection rebuild
+- empty explicit transactions create no transaction/history state
+- multiple same-row mutations staged in one transaction normalize to one final
+  row version
+- upsert is an explicit create-or-update operation and participates in
+  transaction normalization
+- mergeable upsert converges across a multi-tier topology and preserves omitted
+  fields on update
+- mergeable upsert over a deleted row uses restore/insert semantics and appends
+  a new current history version
+- exclusive upsert over an existing row needs a clearer read-set/conflict
+  semantic before it can be made a passing invariant
+- awaiting-dependency transactions do not publish subscription-visible rows
+  until the dependency arrives
+- fate-before-history delivery survives durable restart and materializes when
+  history later arrives
+- removing durable observed-query descriptors requires an explicit
+  resubscribe/query-settlement protocol, because retained local facts and
+  current query results are not the same thing
+- duplicated/reordered table bundles converge across a simple multi-tier
+  topology
+- seeded duplicate/reorder schedules converge after mixed insert, update,
+  delete, and later insert operations
+- conflict resolution is a semantic transaction choice that clears current
+  conflict metadata
+- default query ordering must converge across different physical apply orders
+- unordered predicate queries and ordered-page tie-breakers should use semantic
+  public row ids rather than physical row ids
+- trusted peer execution has distinct user-scoped policy evaluation and
+  privileged attribution modes
+- exclusive transaction forwarding must carry the auth user that global policy
+  evaluates, separate from the edge/service attribution user
+- one simple write call maps to one sealed transaction, while explicit
+  transactions can contain several row versions
+- query-scope export includes full history for rows in the result set
+- replaying a same-tx-id bundle with forged row content does not rewrite an
+  already applied accepted transaction
+- subscription diff ordering is deterministic for mixed add/update/remove polls
+- restore reuses insert semantics by appending a new version with the restoring
+  user as author
+- stale delete bundles cannot hide a restored row after newer append-only
+  restore history has already applied
+- public row ids are globally unique across tables
+- unresolved refs may mention a public row id before the target table owns it
+- synced history cannot reuse a public row id already owned by another table
+- terminal policy denial has safe public detail that does not expose hidden
+  dependency row ids
+- files/blobs, encrypted fields, and admin catalogue publication now have
+  ignored placeholder tests so the missing product pillars are visible in the
+  suite
+- predicate/range read-set validation and branch backing-row permission gating
+  have explicit ignored placeholders
+- range observed facts, cache eviction, as-of-time queries, and stable public
+  error surfaces have explicit ignored placeholders
+- overlapping query-bundle merge semantics with scoped metadata are an explicit
+  placeholder
+- query settled state, compact reconnect summaries, catalogue observed facts,
+  missing-permission fail-closed behavior, staged untrusted publication,
+  resolved conflict provenance, and generated-index plan assertions have
+  explicit ignored placeholders
 
 ### E.4 Largest Untested Gaps
 
 The largest gaps between Appendix D and the current prototype tests are:
 
 - full vector snapshots and compact dotted-vector encoding
-- exact one-simple-write transaction count, sealed transaction immutability, and
-  rejection detail storage outside the hot transaction row
+- sealed transaction immutability and rejection detail storage outside the hot
+  transaction row
 - explicit wait behavior for exclusive transactions at local, edge, and global
   tiers
-- explicit upsert semantics across mergeable and exclusive transactions in
-  multi-tier topologies
-- implementation/tests for empty explicit transaction no-ops and same-row
-  mutation normalization
+- exclusive upsert semantics over existing rows in multi-tier topologies
 - forwarded exclusive transaction retry/offline transport and proactive
   dependency request/subscription mechanics for mergeable `awaiting_deps`
-- compact reconnect summaries and active query-descriptor replay protocol
-- range and catalogue observed facts
-- cache eviction policy for retained out-of-scope rows
+- compact reconnect summaries and active query-descriptor replay protocol,
+  including how to stop persisting observed descriptors without leaving stale
+  local facts in current query results
+- union semantics for merging overlapping query bundles with different scoped
+  metadata fingerprints
+- catalogue observed facts
 - tier-gated query/subscription settlement semantics
 - missing catalogue and missing permission fail-closed behavior
 - admin-controlled catalogue publication and separate catalogue sync lane
@@ -272,10 +538,13 @@ The largest gaps between Appendix D and the current prototype tests are:
 - staged untrusted authority apply before publication
 - public error object shape, global rejection callback, and redaction policy
 - stable public error machine codes across write promises, queries,
-  subscriptions, and sync errors
-- as-of-time query/export API and timestamp-to-epoch mapping
-- deterministic default ordering and subscription diff ordering
-- deterministic clock/message harness for drop/delay/reconnect scenarios
+  subscriptions, and sync errors beyond the placeholder invariant
+- as-of-time query/export API and timestamp-to-epoch mapping beyond the
+  placeholder invariant
+- subscription diff ordering beyond the deterministic cases already covered,
+  especially across future settled-state barriers
+- deterministic clock/message harness for drop/delay/reconnect scenarios beyond
+  the seeded duplicate/reorder schedule now covered
 
 This spec is serious but still evolving. New implementation results, review
 comments, and experiments should be allowed to falsify parts of it. When they
