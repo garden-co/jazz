@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use mini_jazz_sqlite::sync::Bundle;
 use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, Storage, SubscriptionDelta};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -163,23 +162,6 @@ impl MiniJazzRuntime {
                 .read_rows_where_eq(table_name, field_name, value)
                 .map_err(to_js_error)?,
         )
-    }
-
-    #[wasm_bindgen(js_name = exportTableHistory)]
-    pub fn export_table_history(&self, table_name: &str) -> Result<JsValue, JsValue> {
-        to_js_value(
-            self.runtime
-                .export_table_history(table_name)
-                .map_err(to_js_error)?,
-        )
-    }
-
-    #[wasm_bindgen(js_name = applyBundle)]
-    pub fn apply_bundle(&mut self, bundle: JsValue) -> Result<(), JsValue> {
-        let bundle: Bundle = serde_wasm_bindgen::from_value(bundle)
-            .map_err(|error| JsValue::from_str(&format!("invalid bundle: {error}")))?;
-        self.runtime.apply_bundle(&bundle).map_err(to_js_error)?;
-        self.notify_subscriptions()
     }
 
     #[wasm_bindgen(js_name = storageStats)]
