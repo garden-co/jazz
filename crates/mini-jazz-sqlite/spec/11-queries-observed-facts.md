@@ -27,11 +27,12 @@ contract. Unsupported semantic features are outside that contract until they
 have a generic lowering, and should not be exposed through binding-specific
 shortcuts.
 
-Supported descriptors should lower into the embedded database query engine.
-Predicate evaluation, ordering, limit, and offset belong in compiled SQL or an
-equivalent backend relational plan. The runtime may decode semantic rows after
-the backend returns candidates, but it should not fetch broad row sets and
-reimplement query filtering, sorting, or pagination in host-language code.
+Supported indexable query forms should lower to the embedded database on current
+projections. Falling back to full visible-row scans is optimization debt and
+should be named as such. The correctness baseline allows slower fallback paths
+for historical pinned-base branch snapshots, arbitrary historical snapshots, and
+other query-time visibility cases where no derived projection has been promoted
+yet.
 
 Includes follow ordinary relational semantics:
 

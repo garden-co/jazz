@@ -183,8 +183,9 @@ feature exists.
 - Native, WASM, and higher-level bindings execute the same supported query
   descriptor with the same semantic result.
 - Cross-binding query semantics cover supported query descriptor features.
-- Supported predicates, ordering, limit, and offset are executed by the storage
-  query plan, not by broad host-language post-processing.
+- Supported indexable predicates, ordering, limit, and offset on current
+  projections are executed by the storage query plan. Full visible-row scans are
+  optimization debt reserved for historical or unpromoted visibility cases.
 - Query window values crossing platform boundaries fail on invalid or oversized
   values instead of wrapping, truncating, or silently changing the requested
   page.
