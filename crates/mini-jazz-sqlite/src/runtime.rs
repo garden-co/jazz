@@ -780,6 +780,22 @@ impl Runtime {
         Ok(manifests)
     }
 
+    pub fn missing_history_block_manifests(
+        &self,
+        remote_manifests: &[HistoryBlockManifest],
+    ) -> Result<Vec<HistoryBlockManifest>> {
+        let local_manifests = self.all_history_block_manifests()?;
+        Ok(remote_manifests
+            .iter()
+            .filter(|remote| {
+                !local_manifests
+                    .iter()
+                    .any(|local| history_block_manifest_matches(local, remote))
+            })
+            .cloned()
+            .collect())
+    }
+
     pub fn export_history_blocks(&self, table_name: &str) -> Result<Vec<HistoryBlockExport>> {
         self.schema.table_def(table_name)?;
         let table_num = crate::schema::table_num(&self.conn, table_name)?;
@@ -829,6 +845,21 @@ impl Runtime {
             blocks.extend(self.export_history_blocks(&table.name)?);
         }
         Ok(blocks)
+    }
+
+    pub fn export_history_blocks_matching(
+        &self,
+        requested_manifests: &[HistoryBlockManifest],
+    ) -> Result<Vec<HistoryBlockExport>> {
+        let local_blocks = self.export_all_history_blocks()?;
+        Ok(local_blocks
+            .into_iter()
+            .filter(|block| {
+                requested_manifests
+                    .iter()
+                    .any(|requested| history_block_manifest_matches(&block.manifest, requested))
+            })
+            .collect())
     }
 
     pub fn import_history_blocks(&mut self, blocks: &[HistoryBlockExport]) -> Result<usize> {
@@ -6279,6 +6310,24 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
         return Err(crate::Error::new("history block missing tx ranges"));
     }
     Ok(())
+}
+
+fn history_block_manifest_matches(
+    local: &HistoryBlockManifest,
+    remote: &HistoryBlockManifest,
+) -> bool {
+    local.kind == remote.kind
+        && local.table == remote.table
+        && local.row_id == remote.row_id
+        && local.min_global_epoch == remote.min_global_epoch
+        && local.max_global_epoch == remote.max_global_epoch
+        && local.row_count == remote.row_count
+        && local.tx_count == remote.tx_count
+        && local.codec == remote.codec
+        && local.format_version == remote.format_version
+        && local.uncompressed_bytes == remote.uncompressed_bytes
+        && local.compressed_bytes == remote.compressed_bytes
+        && local.payload_sha256 == remote.payload_sha256
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

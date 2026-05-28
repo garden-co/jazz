@@ -307,12 +307,26 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
     let blocks = alice.export_history_blocks("notes").unwrap();
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].manifest.payload_sha256.len(), 64);
+    let alice_manifests = alice.all_history_block_manifests().unwrap();
+    let missing = bob
+        .missing_history_block_manifests(&alice_manifests)
+        .unwrap();
+    assert_eq!(missing, alice_manifests);
+    assert_eq!(
+        alice.export_history_blocks_matching(&missing).unwrap(),
+        blocks
+    );
+
     let mut tampered = blocks.clone();
     tampered[0].payload[0] ^= 1;
     let err = bob.import_history_blocks(&tampered).unwrap_err();
     assert!(err.to_string().contains("payload hash mismatch"));
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 0);
+    assert!(bob
+        .missing_history_block_manifests(&alice_manifests)
+        .unwrap()
+        .is_empty());
 
     assert_eq!(bob.storage_stats().unwrap().history_rows, 0);
     assert_eq!(bob.storage_stats().unwrap().sealed_history_rows, 4);

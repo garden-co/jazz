@@ -201,3 +201,9 @@ Thu May 28 00:12:28 PDT 2026
 Decision: switch newly sealed history blocks from compact Bundle JSON to a columnar JSON payload compressed with lz4. The decoder still returns the same logical Bundle, but the physical block stores tx/read/history fields as parallel arrays so the format matches the RFC direction and avoids repeated object keys.
 
 Scope impact: keep decoding support for the existing v1 `bundle-json-lz4` blocks so earlier checkpoints and tests remain readable. The v2 format is still JSON inside lz4, not the final binary/delta-varint encoding.
+
+## Thu May 28 00:21:08 PDT 2026 - Manifest-Selected Block Sync
+
+Decision: Treat history block manifests as a peer-comparable inventory, but keep SQLite `block_id` local-only. A remote block is considered present when kind, table, row id, epoch range, codec, format version, byte counts, and payload hash match.
+
+Scope impact: add APIs for computing missing remote block manifests and exporting only matching local blocks. This gives sync a first-class block delta path without decoding cold history or reopening compacted rows.
