@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:42:52 PDT 2026
+
+Decision: smoke-test the deep-history benchmark write-batching path with a tiny append run instead of chasing fresh numbers tonight.
+
+Why: the combined small scenario run produced no early output and was killed to avoid burning the timebox. The important post-refactor check is that `MINI_JAZZ_DEEP_HISTORY_WRITE_BATCH_SIZE` still drives the benchmark path.
+
+Scope impact: a 100-update append smoke run completed with batching enabled and reported the expected note: "SQLite write batching enabled: up to 64 logical Jazz txs per SQLite commit." No canonical benchmark numbers were updated from this smoke run.
+
 ## Thu May 28 03:39:06 PDT 2026
 
 Decision: add explicit compacted-history coverage for hyphenated node ids in public tx ids.
