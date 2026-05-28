@@ -26,3 +26,11 @@ Decision: compact transaction rows opportunistically, not absolutely. A sealed t
 Why: `tx_num` is still the open-store relational key for current projections and implicit previous-local-epoch reads. Deleting every tx in a sealed block would require a larger rewrite of those paths. Opportunistic deletion gives immediate metadata savings while preserving the current operational model.
 
 Scope impact: the block payload is the authoritative historical source for deleted tx metadata. Open tx rows remain where they are still operationally referenced.
+
+## Wed May 27 23:04:44 PDT 2026
+
+Decision: add freelist/live-byte visibility to storage stats rather than treating unchanged SQLite file size as compaction failure.
+
+Why: deleting thousands of ordinary history/tx rows moves pages to SQLite's freelist. That space is reusable by future writes but the database file does not shrink without VACUUM/auto-vacuum maintenance. The benchmark needs to distinguish allocated file bytes from live allocated pages.
+
+Scope impact: benchmark comparisons should include live database bytes or freelist bytes for compaction experiments. A later maintenance API can decide when to VACUUM durable files.

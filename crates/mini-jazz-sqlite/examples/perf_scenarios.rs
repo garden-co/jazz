@@ -198,6 +198,9 @@ enum DeepHistoryReport {
     AppendStream(DeepHistoryCaseReport),
     AutomergePaper(DeepHistoryCaseReport),
     CanvasPositions(DeepHistoryCaseReport),
+    AppendStreamHistoryBlocks(DeepHistoryCaseReport),
+    AutomergePaperHistoryBlocks(DeepHistoryCaseReport),
+    CanvasPositionsHistoryBlocks(DeepHistoryCaseReport),
     AppendStreamJazzRope(DeepHistoryCaseReport),
     AutomergePaperJazzRope(DeepHistoryCaseReport),
     CanvasPositionsJazzRope(DeepHistoryCaseReport),
@@ -228,6 +231,8 @@ struct DeepHistoryCaseReport {
     reference_gzip_bytes: Option<usize>,
     bundle_bytes: usize,
     database_bytes: i64,
+    live_database_bytes: i64,
+    freelist_bytes: i64,
     total_file_bytes: i64,
     history_rows: i64,
     current_rows: i64,
@@ -4093,23 +4098,34 @@ fn timed_apply_bundles(runtime: &mut Runtime, bundles: Vec<Bundle>) -> Result<Du
 fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
     match kind {
         "append" | "append-stream" => Ok(DeepHistoryReport::AppendStream(run_append_stream_probe()?)),
+        "append-history-blocks" | "append-stream-history-blocks" => Ok(
+            DeepHistoryReport::AppendStreamHistoryBlocks(run_append_stream_history_blocks_probe()?),
+        ),
         "append-jazz-rope" | "append-stream-jazz-rope" => Ok(
             DeepHistoryReport::AppendStreamJazzRope(run_append_stream_jazz_rope_probe()?),
         ),
         "automerge" | "automerge-paper" => {
             Ok(DeepHistoryReport::AutomergePaper(run_automerge_paper_probe()?))
         }
+        "automerge-history-blocks" | "automerge-paper-history-blocks" => Ok(
+            DeepHistoryReport::AutomergePaperHistoryBlocks(
+                run_automerge_paper_history_blocks_probe()?,
+            ),
+        ),
         "automerge-jazz-rope" | "automerge-paper-jazz-rope" => Ok(
             DeepHistoryReport::AutomergePaperJazzRope(run_automerge_paper_jazz_rope_probe()?),
         ),
         "canvas" | "canvas-positions" => {
             Ok(DeepHistoryReport::CanvasPositions(run_canvas_positions_probe()?))
         }
+        "canvas-history-blocks" | "canvas-positions-history-blocks" => Ok(
+            DeepHistoryReport::CanvasPositionsHistoryBlocks(run_canvas_positions_history_blocks_probe()?),
+        ),
         "canvas-jazz-rope" | "canvas-positions-jazz-rope" => Ok(
             DeepHistoryReport::CanvasPositionsJazzRope(run_canvas_positions_jazz_rope_probe()?),
         ),
         other => Err(format!(
-            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected append, append-jazz-rope, automerge-paper, automerge-paper-jazz-rope, canvas, or canvas-jazz-rope"
+            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected append, append-history-blocks, append-jazz-rope, automerge-paper, automerge-history-blocks, automerge-paper-jazz-rope, canvas, canvas-history-blocks, or canvas-jazz-rope"
         )
         .into()),
     }
@@ -4137,7 +4153,39 @@ fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
         }),
         final_reference_json: None,
         compare_to_final_payload: true,
+        compact_hot_tail: None,
         notes: vec!["Naive baseline: one full-row text update per token-like append.".to_owned()],
+    })
+}
+
+fn run_append_stream_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport> {
+    let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 2_225);
+    let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
+    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 445).max(1);
+    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every).max(1);
+    let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
+    let mut state = String::new();
+    run_naive_deep_history_case(DeepHistoryCaseInput {
+        target_updates,
+        max_seconds,
+        sample_every,
+        schema: text_document_schema(),
+        table: "documents",
+        row_id: "stream",
+        field: "body",
+        initial_value: String::new(),
+        reference_gzip_bytes: None,
+        next_value: Box::new(move |_| {
+            state.push_str(&token);
+            Ok(state.clone())
+        }),
+        final_reference_json: None,
+        compare_to_final_payload: true,
+        compact_hot_tail: Some(hot_tail),
+        notes: vec![
+            "History blocks: naive full-row writes, then seal old accepted history into lz4 blocks."
+                .to_owned(),
+        ],
     })
 }
 
@@ -4170,9 +4218,49 @@ fn run_automerge_paper_probe() -> BenchResult<DeepHistoryCaseReport> {
         }),
         final_reference_json: None,
         compare_to_final_payload: true,
+        compact_hot_tail: None,
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
             "Naive baseline: apply trace patch locally, then write whole document body.".to_owned(),
+        ],
+    })
+}
+
+fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport> {
+    let trace_path = automerge_trace_path()?;
+    let trace_bytes = std::fs::metadata(&trace_path)?.len() as usize;
+    let trace_json = gzip_decode_to_string(&trace_path)?;
+    let trace: AutomergeTrace = serde_json::from_str(&trace_json)?;
+    let target_updates = env_optional_usize("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_UPDATES")
+        .unwrap_or(2_900)
+        .min(trace.txns.len());
+    let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
+    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 580).max(1);
+    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every).max(1);
+    let mut state = trace.start_content;
+    let txns = trace.txns;
+    let available_txns = txns.len();
+    run_naive_deep_history_case(DeepHistoryCaseInput {
+        target_updates,
+        max_seconds,
+        sample_every,
+        schema: text_document_schema(),
+        table: "documents",
+        row_id: "automerge-paper",
+        field: "body",
+        initial_value: state.clone(),
+        reference_gzip_bytes: Some(trace_bytes),
+        next_value: Box::new(move |index| {
+            apply_automerge_patches(&mut state, &txns[index].patches)?;
+            Ok(state.clone())
+        }),
+        final_reference_json: None,
+        compare_to_final_payload: true,
+        compact_hot_tail: Some(hot_tail),
+        notes: vec![
+            format!("Source trace transactions available: {available_txns}"),
+            "History blocks: naive full-row writes, then seal old accepted history into lz4 blocks."
+                .to_owned(),
         ],
     })
 }
@@ -4253,8 +4341,42 @@ fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
         next_value: Box::new(move |index| Ok(all_positions[index].clone())),
         final_reference_json: Some(reference_json),
         compare_to_final_payload: false,
+        compact_hot_tail: None,
         notes: vec![
             "Naive baseline: one full-row position JSON text update per 60 FPS frame.".to_owned(),
+            "Final-payload ratios are not meaningful for presence-like coordinates and are emitted as null.".to_owned(),
+        ],
+    })
+}
+
+fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport> {
+    let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES", 3_900);
+    let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
+    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 780).max(1);
+    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every).max(1);
+    let mut all_positions = Vec::with_capacity(target_updates);
+    for frame in 0..target_updates {
+        all_positions.push(canvas_position_json(frame));
+    }
+    let reference_json = serde_json::to_string(&all_positions)?;
+    let reference_gzip_bytes = Some(gzip_bytes(reference_json.as_bytes())?);
+    run_naive_deep_history_case(DeepHistoryCaseInput {
+        target_updates,
+        max_seconds,
+        sample_every,
+        schema: text_document_schema(),
+        table: "documents",
+        row_id: "canvas-object",
+        field: "body",
+        initial_value: canvas_position_json(0),
+        reference_gzip_bytes,
+        next_value: Box::new(move |index| Ok(all_positions[index].clone())),
+        final_reference_json: Some(reference_json),
+        compare_to_final_payload: false,
+        compact_hot_tail: Some(hot_tail),
+        notes: vec![
+            "History blocks: naive full-row writes, then seal old accepted history into lz4 blocks."
+                .to_owned(),
             "Final-payload ratios are not meaningful for presence-like coordinates and are emitted as null.".to_owned(),
         ],
     })
@@ -4300,6 +4422,7 @@ struct DeepHistoryCaseInput {
     next_value: Box<dyn FnMut(usize) -> BenchResult<String>>,
     final_reference_json: Option<String>,
     compare_to_final_payload: bool,
+    compact_hot_tail: Option<usize>,
     notes: Vec<String>,
 }
 
@@ -4438,6 +4561,7 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     let writer_stats = writer.storage_stats()?;
     let rope_database_bytes = sqlite_database_bytes(&writer_rope)?;
     let database_bytes = writer_stats.database_bytes + rope_database_bytes;
+    let live_database_bytes = writer_stats.live_database_bytes + rope_database_bytes;
     let total_file_bytes =
         writer_stats.total_file_bytes + sqlite_path_total_file_bytes(&writer_rope_path);
     let mut notes = input.notes;
@@ -4484,6 +4608,8 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
         database_bytes,
+        live_database_bytes,
+        freelist_bytes: writer_stats.freelist_bytes,
         total_file_bytes,
         history_rows: writer_stats.history_rows,
         current_rows: writer_stats.current_rows,
@@ -4624,6 +4750,7 @@ fn run_jazz_rope_position_case(
     let writer_stats = writer.storage_stats()?;
     let rope_database_bytes = sqlite_database_bytes(&writer_rope)?;
     let database_bytes = writer_stats.database_bytes + rope_database_bytes;
+    let live_database_bytes = writer_stats.live_database_bytes + rope_database_bytes;
     let total_file_bytes =
         writer_stats.total_file_bytes + sqlite_path_total_file_bytes(&writer_rope_path);
     let mut notes = input.notes;
@@ -4669,6 +4796,8 @@ fn run_jazz_rope_position_case(
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
         database_bytes,
+        live_database_bytes,
+        freelist_bytes: writer_stats.freelist_bytes,
         total_file_bytes,
         history_rows: writer_stats.history_rows,
         current_rows: writer_stats.current_rows,
@@ -5008,6 +5137,22 @@ fn run_naive_deep_history_case(
     }
 
     let total_loop_ms = ms(started.elapsed());
+    let mut notes = input.notes;
+    if let Some(hot_tail) = input.compact_hot_tail {
+        let compaction_started = Instant::now();
+        let compaction = writer.compact_accepted_history(input.table, input.row_id, hot_tail)?;
+        let compaction_ms = ms(compaction_started.elapsed());
+        notes.push(format!(
+            "History block compaction: hot tail {}, sealed rows {}, blocks {}, sealed tx rows {}, uncompressed bytes {}, compressed bytes {}, compaction {:.2} ms.",
+            hot_tail,
+            compaction.sealed_history_rows,
+            compaction.history_blocks,
+            compaction.sealed_transactions,
+            compaction.uncompressed_bytes,
+            compaction.compressed_bytes,
+            compaction_ms
+        ));
+    }
     let bundle = writer.export_table_history(input.table)?;
     let bundle_summary = BundleSummary::from(&bundle)?;
     let cold_schema = input.schema.clone();
@@ -5057,7 +5202,6 @@ fn run_naive_deep_history_case(
     } else {
         None
     };
-    let mut notes = input.notes;
     if let Some(reference_json) = input.final_reference_json {
         notes.push(format!(
             "Reference uncompressed JSON bytes: {}",
@@ -5097,6 +5241,8 @@ fn run_naive_deep_history_case(
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: bundle_summary.bytes,
         database_bytes: stats.database_bytes,
+        live_database_bytes: stats.live_database_bytes,
+        freelist_bytes: stats.freelist_bytes,
         total_file_bytes,
         history_rows: stats.history_rows,
         current_rows: stats.current_rows,

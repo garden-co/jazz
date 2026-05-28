@@ -44,6 +44,9 @@ pub struct StorageStats {
     pub rejected_transactions: i64,
     pub page_count: i64,
     pub page_size: i64,
+    pub freelist_pages: i64,
+    pub freelist_bytes: i64,
+    pub live_database_bytes: i64,
     pub database_bytes: i64,
     pub main_file_bytes: i64,
     pub wal_file_bytes: i64,
@@ -63,6 +66,7 @@ pub(crate) struct StorageFileBytes {
 pub(crate) struct StoragePageBytes {
     pub count: i64,
     pub size: i64,
+    pub freelist: i64,
     pub object_bytes: BTreeMap<String, i64>,
 }
 
@@ -161,6 +165,9 @@ impl StorageStats {
             rejected_transactions,
             page_count: page_bytes.count,
             page_size: page_bytes.size,
+            freelist_pages: page_bytes.freelist,
+            freelist_bytes: page_bytes.freelist * page_bytes.size,
+            live_database_bytes: (page_bytes.count - page_bytes.freelist) * page_bytes.size,
             database_bytes: page_bytes.count * page_bytes.size,
             main_file_bytes: file_bytes.main,
             wal_file_bytes: file_bytes.wal,

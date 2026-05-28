@@ -52,6 +52,7 @@ Canvas `3900` frames is about 65 simulated seconds at 60 FPS.
 | Base1 | Base plus compact tx metadata: derived public tx ids and NULL empty metadata   |
 | Base2 | Base1 plus packed tx writes/reads JSON on `jazz_tx`                            |
 | Base3 | Base2 plus compact bundle wire dictionaries and positional record arrays       |
+| Block | Base3 plus sealed lz4 history blocks after the write loop                      |
 |  Incr | Same sequence sidecar, but sampled sync copies only new sidecar nodes/segments |
 
 The earlier full-sidecar-snapshot sequence experiment was replaced by `Incr` and
@@ -72,81 +73,87 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 
 ## Comparison Table
 
-| Scenario  | Metric                     |       Base |      Base1 |      Base2 |      Base3 |      Incr |
-| --------- | -------------------------- | ---------: | ---------: | ---------: | ---------: | --------: |
-| Append    | completed updates          |       2225 |       2225 |       2225 |       2225 |      2225 |
-| Append    | total loop                 |    7360 ms |    7406 ms |    7687 ms |    7609 ms |   7653 ms |
-| Append    | write only                 |     812 ms |     623 ms |     725 ms |     767 ms |   3406 ms |
-| Append    | avg loop/update            |    3.31 ms |    3.33 ms |    3.45 ms |    3.42 ms |   3.44 ms |
-| Append    | avg write/update           |    0.37 ms |    0.28 ms |    0.33 ms |    0.34 ms |   1.53 ms |
-| Append    | sampled receive            |    6544 ms |    6780 ms |    6959 ms |    6839 ms |   4245 ms |
-| Append    | live receive avg           |    1091 ms |    1130 ms |    1160 ms |    1140 ms |    707 ms |
-| Append    | live receive p50           |     886 ms |     924 ms |     974 ms |     969 ms |    819 ms |
-| Append    | live receive p95           |    3303 ms |    3350 ms |    3382 ms |    3369 ms |   1390 ms |
-| Append    | cold load                  |    1898 ms |    1967 ms |    2081 ms |    1961 ms |   2137 ms |
-| Append    | current read               |    0.15 ms |    0.15 ms |    0.24 ms |    0.15 ms |  51.60 ms |
-| Append    | history rows               |       2226 |       2226 |       2226 |       2226 |      2225 |
-| Append    | final payload bytes        |     13,350 |     13,350 |     13,350 |     13,350 |    13,350 |
-| Append    | bundle bytes               | 16,115,414 | 16,115,414 | 16,115,414 | 15,235,071 | 1,411,141 |
-| Append    | database bytes             | 18,796,544 | 18,677,760 | 18,657,280 | 18,657,280 |   573,440 |
-| Append    | total file bytes           | 22,319,040 | 22,773,576 | 22,388,624 | 22,388,624 | 4,738,720 |
-| Append    | database / final payload   |   1407.98x |   1399.08x |   1397.55x |   1397.55x |    42.95x |
-| Append    | total file / final payload |   1671.84x |   1705.89x |   1677.05x |   1677.05x |   354.96x |
-| Append    | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |      4449 |
-| Append    | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |      2225 |
-| Append    | sidecar concat nodes       |        N/A |        N/A |        N/A |        N/A |      2224 |
-| Append    | sidecar segment bytes      |        N/A |        N/A |        N/A |        N/A |    13,350 |
-| Automerge | completed updates          |       2900 |       2900 |       2900 |       2900 |      2900 |
-| Automerge | total loop                 |    7589 ms |    7528 ms |    8000 ms |    7999 ms | 18,519 ms |
-| Automerge | write only                 |     811 ms |     817 ms |     958 ms |     969 ms |   9019 ms |
-| Automerge | avg loop/update            |    2.62 ms |    2.60 ms |    2.76 ms |    2.76 ms |   6.39 ms |
-| Automerge | avg write/update           |    0.28 ms |    0.28 ms |    0.33 ms |    0.33 ms |   3.11 ms |
-| Automerge | sampled receive            |    6774 ms |    6707 ms |    7038 ms |    7025 ms |   9497 ms |
-| Automerge | live receive avg           |    1129 ms |    1118 ms |    1173 ms |    1171 ms |   1583 ms |
-| Automerge | live receive p50           |     977 ms |     884 ms |     940 ms |     938 ms |   2090 ms |
-| Automerge | live receive p95           |    3511 ms |    3429 ms |    3547 ms |    3532 ms |   3271 ms |
-| Automerge | cold load                  |    1895 ms |    1902 ms |    2024 ms |    2031 ms |   7311 ms |
-| Automerge | current read               |    0.14 ms |    0.14 ms |    0.14 ms |    0.13 ms |  41.52 ms |
-| Automerge | history rows               |       2901 |       2901 |       2901 |       2901 |      2900 |
-| Automerge | final payload bytes        |       1750 |       1750 |       1750 |       1750 |      1750 |
-| Automerge | source trace gzip bytes    |    904,360 |    904,360 |    904,360 |    904,360 |   904,360 |
-| Automerge | bundle bytes               |  5,351,258 |  5,351,258 |  5,351,258 |  4,152,081 | 2,209,941 |
-| Automerge | database bytes             |  9,859,072 |  9,707,520 |  9,687,040 |  9,687,040 |   892,928 |
-| Automerge | total file bytes           | 13,729,560 | 13,807,432 | 13,778,664 | 13,778,664 | 5,082,808 |
-| Automerge | database / final payload   |   5633.76x |   5547.15x |   5535.45x |   5535.45x |   510.24x |
-| Automerge | total file / final payload |   7845.46x |   7889.96x |   7873.52x |   7873.52x |  2904.46x |
-| Automerge | database / source gzip     |     10.90x |     10.73x |     10.71x |     10.71x |     0.99x |
-| Automerge | bundle / source gzip       |      5.92x |      5.92x |      5.92x |      4.59x |     2.44x |
-| Automerge | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |    17,042 |
-| Automerge | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |      2325 |
-| Automerge | sidecar concat nodes       |        N/A |        N/A |        N/A |        N/A |    14,717 |
-| Automerge | sidecar segment bytes      |        N/A |        N/A |        N/A |        N/A |      2325 |
-| Canvas    | completed updates          |       3900 |       3900 |       3900 |       3900 |      3900 |
-| Canvas    | total loop                 |    7801 ms |    7896 ms |    8459 ms |    8455 ms | 15,234 ms |
-| Canvas    | write only                 |    1043 ms |     766 ms |     912 ms |     903 ms |   5217 ms |
-| Canvas    | avg loop/update            |    2.00 ms |    2.02 ms |    2.17 ms |    2.17 ms |   3.91 ms |
-| Canvas    | avg write/update           |    0.27 ms |    0.20 ms |    0.23 ms |    0.23 ms |   1.34 ms |
-| Canvas    | sampled receive            |    6753 ms |    7126 ms |    7543 ms |    7548 ms | 10,012 ms |
-| Canvas    | live receive avg           |    1125 ms |    1188 ms |    1257 ms |    1258 ms |   1669 ms |
-| Canvas    | live receive p50           |    1119 ms |    1176 ms |    1261 ms |    1263 ms |   1578 ms |
-| Canvas    | live receive p95           |    3026 ms |    3159 ms |    3292 ms |    3274 ms |   4394 ms |
-| Canvas    | cold load                  |    2007 ms |    2072 ms |    2217 ms |    2236 ms |   5479 ms |
-| Canvas    | current read               |    0.11 ms |    0.14 ms |    0.13 ms |    0.13 ms |   0.18 ms |
-| Canvas    | history rows               |       3901 |       3901 |       3901 |       3901 |      3900 |
-| Canvas    | final payload bytes        |         46 |         46 |         46 |         46 |        46 |
-| Canvas    | position trace gzip bytes  |     78,526 |     78,526 |     78,526 |     78,526 |    77,211 |
-| Canvas    | position trace JSON bytes  |    205,609 |    205,609 |    205,609 |    205,609 |   182,209 |
-| Canvas    | bundle bytes               |  2,455,136 |  2,455,136 |  2,455,136 |    858,561 | 2,591,442 |
-| Canvas    | database bytes             |    884,736 |    679,936 |    659,456 |    659,456 |   913,408 |
-| Canvas    | total file bytes           |  5,070,520 |  4,857,480 |  4,828,760 |  4,828,760 | 5,090,976 |
-| Canvas    | database / final payload   |        N/A |        N/A |        N/A |        N/A |       N/A |
-| Canvas    | total file / final payload |        N/A |        N/A |        N/A |        N/A |       N/A |
-| Canvas    | database / position gzip   |     11.27x |      8.66x |      8.40x |      8.40x |    11.83x |
-| Canvas    | bundle / position gzip     |     31.27x |     31.27x |     31.27x |     10.93x |    33.56x |
-| Canvas    | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |      7799 |
-| Canvas    | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |      3900 |
-| Canvas    | sidecar concat nodes       |        N/A |        N/A |        N/A |        N/A |      3899 |
-| Canvas    | sidecar segment bytes      |        N/A |        N/A |        N/A |        N/A |    31,392 |
+| Scenario  | Metric                     |       Base |      Base1 |      Base2 |      Base3 |      Block |      Incr |
+| --------- | -------------------------- | ---------: | ---------: | ---------: | ---------: | ---------: | --------: |
+| Append    | completed updates          |       2225 |       2225 |       2225 |       2225 |       2225 |      2225 |
+| Append    | total loop                 |    7360 ms |    7406 ms |    7687 ms |    7609 ms |    7721 ms |   7653 ms |
+| Append    | write only                 |     812 ms |     623 ms |     725 ms |     767 ms |     765 ms |   3406 ms |
+| Append    | avg loop/update            |    3.31 ms |    3.33 ms |    3.45 ms |    3.42 ms |    3.47 ms |   3.44 ms |
+| Append    | avg write/update           |    0.37 ms |    0.28 ms |    0.33 ms |    0.34 ms |    0.34 ms |   1.53 ms |
+| Append    | sampled receive            |    6544 ms |    6780 ms |    6959 ms |    6839 ms |    6953 ms |   4245 ms |
+| Append    | live receive avg           |    1091 ms |    1130 ms |    1160 ms |    1140 ms |    1159 ms |    707 ms |
+| Append    | live receive p50           |     886 ms |     924 ms |     974 ms |     969 ms |     988 ms |    819 ms |
+| Append    | live receive p95           |    3303 ms |    3350 ms |    3382 ms |    3369 ms |    3444 ms |   1390 ms |
+| Append    | cold load                  |    1898 ms |    1967 ms |    2081 ms |    1961 ms |    1998 ms |   2137 ms |
+| Append    | current read               |    0.15 ms |    0.15 ms |    0.24 ms |    0.15 ms |    0.14 ms |  51.60 ms |
+| Append    | history rows               |       2226 |       2226 |       2226 |       2226 |        445 |      2225 |
+| Append    | final payload bytes        |     13,350 |     13,350 |     13,350 |     13,350 |     13,350 |    13,350 |
+| Append    | bundle bytes               | 16,115,414 | 16,115,414 | 16,115,414 | 15,235,071 | 15,235,071 | 1,411,141 |
+| Append    | database bytes             | 18,796,544 | 18,677,760 | 18,657,280 | 18,657,280 | 18,751,488 |   573,440 |
+| Append    | live database bytes        |        N/A |        N/A |        N/A |        N/A |  6,082,560 |       N/A |
+| Append    | freelist bytes             |        N/A |        N/A |        N/A |        N/A | 12,668,928 |       N/A |
+| Append    | total file bytes           | 22,319,040 | 22,773,576 | 22,388,624 | 22,388,624 | 22,400,912 | 4,738,720 |
+| Append    | database / final payload   |   1407.98x |   1399.08x |   1397.55x |   1397.55x |   1404.61x |    42.95x |
+| Append    | total file / final payload |   1671.84x |   1705.89x |   1677.05x |   1677.05x |   1677.97x |   354.96x |
+| Append    | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |        N/A |      4449 |
+| Append    | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |        N/A |      2225 |
+| Append    | sidecar concat nodes       |        N/A |        N/A |        N/A |        N/A |        N/A |      2224 |
+| Append    | sidecar segment bytes      |        N/A |        N/A |        N/A |        N/A |        N/A |    13,350 |
+| Automerge | completed updates          |       2900 |       2900 |       2900 |       2900 |       2900 |      2900 |
+| Automerge | total loop                 |    7589 ms |    7528 ms |    8000 ms |    7999 ms |    8040 ms | 18,519 ms |
+| Automerge | write only                 |     811 ms |     817 ms |     958 ms |     969 ms |     893 ms |   9019 ms |
+| Automerge | avg loop/update            |    2.62 ms |    2.60 ms |    2.76 ms |    2.76 ms |    2.77 ms |   6.39 ms |
+| Automerge | avg write/update           |    0.28 ms |    0.28 ms |    0.33 ms |    0.33 ms |    0.31 ms |   3.11 ms |
+| Automerge | sampled receive            |    6774 ms |    6707 ms |    7038 ms |    7025 ms |    7144 ms |   9497 ms |
+| Automerge | live receive avg           |    1129 ms |    1118 ms |    1173 ms |    1171 ms |    1191 ms |   1583 ms |
+| Automerge | live receive p50           |     977 ms |     884 ms |     940 ms |     938 ms |     942 ms |   2090 ms |
+| Automerge | live receive p95           |    3511 ms |    3429 ms |    3547 ms |    3532 ms |    3616 ms |   3271 ms |
+| Automerge | cold load                  |    1895 ms |    1902 ms |    2024 ms |    2031 ms |    2043 ms |   7311 ms |
+| Automerge | current read               |    0.14 ms |    0.14 ms |    0.14 ms |    0.13 ms |    0.14 ms |  41.52 ms |
+| Automerge | history rows               |       2901 |       2901 |       2901 |       2901 |        580 |      2900 |
+| Automerge | final payload bytes        |       1750 |       1750 |       1750 |       1750 |       1750 |      1750 |
+| Automerge | source trace gzip bytes    |    904,360 |    904,360 |    904,360 |    904,360 |    904,360 |   904,360 |
+| Automerge | bundle bytes               |  5,351,258 |  5,351,258 |  5,351,258 |  4,152,081 |  4,152,081 | 2,209,941 |
+| Automerge | database bytes             |  9,859,072 |  9,707,520 |  9,687,040 |  9,687,040 |  9,818,112 |   892,928 |
+| Automerge | live database bytes        |        N/A |        N/A |        N/A |        N/A |  2,998,272 |       N/A |
+| Automerge | freelist bytes             |        N/A |        N/A |        N/A |        N/A |  6,819,840 |       N/A |
+| Automerge | total file bytes           | 13,729,560 | 13,807,432 | 13,778,664 | 13,778,664 | 13,790,952 | 5,082,808 |
+| Automerge | database / final payload   |   5633.76x |   5547.15x |   5535.45x |   5535.45x |   5610.35x |   510.24x |
+| Automerge | total file / final payload |   7845.46x |   7889.96x |   7873.52x |   7873.52x |   7880.54x |  2904.46x |
+| Automerge | database / source gzip     |     10.90x |     10.73x |     10.71x |     10.71x |     10.86x |     0.99x |
+| Automerge | bundle / source gzip       |      5.92x |      5.92x |      5.92x |      4.59x |      4.59x |     2.44x |
+| Automerge | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |        N/A |    17,042 |
+| Automerge | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |        N/A |      2325 |
+| Automerge | sidecar concat nodes       |        N/A |        N/A |        N/A |        N/A |        N/A |    14,717 |
+| Automerge | sidecar segment bytes      |        N/A |        N/A |        N/A |        N/A |        N/A |      2325 |
+| Canvas    | completed updates          |       3900 |       3900 |       3900 |       3900 |       3900 |      3900 |
+| Canvas    | total loop                 |    7801 ms |    7896 ms |    8459 ms |    8455 ms |    8418 ms | 15,234 ms |
+| Canvas    | write only                 |    1043 ms |     766 ms |     912 ms |     903 ms |     864 ms |   5217 ms |
+| Canvas    | avg loop/update            |    2.00 ms |    2.02 ms |    2.17 ms |    2.17 ms |    2.16 ms |   3.91 ms |
+| Canvas    | avg write/update           |    0.27 ms |    0.20 ms |    0.23 ms |    0.23 ms |    0.22 ms |   1.34 ms |
+| Canvas    | sampled receive            |    6753 ms |    7126 ms |    7543 ms |    7548 ms |    7549 ms | 10,012 ms |
+| Canvas    | live receive avg           |    1125 ms |    1188 ms |    1257 ms |    1258 ms |    1258 ms |   1669 ms |
+| Canvas    | live receive p50           |    1119 ms |    1176 ms |    1261 ms |    1263 ms |    1258 ms |   1578 ms |
+| Canvas    | live receive p95           |    3026 ms |    3159 ms |    3292 ms |    3274 ms |    3271 ms |   4394 ms |
+| Canvas    | cold load                  |    2007 ms |    2072 ms |    2217 ms |    2236 ms |    2324 ms |   5479 ms |
+| Canvas    | current read               |    0.11 ms |    0.14 ms |    0.13 ms |    0.13 ms |    0.14 ms |   0.18 ms |
+| Canvas    | history rows               |       3901 |       3901 |       3901 |       3901 |        780 |      3900 |
+| Canvas    | final payload bytes        |         46 |         46 |         46 |         46 |         46 |        46 |
+| Canvas    | position trace gzip bytes  |     78,526 |     78,526 |     78,526 |     78,526 |     78,526 |    77,211 |
+| Canvas    | position trace JSON bytes  |    205,609 |    205,609 |    205,609 |    205,609 |    205,609 |   182,209 |
+| Canvas    | bundle bytes               |  2,455,136 |  2,455,136 |  2,455,136 |    858,561 |    858,561 | 2,591,442 |
+| Canvas    | database bytes             |    884,736 |    679,936 |    659,456 |    659,456 |    888,832 |   913,408 |
+| Canvas    | live database bytes        |        N/A |        N/A |        N/A |        N/A |    442,368 |       N/A |
+| Canvas    | freelist bytes             |        N/A |        N/A |        N/A |        N/A |    446,464 |       N/A |
+| Canvas    | total file bytes           |  5,070,520 |  4,857,480 |  4,828,760 |  4,828,760 |  4,845,168 | 5,090,976 |
+| Canvas    | database / final payload   |        N/A |        N/A |        N/A |        N/A |        N/A |       N/A |
+| Canvas    | total file / final payload |        N/A |        N/A |        N/A |        N/A |        N/A |       N/A |
+| Canvas    | database / position gzip   |     11.27x |      8.66x |      8.40x |      8.40x |     11.32x |    11.83x |
+| Canvas    | bundle / position gzip     |     31.27x |     31.27x |     31.27x |     10.93x |     10.93x |    33.56x |
+| Canvas    | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |        N/A |      7799 |
+| Canvas    | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |        N/A |      3900 |
+| Canvas    | sidecar concat nodes       |        N/A |        N/A |        N/A |        N/A |        N/A |      3899 |
+| Canvas    | sidecar segment bytes      |        N/A |        N/A |        N/A |        N/A |        N/A |    31,392 |
 
 ## Notes
 

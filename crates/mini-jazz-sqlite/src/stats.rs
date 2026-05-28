@@ -34,6 +34,7 @@ pub(crate) fn collect(conn: &Connection, schema: &SchemaDef) -> Result<StorageSt
     let page_bytes = StoragePageBytes {
         count: conn.query_row("PRAGMA page_count", [], |row| row.get(0))?,
         size: conn.query_row("PRAGMA page_size", [], |row| row.get(0))?,
+        freelist: conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))?,
         object_bytes: table_page_bytes(conn)?,
     };
     let file_sizes = sqlite_file_sizes(conn)?;
