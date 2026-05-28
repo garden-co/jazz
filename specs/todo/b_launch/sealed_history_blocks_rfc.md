@@ -448,6 +448,8 @@ minimum-version thresholds, an optional maximum block budget, and an optional
 compressed-payload byte budget, and an optional wall-clock budget. The budgets
 let an embedder run maintenance in bounded chunks, leaving age and richer
 pre-compaction byte-estimate scheduling as higher-level policy decisions.
+The policy can also cap rows per sealed block, which lets very deep rows be
+split into multiple smaller blocks instead of one large blob.
 
 Compaction only makes SQLite pages reusable. It should not automatically force
 the database file to shrink, because checkpoint/truncate/vacuum work can be a
@@ -460,7 +462,6 @@ Open questions:
 - whether compacted open rows are deleted or replaced with tombstone stubs
 - whether compacted tx rows are deleted or replaced with lookup stubs
 - whether block ids are content-addressed, auto-incremented, or both
-- how large a block should be before sealing a second block for the same row
 - whether compaction is triggered by row version count, byte size, age, or all
   three
 - how to coordinate tx compaction when one transaction writes multiple rows that

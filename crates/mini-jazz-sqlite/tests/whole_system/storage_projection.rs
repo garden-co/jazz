@@ -1620,6 +1620,50 @@ fn compaction_policy_can_budget_compressed_block_bytes() {
 }
 
 #[test]
+fn compaction_policy_can_split_deep_rows_into_smaller_blocks() {
+    let schema = SchemaDef::new().table("docs", |table| {
+        table.text("title");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-1",
+            BTreeMap::from([("title".to_owned(), json!("v1"))]),
+        )
+        .unwrap();
+    for idx in 2..=8 {
+        alice
+            .update_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("title".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+
+    let stats = alice
+        .compact_history_with_policy(
+            HistoryCompactionPolicy::accepted_only(1, 1).with_max_rows_per_block(2),
+        )
+        .unwrap();
+    assert_eq!(stats.sealed_history_rows, 7);
+    assert_eq!(stats.history_blocks, 4);
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 1);
+    assert_eq!(alice.all_history_block_manifests().unwrap().len(), 4);
+    assert_eq!(
+        alice
+            .read_row_at_node_epoch("docs", "doc-1", "alice-node", 3)
+            .unwrap()
+            .unwrap()
+            .values["title"],
+        json!("v3")
+    );
+}
+
+#[test]
 fn rejected_multi_row_tx_metadata_stays_open_until_all_rows_are_compacted() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

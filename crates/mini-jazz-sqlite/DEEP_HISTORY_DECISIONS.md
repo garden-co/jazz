@@ -395,3 +395,11 @@ Decision: Extend `HistoryCompactionPolicy` with an optional compressed-payload b
 Why: block-count and wall-clock budgets are useful but do not directly bound how much sealed payload maintenance emits. A compressed-byte budget lets callers make bounded progress in storage terms and complements the block-count limit.
 
 Scope impact: policy compaction checks compressed bytes before starting each next row block. The budget is post-block rather than a preflight estimate, so it can overshoot by one block; richer byte estimation remains future scheduling work.
+
+## Thu May 28 02:15:59 PDT 2026 - Rows Per History Block
+
+Decision: Add a `max_rows_per_block` compaction policy knob for accepted history.
+
+Why: one huge block per deep row is good for compression but bad for cold point reads, because the first read has to decode and scan the whole blob. Smaller per-row blocks give us a direct storage/read-latency tradeoff without changing semantics.
+
+Scope impact: policy compaction can now split one row's compacted accepted history into multiple blocks. Existing direct row/table compaction keeps the old single-block behavior unless the policy knob is used.

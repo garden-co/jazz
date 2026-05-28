@@ -111,6 +111,7 @@ pub struct HistoryCompactionPolicy {
     pub max_blocks: Option<usize>,
     pub max_compressed_bytes: Option<i64>,
     pub max_duration: Option<Duration>,
+    pub max_rows_per_block: Option<usize>,
 }
 
 impl HistoryCompactionPolicy {
@@ -123,6 +124,7 @@ impl HistoryCompactionPolicy {
             max_blocks: None,
             max_compressed_bytes: None,
             max_duration: None,
+            max_rows_per_block: None,
         }
     }
 
@@ -135,6 +137,7 @@ impl HistoryCompactionPolicy {
             max_blocks: None,
             max_compressed_bytes: None,
             max_duration: None,
+            max_rows_per_block: None,
         }
     }
 
@@ -150,6 +153,11 @@ impl HistoryCompactionPolicy {
 
     pub fn with_max_compressed_bytes(mut self, max_compressed_bytes: i64) -> Self {
         self.max_compressed_bytes = Some(max_compressed_bytes);
+        self
+    }
+
+    pub fn with_max_rows_per_block(mut self, max_rows_per_block: usize) -> Self {
+        self.max_rows_per_block = Some(max_rows_per_block);
         self
     }
 }
