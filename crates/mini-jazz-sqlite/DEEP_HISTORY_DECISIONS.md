@@ -297,3 +297,9 @@ Scope impact: the first query-scoped block-native sync family now covers the sim
 Decision: Introduce a `HistoryDelta` return type for block-native sync APIs instead of anonymous `(Bundle, Vec<HistoryBlockExport>)` tuples.
 
 Scope impact: table, all-table, and query predicate deltas now expose the same named shape. This keeps receiver code aligned with `apply_history_delta` and makes the API harder to misuse as more query operators gain block-native variants.
+
+## Thu May 28 01:30:06 PDT 2026 - Top Query Block Deltas
+
+Decision: Add block-native history delta APIs for top-created and top-field query shapes without previous-observed repair state.
+
+Scope impact: page-like query sync can now transfer matching sealed row blocks without expanding them into ordinary history when bootstrapping a top query. Previous-observed refresh variants still need a follow-up API because their repair row set is caller-provided state.

@@ -3677,6 +3677,65 @@ impl Runtime {
         )
     }
 
+    pub fn export_query_where_eq_top_created_at_desc_history_delta(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<HistoryDelta> {
+        let rows = self.read_rows_where_eq_top_created_at_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            limit,
+        )?;
+        self.export_query_scope_history_delta(
+            table_name,
+            field_name,
+            "eq_top_created_at_desc",
+            json!({
+                "eq": value,
+                "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
+            }),
+            rows,
+            remote_block_manifests,
+        )
+    }
+
+    pub fn export_query_where_eq_top_field_desc_history_delta(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<HistoryDelta> {
+        let rows = self.read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            order_field_name,
+            limit,
+        )?;
+        self.export_query_scope_history_delta(
+            table_name,
+            field_name,
+            "eq_top_field_desc",
+            json!({
+                "eq": value,
+                "order_field": order_field_name,
+                "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
+            }),
+            rows,
+            remote_block_manifests,
+        )
+    }
+
     pub fn export_query_where_eq_with_ref_include(
         &self,
         table_name: &str,

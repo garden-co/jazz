@@ -538,6 +538,70 @@ fn contains_query_history_delta_syncs_matching_blocks() {
 }
 
 #[test]
+fn top_created_query_history_delta_syncs_matching_blocks() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    for idx in 2..=5 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("newer")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .compact_accepted_history("notes", "note-1", 1)
+        .unwrap();
+
+    let delta = alice
+        .export_query_where_eq_top_created_at_desc_history_delta(
+            "notes",
+            "pinned",
+            json!(true),
+            2,
+            &[],
+        )
+        .unwrap();
+    assert_eq!(delta.blocks.len(), 1);
+
+    bob.apply_history_delta(&delta.bundle, &delta.blocks)
+        .unwrap();
+    let rows = bob
+        .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["note-2", "note-1"]
+    );
+    assert_eq!(rows[1].values["body"], json!("v5"));
+}
+
+#[test]
 fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
     let schema = SchemaDef::new()
         .table("docs", |table| {
