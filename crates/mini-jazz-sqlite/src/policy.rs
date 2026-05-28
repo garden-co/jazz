@@ -91,7 +91,7 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
                 &format!(
                     "SELECT COUNT(*)
                      FROM {} current
-                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                     JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
                      WHERE current.row_num = ?
                        AND {}
                        AND current.is_deleted = 0
@@ -142,7 +142,7 @@ fn snapshot_write_ref_allowed(
         &format!(
             "SELECT COUNT(*)
              FROM {} h
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
              WHERE h.row_num = ?
                AND h.j_branch_num = 1
                AND h.op != 3
@@ -153,7 +153,7 @@ fn snapshot_write_ref_allowed(
                AND NOT EXISTS (
                  SELECT 1
                  FROM {history_table} newer
-                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
                  WHERE newer.row_num = h.row_num
                    AND newer.j_branch_num = 1
                    AND newer_tx.outcome != {}
@@ -289,7 +289,7 @@ fn lower_policy(
                 "EXISTS (
                    SELECT 1
                    FROM {} {parent_alias}
-                   JOIN jazz_tx {parent_tx_alias}
+                   JOIN jazz_tx_public {parent_tx_alias}
                      ON {parent_tx_alias}.tx_num = {parent_alias}.visible_tx_num
                    WHERE {parent_alias}.row_num = {alias}.{}
                      {branch_filter}
@@ -358,7 +358,7 @@ fn lower_snapshot_policy(
                 "EXISTS (
                    SELECT 1
                    FROM {} {parent_alias}
-                   JOIN jazz_tx {parent_tx_alias}
+                   JOIN jazz_tx_public {parent_tx_alias}
                      ON {parent_tx_alias}.tx_num = {parent_alias}.tx_num
                    WHERE {parent_alias}.row_num = {alias}.{}
                      AND {parent_alias}.j_branch_num = 1
@@ -369,7 +369,7 @@ fn lower_snapshot_policy(
                      AND NOT EXISTS (
                        SELECT 1
                        FROM {} {newer_alias}
-                       JOIN jazz_tx {newer_tx_alias}
+                       JOIN jazz_tx_public {newer_tx_alias}
                          ON {newer_tx_alias}.tx_num = {newer_alias}.tx_num
                        WHERE {newer_alias}.row_num = {parent_alias}.row_num
                          AND {newer_alias}.j_branch_num = 1

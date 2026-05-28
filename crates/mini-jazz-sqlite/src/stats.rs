@@ -19,7 +19,7 @@ pub(crate) fn collect(conn: &Connection, schema: &SchemaDef) -> Result<StorageSt
         params![tx::OUTCOME_REJECTED],
         |row| row.get(0),
     )?;
-    let mut stmt = conn.prepare("SELECT tx_id, tx_num FROM jazz_tx")?;
+    let mut stmt = conn.prepare("SELECT tx_id, tx_num FROM jazz_tx_public")?;
     let tx_nums = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))

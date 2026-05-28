@@ -43,7 +43,7 @@ fn rebuild_table(
     let sql = format!(
         "SELECT {}
          FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          WHERE tx.outcome != ?
            AND NOT (tx.outcome = ? AND tx.conflict_mode = ?)
            AND NOT EXISTS (

@@ -250,7 +250,7 @@ impl QueryContext<'_> {
                JOIN {current_table} current
                  ON current.{predicate_column} = query_values.predicate_value
                JOIN jazz_row_id ids ON ids.row_num = current.row_num
-               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
                WHERE current.j_branch_num = 1
                  AND current.is_deleted = 0
                  AND tx.outcome != ?
@@ -388,7 +388,7 @@ impl QueryContext<'_> {
             "SELECT {}
              FROM {} current
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
              WHERE current.j_branch_num = 1
                AND current.is_deleted = 0
                AND tx.outcome != ?
@@ -502,7 +502,7 @@ impl QueryContext<'_> {
                JOIN {current_table} current
                  ON current.{predicate_column} = query_values.predicate_value
                JOIN jazz_row_id ids ON ids.row_num = current.row_num
-               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
                WHERE current.j_branch_num = 1
                  AND current.is_deleted = 0
                  AND tx.outcome != ?
@@ -646,7 +646,7 @@ impl QueryContext<'_> {
                SELECT {current_row_columns}
                FROM {current_table} current
                JOIN jazz_row_id ids ON ids.row_num = current.row_num
-               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
                WHERE current.j_branch_num = ?
                  AND current.is_deleted = 0
                  AND tx.outcome != ?
@@ -659,7 +659,7 @@ impl QueryContext<'_> {
                SELECT {history_row_columns}
                FROM {history_table} h
                JOIN jazz_row_id ids ON ids.row_num = h.row_num
-               JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+               JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
                WHERE h.j_branch_num = 1
                  AND tx.outcome != ?
                  AND tx.global_epoch IS NOT NULL
@@ -669,7 +669,7 @@ impl QueryContext<'_> {
                  AND NOT EXISTS (
                    SELECT 1
                    FROM {history_table} newer
-                   JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                   JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
                    WHERE newer.row_num = h.row_num
                      AND newer.j_branch_num = 1
                      AND newer_tx.outcome != ?
@@ -793,7 +793,7 @@ impl QueryContext<'_> {
                SELECT {row_columns}
                FROM {current_table} current
                JOIN jazz_row_id ids ON ids.row_num = current.row_num
-               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
                WHERE current.j_branch_num = ?
                  AND current.is_deleted = 0
                  AND tx.outcome != ?
@@ -806,7 +806,7 @@ impl QueryContext<'_> {
                SELECT {row_columns}
                FROM {current_table} current
                JOIN jazz_row_id ids ON ids.row_num = current.row_num
-               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
                WHERE current.j_branch_num = 1
                  AND current.is_deleted = 0
                  AND tx.outcome != ?
@@ -950,7 +950,7 @@ impl QueryContext<'_> {
                 "SELECT {}
              FROM {} current
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
              WHERE current.j_branch_num IN ({source_placeholders})
                AND current.row_num = ?
                AND current.is_deleted = 0
@@ -1055,7 +1055,7 @@ impl QueryContext<'_> {
             "WITH RECURSIVE subtree(row_num) AS (
                SELECT current.row_num
                FROM {current_table} current
-               JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+               JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
                WHERE current.row_num = ?
                  AND current.j_branch_num = ?
                  AND current.is_deleted = 0
@@ -1075,7 +1075,7 @@ impl QueryContext<'_> {
              FROM subtree
              JOIN {current_table} current ON current.row_num = subtree.row_num
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
              ORDER BY CASE WHEN current.row_num = ? THEN 0 ELSE 1 END,
                       current.j_created_at,
                       current.row_num",
@@ -1318,7 +1318,7 @@ impl QueryContext<'_> {
             "SELECT {}
              FROM {} current
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
              WHERE current.row_num = ?
                AND current.j_branch_num = ?
                AND current.is_deleted = 0
@@ -1367,7 +1367,7 @@ impl QueryContext<'_> {
             "SELECT {}
              FROM {} current
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
             WHERE current.is_deleted = 0
                AND (
                  current.j_branch_num IN ({scope_placeholders})
@@ -1495,7 +1495,7 @@ impl QueryContext<'_> {
             "SELECT {}
              FROM {} current
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
             WHERE current.is_deleted = 0
                AND (
                  current.j_branch_num IN ({scope_placeholders})
@@ -1682,7 +1682,7 @@ impl QueryContext<'_> {
             "SELECT {}
              FROM {} current
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
             WHERE current.is_deleted = 0
                AND (
                  current.j_branch_num IN ({scope_placeholders})
@@ -1806,7 +1806,7 @@ impl QueryContext<'_> {
             "SELECT {}
              FROM {} current
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
             WHERE current.is_deleted = 0
                AND (
                  current.j_branch_num IN ({scope_placeholders})
@@ -1939,7 +1939,7 @@ impl QueryContext<'_> {
             "SELECT {}
              FROM {} h
              JOIN jazz_row_id ids ON ids.row_num = h.row_num
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
              WHERE h.j_branch_num = 1
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
@@ -1949,7 +1949,7 @@ impl QueryContext<'_> {
                AND NOT EXISTS (
                  SELECT 1
                  FROM {history_table} newer
-                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
                  WHERE newer.row_num = h.row_num
                    AND newer.j_branch_num = 1
                    AND newer_tx.outcome != ?

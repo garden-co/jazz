@@ -53,7 +53,7 @@ fn current_row_values_exact(
     let sql = format!(
         "SELECT {}
          FROM {} current
-         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
          WHERE current.row_num = ?
            AND current.j_branch_num = ?
            AND current.is_deleted = 0
@@ -88,7 +88,7 @@ fn snapshot_row_values(
     let sql = format!(
         "SELECT {}
          FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          WHERE h.row_num = ?
            AND h.j_branch_num = 1
            AND h.op != 3
@@ -98,7 +98,7 @@ fn snapshot_row_values(
            AND NOT EXISTS (
              SELECT 1
              FROM {history_table} newer
-             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+             JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
              WHERE newer.row_num = h.row_num
                AND newer.j_branch_num = 1
                AND newer_tx.outcome != ?

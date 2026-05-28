@@ -320,7 +320,6 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS jazz_tx (
           tx_num INTEGER PRIMARY KEY,
-          tx_id TEXT NOT NULL UNIQUE,
           node_num INTEGER NOT NULL,
           local_epoch INTEGER NOT NULL,
           global_epoch INTEGER,
@@ -328,9 +327,26 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           conflict_mode INTEGER NOT NULL,
           outcome INTEGER NOT NULL,
           created_at INTEGER NOT NULL,
-          metadata_json TEXT NOT NULL,
+          metadata_json TEXT,
+          writes_json TEXT NOT NULL DEFAULT '[]',
+          reads_json TEXT,
           UNIQUE (node_num, local_epoch)
         );
+
+        CREATE VIEW IF NOT EXISTS jazz_tx_public AS
+        SELECT tx.tx_num,
+               'tx-' || node.node_id || '-' || tx.local_epoch AS tx_id,
+               node.node_id,
+               tx.node_num,
+               tx.local_epoch,
+               tx.global_epoch,
+               tx.kind,
+               tx.conflict_mode,
+               tx.outcome,
+               tx.created_at,
+               tx.metadata_json
+          FROM jazz_tx tx
+          JOIN jazz_node node ON node.node_num = tx.node_num;
 
         CREATE TABLE IF NOT EXISTS jazz_tx_receipt (
           tx_num INTEGER NOT NULL,
@@ -359,22 +375,33 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           table_name TEXT NOT NULL UNIQUE
         );
 
-        CREATE TABLE IF NOT EXISTS jazz_tx_write (
-          tx_num INTEGER NOT NULL,
-          table_num INTEGER NOT NULL,
-          row_num INTEGER NOT NULL,
-          op INTEGER NOT NULL,
-          PRIMARY KEY (tx_num, table_num, row_num)
-        ) WITHOUT ROWID;
+        CREATE VIEW IF NOT EXISTS jazz_tx_write AS
+        SELECT tx.tx_num,
+               CAST(json_extract(write.value, '$[0]') AS INTEGER) AS table_num,
+               CAST(json_extract(write.value, '$[1]') AS INTEGER) AS row_num,
+               CAST(json_extract(write.value, '$[2]') AS INTEGER) AS op
+          FROM jazz_tx tx, json_each(tx.writes_json) write;
 
-        CREATE TABLE IF NOT EXISTS jazz_tx_read (
-          tx_num INTEGER NOT NULL,
-          table_num INTEGER NOT NULL,
-          row_num INTEGER NOT NULL,
-          reason INTEGER NOT NULL,
-          observed_tx_num INTEGER,
-          PRIMARY KEY (tx_num, table_num, row_num, reason)
-        ) WITHOUT ROWID;
+        CREATE VIEW IF NOT EXISTS jazz_tx_read AS
+        SELECT tx.tx_num,
+               CAST(json_extract(read.value, '$[0]') AS INTEGER) AS table_num,
+               CAST(json_extract(read.value, '$[1]') AS INTEGER) AS row_num,
+               CAST(json_extract(read.value, '$[2]') AS INTEGER) AS reason,
+               CAST(json_extract(read.value, '$[3]') AS INTEGER) AS observed_tx_num
+          FROM jazz_tx tx, json_each(tx.reads_json) read
+         WHERE tx.reads_json IS NOT NULL
+        UNION ALL
+        SELECT tx.tx_num,
+               CAST(json_extract(write.value, '$[0]') AS INTEGER) AS table_num,
+               CAST(json_extract(write.value, '$[1]') AS INTEGER) AS row_num,
+               2 AS reason,
+               previous.tx_num AS observed_tx_num
+          FROM jazz_tx tx
+          JOIN jazz_tx previous
+            ON previous.node_num = tx.node_num
+           AND previous.local_epoch = tx.local_epoch - 1,
+               json_each(tx.writes_json) write
+         WHERE tx.reads_json IS NULL;
 
         CREATE TABLE IF NOT EXISTS jazz_query_read (
           branch_id TEXT NOT NULL,

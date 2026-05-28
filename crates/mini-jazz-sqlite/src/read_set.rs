@@ -64,13 +64,7 @@ pub(crate) fn record_tx_read_num_with_observed(
     reason: i64,
     observed_tx_num: Option<i64>,
 ) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "INSERT OR REPLACE INTO jazz_tx_read
-         (tx_num, table_num, row_num, reason, observed_tx_num)
-         VALUES (?, ?, ?, ?, ?)",
-    )?;
-    stmt.execute(params![tx_num, table_num, row_num, reason, observed_tx_num])?;
-    Ok(())
+    tx::append_read(conn, tx_num, table_num, row_num, reason, observed_tx_num)
 }
 
 pub(crate) fn tx_read_set_is_stale(
@@ -218,7 +212,7 @@ fn snapshot_visible_tx_num(
         &format!(
             "SELECT h.tx_num
              FROM {} h
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
              WHERE h.row_num = ?
                AND h.j_branch_num = 1
                AND h.op != 3
@@ -237,11 +231,7 @@ fn snapshot_visible_tx_num(
 }
 
 fn tx_id_for_num(conn: &Connection, tx_num: i64) -> Result<String> {
-    Ok(conn.query_row(
-        "SELECT tx_id FROM jazz_tx WHERE tx_num = ?",
-        params![tx_num],
-        |row| row.get(0),
-    )?)
+    tx::tx_id_for_num(conn, tx_num)
 }
 
 fn now_ms() -> i64 {

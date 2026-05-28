@@ -733,18 +733,19 @@ impl Runtime {
             let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
             db.execute(
                 "INSERT INTO jazz_tx
-                 (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(tx_id) DO UPDATE SET
+                 (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json, writes_json, reads_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]')
+                 ON CONFLICT(node_num, local_epoch) DO UPDATE SET
                    outcome = MAX(jazz_tx.outcome, excluded.outcome),
                    global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
                    conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
-                   metadata_json = CASE
-                     WHEN excluded.metadata_json != '{}' THEN excluded.metadata_json
-                     ELSE jazz_tx.metadata_json
-                   END",
+                   metadata_json = COALESCE(excluded.metadata_json, jazz_tx.metadata_json),
+                   writes_json = CASE
+                     WHEN jazz_tx.writes_json = '[]' THEN excluded.writes_json
+                     ELSE jazz_tx.writes_json
+                   END,
+                   reads_json = COALESCE(jazz_tx.reads_json, excluded.reads_json)",
                 params![
-                    tx_record.tx_id,
                     node_num,
                     tx_record.local_epoch,
                     tx_record.global_epoch,
@@ -796,11 +797,6 @@ impl Runtime {
         let mut row_nums_by_id = BTreeMap::new();
         let mut row_nums_created_in_apply = BTreeSet::new();
         let mut user_nums_by_id = BTreeMap::new();
-        let mut insert_read_stmt = db.prepare_cached(
-            "INSERT OR REPLACE INTO jazz_tx_read
-             (tx_num, table_num, row_num, reason, observed_tx_num)
-             VALUES (?, ?, ?, ?, ?)",
-        )?;
         for read_record in &bundle.reads {
             let tx_num = tx_nums_by_id
                 .get(&read_record.tx_id)
@@ -826,15 +822,15 @@ impl Runtime {
                     })
                 })
                 .transpose()?;
-            insert_read_stmt.execute(params![
+            tx::append_read(
+                &db,
                 tx_num,
                 table_num,
                 row_num,
                 read_record.reason,
-                observed_tx_num
-            ])?;
+                observed_tx_num,
+            )?;
         }
-        drop(insert_read_stmt);
         let reads_ms = duration_ms(reads_started.elapsed());
 
         let rejected_cleanup_started = Instant::now();
@@ -1509,7 +1505,7 @@ impl Runtime {
                        AND row_num NOT IN (
                          SELECT current.row_num
                          FROM {current_table} current
-                         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                         JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
                          WHERE current.j_branch_num = ?
                            AND current.is_deleted = 0
                            AND tx.outcome != ?
@@ -1579,7 +1575,7 @@ impl Runtime {
                        AND row_num NOT IN (
                          SELECT current.row_num
                          FROM {current_table} current
-                         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                         JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
                          WHERE current.j_branch_num = ?
                            AND current.is_deleted = 0
                            AND tx.outcome != ?
@@ -1636,7 +1632,7 @@ impl Runtime {
                              SELECT h.row_num
                              FROM {history_table} h
                              JOIN jazz_row_id ids ON ids.row_num = h.row_num
-                             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
                              WHERE ids.row_id != ?
                                AND h.j_branch_num = ?
                                AND h.op != 3
@@ -1666,7 +1662,7 @@ impl Runtime {
                            AND row_num NOT IN (
                              SELECT h.row_num
                              FROM {history_table} h
-                             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
                              WHERE h.row_num = ?
                                AND h.j_branch_num = ?
                                AND h.op != 3
@@ -1716,7 +1712,7 @@ impl Runtime {
                        AND row_num NOT IN (
                          SELECT h.row_num
                          FROM {history_table} h
-                         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
                          WHERE h.j_branch_num = ?
                            AND {history_created_by_sql}
                            AND h.op != 3
@@ -1752,7 +1748,7 @@ impl Runtime {
                        AND row_num NOT IN (
                          SELECT todo.row_num
                          FROM {current_table} todo
-                         JOIN jazz_tx todo_tx ON todo_tx.tx_num = todo.visible_tx_num
+                         JOIN jazz_tx_public todo_tx ON todo_tx.tx_num = todo.visible_tx_num
                          WHERE todo.j_branch_num = ?
                            AND todo.is_deleted = 0
                            AND todo.done = 0
@@ -1789,7 +1785,7 @@ impl Runtime {
                      SELECT ids.row_num
                      FROM jazz_row_id ids
                      JOIN {history_table} h ON h.row_num = ids.row_num
-                     JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                     JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
                      WHERE h.j_branch_num = ?
                        AND h.op != 3
                        AND tx.outcome != ?
@@ -2059,7 +2055,7 @@ impl Runtime {
 
     pub fn transaction_info(&self, tx_id: &str) -> Result<TransactionInfo> {
         let (tx_id, global_epoch, conflict_mode) = self.conn.query_row(
-            "SELECT tx_id, global_epoch, conflict_mode FROM jazz_tx WHERE tx_id = ?",
+            "SELECT tx_id, global_epoch, conflict_mode FROM jazz_tx_public WHERE tx_id = ?",
             params![tx_id],
             |row| {
                 Ok((
@@ -2071,7 +2067,7 @@ impl Runtime {
         )?;
         let mut stmt = self.conn.prepare(
             "SELECT tier FROM jazz_tx_receipt receipt
-             JOIN jazz_tx tx ON tx.tx_num = receipt.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = receipt.tx_num
              WHERE tx.tx_id = ?
              ORDER BY tier",
         )?;
@@ -2083,7 +2079,7 @@ impl Runtime {
             .query_row(
                 "SELECT rejection.code, rejection.detail_json
                  FROM jazz_tx_rejection rejection
-                 JOIN jazz_tx tx ON tx.tx_num = rejection.tx_num
+                 JOIN jazz_tx_public tx ON tx.tx_num = rejection.tx_num
                  WHERE tx.tx_id = ?",
                 params![tx_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -2101,7 +2097,7 @@ impl Runtime {
             .query_row(
                 "SELECT awaiting.detail_json
                  FROM jazz_tx_awaiting_dependency awaiting
-                 JOIN jazz_tx tx ON tx.tx_num = awaiting.tx_num
+                 JOIN jazz_tx_public tx ON tx.tx_num = awaiting.tx_num
                  WHERE tx.tx_id = ?",
                 params![tx_id],
                 |row| row.get::<_, String>(0),
@@ -2125,7 +2121,7 @@ impl Runtime {
         let mut stmt = self.conn.prepare(
             "SELECT tx.tx_id, rejection.code, rejection.detail_json
              FROM jazz_tx_rejection rejection
-             JOIN jazz_tx tx ON tx.tx_num = rejection.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = rejection.tx_num
              ORDER BY tx.tx_num",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -2148,7 +2144,7 @@ impl Runtime {
         let mut stmt = self.conn.prepare(
             "SELECT tables.table_name, ids.row_id
              FROM jazz_tx_write writes
-             JOIN jazz_tx tx ON tx.tx_num = writes.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = writes.tx_num
              JOIN jazz_table tables ON tables.table_num = writes.table_num
              JOIN jazz_row_id ids ON ids.row_num = writes.row_num
              WHERE tx.tx_id = ?
@@ -2176,10 +2172,10 @@ impl Runtime {
         let mut stmt = self.conn.prepare(
             "SELECT tables.table_name, ids.row_id, observed.tx_id
              FROM jazz_tx_read reads
-             JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = reads.tx_num
              JOIN jazz_table tables ON tables.table_num = reads.table_num
              JOIN jazz_row_id ids ON ids.row_num = reads.row_num
-             LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
+             LEFT JOIN jazz_tx_public observed ON observed.tx_num = reads.observed_tx_num
              WHERE tx.tx_id = ?
              ORDER BY tables.table_name, ids.row_id",
         )?;
@@ -2202,7 +2198,7 @@ impl Runtime {
         let mut stmt = self.conn.prepare(
             "SELECT tables.table_name, ids.row_id
              FROM jazz_tx_read reads
-             JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = reads.tx_num
              JOIN jazz_table tables ON tables.table_num = reads.table_num
              JOIN jazz_row_id ids ON ids.row_num = reads.row_num
              WHERE tx.tx_id = ?
@@ -2523,7 +2519,7 @@ impl Runtime {
         let sql = format!(
             "SELECT {}
              FROM {} h
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
              WHERE h.row_num = ?
                AND h.j_branch_num = ?
                AND h.op = 3
@@ -3878,7 +3874,7 @@ impl Runtime {
              FROM jazz_branch_source source
              JOIN {} current ON current.j_branch_num = source.source_branch_num
              JOIN jazz_row_id ids ON ids.row_num = current.row_num
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
              WHERE source.branch_num = ?
                AND current.is_deleted = 0
                AND tx.outcome != ?
@@ -4318,7 +4314,7 @@ fn awaiting_dependency_transactions(conn: &Connection) -> Result<Vec<AwaitingDep
     let mut stmt = conn.prepare(
         "SELECT tx.tx_num, tx.tx_id, awaiting.auth_user
          FROM jazz_tx_awaiting_dependency awaiting
-         JOIN jazz_tx tx ON tx.tx_num = awaiting.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = awaiting.tx_num
          ORDER BY tx.tx_num",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -4539,19 +4535,12 @@ fn repair_missing_observed_policy_read(
         )
         .optional()?;
     if let Some(observed_tx_num) = observed_tx_num {
-        conn.execute(
-            "UPDATE jazz_tx_read
-             SET observed_tx_num = ?
-             WHERE tx_num = ?
-               AND table_num = ?
-               AND row_num = ?
-               AND observed_tx_num IS NULL",
-            params![
-                observed_tx_num,
-                tx_num,
-                crate::schema::table_num(conn, table_name)?,
-                row_num
-            ],
+        tx::fill_observed_read(
+            conn,
+            tx_num,
+            crate::schema::table_num(conn, table_name)?,
+            row_num,
+            observed_tx_num,
         )?;
     }
     Ok(())
@@ -4590,7 +4579,7 @@ fn exclusive_write_conflict_exists(
     let count: i64 = conn.query_row(
         "SELECT COUNT(*)
          FROM jazz_tx_write writes
-         JOIN jazz_tx tx ON tx.tx_num = writes.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = writes.tx_num
          WHERE writes.table_num = ?
            AND writes.row_num = ?
            AND tx.conflict_mode = ?
@@ -4706,7 +4695,7 @@ fn current_ref_field_row_num(
         &format!(
             "SELECT current.{column}
              FROM {} current
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = current.visible_tx_num
              WHERE current.row_num = ?
                AND {}
                AND current.is_deleted = 0
@@ -4755,7 +4744,7 @@ fn snapshot_ref_field_row_num(
         &format!(
             "SELECT h.{column}
              FROM {} h
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
              WHERE h.row_num = ?
                AND h.j_branch_num = 1
                AND h.op != 3
@@ -4765,7 +4754,7 @@ fn snapshot_ref_field_row_num(
                AND NOT EXISTS (
                  SELECT 1
                  FROM {history_table} newer
-                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
                  WHERE newer.row_num = h.row_num
                    AND newer.j_branch_num = 1
                    AND newer_tx.outcome != ?
@@ -4827,12 +4816,7 @@ fn record_tx_write_num(
     row_num: i64,
     op: i64,
 ) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "INSERT OR REPLACE INTO jazz_tx_write (tx_num, table_num, row_num, op)
-         VALUES (?, ?, ?, ?)",
-    )?;
-    stmt.execute(params![tx_num, table_num, row_num, op])?;
-    Ok(())
+    tx::append_write(conn, tx_num, table_num, row_num, op)
 }
 
 pub struct TransactionBuilder<'a> {
@@ -5295,7 +5279,7 @@ fn durable_version_exists_for_row(
         &format!(
             "SELECT COUNT(*)
              FROM {} h
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
              WHERE h.row_num = ?
                AND h.j_branch_num = ?
                AND tx.outcome != ?
@@ -5349,8 +5333,8 @@ fn is_newest_version_for_current(
         &format!(
             "SELECT COUNT(*)
              FROM {} h
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-             JOIN jazz_tx current_tx ON current_tx.tx_num = ?
+             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx_public current_tx ON current_tx.tx_num = ?
              WHERE h.row_num = ?
                AND h.j_branch_num = ?
                AND tx.outcome != ?
@@ -5423,7 +5407,7 @@ fn tx_is_newer_than_current_fast_path(
            ELSE candidate.tx_num > current.tx_num
          END
          FROM jazz_tx candidate
-         JOIN jazz_tx current ON current.tx_num = ?
+         JOIN jazz_tx_public current ON current.tx_num = ?
          WHERE candidate.tx_num = ?",
         params![current_tx_num, candidate_tx_num],
         |row| row.get(0),
@@ -5433,9 +5417,8 @@ fn tx_is_newer_than_current_fast_path(
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
-         FROM jazz_tx tx
-         JOIN jazz_node node ON node.node_num = tx.node_num
+        "SELECT tx.tx_id, tx.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
+         FROM jazz_tx_public tx
          LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
          ORDER BY tx.tx_num",
     )?;
@@ -5444,7 +5427,7 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
         let mut receipt_stmt = conn.prepare(
             "SELECT receipt.tier
              FROM jazz_tx_receipt receipt
-             JOIN jazz_tx tx ON tx.tx_num = receipt.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = receipt.tx_num
              WHERE tx.tx_id = ?
              ORDER BY receipt.tier",
         )?;
@@ -5458,7 +5441,10 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             global_epoch: row.get(3)?,
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
-            auth_user: parse_tx_auth_user_for_sqlite(&row.get::<_, String>(9)?, 9)?,
+            auth_user: parse_tx_auth_user_for_sqlite(
+                row.get::<_, Option<String>>(9)?.as_deref(),
+                9,
+            )?,
             rejection_code: row.get(6)?,
             rejection_detail: row
                 .get::<_, Option<String>>(7)?
@@ -5504,7 +5490,7 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
     let tx_ids = tx_ids.into_iter().collect::<Vec<_>>();
     let mut receipt_stmt = conn.prepare(&format!(
         "SELECT tx.tx_id, receipt.tier
-         FROM jazz_tx tx
+         FROM jazz_tx_public tx
          JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
          WHERE tx.tx_id IN ({placeholders})
          ORDER BY tx.tx_num, receipt.tier",
@@ -5523,9 +5509,8 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
     }
 
     let mut stmt = conn.prepare(&format!(
-        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
-         FROM jazz_tx tx
-         JOIN jazz_node node ON node.node_num = tx.node_num
+        "SELECT tx.tx_id, tx.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
+         FROM jazz_tx_public tx
          LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
          WHERE tx.tx_id IN ({placeholders})
          ORDER BY tx.tx_num",
@@ -5544,7 +5529,10 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
             global_epoch: row.get(3)?,
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
-            auth_user: parse_tx_auth_user_for_sqlite(&row.get::<_, String>(9)?, 9)?,
+            auth_user: parse_tx_auth_user_for_sqlite(
+                row.get::<_, Option<String>>(9)?.as_deref(),
+                9,
+            )?,
             rejection_code: row.get(6)?,
             rejection_detail: row
                 .get::<_, Option<String>>(7)?
@@ -5570,18 +5558,20 @@ fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
     }
 }
 
-fn tx_metadata_json(auth_user: Option<&str>) -> Result<String> {
-    let metadata = match auth_user {
-        Some(user) => json!({ "auth_user": user }),
-        None => json!({}),
-    };
-    serde_json::to_string(&metadata).map_err(|err| crate::Error::new(err.to_string()))
+fn tx_metadata_json(auth_user: Option<&str>) -> Result<Option<String>> {
+    auth_user
+        .map(|user| serde_json::to_string(&json!({ "auth_user": user })))
+        .transpose()
+        .map_err(|err| crate::Error::new(err.to_string()))
 }
 
 fn parse_tx_auth_user_for_sqlite(
-    metadata_json: &str,
+    metadata_json: Option<&str>,
     column: usize,
 ) -> rusqlite::Result<Option<String>> {
+    let Some(metadata_json) = metadata_json else {
+        return Ok(None);
+    };
     let metadata = serde_json::from_str::<JsonValue>(metadata_json).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(
             column,
@@ -5659,9 +5649,9 @@ fn export_reads_for_history_simple(
     let mut stmt = conn.prepare(&format!(
         "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
          FROM jazz_tx_read reads
-         JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = reads.tx_num
          JOIN jazz_table tables ON tables.table_num = reads.table_num
-         LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
+         LEFT JOIN jazz_tx_public observed ON observed.tx_num = reads.observed_tx_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
          WHERE tx.tx_id IN ({placeholders})
          ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
@@ -5699,7 +5689,7 @@ fn count_read_rows_for_tx_ids(conn: &Connection, tx_ids: &[String]) -> Result<us
         &format!(
             "SELECT COUNT(*)
              FROM jazz_tx_read reads
-             JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = reads.tx_num
              WHERE tx.tx_id IN ({placeholders})",
             placeholders = (0..tx_ids.len())
                 .map(|_| "?")
@@ -5747,10 +5737,10 @@ fn export_reads_for_history_with_temp_scope(
     let mut stmt = conn.prepare(
         "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
          FROM jazz_export_tx_scope tx_scope
-         JOIN jazz_tx tx ON tx.tx_id = tx_scope.tx_id
+         JOIN jazz_tx_public tx ON tx.tx_id = tx_scope.tx_id
          JOIN jazz_tx_read reads ON reads.tx_num = tx.tx_num
          JOIN jazz_table tables ON tables.table_num = reads.table_num
-         LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
+         LEFT JOIN jazz_tx_public observed ON observed.tx_num = reads.observed_tx_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
          LEFT JOIN jazz_export_history_scope history_scope
            ON history_scope.tx_id = tx.tx_id
@@ -5947,7 +5937,7 @@ fn export_main_base_snapshot_history(
     let sql = format!(
         "SELECT h.row_num
          FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          WHERE h.j_branch_num = 1
            AND tx.outcome != ?
            AND tx.global_epoch IS NOT NULL
@@ -5957,7 +5947,7 @@ fn export_main_base_snapshot_history(
            AND NOT EXISTS (
              SELECT 1
              FROM {history_table} newer
-             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+             JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
              WHERE newer.row_num = h.row_num
                AND newer.j_branch_num = 1
                AND newer_tx.outcome != ?
@@ -6035,7 +6025,7 @@ fn export_snapshot_policy_dependency_history(
     let sql = format!(
         "SELECT DISTINCT h.{ref_column}
          FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          WHERE {row_filter}
            AND h.j_branch_num = 1
            AND h.op != 3
@@ -6046,7 +6036,7 @@ fn export_snapshot_policy_dependency_history(
            AND NOT EXISTS (
              SELECT 1
              FROM {history_table} newer
-             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+             JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
              WHERE newer.row_num = h.row_num
                AND newer.j_branch_num = 1
                AND newer_tx.outcome != {}
@@ -6133,7 +6123,7 @@ fn export_policy_dependency_history(
         let sql = format!(
             "SELECT DISTINCT current.{ref_column}
              FROM {} current
-             JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+             JOIN jazz_tx_public current_tx ON current_tx.tx_num = current.visible_tx_num
              WHERE current.is_deleted = 0
                AND {}
                AND current_tx.outcome != {}
@@ -6190,7 +6180,7 @@ fn scoped_policy_parent_row_nums(
     let mut stmt = conn.prepare(&format!(
         "SELECT current.{ref_column}
          FROM {} current
-         JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+         JOIN jazz_tx_public current_tx ON current_tx.tx_num = current.visible_tx_num
          WHERE current.row_num IN ({child_placeholders})
            AND current.is_deleted = 0
            AND {}
@@ -6221,14 +6211,14 @@ fn export_deleted_table_history(
     let sql = format!(
         "SELECT h.row_num
          FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          WHERE h.op = 3
            AND {}
            AND tx.outcome != {}
            AND NOT EXISTS (
              SELECT 1
              FROM {history_table} newer
-             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+             JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
              WHERE newer.row_num = h.row_num
                AND newer.j_branch_num = h.j_branch_num
                AND newer_tx.outcome != {}
@@ -6269,7 +6259,7 @@ fn export_deleted_recursive_descendant_history(
         "WITH RECURSIVE deleted_tree(row_num) AS (
            SELECT h.row_num
            FROM {history_table} h
-           JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+           JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
            WHERE h.op = 3
              AND {branch_filter}
              AND h.{parent_column} IN ({parent_placeholders})
@@ -6277,7 +6267,7 @@ fn export_deleted_recursive_descendant_history(
              AND NOT EXISTS (
                SELECT 1
                FROM {history_table} newer
-               JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+               JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
                WHERE newer.row_num = h.row_num
                  AND newer.j_branch_num = h.j_branch_num
                  AND newer_tx.outcome != {rejected}
@@ -6294,7 +6284,7 @@ fn export_deleted_recursive_descendant_history(
              AND NOT EXISTS (
                SELECT 1
                FROM {history_table} newer
-               JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+               JOIN jazz_tx_public newer_tx ON newer_tx.tx_num = newer.tx_num
                WHERE newer.row_num = child.row_num
                  AND newer.j_branch_num = child.j_branch_num
                  AND newer_tx.outcome != {rejected}
@@ -6342,7 +6332,7 @@ fn export_recursive_scope_repair_history(
         "WITH RECURSIVE historical_tree(row_num) AS (
            SELECT h.row_num
            FROM {history_table} h
-           JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+           JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
            WHERE {branch_filter}
              AND h.{parent_column} IN ({parent_placeholders})
              AND tx.outcome != {rejected}
@@ -6439,7 +6429,7 @@ fn query_scope_repair_row_nums(
         let sql = format!(
             "SELECT DISTINCT h.row_num
              FROM {} h
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
              WHERE {created_by_sql}
                AND tx.outcome != ?",
             crate::schema::history_table(&table.name),
@@ -6477,7 +6467,7 @@ fn query_scope_repair_row_nums(
     let sql = format!(
         "SELECT DISTINCT h.row_num
          FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          WHERE {predicate_sql}
            AND tx.outcome != ?",
         crate::schema::history_table(&table.name),
@@ -6533,7 +6523,7 @@ fn query_scope_rejected_tx_ids(
             let sql = format!(
                 "SELECT DISTINCT tx.tx_id
                  FROM {} h
-                 JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                 JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
                  JOIN jazz_row_id ids ON ids.row_num = h.row_num
                  WHERE ids.row_id != ?
                    AND tx.outcome = ?
@@ -6575,7 +6565,7 @@ fn query_scope_rejected_tx_ids(
         let sql = format!(
             "SELECT DISTINCT tx.tx_id
              FROM {} h
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
              WHERE {created_by_sql}
                AND tx.outcome = ?
              ORDER BY tx.tx_num",
@@ -6600,7 +6590,7 @@ fn query_scope_rejected_tx_ids(
     let sql = format!(
         "SELECT DISTINCT tx.tx_id
          FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          WHERE {predicate_sql}
            AND tx.outcome = ?
          ORDER BY tx.tx_num",
@@ -6626,7 +6616,7 @@ fn rejected_tx_ids_for_row_nums(
     let sql = format!(
         "SELECT DISTINCT tx.tx_id
          FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          WHERE {}
            AND tx.outcome = ?
          ORDER BY tx.tx_num",
@@ -6713,13 +6703,13 @@ fn export_visible_table_history(
         "SELECT {}
          FROM {} h
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
          WHERE {row_filter}
            AND EXISTS (
            SELECT 1
            FROM {} current
-           JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+           JOIN jazz_tx_public current_tx ON current_tx.tx_num = current.visible_tx_num
            WHERE current.row_num = h.row_num
              AND current.j_branch_num = h.j_branch_num
              AND current.is_deleted = 0
@@ -6807,7 +6797,7 @@ fn export_history_versions_for_rows(
         "SELECT {}
          FROM {} h
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
          JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
          WHERE {row_filter}
            AND {epoch_filter}
