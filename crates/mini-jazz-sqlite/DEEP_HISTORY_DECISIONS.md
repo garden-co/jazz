@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:56:06 PDT 2026
+
+Decision: reject imported raw history blocks with nonsensical tx ranges.
+
+Why: raw block sync already treats the payload hash and compressed size as integrity boundaries. The tx index is equally important for later tx lookup and delta selection, so malformed ranges should fail at import instead of creating impossible index rows.
+
+Scope impact: import now rejects any `HistoryBlockTxRange` whose `min_local_epoch` is greater than `max_local_epoch`. The raw-block sync test covers this alongside hash validation.
+
 ## Thu May 28 03:53:54 PDT 2026
 
 Decision: verify the grouped Incr/rope selector with real canonical caps.

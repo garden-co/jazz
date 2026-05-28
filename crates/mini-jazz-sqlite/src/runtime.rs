@@ -7765,6 +7765,13 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
     if block.manifest.tx_count > 0 && block.tx_ranges.is_empty() {
         return Err(crate::Error::new("history block missing tx ranges"));
     }
+    if block
+        .tx_ranges
+        .iter()
+        .any(|range| range.min_local_epoch > range.max_local_epoch)
+    {
+        return Err(crate::Error::new("history block invalid tx range"));
+    }
     Ok(())
 }
 

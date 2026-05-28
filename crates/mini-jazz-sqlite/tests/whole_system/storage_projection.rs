@@ -343,6 +343,11 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
     tampered[0].payload[0] ^= 1;
     let err = bob.import_history_blocks(&tampered).unwrap_err();
     assert!(err.to_string().contains("payload hash mismatch"));
+    let mut invalid_range = blocks.clone();
+    invalid_range[0].tx_ranges[0].min_local_epoch =
+        invalid_range[0].tx_ranges[0].max_local_epoch + 1;
+    let err = bob.import_history_blocks(&invalid_range).unwrap_err();
+    assert!(err.to_string().contains("invalid tx range"));
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 0);
     assert!(bob
