@@ -22,3 +22,11 @@ sqlite-wasm-vfs = "0.2"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+# `wasm-opt` here REPLACES wasm-pack's defaults, so include `-O` explicitly.
+# `-g` preserves the wasm `name` section so browser profilers show Rust symbols.
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = ["-O", "-g"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "-g"]

@@ -21,11 +21,15 @@ if (!env.CC_wasm32_unknown_unknown) {
   }
 }
 
-const result = spawnSync("wasm-pack", ["build", crateDir, "--target", "web", "--out-dir", outDir], {
-  cwd: repoRoot,
-  env,
-  stdio: "inherit",
-});
+const result = spawnSync(
+  "wasm-pack",
+  ["build", crateDir, "--target", "web", "--out-dir", outDir, "--profiling"],
+  {
+    cwd: repoRoot,
+    env,
+    stdio: "inherit",
+  },
+);
 
 if (result.error) {
   console.error(result.error.message);
