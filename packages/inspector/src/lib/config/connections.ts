@@ -37,7 +37,13 @@ export function readStoredConnections(): StoredConnections {
     if (!raw) return emptyConnectionStore();
     const parsed = JSON.parse(raw) as unknown;
     const migrated = migrateStoredConnections(parsed);
-    return migrated ?? emptyConnectionStore();
+    if (migrated === null) {
+      return emptyConnectionStore();
+    }
+    if (isStoredConnections(parsed) === false) {
+      writeStoredConnections(migrated);
+    }
+    return migrated;
   } catch {
     return emptyConnectionStore();
   }
