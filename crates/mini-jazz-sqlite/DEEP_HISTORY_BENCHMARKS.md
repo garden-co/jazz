@@ -89,6 +89,10 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 | Append    | history rows               |       2226 |       2226 |       2226 |       2226 |          0 |      2225 |
 | Append    | final payload bytes        |     13,350 |     13,350 |     13,350 |     13,350 |     13,350 |    13,350 |
 | Append    | bundle bytes               | 16,115,414 | 16,115,414 | 16,115,414 | 15,235,071 | 15,235,071 | 1,411,141 |
+| Append    | block-native export        |        N/A |        N/A |        N/A |        N/A |    0.16 ms |       N/A |
+| Append    | block-native import        |        N/A |        N/A |        N/A |        N/A |   93.01 ms |       N/A |
+| Append    | block-native blocks        |        N/A |        N/A |        N/A |        N/A |          1 |       N/A |
+| Append    | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    135,214 |       N/A |
 | Append    | database bytes             | 18,796,544 | 18,677,760 | 18,657,280 | 18,657,280 | 18,788,352 |   573,440 |
 | Append    | live database bytes        |        N/A |        N/A |        N/A |        N/A |    258,048 |       N/A |
 | Append    | freelist bytes             |        N/A |        N/A |        N/A |        N/A | 18,530,304 |       N/A |
@@ -114,6 +118,10 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 | Automerge | final payload bytes        |       1750 |       1750 |       1750 |       1750 |       1750 |      1750 |
 | Automerge | source trace gzip bytes    |    904,360 |    904,360 |    904,360 |    904,360 |    904,360 |   904,360 |
 | Automerge | bundle bytes               |  5,351,258 |  5,351,258 |  5,351,258 |  4,152,081 |  4,152,081 | 2,209,941 |
+| Automerge | block-native export        |        N/A |        N/A |        N/A |        N/A |    0.15 ms |       N/A |
+| Automerge | block-native import        |        N/A |        N/A |        N/A |        N/A |   88.61 ms |       N/A |
+| Automerge | block-native blocks        |        N/A |        N/A |        N/A |        N/A |          1 |       N/A |
+| Automerge | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    156,323 |       N/A |
 | Automerge | database bytes             |  9,859,072 |  9,707,520 |  9,687,040 |  9,687,040 |  9,846,784 |   892,928 |
 | Automerge | live database bytes        |        N/A |        N/A |        N/A |        N/A |    262,144 |       N/A |
 | Automerge | freelist bytes             |        N/A |        N/A |        N/A |        N/A |  9,584,640 |       N/A |
@@ -142,6 +150,10 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 | Canvas    | position trace gzip bytes  |     78,526 |     78,526 |     78,526 |     78,526 |     78,526 |    77,211 |
 | Canvas    | position trace JSON bytes  |    205,609 |    205,609 |    205,609 |    205,609 |    205,609 |   182,209 |
 | Canvas    | bundle bytes               |  2,455,136 |  2,455,136 |  2,455,136 |    858,561 |    858,561 | 2,591,442 |
+| Canvas    | block-native export        |        N/A |        N/A |        N/A |        N/A |    0.13 ms |       N/A |
+| Canvas    | block-native import        |        N/A |        N/A |        N/A |        N/A |   70.76 ms |       N/A |
+| Canvas    | block-native blocks        |        N/A |        N/A |        N/A |        N/A |          1 |       N/A |
+| Canvas    | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    274,884 |       N/A |
 | Canvas    | database bytes             |    884,736 |    679,936 |    659,456 |    659,456 |    946,176 |   913,408 |
 | Canvas    | live database bytes        |        N/A |        N/A |        N/A |        N/A |    380,928 |       N/A |
 | Canvas    | freelist bytes             |        N/A |        N/A |        N/A |        N/A |    565,248 |       N/A |
@@ -168,6 +180,10 @@ intentionally `N/A`; compare to the gzipped position trace instead.
   per scenario. `live database bytes` shows the real page footprint after
   compaction; `total file bytes` still includes freed pages unless the explicit
   reclaim step is run.
+- Block-native payload bytes are the compressed sealed block bytes that a
+  block-aware peer could request/store without expanding archived history back
+  into ordinary row history. The ordinary `bundle bytes` rows still show the
+  compatibility path that decodes blocks back into logical Jazz history.
 
 ## Reclaim Probe
 

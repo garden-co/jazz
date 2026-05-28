@@ -230,6 +230,10 @@ struct DeepHistoryCaseReport {
     extrapolated_final_payload_bytes_for_target: Option<usize>,
     reference_gzip_bytes: Option<usize>,
     bundle_bytes: usize,
+    block_native_export_ms: Option<f64>,
+    block_native_import_ms: Option<f64>,
+    block_native_blocks: Option<usize>,
+    block_native_payload_bytes: Option<usize>,
     database_bytes: i64,
     live_database_bytes: i64,
     freelist_bytes: i64,
@@ -4624,6 +4628,10 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         extrapolated_final_payload_bytes_for_target: Some(final_payload_bytes),
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
+        block_native_export_ms: None,
+        block_native_import_ms: None,
+        block_native_blocks: None,
+        block_native_payload_bytes: None,
         database_bytes,
         live_database_bytes,
         freelist_bytes: writer_stats.freelist_bytes,
@@ -4812,6 +4820,10 @@ fn run_jazz_rope_position_case(
         extrapolated_final_payload_bytes_for_target: None,
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
+        block_native_export_ms: None,
+        block_native_import_ms: None,
+        block_native_blocks: None,
+        block_native_payload_bytes: None,
         database_bytes,
         live_database_bytes,
         freelist_bytes: writer_stats.freelist_bytes,
@@ -5190,6 +5202,10 @@ fn run_naive_deep_history_case(
     }
 
     let total_loop_ms = ms(started.elapsed());
+    let mut block_native_export_ms = None;
+    let mut block_native_import_ms = None;
+    let mut block_native_blocks = None;
+    let mut block_native_payload_bytes = None;
     if let Some(hot_tail) = input.compact_hot_tail {
         let compaction_started = Instant::now();
         let compaction = writer.compact_table_accepted_history(input.table, hot_tail, hot_tail)?;
@@ -5213,6 +5229,25 @@ fn run_naive_deep_history_case(
                 reclaim_ms
             ));
         }
+        let block_export_started = Instant::now();
+        let history_blocks = writer.export_history_blocks(input.table)?;
+        block_native_export_ms = Some(ms(block_export_started.elapsed()));
+        block_native_blocks = Some(history_blocks.len());
+        block_native_payload_bytes = Some(
+            history_blocks
+                .iter()
+                .map(|block| block.payload.len())
+                .sum::<usize>(),
+        );
+        let mut block_peer = Runtime::open_with_schema(
+            Storage::Memory,
+            "block-peer-node",
+            "bob",
+            input.schema.clone(),
+        )?;
+        let block_import_started = Instant::now();
+        block_peer.import_history_blocks(&history_blocks)?;
+        block_native_import_ms = Some(ms(block_import_started.elapsed()));
     }
     let bundle = writer.export_table_history(input.table)?;
     let bundle_summary = BundleSummary::from(&bundle)?;
@@ -5301,6 +5336,10 @@ fn run_naive_deep_history_case(
         extrapolated_final_payload_bytes_for_target,
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: bundle_summary.bytes,
+        block_native_export_ms,
+        block_native_import_ms,
+        block_native_blocks,
+        block_native_payload_bytes,
         database_bytes: stats.database_bytes,
         live_database_bytes: stats.live_database_bytes,
         freelist_bytes: stats.freelist_bytes,
