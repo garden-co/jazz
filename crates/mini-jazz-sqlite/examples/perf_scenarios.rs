@@ -242,6 +242,9 @@ struct DeepHistoryCaseReport {
     extrapolated_final_payload_bytes_for_target: Option<usize>,
     reference_gzip_bytes: Option<usize>,
     bundle_bytes: usize,
+    native_sync_bytes: usize,
+    native_export_ms: f64,
+    native_import_ms: f64,
     block_native_export_ms: Option<f64>,
     block_native_import_ms: Option<f64>,
     block_native_blocks: Option<usize>,
@@ -4711,6 +4714,9 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     let mut block_native_import_ms = None;
     let mut block_native_blocks = None;
     let mut block_native_payload_bytes = None;
+    let mut native_sync_bytes = None;
+    let mut native_export_ms = None;
+    let mut native_import_ms = None;
     if let Some(hot_tail) = input.compact_hot_tail {
         let compaction_started = Instant::now();
         let compaction = if let Some(max_rows_per_block) = input.compact_max_rows_per_block {
@@ -4771,6 +4777,7 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
             delta_bundle_summary.bytes,
             block_native_payload_bytes.unwrap_or(0)
         ));
+        native_export_ms = block_native_export_ms;
         let mut block_peer =
             Runtime::open_with_schema(Storage::Memory, "block-peer-node", "bob", schema.clone())?;
         let block_peer_rope_path = tmp.path().join("block-peer-rope.sqlite");
@@ -4786,11 +4793,17 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
             "Block-native sidecar delta: current root reachable bytes {}.",
             block_sidecar_bytes
         ));
+        native_sync_bytes = Some(
+            delta_bundle_summary.bytes
+                + block_native_payload_bytes.unwrap_or(0)
+                + block_sidecar_bytes,
+        );
         let block_text = persisted_rope::materialize(&block_peer_rope, Some(block_root))?;
         if block_text.len() != final_payload_bytes {
             return Err("block+incr import materialized unexpected length".into());
         }
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
+        native_import_ms = block_native_import_ms;
     }
 
     let current_started = Instant::now();
@@ -4802,7 +4815,9 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         return Err("jazz rope text current read materialized unexpected length".into());
     }
 
+    let final_bundle_export_started = Instant::now();
     let final_bundle = writer.export_table_history("documents")?;
+    let final_bundle_export_ms = ms(final_bundle_export_started.elapsed());
     let final_bundle_summary = BundleSummary::from(&final_bundle)?;
     let sidecar_bundle_bytes = rope_sidecar_bundle_bytes(&writer_rope)?;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
@@ -4914,6 +4929,10 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         extrapolated_final_payload_bytes_for_target: Some(final_payload_bytes),
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
+        native_sync_bytes: native_sync_bytes
+            .unwrap_or(final_bundle_summary.bytes + sidecar_bundle_bytes),
+        native_export_ms: native_export_ms.unwrap_or(final_bundle_export_ms),
+        native_import_ms: native_import_ms.unwrap_or(cold_load_ms),
         block_native_export_ms,
         block_native_import_ms,
         block_native_blocks,
@@ -5039,7 +5058,9 @@ fn run_jazz_rope_position_case(
         return Err("jazz rope current read observed unexpected latest position".into());
     }
 
+    let final_bundle_export_started = Instant::now();
     let final_bundle = writer.export_table_history("canvas_objects")?;
+    let final_bundle_export_ms = ms(final_bundle_export_started.elapsed());
     let final_bundle_summary = BundleSummary::from(&final_bundle)?;
     let sidecar_bundle_bytes = rope_sidecar_bundle_bytes(&writer_rope)?;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
@@ -5112,6 +5133,9 @@ fn run_jazz_rope_position_case(
         extrapolated_final_payload_bytes_for_target: None,
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
+        native_sync_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
+        native_export_ms: final_bundle_export_ms,
+        native_import_ms: cold_load_ms,
         block_native_export_ms: None,
         block_native_import_ms: None,
         block_native_blocks: None,
@@ -5633,6 +5657,9 @@ fn run_naive_deep_history_case(
     let mut block_native_import_ms = None;
     let mut block_native_blocks = None;
     let mut block_native_payload_bytes = None;
+    let mut native_sync_bytes = None;
+    let mut native_export_ms = None;
+    let mut native_import_ms = None;
     if let Some(hot_tail) = input.compact_hot_tail {
         let compaction_started = Instant::now();
         let compaction = if let Some(max_rows_per_block) = input.compact_max_rows_per_block {
@@ -5685,6 +5712,9 @@ fn run_naive_deep_history_case(
             delta_bundle_summary.bytes,
             block_native_payload_bytes.unwrap_or(0)
         ));
+        native_sync_bytes =
+            Some(delta_bundle_summary.bytes + block_native_payload_bytes.unwrap_or(0));
+        native_export_ms = block_native_export_ms;
         let mut block_peer = Runtime::open_with_schema(
             Storage::Memory,
             "block-peer-node",
@@ -5702,8 +5732,11 @@ fn run_naive_deep_history_case(
             .into());
         }
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
+        native_import_ms = block_native_import_ms;
     }
+    let bundle_export_started = Instant::now();
     let bundle = writer.export_table_history(input.table)?;
+    let bundle_export_ms = ms(bundle_export_started.elapsed());
     let bundle_summary = BundleSummary::from(&bundle)?;
     let cold_schema = input.schema.clone();
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", cold_schema)?;
@@ -5826,6 +5859,9 @@ fn run_naive_deep_history_case(
         extrapolated_final_payload_bytes_for_target,
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: bundle_summary.bytes,
+        native_sync_bytes: native_sync_bytes.unwrap_or(bundle_summary.bytes),
+        native_export_ms: native_export_ms.unwrap_or(bundle_export_ms),
+        native_import_ms: native_import_ms.unwrap_or(cold_load_ms),
         block_native_export_ms,
         block_native_import_ms,
         block_native_blocks,

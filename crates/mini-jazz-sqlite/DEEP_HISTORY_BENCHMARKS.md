@@ -105,74 +105,65 @@ For append and document edits, final-payload ratios compare storage to the text
 content produced by the run. For canvas positions, final-payload ratios are
 intentionally `N/A`; compare to the gzipped position trace instead. Storage rows
 use measured `live_database_bytes`; because these canonical runs completed their
-target update counts, no extrapolation was needed. Aggregate write-loop, cold
-load, and block-native sync timings are normalized by completed update count;
-point reads and `transaction_info` stay as absolute per-call latencies.
+target update counts, no extrapolation was needed. Aggregate write-loop and native sync timings are normalized by completed update
+count; point reads and `transaction_info` stay as absolute per-call latencies.
 
 ## Comparison Tables
 
 ### Append
 
-| Metric                        |      Base3 |      Block |  Block+S |
-| ----------------------------- | ---------: | ---------: | -------: |
-| completed updates             |       2225 |       2225 |     2225 |
-| total loop / update           |    3.42 ms |    3.48 ms |  3.74 ms |
-| write only / update           |    0.34 ms |    0.31 ms |  1.32 ms |
-| sampled receive / update      |    3.07 ms |    3.17 ms |  2.42 ms |
-| cold load / update            |    0.88 ms |    0.90 ms |  1.16 ms |
-| current read                  |    0.15 ms |    0.14 ms |  0.32 ms |
-| historical read avg           |        N/A |   41.79 ms | 49.98 ms |
-| tx info avg                   |        N/A |    0.27 ms |  0.26 ms |
-| block-native export / update  |        N/A |   0.010 ms | 0.008 ms |
-| block-native import / update  |        N/A |   0.136 ms | 0.062 ms |
-| compatibility bundle bytes    | 15,235,071 | 15,235,071 |  567,966 |
-| block-native payload bytes    |        N/A |     67,005 |   31,452 |
-| current-root sidecar bytes    |        N/A |        N/A |   13,742 |
-| live database / final payload |   1397.55x |    453.48x |   25.47x |
+| Metric                        |      Base3 |     Block |  Block+S |
+| ----------------------------- | ---------: | --------: | -------: |
+| completed updates             |       2225 |      2225 |     2225 |
+| total loop / update           |    3.45 ms |   3.57 ms |  3.66 ms |
+| write only / update           |    0.31 ms |   0.36 ms |  1.27 ms |
+| sampled receive / update      |    3.14 ms |   3.20 ms |  2.38 ms |
+| current read                  |    0.14 ms |   0.15 ms |  0.30 ms |
+| historical read avg           |  693.96 ms |  41.18 ms | 50.07 ms |
+| tx info avg                   |    1.36 ms |   0.28 ms |  0.25 ms |
+| native export / update        |    0.05 ms |  0.010 ms | 0.008 ms |
+| native import / update        |    0.90 ms |   0.14 ms |  0.06 ms |
+| native sync bytes             | 15,235,071 | 5,486,681 |  118,681 |
+| live database / final payload |   1397.55x |   453.47x |   25.47x |
 
 ### Automerge
 
-| Metric                       |     Base3 |     Block |   Block+S |
-| ---------------------------- | --------: | --------: | --------: |
-| completed updates            |      2900 |      2900 |      2900 |
-| total loop / update          |   2.76 ms |   2.82 ms |   6.35 ms |
-| write only / update          |   0.33 ms |   0.26 ms |   2.36 ms |
-| sampled receive / update     |   2.42 ms |   2.52 ms |   3.99 ms |
-| cold load / update           |   0.70 ms |   0.72 ms |   2.43 ms |
-| current read                 |   0.13 ms |   0.14 ms |   0.19 ms |
-| historical read avg          |       N/A |  61.47 ms |  72.89 ms |
-| tx info avg                  |       N/A |   0.36 ms |   0.33 ms |
-| block-native export / update |       N/A |  0.009 ms |  0.008 ms |
-| block-native import / update |       N/A |  0.094 ms |  0.065 ms |
-| compatibility bundle bytes   | 4,152,081 | 4,152,081 | 1,090,481 |
-| block-native payload bytes   |       N/A |    87,526 |    41,677 |
-| current-root sidecar bytes   |       N/A |       N/A |     1,806 |
-| live database / source gzip  |    10.73x |     3.28x |     0.65x |
+| Metric                      |      Base3 |     Block |  Block+S |
+| --------------------------- | ---------: | --------: | -------: |
+| completed updates           |       2900 |      2900 |     2900 |
+| total loop / update         |    2.80 ms |   2.77 ms |  6.72 ms |
+| write only / update         |    0.29 ms |   0.26 ms |  2.98 ms |
+| sampled receive / update    |    2.46 ms |   2.47 ms |  3.74 ms |
+| current read                |    0.14 ms |   0.13 ms |  0.18 ms |
+| historical read avg         | 1148.49 ms |  60.26 ms | 75.65 ms |
+| tx info avg                 |    1.84 ms |   0.32 ms |  0.33 ms |
+| native export / update      |    0.05 ms |  0.009 ms | 0.008 ms |
+| native import / update      |    0.71 ms |   0.09 ms |  0.07 ms |
+| native sync bytes           |  4,152,081 | 1,229,154 |  139,884 |
+| live database / source gzip |     10.73x |     3.28x |    0.65x |
 
 ### Canvas
 
-| Metric                        |   Base3 |    Block | Block+S |
-| ----------------------------- | ------: | -------: | ------: |
-| completed updates             |    3900 |     3900 |     N/A |
-| total loop / update           | 2.17 ms |  2.18 ms |     N/A |
-| write only / update           | 0.23 ms |  0.21 ms |     N/A |
-| sampled receive / update      | 1.94 ms |  1.97 ms |     N/A |
-| cold load / update            | 0.57 ms |  0.58 ms |     N/A |
-| current read                  | 0.13 ms |  0.13 ms |     N/A |
-| historical read avg           |     N/A | 98.89 ms |     N/A |
-| tx info avg                   |     N/A |  0.44 ms |     N/A |
-| block-native export / update  |     N/A | 0.008 ms |     N/A |
-| block-native import / update  |     N/A | 0.076 ms |     N/A |
-| compatibility bundle bytes    | 858,561 |  858,108 |     N/A |
-| block-native payload bytes    |     N/A |  173,244 |     N/A |
-| live database / position gzip |   8.61x |    5.11x |     N/A |
+| Metric                        |      Base3 |    Block | Block+S |
+| ----------------------------- | ---------: | -------: | ------: |
+| completed updates             |       3900 |     3900 |     N/A |
+| total loop / update           |    2.18 ms |  2.16 ms |     N/A |
+| write only / update           |    0.21 ms |  0.23 ms |     N/A |
+| sampled receive / update      |    1.97 ms |  1.93 ms |     N/A |
+| current read                  |    0.16 ms |  0.13 ms |     N/A |
+| historical read avg           | 2080.19 ms | 98.32 ms |     N/A |
+| tx info avg                   |    2.35 ms |  0.39 ms |     N/A |
+| native export / update        |    0.04 ms | 0.008 ms |     N/A |
+| native import / update        |    0.58 ms |  0.08 ms |     N/A |
+| native sync bytes             |    858,561 |  337,476 |     N/A |
+| live database / position gzip |      8.61x |    5.11x |     N/A |
 
 ## Notes
 
 - Current reads remain fast in the naive baseline because the current projection
   is doing its job.
-- `Block+S` reduces compatibility bundle size and block-native current sync
-  payloads by moving large text values into immutable sidecar segments. Its
+- `Block+S` reduces native sync payloads by moving large text values into
+  immutable sidecar segments. Its
   current write path is intentionally unbatched, so write cost is worse than
   Base3/Block for now.
 - Current-root compaction in `Block+S` makes text current reads shallow again,
@@ -182,13 +173,10 @@ point reads and `transaction_info` stay as absolute per-call latencies.
   history into one block per scenario. `live database bytes` shows the real page
   footprint after compaction; `total file bytes` still includes freed pages
   unless the explicit reclaim step is run.
-- Block-native payload bytes are the compressed sealed block bytes that a
-  block-aware peer could request/store without expanding archived history back
-  into ordinary row history. `block-native export` now measures creating an open
-  history bundle plus missing block payloads; `block-native import` measures
-  importing those blocks and applying the open bundle. The ordinary `bundle bytes`
-  rows still show the compatibility
-  path that decodes blocks back into logical Jazz history.
+- `native sync bytes` is each setup's intended sync payload shape: Base3 compact
+  bundle bytes; Block open-hot-tail bundle plus compressed history block bytes;
+  Block+S open-hot-tail root bundle plus compressed history block bytes plus the
+  current-root sidecar delta. Native export/import timings use the same path.
 - Historical local point reads currently decode and scan a whole selected block.
   The first measured Block numbers are intentionally rough but show this path is
   a real optimization target.
