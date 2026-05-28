@@ -4154,6 +4154,7 @@ fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: None,
+        reclaim_after_compact: false,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec!["Naive baseline: one full-row text update per token-like append.".to_owned()],
     })
@@ -4164,6 +4165,7 @@ fn run_append_stream_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 445).max(1);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let reclaim_after_compact = env_bool("MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT", false);
     let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
     let mut state = String::new();
     run_naive_deep_history_case(DeepHistoryCaseInput {
@@ -4183,6 +4185,7 @@ fn run_append_stream_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: Some(hot_tail),
+        reclaim_after_compact,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             "History blocks: naive full-row writes, then seal old accepted history into lz4 blocks."
@@ -4221,6 +4224,7 @@ fn run_automerge_paper_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: None,
+        reclaim_after_compact: false,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
@@ -4240,6 +4244,7 @@ fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseRepo
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 580).max(1);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let reclaim_after_compact = env_bool("MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT", false);
     let mut state = trace.start_content;
     let txns = trace.txns;
     let available_txns = txns.len();
@@ -4260,6 +4265,7 @@ fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseRepo
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: Some(hot_tail),
+        reclaim_after_compact,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
@@ -4346,6 +4352,7 @@ fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: Some(reference_json),
         compare_to_final_payload: false,
         compact_hot_tail: None,
+        reclaim_after_compact: false,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             "Naive baseline: one full-row position JSON text update per 60 FPS frame.".to_owned(),
@@ -4359,6 +4366,7 @@ fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseRep
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 780).max(1);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let reclaim_after_compact = env_bool("MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT", false);
     let mut all_positions = Vec::with_capacity(target_updates);
     for frame in 0..target_updates {
         all_positions.push(canvas_position_json(frame));
@@ -4379,6 +4387,7 @@ fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseRep
         final_reference_json: Some(reference_json),
         compare_to_final_payload: false,
         compact_hot_tail: Some(hot_tail),
+        reclaim_after_compact,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             "History blocks: naive full-row writes, then seal old accepted history into lz4 blocks."
@@ -4429,6 +4438,7 @@ struct DeepHistoryCaseInput {
     final_reference_json: Option<String>,
     compare_to_final_payload: bool,
     compact_hot_tail: Option<usize>,
+    reclaim_after_compact: bool,
     write_batch_size: Option<usize>,
     notes: Vec<String>,
 }
@@ -5194,6 +5204,15 @@ fn run_naive_deep_history_case(
             compaction.compressed_bytes,
             compaction_ms
         ));
+        if input.reclaim_after_compact {
+            let reclaim_started = Instant::now();
+            writer.reclaim_storage()?;
+            let reclaim_ms = ms(reclaim_started.elapsed());
+            notes.push(format!(
+                "SQLite storage reclaim after compaction: {:.2} ms.",
+                reclaim_ms
+            ));
+        }
     }
     let bundle = writer.export_table_history(input.table)?;
     let bundle_summary = BundleSummary::from(&bundle)?;

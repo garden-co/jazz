@@ -888,7 +888,9 @@ impl Runtime {
 
     pub fn reclaim_storage(&mut self) -> Result<()> {
         self.conn
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+            .execute_batch(
+                "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);",
+            )
             .map_err(Into::into)
     }
 

@@ -166,8 +166,19 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 - With block compaction hot tail set to `0`, the Block experiment removes all
   open history rows and leaves only the current projection plus one sealed block
   per scenario. `live database bytes` shows the real page footprint after
-  compaction; `total file bytes` still includes freed pages until we add an
-  explicit vacuum/checkpoint/repack step.
+  compaction; `total file bytes` still includes freed pages unless the explicit
+  reclaim step is run.
+
+## Reclaim Probe
+
+Quick non-canonical probe after adding `Runtime::reclaim_storage()`. Input was
+the canonical append Block run with
+`MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL=0` and
+`MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT=1`.
+
+| Scenario | reclaim time | database bytes | live database bytes | freelist bytes | total file bytes | total file / final payload |
+| -------- | -----------: | -------------: | ------------------: | -------------: | ---------------: | -------------------------: |
+| Append   |      47.6 ms |        258,048 |             258,048 |              0 |          290,816 |                     21.78x |
 
 ## Batched Write Probe
 
