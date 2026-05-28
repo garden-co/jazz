@@ -352,6 +352,42 @@ fn compaction_keeps_visible_head_rebuildable_with_zero_hot_tail() {
 }
 
 #[test]
+fn table_compaction_seals_each_deep_row_independently() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    for note in ["note-1", "note-2"] {
+        alice
+            .insert_row(
+                "notes",
+                note,
+                BTreeMap::from([
+                    ("body".to_owned(), json!("v1")),
+                    ("pinned".to_owned(), json!(false)),
+                ]),
+            )
+            .unwrap();
+        for version in 2..=4 {
+            alice
+                .update_row(
+                    "notes",
+                    note,
+                    BTreeMap::from([("body".to_owned(), json!(format!("{note}-v{version}")))]),
+                )
+                .unwrap();
+        }
+    }
+
+    let stats = alice.compact_table_accepted_history("notes", 1, 2).unwrap();
+
+    assert_eq!(stats.history_blocks, 2);
+    assert_eq!(stats.sealed_history_rows, 6);
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 2);
+    assert_eq!(alice.read_rows("notes").unwrap().len(), 2);
+}
+
+#[test]
 fn delete_is_history_not_removal() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
