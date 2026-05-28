@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 04:12:19 PDT 2026
+
+Decision: rerun Block benchmarks after the tx-reference validation landed.
+
+Why: even small validation additions affect the block-native import measurement, and the comparison table should describe the code at HEAD. The extra tx-id checks did not materially change the shape: import remains around 273-303 ms for append/Automerge and 296 ms for canvas in this run.
+
+Scope impact: `/tmp/deep_history_all_canonical_blocks_final.json` is the latest canonical Block run, and the Block column was refreshed from that output.
+
 ## Thu May 28 04:09:29 PDT 2026
 
 Decision: reject sealed block payloads whose history/read records reference missing tx records.
