@@ -146,6 +146,31 @@ pub fn root_leaf_count(conn: &Connection, root: RopeRoot) -> Result<i64> {
     }
 }
 
+pub fn root_depth(conn: &Connection, root: RopeRoot) -> Result<i64> {
+    let mut max_depth = 0;
+    let mut stack = root
+        .into_iter()
+        .map(|node_id| (node_id, 1))
+        .collect::<Vec<_>>();
+    while let Some((node_id, depth)) = stack.pop() {
+        max_depth = max_depth.max(depth);
+        let node = node(conn, node_id)?;
+        match node.kind {
+            KIND_LEAF | KIND_POSITION_LEAF => {}
+            KIND_CONCAT => {
+                if let Some(left) = node.left_node_id {
+                    stack.push((left, depth + 1));
+                }
+                if let Some(right) = node.right_node_id {
+                    stack.push((right, depth + 1));
+                }
+            }
+            _ => return Err(Error::new("unknown rope node kind")),
+        }
+    }
+    Ok(max_depth)
+}
+
 pub fn root_len(conn: &Connection, root: RopeRoot) -> Result<i64> {
     let Some(root_id) = root else {
         return Ok(0);
@@ -187,16 +212,21 @@ fn concat(conn: &Connection, left: RopeRoot, right: RopeRoot) -> Result<RopeRoot
         (None, None) => Ok(None),
         (Some(node), None) | (None, Some(node)) => Ok(Some(node)),
         (Some(left), Some(right)) => {
-            let byte_len = node(conn, left)?.byte_len + node(conn, right)?.byte_len;
-            conn.execute(
-                "INSERT INTO jazz_rope_node
-                 (kind, byte_len, left_node_id, right_node_id, segment_id, segment_start)
-                 VALUES (?, ?, ?, ?, NULL, NULL)",
-                params![KIND_CONCAT, byte_len, left, right],
-            )?;
-            Ok(Some(conn.last_insert_rowid()))
+            let left_node = node(conn, left)?;
+            let right_node = node(conn, right)?;
+            insert_concat(conn, left, right, left_node.byte_len + right_node.byte_len)
         }
     }
+}
+
+fn insert_concat(conn: &Connection, left: i64, right: i64, byte_len: i64) -> Result<RopeRoot> {
+    conn.prepare_cached(
+        "INSERT INTO jazz_rope_node
+         (kind, byte_len, left_node_id, right_node_id, segment_id, segment_start)
+         VALUES (?, ?, ?, ?, NULL, NULL)",
+    )?
+    .execute(params![KIND_CONCAT, byte_len, left, right])?;
+    Ok(Some(conn.last_insert_rowid()))
 }
 
 fn split(conn: &Connection, root: RopeRoot, at_byte: usize) -> Result<(RopeRoot, RopeRoot)> {
@@ -297,12 +327,17 @@ fn insert_leaf_ref(
     segment_start: i64,
     byte_len: usize,
 ) -> Result<i64> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO jazz_rope_node
          (kind, byte_len, left_node_id, right_node_id, segment_id, segment_start)
          VALUES (?, ?, NULL, NULL, ?, ?)",
-        params![KIND_LEAF, byte_len as i64, segment_id, segment_start],
-    )?;
+    )?
+    .execute(params![
+        KIND_LEAF,
+        byte_len as i64,
+        segment_id,
+        segment_start
+    ])?;
     Ok(conn.last_insert_rowid())
 }
 
@@ -312,46 +347,43 @@ fn insert_position_leaf_ref(
     segment_start: i64,
     sample_count: usize,
 ) -> Result<i64> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO jazz_rope_node
          (kind, byte_len, left_node_id, right_node_id, segment_id, segment_start)
          VALUES (?, ?, NULL, NULL, ?, ?)",
-        params![
-            KIND_POSITION_LEAF,
-            sample_count as i64,
-            segment_id,
-            segment_start
-        ],
-    )?;
+    )?
+    .execute(params![
+        KIND_POSITION_LEAF,
+        sample_count as i64,
+        segment_id,
+        segment_start
+    ])?;
     Ok(conn.last_insert_rowid())
 }
 
 fn node(conn: &Connection, node_id: i64) -> Result<Node> {
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT kind, byte_len, left_node_id, right_node_id, segment_id, segment_start
          FROM jazz_rope_node
          WHERE node_id = ?",
-        params![node_id],
-        |row| {
-            Ok(Node {
-                kind: row.get(0)?,
-                byte_len: row.get(1)?,
-                left_node_id: row.get(2)?,
-                right_node_id: row.get(3)?,
-                segment_id: row.get(4)?,
-                segment_start: row.get(5)?,
-            })
-        },
-    )
+    )?
+    .query_row(params![node_id], |row| {
+        Ok(Node {
+            kind: row.get(0)?,
+            byte_len: row.get(1)?,
+            left_node_id: row.get(2)?,
+            right_node_id: row.get(3)?,
+            segment_id: row.get(4)?,
+            segment_start: row.get(5)?,
+        })
+    })
     .optional()?
     .ok_or_else(|| Error::new("unknown rope node"))
 }
 
 fn append_segment(conn: &Connection, text: &str) -> Result<(i64, i64)> {
-    conn.execute(
-        "INSERT INTO jazz_rope_segment (text) VALUES (?)",
-        params![text],
-    )?;
+    conn.prepare_cached("INSERT INTO jazz_rope_segment (text) VALUES (?)")?
+        .execute(params![text])?;
     Ok((conn.last_insert_rowid(), 0))
 }
 
@@ -519,6 +551,7 @@ mod tests {
 
         assert_eq!(materialize(&conn, root).unwrap(), " token".repeat(100));
         assert_eq!(root_leaf_count(&conn, root).unwrap(), 100);
+        assert_eq!(root_depth(&conn, root).unwrap(), 100);
         let segment_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM jazz_rope_segment", [], |row| {
                 row.get(0)
@@ -555,6 +588,7 @@ mod tests {
         assert_eq!(materialize(&conn, compacted).unwrap(), " token".repeat(100));
         assert_eq!(root_leaf_count(&conn, root).unwrap(), 100);
         assert_eq!(root_leaf_count(&conn, compacted).unwrap(), 1);
+        assert_eq!(root_depth(&conn, compacted).unwrap(), 1);
         let segment_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM jazz_rope_segment", [], |row| {
                 row.get(0)

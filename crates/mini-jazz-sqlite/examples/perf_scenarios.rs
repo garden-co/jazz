@@ -4796,6 +4796,9 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         let root_compaction_started = Instant::now();
         let current_rows = writer.read_rows("documents")?;
         let current_root = row_root_id(&current_rows, "body_root")?;
+        let pre_compact_leaf_count =
+            persisted_rope::root_leaf_count(&writer_rope, Some(current_root))?;
+        let pre_compact_depth = persisted_rope::root_depth(&writer_rope, Some(current_root))?;
         let compacted_root = persisted_rope::compact_text_root(&writer_rope, Some(current_root))?
             .ok_or("compacted non-empty rope lost root")?;
         writer.update_row(
@@ -4804,8 +4807,9 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
             map1("body_root", json!(compacted_root.to_string())),
         )?;
         input.notes.push(format!(
-            "Current root sidecar compaction: old leaves {}, new leaves {}, compaction+root write {:.2} ms.",
-            persisted_rope::root_leaf_count(&writer_rope, Some(current_root))?,
+            "Current root sidecar compaction: old leaves {}, old depth {}, new leaves {}, compaction+root write {:.2} ms.",
+            pre_compact_leaf_count,
+            pre_compact_depth,
             persisted_rope::root_leaf_count(&writer_rope, Some(compacted_root))?,
             ms(root_compaction_started.elapsed())
         ));
@@ -4916,6 +4920,7 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     let transaction_info_total_ms = ms(tx_info_started.elapsed());
     let transaction_info_count = tx_info_ids.len();
     let rope_stats = persisted_rope::stats(&writer_rope)?;
+    let rope_depth = persisted_rope::root_depth(&writer_rope, Some(current_root))?;
     let writer_stats = writer.storage_stats()?;
     let rope_database_bytes = sqlite_database_bytes(&writer_rope)?;
     let database_bytes = writer_stats.database_bytes + rope_database_bytes;
@@ -4924,10 +4929,11 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         writer_stats.total_file_bytes + sqlite_path_total_file_bytes(&writer_rope_path);
     let mut notes = input.notes;
     notes.push(format!(
-        "Rope nodes: {}, leaf nodes: {}, concat nodes: {}, leaf bytes: {}, segment bytes: {}",
+        "Rope nodes: {}, leaf nodes: {}, concat nodes: {}, root depth: {}, leaf bytes: {}, segment bytes: {}",
         rope_stats.nodes,
         rope_stats.leaf_nodes,
         rope_stats.concat_nodes,
+        rope_depth,
         rope_stats.leaf_bytes,
         rope_stats.segment_bytes
     ));

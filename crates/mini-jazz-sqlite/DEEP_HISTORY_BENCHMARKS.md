@@ -82,6 +82,7 @@ row's cold accepted history into one lz4 block.
 |    Block | Base3 plus sealed lz4 history blocks after the write loop                       |
 |  Block+S | Block plus immutable sequence sidecar roots and incremental sidecar sync        |
 | Block+S2 | Block+S plus SQLite transaction batching and current-derived pending visibility |
+| Block+S3 | Block+S2 plus prepared-statement cleanup and rope depth instrumentation         |
 
 `Block+S` is the immutable sidecar implementation for large text
 columns: text sidecar segments are immutable, old Jazz root history is sealed
@@ -92,7 +93,8 @@ current code. `Block+S2` is the current write-path iteration: logical Jazz
 history remains one row per update, but root writes/sidecar writes are grouped
 into short SQLite transactions, sidecar receive uses one SQLite transaction, and
 remote-pending visibility is derived from the current visible tx before falling
-back to a durable-history lookup.
+back to a durable-history lookup. `Block+S3` keeps the same storage format and
+adds hot-path prepared statement reuse plus rope-shape instrumentation.
 
 ## Timing Fields
 
@@ -119,51 +121,51 @@ count; point reads and `transaction_info` stay as absolute per-call latencies.
 
 ### Append
 
-| Metric                        |      Base3 |     Block |  Block+S | Block+S2 |
-| ----------------------------- | ---------: | --------: | -------: | -------: |
-| completed updates             |       2225 |      2225 |     2225 |     2225 |
-| total loop / update           |    3.45 ms |   3.57 ms |  3.66 ms |  0.89 ms |
-| write only / update           |    0.31 ms |   0.36 ms |  1.27 ms |  0.21 ms |
-| sampled receive / update      |    3.14 ms |   3.20 ms |  2.38 ms |  0.68 ms |
-| current read                  |    0.14 ms |   0.15 ms |  0.30 ms |  0.32 ms |
-| historical read avg           |  693.96 ms |  41.18 ms | 50.07 ms | 48.97 ms |
-| tx info avg                   |    1.36 ms |   0.28 ms |  0.25 ms |  0.25 ms |
-| native export / update        |    0.05 ms |  0.010 ms | 0.008 ms | 0.008 ms |
-| native import / update        |    0.90 ms |   0.14 ms |  0.06 ms |  0.05 ms |
-| native sync bytes             | 15,235,071 | 5,486,681 |  118,681 |  114,583 |
-| live database / final payload |   1397.55x |   453.47x |   25.47x |   25.16x |
+| Metric                        |      Base3 |     Block |  Block+S | Block+S2 | Block+S3 |
+| ----------------------------- | ---------: | --------: | -------: | -------: | -------: |
+| completed updates             |       2225 |      2225 |     2225 |     2225 |     2225 |
+| total loop / update           |    3.45 ms |   3.57 ms |  3.66 ms |  0.89 ms |  0.61 ms |
+| write only / update           |    0.31 ms |   0.36 ms |  1.27 ms |  0.21 ms |  0.16 ms |
+| sampled receive / update      |    3.14 ms |   3.20 ms |  2.38 ms |  0.68 ms |  0.45 ms |
+| current read                  |    0.14 ms |   0.15 ms |  0.30 ms |  0.32 ms |  0.37 ms |
+| historical read avg           |  693.96 ms |  41.18 ms | 50.07 ms | 48.97 ms | 47.39 ms |
+| tx info avg                   |    1.36 ms |   0.28 ms |  0.25 ms |  0.25 ms |  0.24 ms |
+| native export / update        |    0.05 ms |  0.010 ms | 0.008 ms | 0.008 ms | 0.004 ms |
+| native import / update        |    0.90 ms |   0.14 ms |  0.06 ms |  0.05 ms |  0.04 ms |
+| native sync bytes             | 15,235,071 | 5,486,681 |  118,681 |  114,583 |  117,632 |
+| live database / final payload |   1397.55x |   453.47x |   25.47x |   25.16x |   25.47x |
 
 ### Automerge
 
-| Metric                      |      Base3 |     Block |  Block+S | Block+S2 |
-| --------------------------- | ---------: | --------: | -------: | -------: |
-| completed updates           |       2900 |      2900 |     2900 |     2900 |
-| total loop / update         |    2.80 ms |   2.77 ms |  6.72 ms |  1.07 ms |
-| write only / update         |    0.29 ms |   0.26 ms |  2.98 ms |  0.39 ms |
-| sampled receive / update    |    2.46 ms |   2.47 ms |  3.74 ms |  0.67 ms |
-| current read                |    0.14 ms |   0.13 ms |  0.18 ms |  0.17 ms |
-| historical read avg         | 1148.49 ms |  60.26 ms | 75.65 ms | 72.74 ms |
-| tx info avg                 |    1.84 ms |   0.32 ms |  0.33 ms |  0.30 ms |
-| native export / update      |    0.05 ms |  0.009 ms | 0.008 ms | 0.008 ms |
-| native import / update      |    0.71 ms |   0.09 ms |  0.07 ms |  0.05 ms |
-| native sync bytes           |  4,152,081 | 1,229,154 |  139,884 |  138,177 |
-| live database / source gzip |     10.73x |     3.28x |    0.65x |    0.64x |
+| Metric                      |      Base3 |     Block |  Block+S | Block+S2 | Block+S3 |
+| --------------------------- | ---------: | --------: | -------: | -------: | -------: |
+| completed updates           |       2900 |      2900 |     2900 |     2900 |     2900 |
+| total loop / update         |    2.80 ms |   2.77 ms |  6.72 ms |  1.07 ms |  0.76 ms |
+| write only / update         |    0.29 ms |   0.26 ms |  2.98 ms |  0.39 ms |  0.31 ms |
+| sampled receive / update    |    2.46 ms |   2.47 ms |  3.74 ms |  0.67 ms |  0.45 ms |
+| current read                |    0.14 ms |   0.13 ms |  0.18 ms |  0.17 ms |  0.18 ms |
+| historical read avg         | 1148.49 ms |  60.26 ms | 75.65 ms | 72.74 ms | 70.55 ms |
+| tx info avg                 |    1.84 ms |   0.32 ms |  0.33 ms |  0.30 ms |  0.30 ms |
+| native export / update      |    0.05 ms |  0.009 ms | 0.008 ms | 0.008 ms | 0.004 ms |
+| native import / update      |    0.71 ms |   0.09 ms |  0.07 ms |  0.05 ms |  0.04 ms |
+| native sync bytes           |  4,152,081 | 1,229,154 |  139,884 |  138,177 |  138,561 |
+| live database / source gzip |     10.73x |     3.28x |    0.65x |    0.64x |    0.64x |
 
 ### Canvas
 
-| Metric                        |      Base3 |    Block |   Block+S | Block+S2 |
-| ----------------------------- | ---------: | -------: | --------: | -------: |
-| completed updates             |       3900 |     3900 |      3900 |     3900 |
-| total loop / update           |    2.18 ms |  2.16 ms |   2.18 ms |  0.78 ms |
-| write only / update           |    0.21 ms |  0.23 ms |   0.23 ms |  0.22 ms |
-| sampled receive / update      |    1.97 ms |  1.93 ms |   1.95 ms |  0.55 ms |
-| current read                  |    0.16 ms |  0.13 ms |   0.14 ms |  0.13 ms |
-| historical read avg           | 2080.19 ms | 98.32 ms | 100.07 ms | 97.88 ms |
-| tx info avg                   |    2.35 ms |  0.39 ms |   0.43 ms |  0.39 ms |
-| native export / update        |    0.04 ms | 0.008 ms |  0.008 ms | 0.008 ms |
-| native import / update        |    0.58 ms |  0.08 ms |   0.08 ms |  0.06 ms |
-| native sync bytes             |    858,561 |  337,476 |   337,675 |  337,694 |
-| live database / position gzip |      8.61x |    5.11x |     5.11x |    5.11x |
+| Metric                        |      Base3 |    Block |   Block+S | Block+S2 | Block+S3 |
+| ----------------------------- | ---------: | -------: | --------: | -------: | -------: |
+| completed updates             |       3900 |     3900 |      3900 |     3900 |     3900 |
+| total loop / update           |    2.18 ms |  2.16 ms |   2.18 ms |  0.78 ms |  0.58 ms |
+| write only / update           |    0.21 ms |  0.23 ms |   0.23 ms |  0.22 ms |  0.23 ms |
+| sampled receive / update      |    1.97 ms |  1.93 ms |   1.95 ms |  0.55 ms |  0.35 ms |
+| current read                  |    0.16 ms |  0.13 ms |   0.14 ms |  0.13 ms |  0.13 ms |
+| historical read avg           | 2080.19 ms | 98.32 ms | 100.07 ms | 97.88 ms | 98.14 ms |
+| tx info avg                   |    2.35 ms |  0.39 ms |   0.43 ms |  0.39 ms |  0.40 ms |
+| native export / update        |    0.04 ms | 0.008 ms |  0.008 ms | 0.008 ms | 0.004 ms |
+| native import / update        |    0.58 ms |  0.08 ms |   0.08 ms |  0.06 ms |  0.05 ms |
+| native sync bytes             |    858,561 |  337,476 |   337,675 |  337,694 |  337,463 |
+| live database / position gzip |      8.61x |    5.11x |     5.11x |    5.11x |    5.11x |
 
 ## Notes
 

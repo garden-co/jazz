@@ -1657,54 +1657,54 @@ impl Runtime {
         let txs_started = Instant::now();
         let mut tx_nums_by_id = BTreeMap::new();
         let mut tx_info_by_num = BTreeMap::new();
+        let mut upsert_tx_stmt = db.prepare_cached(
+            "INSERT INTO jazz_tx
+             (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json, writes_json, reads_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]')
+             ON CONFLICT(node_num, local_epoch) DO UPDATE SET
+               outcome = MAX(jazz_tx.outcome, excluded.outcome),
+               global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
+               conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
+               metadata_json = COALESCE(excluded.metadata_json, jazz_tx.metadata_json),
+               writes_json = CASE
+                 WHEN jazz_tx.writes_json = '[]' THEN excluded.writes_json
+                 ELSE jazz_tx.writes_json
+               END,
+               reads_json = COALESCE(jazz_tx.reads_json, excluded.reads_json)",
+        )?;
+        let mut upsert_rejection_stmt = db.prepare_cached(
+            "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
+             VALUES (?, ?, ?)",
+        )?;
+        let mut upsert_receipt_stmt = db.prepare_cached(
+            "INSERT OR REPLACE INTO jazz_tx_receipt
+             (tx_num, tier, observed_at, receipt_json)
+             VALUES (?, ?, ?, '{}')",
+        )?;
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
             let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
-            db.execute(
-                "INSERT INTO jazz_tx
-                 (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json, writes_json, reads_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]')
-                 ON CONFLICT(node_num, local_epoch) DO UPDATE SET
-                   outcome = MAX(jazz_tx.outcome, excluded.outcome),
-                   global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
-                   conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
-                   metadata_json = COALESCE(excluded.metadata_json, jazz_tx.metadata_json),
-                   writes_json = CASE
-                     WHEN jazz_tx.writes_json = '[]' THEN excluded.writes_json
-                     ELSE jazz_tx.writes_json
-                   END,
-                   reads_json = COALESCE(jazz_tx.reads_json, excluded.reads_json)",
-                params![
-                    node_num,
-                    tx_record.local_epoch,
-                    tx_record.global_epoch,
-                    tx::KIND_DATA,
-                    tx_record.conflict_mode,
-                    tx_record.outcome,
-                    tx_record.created_at,
-                    metadata_json
-                ],
-            )?;
+            upsert_tx_stmt.execute(params![
+                node_num,
+                tx_record.local_epoch,
+                tx_record.global_epoch,
+                tx::KIND_DATA,
+                tx_record.conflict_mode,
+                tx_record.outcome,
+                tx_record.created_at,
+                metadata_json
+            ])?;
             let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
             tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
             tx_info_by_num.insert(tx_num, tx_apply_info(&db, tx_num)?);
             if tx_record.outcome == tx::OUTCOME_REJECTED {
                 if let Some(code) = &tx_record.rejection_code {
                     let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
-                    db.execute(
-                        "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
-                         VALUES (?, ?, ?)",
-                        params![tx_num, code, detail_json],
-                    )?;
+                    upsert_rejection_stmt.execute(params![tx_num, code, detail_json])?;
                 }
             }
             if let Some(global_epoch) = tx_record.global_epoch {
-                db.execute(
-                    "INSERT OR REPLACE INTO jazz_tx_receipt
-                     (tx_num, tier, observed_at, receipt_json)
-                     VALUES (?, ?, ?, '{}')",
-                    params![tx_num, tx::TIER_GLOBAL, global_epoch],
-                )?;
+                upsert_receipt_stmt.execute(params![tx_num, tx::TIER_GLOBAL, global_epoch])?;
             }
             for tier in &tx_record.receipt_tiers {
                 let observed_at = if *tier == tx::TIER_GLOBAL {
@@ -1712,14 +1712,12 @@ impl Runtime {
                 } else {
                     tx_record.created_at
                 };
-                db.execute(
-                    "INSERT OR REPLACE INTO jazz_tx_receipt
-                     (tx_num, tier, observed_at, receipt_json)
-                     VALUES (?, ?, ?, '{}')",
-                    params![tx_num, tier, observed_at],
-                )?;
+                upsert_receipt_stmt.execute(params![tx_num, tier, observed_at])?;
             }
         }
+        drop(upsert_receipt_stmt);
+        drop(upsert_rejection_stmt);
+        drop(upsert_tx_stmt);
         let txs_ms = duration_ms(txs_started.elapsed());
 
         let reads_started = Instant::now();
@@ -7289,21 +7287,22 @@ struct ApplyHistoryContext<'a> {
 }
 
 fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {
-    Ok(conn.query_row(
+    let mut stmt = conn.prepare_cached(
         "SELECT node_num, outcome, conflict_mode,
                 outcome = ? OR global_epoch IS NOT NULL
          FROM jazz_tx
          WHERE tx_num = ?",
-        params![tx::OUTCOME_ACCEPTED, tx_num],
-        |row| {
+    )?;
+    Ok(
+        stmt.query_row(params![tx::OUTCOME_ACCEPTED, tx_num], |row| {
             Ok(ApplyTxInfo {
                 node_num: row.get(0)?,
                 outcome: row.get(1)?,
                 conflict_mode: row.get(2)?,
                 is_durable: row.get(3)?,
             })
-        },
-    )?)
+        })?,
+    )
 }
 
 fn next_global_epoch(conn: &Connection) -> Result<i64> {
@@ -7464,6 +7463,22 @@ fn tx_is_newer_than_current_fast_path(
 }
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
+    let mut receipt_stmt = conn.prepare(
+        "SELECT tx.tx_id, receipt.tier
+         FROM jazz_tx_public tx
+         JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
+         ORDER BY tx.tx_num, receipt.tier",
+    )?;
+    let receipt_rows = receipt_stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut receipt_tiers_by_tx = BTreeMap::<String, Vec<i64>>::new();
+    for receipt_row in receipt_rows {
+        let (tx_id, tier) = receipt_row?;
+        receipt_tiers_by_tx.entry(tx_id).or_default().push(tier);
+    }
+    drop(receipt_stmt);
+
     let mut stmt = conn.prepare(
         "SELECT tx.tx_id, tx.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
          FROM jazz_tx_public tx
@@ -7472,16 +7487,7 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     )?;
     let records = stmt.query_map([], |row| {
         let tx_id = row.get::<_, String>(0)?;
-        let mut receipt_stmt = conn.prepare(
-            "SELECT receipt.tier
-             FROM jazz_tx_receipt receipt
-             JOIN jazz_tx_public tx ON tx.tx_num = receipt.tx_num
-             WHERE tx.tx_id = ?
-             ORDER BY receipt.tier",
-        )?;
-        let receipt_tiers = receipt_stmt
-            .query_map(params![tx_id], |row| row.get::<_, i64>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let receipt_tiers = receipt_tiers_by_tx.get(&tx_id).cloned().unwrap_or_default();
         Ok(TxRecord {
             tx_id,
             node_id: row.get(1)?,

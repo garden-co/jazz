@@ -23,15 +23,10 @@ pub(crate) struct PackedRead(
 );
 
 pub(crate) fn ensure_node(conn: &Connection, node_id: &str) -> Result<i64> {
-    conn.execute(
-        "INSERT OR IGNORE INTO jazz_node (node_id) VALUES (?)",
-        params![node_id],
-    )?;
-    Ok(conn.query_row(
-        "SELECT node_num FROM jazz_node WHERE node_id = ?",
-        params![node_id],
-        |row| row.get(0),
-    )?)
+    conn.prepare_cached("INSERT OR IGNORE INTO jazz_node (node_id) VALUES (?)")?
+        .execute(params![node_id])?;
+    let mut stmt = conn.prepare_cached("SELECT node_num FROM jazz_node WHERE node_id = ?")?;
+    Ok(stmt.query_row(params![node_id], |row| row.get(0))?)
 }
 
 pub(crate) fn create_tx(
@@ -61,17 +56,16 @@ pub(crate) fn create_tx_with_options(
     global_epoch: Option<i64>,
 ) -> Result<(i64, String)> {
     let next_epoch = conn
-        .query_row(
-            "SELECT COALESCE(MAX(local_epoch), 0) + 1 FROM jazz_tx WHERE node_num = ?",
-            params![node_num],
-            |row| row.get::<_, i64>(0),
-        )
+        .prepare_cached("SELECT COALESCE(MAX(local_epoch), 0) + 1 FROM jazz_tx WHERE node_num = ?")?
+        .query_row(params![node_num], |row| row.get::<_, i64>(0))
         .unwrap_or(1);
     let tx_id = format!("tx-{node_id}-{next_epoch}");
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO jazz_tx
           (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json, writes_json, reads_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '[]', '[]')",
+    )?
+    .execute(
         params![
             node_num,
             next_epoch,
@@ -84,12 +78,12 @@ pub(crate) fn create_tx_with_options(
     )?;
     let tx_num = conn.last_insert_rowid();
     if let Some(global_epoch) = global_epoch {
-        conn.execute(
+        conn.prepare_cached(
             "INSERT OR REPLACE INTO jazz_tx_receipt
              (tx_num, tier, observed_at, receipt_json)
              VALUES (?, ?, ?, '{}')",
-            params![tx_num, TIER_GLOBAL, global_epoch],
-        )?;
+        )?
+        .execute(params![tx_num, TIER_GLOBAL, global_epoch])?;
     }
     Ok((tx_num, tx_id))
 }
@@ -107,10 +101,8 @@ pub(crate) fn append_write(
         writes.push(write);
     }
     let writes_json = serde_json::to_string(&writes).map_err(|err| Error::new(err.to_string()))?;
-    conn.execute(
-        "UPDATE jazz_tx SET writes_json = ? WHERE tx_num = ?",
-        params![writes_json, tx_num],
-    )?;
+    conn.prepare_cached("UPDATE jazz_tx SET writes_json = ? WHERE tx_num = ?")?
+        .execute(params![writes_json, tx_num])?;
     Ok(())
 }
 
@@ -124,11 +116,9 @@ pub(crate) fn append_read(
 ) -> Result<()> {
     let read = PackedRead(table_num, row_num, reason, observed_tx_num);
     let implicit = implicit_previous_reads(conn, tx_num)?;
-    let reads_json = conn.query_row(
-        "SELECT reads_json FROM jazz_tx WHERE tx_num = ?",
-        params![tx_num],
-        |row| row.get::<_, Option<String>>(0),
-    )?;
+    let reads_json = conn
+        .prepare_cached("SELECT reads_json FROM jazz_tx WHERE tx_num = ?")?
+        .query_row(params![tx_num], |row| row.get::<_, Option<String>>(0))?;
     let mut reads = match reads_json {
         Some(json) => serde_json::from_str::<Vec<PackedRead>>(&json)
             .map_err(|err| Error::new(err.to_string()))?,
@@ -142,10 +132,8 @@ pub(crate) fn append_read(
     } else {
         Some(serde_json::to_string(&reads).map_err(|err| Error::new(err.to_string()))?)
     };
-    conn.execute(
-        "UPDATE jazz_tx SET reads_json = ? WHERE tx_num = ?",
-        params![next_json, tx_num],
-    )?;
+    conn.prepare_cached("UPDATE jazz_tx SET reads_json = ? WHERE tx_num = ?")?
+        .execute(params![next_json, tx_num])?;
     Ok(())
 }
 
@@ -156,11 +144,9 @@ pub(crate) fn fill_observed_read(
     row_num: i64,
     observed_tx_num: i64,
 ) -> Result<()> {
-    let reads_json = conn.query_row(
-        "SELECT reads_json FROM jazz_tx WHERE tx_num = ?",
-        params![tx_num],
-        |row| row.get::<_, Option<String>>(0),
-    )?;
+    let reads_json = conn
+        .prepare_cached("SELECT reads_json FROM jazz_tx WHERE tx_num = ?")?
+        .query_row(params![tx_num], |row| row.get::<_, Option<String>>(0))?;
     let mut reads = match reads_json {
         Some(json) => serde_json::from_str::<Vec<PackedRead>>(&json)
             .map_err(|err| Error::new(err.to_string()))?,
@@ -172,34 +158,29 @@ pub(crate) fn fill_observed_read(
         }
     }
     let reads_json = serde_json::to_string(&reads).map_err(|err| Error::new(err.to_string()))?;
-    conn.execute(
-        "UPDATE jazz_tx SET reads_json = ? WHERE tx_num = ?",
-        params![reads_json, tx_num],
-    )?;
+    conn.prepare_cached("UPDATE jazz_tx SET reads_json = ? WHERE tx_num = ?")?
+        .execute(params![reads_json, tx_num])?;
     Ok(())
 }
 
 fn packed_writes(conn: &Connection, tx_num: i64) -> Result<Vec<PackedWrite>> {
-    let json = conn.query_row(
-        "SELECT writes_json FROM jazz_tx WHERE tx_num = ?",
-        params![tx_num],
-        |row| row.get::<_, String>(0),
-    )?;
+    let json = conn
+        .prepare_cached("SELECT writes_json FROM jazz_tx WHERE tx_num = ?")?
+        .query_row(params![tx_num], |row| row.get::<_, String>(0))?;
     serde_json::from_str(&json).map_err(|err| Error::new(err.to_string()))
 }
 
 fn implicit_previous_reads(conn: &Connection, tx_num: i64) -> Result<Vec<PackedRead>> {
     let previous_tx_num = conn
-        .query_row(
+        .prepare_cached(
             "SELECT previous.tx_num
              FROM jazz_tx tx
              JOIN jazz_tx previous
                ON previous.node_num = tx.node_num
               AND previous.local_epoch = tx.local_epoch - 1
              WHERE tx.tx_num = ?",
-            params![tx_num],
-            |row| row.get::<_, i64>(0),
-        )
+        )?
+        .query_row(params![tx_num], |row| row.get::<_, i64>(0))
         .optional()?;
     let Some(previous_tx_num) = previous_tx_num else {
         return Ok(Vec::new());
@@ -220,13 +201,12 @@ fn same_read_set(left: &[PackedRead], right: &[PackedRead]) -> bool {
 
 pub(crate) fn tx_num(conn: &Connection, tx_id: &str) -> Result<i64> {
     let (node_id, local_epoch) = parse_tx_id(tx_id)?;
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT tx.tx_num
          FROM jazz_tx_public tx
          WHERE tx.node_id = ? AND tx.local_epoch = ?",
-        params![node_id, local_epoch],
-        |row| row.get(0),
-    )
+    )?
+    .query_row(params![node_id, local_epoch], |row| row.get(0))
     .optional()?
     .ok_or_else(|| Error::new(format!("unknown transaction {tx_id}")))
 }

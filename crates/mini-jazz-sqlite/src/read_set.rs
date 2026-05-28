@@ -171,35 +171,29 @@ fn current_visible_tx_num(
             }
         }
         if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
-            let branch_tx = conn
-                .query_row(
-                    &format!(
-                        "SELECT visible_tx_num
-                         FROM {}
-                         WHERE row_num = ? AND j_branch_num = ?",
-                        schema::current_table(table_name)
-                    ),
-                    params![row_num, branch_num],
-                    |row| row.get::<_, i64>(0),
-                )
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT visible_tx_num
+                 FROM {}
+                 WHERE row_num = ? AND j_branch_num = ?",
+                schema::current_table(table_name)
+            ))?;
+            let branch_tx = stmt
+                .query_row(params![row_num, branch_num], |row| row.get::<_, i64>(0))
                 .optional()?;
             if branch_tx.is_none() {
                 return snapshot_visible_tx_num(conn, table_name, row_num, base_epoch);
             }
         }
     }
-    conn.query_row(
-        &format!(
-            "SELECT visible_tx_num
-             FROM {}
-             WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
-            schema::current_table(table_name)
-        ),
-        params![row_num, branch_num],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT visible_tx_num
+         FROM {}
+         WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
+        schema::current_table(table_name)
+    ))?;
+    stmt.query_row(params![row_num, branch_num], |row| row.get(0))
+        .optional()
+        .map_err(Into::into)
 }
 
 fn snapshot_visible_tx_num(
@@ -208,24 +202,23 @@ fn snapshot_visible_tx_num(
     row_num: i64,
     base_epoch: i64,
 ) -> Result<Option<i64>> {
-    conn.query_row(
-        &format!(
-            "SELECT h.tx_num
-             FROM {} h
-             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
-             WHERE h.row_num = ?
-               AND h.j_branch_num = 1
-               AND h.op != 3
-               AND tx.outcome != ?
-               AND tx.global_epoch IS NOT NULL
-               AND tx.global_epoch <= ?
-             ORDER BY tx.global_epoch DESC, h.tx_num DESC
-             LIMIT 1",
-            schema::history_table(table_name)
-        ),
-        params![row_num, tx::OUTCOME_REJECTED, base_epoch],
-        |row| row.get(0),
-    )
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT h.tx_num
+         FROM {} h
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
+         WHERE h.row_num = ?
+           AND h.j_branch_num = 1
+           AND h.op != 3
+           AND tx.outcome != ?
+           AND tx.global_epoch IS NOT NULL
+           AND tx.global_epoch <= ?
+         ORDER BY tx.global_epoch DESC, h.tx_num DESC
+         LIMIT 1",
+        schema::history_table(table_name)
+    ))?;
+    stmt.query_row(params![row_num, tx::OUTCOME_REJECTED, base_epoch], |row| {
+        row.get(0)
+    })
     .optional()
     .map_err(Into::into)
 }
