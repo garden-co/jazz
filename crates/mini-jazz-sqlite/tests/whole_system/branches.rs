@@ -545,6 +545,49 @@ fn branch_reads_main_base_with_sparse_overlay() {
 }
 
 #[test]
+fn branch_reads_main_base_after_history_compaction() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+
+    let update_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main after branch")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&update_tx, 2).unwrap();
+    alice
+        .compact_accepted_history("tasks", "task-1", 0)
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Base title"));
+}
+
+#[test]
 fn fixture_open_todos_reads_pinned_base_with_sparse_overlay() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

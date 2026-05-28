@@ -7579,8 +7579,56 @@ fn compactable_history_tx_nums(
             row.get::<_, i64>(0)
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let branch_base_anchors = branch_base_anchor_tx_nums(conn, table_name, row_num)?;
     let compact_len = tx_nums.len().saturating_sub(hot_tail);
-    Ok(tx_nums.into_iter().take(compact_len).collect())
+    Ok(tx_nums
+        .into_iter()
+        .take(compact_len)
+        .filter(|tx_num| !branch_base_anchors.contains(tx_num))
+        .collect())
+}
+
+fn branch_base_anchor_tx_nums(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+) -> Result<BTreeSet<i64>> {
+    let base_epochs = conn
+        .prepare(
+            "SELECT DISTINCT base_global_epoch
+             FROM jazz_branch
+             WHERE branch_num != 1
+               AND base_global_epoch IS NOT NULL",
+        )?
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut anchors = BTreeSet::new();
+    let sql = format!(
+        "SELECT h.tx_num
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.row_num = ?
+           AND h.j_branch_num = 1
+           AND h.op != 3
+           AND tx.outcome != ?
+           AND tx.global_epoch IS NOT NULL
+           AND tx.global_epoch <= ?
+         ORDER BY tx.global_epoch DESC, h.tx_num DESC
+         LIMIT 1",
+        crate::schema::history_table(table_name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    for base_epoch in base_epochs {
+        if let Some(tx_num) = stmt
+            .query_row(params![row_num, tx::OUTCOME_REJECTED, base_epoch], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?
+        {
+            anchors.insert(tx_num);
+        }
+    }
+    Ok(anchors)
 }
 
 fn history_block_kind_name(kind: i64) -> &'static str {

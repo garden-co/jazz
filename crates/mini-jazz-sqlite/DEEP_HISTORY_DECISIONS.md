@@ -563,3 +563,11 @@ Decision: make the sealed branch-base predicate repair return no extra rows for 
 Why: the repair path is an optimization/correctness bridge for ordinary predicate scopes. Top, recursive, or future operators should not fail merely because this sealed-base scan does not know how to evaluate them yet; they can continue through their existing open-history/export paths.
 
 Scope impact: equality, not-equal, contains, and in remain supported. Other operators simply get no sealed-base predicate repair from this helper.
+
+## Thu May 28 03:20:22 PDT 2026 - Preserve Branch Base Anchors In Open History
+
+Decision: accepted compaction should not seal the latest main row version at any live branch base epoch.
+
+Why: ordinary branch reads use the current/open sparse-overlay model and should stay fast without decoding cold blocks. If compaction with `hot_tail = 0` removes the exact main row version that a branch is pinned to, local branch reads can no longer materialize the base row. Keeping one sparse anchor per pinned base epoch is a small storage cost for preserving branch snapshot semantics and read performance.
+
+Scope impact: compaction still seals older and newer accepted history, but skips branch-base anchor txs. Added a regression test for local branch reads after history compaction.
