@@ -89,15 +89,15 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 | Append    | history rows               |       2226 |       2226 |       2226 |       2226 |          0 |      2225 |
 | Append    | final payload bytes        |     13,350 |     13,350 |     13,350 |     13,350 |     13,350 |    13,350 |
 | Append    | bundle bytes               | 16,115,414 | 16,115,414 | 16,115,414 | 15,235,071 | 15,235,071 | 1,411,141 |
-| Append    | block-native export        |        N/A |        N/A |        N/A |        N/A |    0.15 ms |       N/A |
-| Append    | block-native import        |        N/A |        N/A |        N/A |        N/A |    0.24 ms |       N/A |
+| Append    | block-native export        |        N/A |        N/A |        N/A |        N/A |    5.86 ms |       N/A |
+| Append    | block-native import        |        N/A |        N/A |        N/A |        N/A |    5.79 ms |       N/A |
 | Append    | block-native blocks        |        N/A |        N/A |        N/A |        N/A |          1 |       N/A |
-| Append    | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    137,174 |       N/A |
-| Append    | database bytes             | 18,796,544 | 18,677,760 | 18,657,280 | 18,657,280 | 18,788,352 |   573,440 |
-| Append    | live database bytes        |        N/A |        N/A |        N/A |        N/A |    258,048 |       N/A |
+| Append    | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    132,914 |       N/A |
+| Append    | database bytes             | 18,796,544 | 18,677,760 | 18,657,280 | 18,657,280 | 18,784,256 |   573,440 |
+| Append    | live database bytes        |        N/A |        N/A |        N/A |        N/A |    253,952 |       N/A |
 | Append    | freelist bytes             |        N/A |        N/A |        N/A |        N/A | 18,530,304 |       N/A |
 | Append    | total file bytes           | 22,319,040 | 22,773,576 | 22,388,624 | 22,388,624 | 22,400,912 | 4,738,720 |
-| Append    | database / final payload   |   1407.98x |   1399.08x |   1397.55x |   1397.55x |   1407.37x |    42.95x |
+| Append    | database / final payload   |   1407.98x |   1399.08x |   1397.55x |   1397.55x |   1407.06x |    42.95x |
 | Append    | total file / final payload |   1671.84x |   1705.89x |   1677.05x |   1677.05x |   1677.97x |   354.96x |
 | Append    | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |        N/A |      4449 |
 | Append    | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |        N/A |      2225 |
@@ -118,17 +118,17 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 | Automerge | final payload bytes        |       1750 |       1750 |       1750 |       1750 |       1750 |      1750 |
 | Automerge | source trace gzip bytes    |    904,360 |    904,360 |    904,360 |    904,360 |    904,360 |   904,360 |
 | Automerge | bundle bytes               |  5,351,258 |  5,351,258 |  5,351,258 |  4,152,081 |  4,152,081 | 2,209,941 |
-| Automerge | block-native export        |        N/A |        N/A |        N/A |        N/A |    1.25 ms |       N/A |
-| Automerge | block-native import        |        N/A |        N/A |        N/A |        N/A |    0.13 ms |       N/A |
+| Automerge | block-native export        |        N/A |        N/A |        N/A |        N/A |    6.52 ms |       N/A |
+| Automerge | block-native import        |        N/A |        N/A |        N/A |        N/A |    6.74 ms |       N/A |
 | Automerge | block-native blocks        |        N/A |        N/A |        N/A |        N/A |          1 |       N/A |
-| Automerge | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    156,722 |       N/A |
-| Automerge | database bytes             |  9,859,072 |  9,707,520 |  9,687,040 |  9,687,040 |  9,846,784 |   892,928 |
-| Automerge | live database bytes        |        N/A |        N/A |        N/A |        N/A |    262,144 |       N/A |
+| Automerge | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    150,205 |       N/A |
+| Automerge | database bytes             |  9,859,072 |  9,707,520 |  9,687,040 |  9,687,040 |  9,842,688 |   892,928 |
+| Automerge | live database bytes        |        N/A |        N/A |        N/A |        N/A |    258,048 |       N/A |
 | Automerge | freelist bytes             |        N/A |        N/A |        N/A |        N/A |  9,584,640 |       N/A |
 | Automerge | total file bytes           | 13,729,560 | 13,807,432 | 13,778,664 | 13,778,664 | 13,790,952 | 5,082,808 |
-| Automerge | database / final payload   |   5633.76x |   5547.15x |   5535.45x |   5535.45x |   5626.73x |   510.24x |
+| Automerge | database / final payload   |   5633.76x |   5547.15x |   5535.45x |   5535.45x |   5624.39x |   510.24x |
 | Automerge | total file / final payload |   7845.46x |   7889.96x |   7873.52x |   7873.52x |   7880.54x |  2904.46x |
-| Automerge | database / source gzip     |     10.90x |     10.73x |     10.71x |     10.71x |     10.89x |     0.99x |
+| Automerge | database / source gzip     |     10.90x |     10.73x |     10.71x |     10.71x |     10.88x |     0.99x |
 | Automerge | bundle / source gzip       |      5.92x |      5.92x |      5.92x |      4.59x |      4.59x |     2.44x |
 | Automerge | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |        N/A |    17,042 |
 | Automerge | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |        N/A |      2325 |
@@ -150,17 +150,17 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 | Canvas    | position trace gzip bytes  |     78,526 |     78,526 |     78,526 |     78,526 |     78,526 |    77,211 |
 | Canvas    | position trace JSON bytes  |    205,609 |    205,609 |    205,609 |    205,609 |    205,609 |   182,209 |
 | Canvas    | bundle bytes               |  2,455,136 |  2,455,136 |  2,455,136 |    858,561 |    858,561 | 2,591,442 |
-| Canvas    | block-native export        |        N/A |        N/A |        N/A |        N/A |    0.19 ms |       N/A |
-| Canvas    | block-native import        |        N/A |        N/A |        N/A |        N/A |    0.16 ms |       N/A |
+| Canvas    | block-native export        |        N/A |        N/A |        N/A |        N/A |   11.06 ms |       N/A |
+| Canvas    | block-native import        |        N/A |        N/A |        N/A |        N/A |   11.17 ms |       N/A |
 | Canvas    | block-native blocks        |        N/A |        N/A |        N/A |        N/A |          1 |       N/A |
-| Canvas    | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    274,623 |       N/A |
-| Canvas    | database bytes             |    884,736 |    679,936 |    659,456 |    659,456 |    946,176 |   913,408 |
-| Canvas    | live database bytes        |        N/A |        N/A |        N/A |        N/A |    380,928 |       N/A |
+| Canvas    | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    260,735 |       N/A |
+| Canvas    | database bytes             |    884,736 |    679,936 |    659,456 |    659,456 |    929,792 |   913,408 |
+| Canvas    | live database bytes        |        N/A |        N/A |        N/A |        N/A |    364,544 |       N/A |
 | Canvas    | freelist bytes             |        N/A |        N/A |        N/A |        N/A |    565,248 |       N/A |
 | Canvas    | total file bytes           |  5,070,520 |  4,857,480 |  4,828,760 |  4,828,760 |  4,845,168 | 5,090,976 |
 | Canvas    | database / final payload   |        N/A |        N/A |        N/A |        N/A |        N/A |       N/A |
 | Canvas    | total file / final payload |        N/A |        N/A |        N/A |        N/A |        N/A |       N/A |
-| Canvas    | database / position gzip   |     11.27x |      8.66x |      8.40x |      8.40x |     12.05x |    11.83x |
+| Canvas    | database / position gzip   |     11.27x |      8.66x |      8.40x |      8.40x |     11.84x |    11.83x |
 | Canvas    | bundle / position gzip     |     31.27x |     31.27x |     31.27x |     10.93x |     10.93x |    33.56x |
 | Canvas    | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |        N/A |      7799 |
 | Canvas    | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |        N/A |      3900 |
@@ -184,6 +184,9 @@ intentionally `N/A`; compare to the gzipped position trace instead.
   block-aware peer could request/store without expanding archived history back
   into ordinary row history. The ordinary `bundle bytes` rows still show the
   compatibility path that decodes blocks back into logical Jazz history.
+- The current Block payload uses columnar JSON compressed with lz4. It is not
+  the final binary/delta-varint block format, but it already avoids repeated
+  per-record JSON object keys inside sealed history blocks.
 
 ## Reclaim Probe
 

@@ -15,13 +15,16 @@ use crate::{
     storage, tx, users, Result, Storage,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
-const HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 2;
+const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
+const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
+const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
 const HISTORY_BLOCK_KIND_ACCEPTED: i64 = 1;
 const HISTORY_BLOCK_KIND_REJECTED: i64 = 2;
 
@@ -523,7 +526,7 @@ impl Runtime {
             Vec::new(),
             history.clone(),
         );
-        let uncompressed = serde_json::to_vec(&payload_bundle)
+        let uncompressed = encode_history_block_payload(&payload_bundle)
             .map_err(|err| crate::Error::new(format!("encode history block: {err}")))?;
         let compressed = lz4_flex::compress_prepend_size(&uncompressed);
         let min_epoch = selected
@@ -652,7 +655,7 @@ impl Runtime {
             Vec::new(),
             history.clone(),
         );
-        let uncompressed = serde_json::to_vec(&payload_bundle)
+        let uncompressed = encode_history_block_payload(&payload_bundle)
             .map_err(|err| crate::Error::new(format!("encode rejected history block: {err}")))?;
         let compressed = lz4_flex::compress_prepend_size(&uncompressed);
         let min_epoch = selected
@@ -748,6 +751,7 @@ impl Runtime {
         )?;
         let rows = stmt.query_map(params![table_num], |row| {
             let block_kind = row.get::<_, i64>(1)?;
+            let payload = row.get::<_, Vec<u8>>(11)?;
             Ok(HistoryBlockManifest {
                 block_id: row.get(0)?,
                 kind: history_block_kind_name(block_kind).to_owned(),
@@ -761,7 +765,7 @@ impl Runtime {
                 format_version: row.get(8)?,
                 uncompressed_bytes: row.get(9)?,
                 compressed_bytes: row.get(10)?,
-                payload_sha256: sha256_hex(&row.get::<_, Vec<u8>>(11)?),
+                payload_sha256: sha256_hex(&payload),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -792,8 +796,10 @@ impl Runtime {
         )?;
         let rows = stmt.query_map(params![table_num], |row| {
             let block_kind = row.get::<_, i64>(1)?;
+            let block_id = row.get(0)?;
+            let payload = row.get::<_, Vec<u8>>(11)?;
             let manifest = HistoryBlockManifest {
-                block_id: row.get(0)?,
+                block_id,
                 kind: history_block_kind_name(block_kind).to_owned(),
                 table: table_name.to_owned(),
                 row_id: row.get(2)?,
@@ -805,12 +811,12 @@ impl Runtime {
                 format_version: row.get(8)?,
                 uncompressed_bytes: row.get(9)?,
                 compressed_bytes: row.get(10)?,
-                payload_sha256: sha256_hex(&row.get::<_, Vec<u8>>(11)?),
+                payload_sha256: sha256_hex(&payload),
             };
             Ok(HistoryBlockExport {
                 manifest,
-                tx_ranges: history_block_tx_ranges(&self.conn, row.get(0)?)?,
-                payload: row.get(11)?,
+                tx_ranges: history_block_tx_ranges(&self.conn, block_id)?,
+                payload,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -6839,11 +6845,22 @@ fn decoded_history_blocks_for_row_epoch(
     Ok(bundles)
 }
 
+fn encode_history_block_payload(bundle: &Bundle) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&ColumnarHistoryBlockPayload::from_bundle(bundle))
+}
+
 fn decode_history_block_payload(
     codec: &str,
     format_version: i64,
     payload: &[u8],
 ) -> Result<Bundle> {
+    if codec == LEGACY_HISTORY_BLOCK_CODEC && format_version == LEGACY_HISTORY_BLOCK_FORMAT_VERSION
+    {
+        let decoded = lz4_flex::decompress_size_prepended(payload)
+            .map_err(|err| crate::Error::new(format!("decode history block: {err}")))?;
+        return serde_json::from_slice::<Bundle>(&decoded)
+            .map_err(|err| crate::Error::new(format!("decode history block bundle: {err}")));
+    }
     if codec != HISTORY_BLOCK_CODEC {
         return Err(crate::Error::new(format!(
             "unsupported history block codec {codec}"
@@ -6856,8 +6873,259 @@ fn decode_history_block_payload(
     }
     let decoded = lz4_flex::decompress_size_prepended(payload)
         .map_err(|err| crate::Error::new(format!("decode history block: {err}")))?;
-    serde_json::from_slice::<Bundle>(&decoded)
-        .map_err(|err| crate::Error::new(format!("decode history block bundle: {err}")))
+    serde_json::from_slice::<ColumnarHistoryBlockPayload>(&decoded)
+        .map_err(|err| crate::Error::new(format!("decode history block payload: {err}")))
+        .and_then(ColumnarHistoryBlockPayload::into_bundle)
+}
+
+#[derive(Serialize, Deserialize)]
+struct ColumnarHistoryBlockPayload {
+    protocol_version: i64,
+    schema_fingerprint: String,
+    policy_fingerprint: String,
+    branches: Vec<BranchRecord>,
+    txs: ColumnarTxRecords,
+    reads: ColumnarReadRecords,
+    query_reads: Vec<QueryReadRecord>,
+    history: ColumnarHistoryRecords,
+}
+
+impl ColumnarHistoryBlockPayload {
+    fn from_bundle(bundle: &Bundle) -> Self {
+        Self {
+            protocol_version: bundle.protocol_version,
+            schema_fingerprint: bundle.schema_fingerprint.clone(),
+            policy_fingerprint: bundle.policy_fingerprint.clone(),
+            branches: bundle.branches.clone(),
+            txs: ColumnarTxRecords::from_records(&bundle.txs),
+            reads: ColumnarReadRecords::from_records(&bundle.reads),
+            query_reads: bundle.query_reads.clone(),
+            history: ColumnarHistoryRecords::from_records(&bundle.history),
+        }
+    }
+
+    fn into_bundle(self) -> Result<Bundle> {
+        Ok(Bundle {
+            protocol_version: self.protocol_version,
+            schema_fingerprint: self.schema_fingerprint,
+            policy_fingerprint: self.policy_fingerprint,
+            branches: self.branches,
+            txs: self.txs.into_records()?,
+            reads: self.reads.into_records()?,
+            query_reads: self.query_reads,
+            history: self.history.into_records()?,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ColumnarTxRecords {
+    tx_id: Vec<String>,
+    node_id: Vec<String>,
+    local_epoch: Vec<i64>,
+    global_epoch: Vec<Option<i64>>,
+    conflict_mode: Vec<i64>,
+    outcome: Vec<i64>,
+    auth_user: Vec<Option<String>>,
+    rejection_code: Vec<Option<String>>,
+    rejection_detail: Vec<Option<JsonValue>>,
+    receipt_tiers: Vec<Vec<i64>>,
+    created_at: Vec<i64>,
+}
+
+impl ColumnarTxRecords {
+    fn from_records(records: &[TxRecord]) -> Self {
+        Self {
+            tx_id: records.iter().map(|record| record.tx_id.clone()).collect(),
+            node_id: records
+                .iter()
+                .map(|record| record.node_id.clone())
+                .collect(),
+            local_epoch: records.iter().map(|record| record.local_epoch).collect(),
+            global_epoch: records.iter().map(|record| record.global_epoch).collect(),
+            conflict_mode: records.iter().map(|record| record.conflict_mode).collect(),
+            outcome: records.iter().map(|record| record.outcome).collect(),
+            auth_user: records
+                .iter()
+                .map(|record| record.auth_user.clone())
+                .collect(),
+            rejection_code: records
+                .iter()
+                .map(|record| record.rejection_code.clone())
+                .collect(),
+            rejection_detail: records
+                .iter()
+                .map(|record| record.rejection_detail.clone())
+                .collect(),
+            receipt_tiers: records
+                .iter()
+                .map(|record| record.receipt_tiers.clone())
+                .collect(),
+            created_at: records.iter().map(|record| record.created_at).collect(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.tx_id.len()
+    }
+
+    fn into_records(self) -> Result<Vec<TxRecord>> {
+        let len = self.len();
+        ensure_column_len("tx.node_id", self.node_id.len(), len)?;
+        ensure_column_len("tx.local_epoch", self.local_epoch.len(), len)?;
+        ensure_column_len("tx.global_epoch", self.global_epoch.len(), len)?;
+        ensure_column_len("tx.conflict_mode", self.conflict_mode.len(), len)?;
+        ensure_column_len("tx.outcome", self.outcome.len(), len)?;
+        ensure_column_len("tx.auth_user", self.auth_user.len(), len)?;
+        ensure_column_len("tx.rejection_code", self.rejection_code.len(), len)?;
+        ensure_column_len("tx.rejection_detail", self.rejection_detail.len(), len)?;
+        ensure_column_len("tx.receipt_tiers", self.receipt_tiers.len(), len)?;
+        ensure_column_len("tx.created_at", self.created_at.len(), len)?;
+        let records = (0..len)
+            .map(|idx| TxRecord {
+                tx_id: self.tx_id[idx].clone(),
+                node_id: self.node_id[idx].clone(),
+                local_epoch: self.local_epoch[idx],
+                global_epoch: self.global_epoch[idx],
+                conflict_mode: self.conflict_mode[idx],
+                outcome: self.outcome[idx],
+                auth_user: self.auth_user[idx].clone(),
+                rejection_code: self.rejection_code[idx].clone(),
+                rejection_detail: self.rejection_detail[idx].clone(),
+                receipt_tiers: self.receipt_tiers[idx].clone(),
+                created_at: self.created_at[idx],
+            })
+            .collect();
+        Ok(records)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ColumnarReadRecords {
+    tx_id: Vec<String>,
+    table: Vec<String>,
+    row_id: Vec<String>,
+    reason: Vec<i64>,
+    observed_tx_id: Vec<Option<String>>,
+}
+
+impl ColumnarReadRecords {
+    fn from_records(records: &[ReadRecord]) -> Self {
+        Self {
+            tx_id: records.iter().map(|record| record.tx_id.clone()).collect(),
+            table: records.iter().map(|record| record.table.clone()).collect(),
+            row_id: records.iter().map(|record| record.row_id.clone()).collect(),
+            reason: records.iter().map(|record| record.reason).collect(),
+            observed_tx_id: records
+                .iter()
+                .map(|record| record.observed_tx_id.clone())
+                .collect(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.tx_id.len()
+    }
+
+    fn into_records(self) -> Result<Vec<ReadRecord>> {
+        let len = self.len();
+        ensure_column_len("read.table", self.table.len(), len)?;
+        ensure_column_len("read.row_id", self.row_id.len(), len)?;
+        ensure_column_len("read.reason", self.reason.len(), len)?;
+        ensure_column_len("read.observed_tx_id", self.observed_tx_id.len(), len)?;
+        let records = (0..len)
+            .map(|idx| ReadRecord {
+                tx_id: self.tx_id[idx].clone(),
+                table: self.table[idx].clone(),
+                row_id: self.row_id[idx].clone(),
+                reason: self.reason[idx],
+                observed_tx_id: self.observed_tx_id[idx].clone(),
+            })
+            .collect();
+        Ok(records)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ColumnarHistoryRecords {
+    table: Vec<String>,
+    row_id: Vec<String>,
+    branch_id: Vec<String>,
+    tx_id: Vec<String>,
+    op: Vec<i64>,
+    values: Vec<BTreeMap<String, JsonValue>>,
+    created_at: Vec<i64>,
+    updated_at: Vec<i64>,
+    created_by: Vec<String>,
+    updated_by: Vec<String>,
+}
+
+impl ColumnarHistoryRecords {
+    fn from_records(records: &[HistoryRecord]) -> Self {
+        Self {
+            table: records.iter().map(|record| record.table.clone()).collect(),
+            row_id: records.iter().map(|record| record.row_id.clone()).collect(),
+            branch_id: records
+                .iter()
+                .map(|record| record.branch_id.clone())
+                .collect(),
+            tx_id: records.iter().map(|record| record.tx_id.clone()).collect(),
+            op: records.iter().map(|record| record.op).collect(),
+            values: records.iter().map(|record| record.values.clone()).collect(),
+            created_at: records.iter().map(|record| record.created_at).collect(),
+            updated_at: records.iter().map(|record| record.updated_at).collect(),
+            created_by: records
+                .iter()
+                .map(|record| record.created_by.clone())
+                .collect(),
+            updated_by: records
+                .iter()
+                .map(|record| record.updated_by.clone())
+                .collect(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.tx_id.len()
+    }
+
+    fn into_records(self) -> Result<Vec<HistoryRecord>> {
+        let len = self.len();
+        ensure_column_len("history.table", self.table.len(), len)?;
+        ensure_column_len("history.row_id", self.row_id.len(), len)?;
+        ensure_column_len("history.branch_id", self.branch_id.len(), len)?;
+        ensure_column_len("history.op", self.op.len(), len)?;
+        ensure_column_len("history.values", self.values.len(), len)?;
+        ensure_column_len("history.created_at", self.created_at.len(), len)?;
+        ensure_column_len("history.updated_at", self.updated_at.len(), len)?;
+        ensure_column_len("history.created_by", self.created_by.len(), len)?;
+        ensure_column_len("history.updated_by", self.updated_by.len(), len)?;
+        let records = (0..len)
+            .map(|idx| HistoryRecord {
+                table: self.table[idx].clone(),
+                row_id: self.row_id[idx].clone(),
+                branch_id: self.branch_id[idx].clone(),
+                tx_id: self.tx_id[idx].clone(),
+                op: self.op[idx],
+                values: self.values[idx].clone(),
+                created_at: self.created_at[idx],
+                updated_at: self.updated_at[idx],
+                created_by: self.created_by[idx].clone(),
+                updated_by: self.updated_by[idx].clone(),
+            })
+            .collect();
+        Ok(records)
+    }
+}
+
+fn ensure_column_len(name: &str, actual: usize, expected: usize) -> Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(crate::Error::new(format!(
+            "history block column {name} length {actual} != {expected}"
+        )))
+    }
 }
 
 fn rebuild_current_projection_from_sealed_blocks(

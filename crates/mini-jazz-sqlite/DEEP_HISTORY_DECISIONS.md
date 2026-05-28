@@ -194,3 +194,10 @@ Thu May 28 00:09:43 PDT 2026
 Decision: expose all-table history block manifest/export helpers in addition to per-table helpers. Block-aware sync and maintenance should be able to discover sealed history without first knowing which user table has blocks.
 
 Scope impact: the helpers are still explicit runtime APIs, not automatic sync behavior; they reuse the same per-block manifests, tx ranges, hashes, and payload bytes.
+Thu May 28 00:12:28 PDT 2026
+
+## Columnar Block Payload V2
+
+Decision: switch newly sealed history blocks from compact Bundle JSON to a columnar JSON payload compressed with lz4. The decoder still returns the same logical Bundle, but the physical block stores tx/read/history fields as parallel arrays so the format matches the RFC direction and avoids repeated object keys.
+
+Scope impact: keep decoding support for the existing v1 `bundle-json-lz4` blocks so earlier checkpoints and tests remain readable. The v2 format is still JSON inside lz4, not the final binary/delta-varint encoding.
