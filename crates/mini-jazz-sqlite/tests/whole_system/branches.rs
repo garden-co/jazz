@@ -577,9 +577,11 @@ fn branch_reads_main_base_after_history_compaction() {
         )
         .unwrap();
     alice.accept_transaction_at_global(&update_tx, 2).unwrap();
-    alice
+    let stats = alice
         .compact_accepted_history("tasks", "task-1", 0)
         .unwrap();
+    assert_eq!(stats.sealed_history_rows, 1);
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 1);
 
     alice.checkout_branch("draft").unwrap();
     let rows = alice.read_rows("tasks").unwrap();
