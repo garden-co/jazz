@@ -25,9 +25,9 @@ impl SchemaDef {
                 table.text("name");
             })
             .table("group_members", |table| {
-                table.ref_("user", "users");
+                table.text("member");
                 table.ref_("group", "groups");
-                table.index("by_user", ["user", "group"]);
+                table.index("by_member", ["member", "group"]);
             })
             .table("projects", |table| {
                 table.text("title");
@@ -69,10 +69,10 @@ impl SchemaDef {
                 table.read_if_group_member();
             })
             .table("group_members", |table| {
-                table.ref_("user", "users");
+                table.text("member");
                 table.ref_("group", "groups");
-                table.index("by_user", ["user", "group"]);
-                table.read_if_user_ref_equals_session("user");
+                table.index("by_member", ["member", "group"]);
+                table.read_if_group_ref_member("group");
             })
             .table("projects", |table| {
                 table.text("title");
@@ -233,6 +233,9 @@ pub(crate) enum PolicyDef {
         field: String,
     },
     GroupMember,
+    GroupRefMember {
+        field: String,
+    },
     ProjectMember,
     ProjectRefMember {
         field: String,
@@ -255,6 +258,9 @@ impl PolicyDef {
                 )
             }
             PolicyDef::GroupMember => "group_member".to_owned(),
+            PolicyDef::GroupRefMember { field } => {
+                format!("group_ref_member:{}", storage_field_name(table, field))
+            }
             PolicyDef::ProjectMember => "project_member".to_owned(),
             PolicyDef::ProjectRefMember { field } => {
                 format!("project_ref_member:{}", storage_field_name(table, field))
@@ -412,6 +418,12 @@ impl TableBuilder {
 
     pub fn read_if_group_member(&mut self) {
         self.table.read_policy = PolicyDef::GroupMember;
+    }
+
+    pub fn read_if_group_ref_member(&mut self, field: &str) {
+        self.table.read_policy = PolicyDef::GroupRefMember {
+            field: field.to_owned(),
+        };
     }
 
     pub fn read_if_project_member(&mut self) {
@@ -641,6 +653,10 @@ fn validate_policy_cycle(
         }
         PolicyDef::ProjectRefMember { field } => {
             validate_policy_ref_field(schema, table, field, Some("projects"))?;
+            return Ok(());
+        }
+        PolicyDef::GroupRefMember { field } => {
+            validate_policy_ref_field(schema, table, field, Some("groups"))?;
             return Ok(());
         }
         PolicyDef::AllowAll

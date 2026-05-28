@@ -16,15 +16,23 @@ const USERS = [
 
 const GROUPS = [
   { id: "group-engineering", name: "Engineering" },
+  { id: "group-company", name: "Company" },
   { id: "group-design", name: "Design" },
   { id: "group-support", name: "Support" },
 ];
 
 const GROUP_MEMBERS = [
-  { id: "group-member-alice-engineering", user: "user-alice", group: "group-engineering" },
-  { id: "group-member-alice-design", user: "user-alice", group: "group-design" },
-  { id: "group-member-bob-engineering", user: "user-bob", group: "group-engineering" },
-  { id: "group-member-cara-support", user: "user-cara", group: "group-support" },
+  { id: "group-member-alice-engineering", member: "user:user-alice", group: "group-engineering" },
+  { id: "group-member-alice-design", member: "user:user-alice", group: "group-design" },
+  { id: "group-member-bob-engineering", member: "user:user-bob", group: "group-engineering" },
+  { id: "group-member-cara-support", member: "user:user-cara", group: "group-support" },
+  {
+    id: "group-member-engineering-company",
+    member: "group:group-engineering",
+    group: "group-company",
+  },
+  { id: "group-member-design-company", member: "group:group-design", group: "group-company" },
+  { id: "group-member-support-company", member: "group:group-support", group: "group-company" },
 ];
 
 const BASE_PROJECTS = [
@@ -37,6 +45,11 @@ const BASE_PROJECTS = [
     id: "project-launch-plan",
     title: "Launch plan",
     members: ["group:group-engineering"],
+  },
+  {
+    id: "project-company-strategy",
+    title: "Company strategy",
+    members: ["group:group-company"],
   },
   {
     id: "project-design-polish",
@@ -57,6 +70,7 @@ const BASE_PROJECTS = [
 
 const GENERATED_MEMBERS = [
   "group:group-engineering",
+  "group:group-company",
   "group:group-design",
   "group:group-support",
   "user:user-alice",
@@ -176,7 +190,7 @@ function seedDirectory() {
     insertMissing(
       "group_members",
       member.id,
-      { user: member.user, group: member.group },
+      { member: member.member, group: member.group },
       groupMemberIds,
     );
   }

@@ -193,7 +193,7 @@ addEventListener("pagehide", () => worker.terminate());
 
 worker.postMessage({
   type: "init",
-  dbName: "mini-jazz-sqlite-group-label-todos.sqlite3",
+  dbName: "mini-jazz-sqlite-nested-group-label-todos.sqlite3",
   nodeId: "browser-worker",
   user: "user-alice",
 });

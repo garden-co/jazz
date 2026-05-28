@@ -15,23 +15,31 @@ fn mini_sqlite_todo_fixture_db_enforces_project_and_todo_visibility_by_user_or_g
     db.run_as_user("user-alice", |alice| {
         assert_eq!(
             visible_ids(alice.read_rows("projects").unwrap()),
-            vec!["project-alice", "project-engineering"]
+            vec!["project-alice", "project-company", "project-engineering"]
         );
         assert_eq!(
             visible_ids(open_todos_query(alice)),
-            vec!["todo-alice", "todo-engineering"]
+            vec!["todo-alice", "todo-company", "todo-engineering"]
         );
     });
 
     db.run_as_user("user-bob", |bob| {
         assert_eq!(
             visible_ids(bob.read_rows("projects").unwrap()),
-            vec!["project-bob", "project-engineering"]
+            vec!["project-bob", "project-company", "project-engineering"]
         );
         assert_eq!(
             visible_ids(open_todos_query(bob)),
-            vec!["todo-bob", "todo-engineering"]
+            vec!["todo-bob", "todo-company", "todo-engineering"]
         );
+    });
+
+    db.run_as_user("user-cara", |cara| {
+        assert_eq!(
+            visible_ids(cara.read_rows("projects").unwrap()),
+            vec!["project-company"]
+        );
+        assert_eq!(visible_ids(open_todos_query(cara)), vec!["todo-company"]);
     });
 }
 
@@ -49,7 +57,7 @@ fn mini_sqlite_todo_fixture_allows_group_reads_but_only_authors_can_delete_todos
     db.run_as_user("user-bob", |bob| {
         assert_eq!(
             visible_ids(open_todos_query(bob)),
-            vec!["todo-bob", "todo-engineering"]
+            vec!["todo-bob", "todo-company", "todo-engineering"]
         );
 
         let tx = bob.delete_row("todos", "todo-engineering").unwrap();
@@ -59,14 +67,17 @@ fn mini_sqlite_todo_fixture_allows_group_reads_but_only_authors_can_delete_todos
         );
         assert_eq!(
             visible_ids(open_todos_query(bob)),
-            vec!["todo-bob", "todo-engineering"]
+            vec!["todo-bob", "todo-company", "todo-engineering"]
         );
     });
 
     db.run_as_user("user-alice", |alice| {
         let tx = alice.delete_row("todos", "todo-engineering").unwrap();
         assert_eq!(alice.transaction_info(&tx).unwrap().rejection_code, None);
-        assert_eq!(visible_ids(open_todos_query(alice)), vec!["todo-alice"]);
+        assert_eq!(
+            visible_ids(open_todos_query(alice)),
+            vec!["todo-alice", "todo-company"]
+        );
     });
 }
 
@@ -86,7 +97,9 @@ fn seed_group_visibility_fixture(db: &mut Runtime) {
 
     for (id, name) in [
         ("group-engineering", "Engineering"),
+        ("group-company", "Company"),
         ("group-design", "Design"),
+        ("group-support", "Support"),
     ] {
         db.insert_row(
             "groups",
@@ -96,24 +109,44 @@ fn seed_group_visibility_fixture(db: &mut Runtime) {
         .unwrap();
     }
 
-    for (id, user, group) in [
+    for (id, member, group) in [
         (
             "group-member-alice-engineering",
-            "user-alice",
+            "user:user-alice",
             "group-engineering",
         ),
         (
             "group-member-bob-engineering",
-            "user-bob",
+            "user:user-bob",
             "group-engineering",
         ),
-        ("group-member-bob-design", "user-bob", "group-design"),
+        (
+            "group-member-engineering-company",
+            "group:group-engineering",
+            "group-company",
+        ),
+        (
+            "group-member-design-company",
+            "group:group-design",
+            "group-company",
+        ),
+        (
+            "group-member-support-company",
+            "group:group-support",
+            "group-company",
+        ),
+        ("group-member-bob-design", "user:user-bob", "group-design"),
+        (
+            "group-member-cara-support",
+            "user:user-cara",
+            "group-support",
+        ),
     ] {
         db.insert_row(
             "group_members",
             id,
             BTreeMap::from([
-                ("user".to_owned(), json!(user)),
+                ("member".to_owned(), json!(member)),
                 ("group".to_owned(), json!(group)),
             ]),
         )
@@ -122,6 +155,7 @@ fn seed_group_visibility_fixture(db: &mut Runtime) {
 
     for (id, title) in [
         ("project-engineering", "Engineering roadmap"),
+        ("project-company", "Company strategy"),
         ("project-alice", "Alice private"),
         ("project-bob", "Bob private"),
     ] {
@@ -148,6 +182,11 @@ fn seed_group_visibility_fixture(db: &mut Runtime) {
             "project-engineering",
             "group:group-engineering",
         ),
+        (
+            "project-member-company",
+            "project-company",
+            "group:group-company",
+        ),
         ("project-member-alice", "project-alice", "user:user-alice"),
         ("project-member-bob", "project-bob", "user:user-bob"),
     ] {
@@ -167,6 +206,12 @@ fn seed_group_visibility_fixture(db: &mut Runtime) {
             "todo-engineering",
             "Plan sync protocol",
             "project-engineering",
+            "user-alice",
+        ),
+        (
+            "todo-company",
+            "Review company plan",
+            "project-company",
             "user-alice",
         ),
         (

@@ -91,6 +91,34 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
             )?;
             Ok(count > 0)
         }
+        PolicyDef::GroupRefMember { field } => {
+            let policy_sql = current_group_ref_member_sql(
+                check.table,
+                "current",
+                field,
+                check.user,
+                Some(check.branch_num),
+                0,
+            )?;
+            let count: i64 = check.db.query_row(
+                &format!(
+                    "SELECT COUNT(*)
+                     FROM {} current
+                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                     WHERE current.row_num = ?
+                       AND {}
+                       AND current.is_deleted = 0
+                       AND tx.outcome != {}
+                       AND {policy_sql}",
+                    crate::schema::current_table(&check.table.name),
+                    effective_branch_sql("current", &check.table.name, check.branch_num),
+                    tx::OUTCOME_REJECTED,
+                ),
+                params![check.row_num],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        }
         PolicyDef::ProjectMember => {
             let policy_sql = current_project_member_policy_sql(
                 "current.row_num",
@@ -412,30 +440,110 @@ fn current_group_member_policy_sql(
     branch_num: Option<i64>,
     depth: usize,
 ) -> String {
-    let member_alias = format!("policy_group_member_{depth}");
-    let member_tx_alias = format!("policy_group_member_tx_{depth}");
-    let branch_filter = branch_num
+    let reachable_alias = format!("policy_reachable_group_{depth}");
+    let reachable_cte = current_reachable_group_rows_cte(&reachable_alias, user, branch_num, depth);
+    format!(
+        "EXISTS (
+           {reachable_cte}
+           SELECT 1
+           FROM {reachable_alias}
+           WHERE {reachable_alias}.row_num = {group_row_expr}
+         )",
+    )
+}
+
+fn current_group_ref_member_sql(
+    table: &TableDef,
+    alias: &str,
+    field_name: &str,
+    user: &str,
+    branch_num: Option<i64>,
+    depth: usize,
+) -> Result<String> {
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field_name)
+        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field_name}")))?;
+    let FieldKind::Ref { table } = &field.kind else {
+        return Err(crate::Error::new(format!(
+            "policy field {} is not a ref",
+            field.name
+        )));
+    };
+    if table != "groups" {
+        return Err(crate::Error::new(format!(
+            "policy field {} must reference groups",
+            field.name
+        )));
+    }
+    Ok(current_group_member_policy_sql(
+        &format!(
+            "{alias}.{}",
+            crate::schema::quote_ident(&crate::schema::storage_column(field))
+        ),
+        user,
+        branch_num,
+        depth,
+    ))
+}
+
+fn current_reachable_group_rows_cte(
+    cte_alias: &str,
+    user: &str,
+    branch_num: Option<i64>,
+    depth: usize,
+) -> String {
+    let direct_alias = format!("{cte_alias}_direct_{depth}");
+    let direct_tx_alias = format!("{cte_alias}_direct_tx_{depth}");
+    let nested_alias = format!("{cte_alias}_nested_{depth}");
+    let nested_tx_alias = format!("{cte_alias}_nested_tx_{depth}");
+    let parent_alias = format!("{cte_alias}_parent_{depth}");
+    let parent_id_alias = format!("{cte_alias}_parent_id_{depth}");
+    let direct_branch_filter = branch_num
         .map(|branch_num| {
             format!(
                 "AND {}",
-                effective_branch_sql(&member_alias, "group_members", branch_num)
+                effective_branch_sql(&direct_alias, "group_members", branch_num)
+            )
+        })
+        .unwrap_or_default();
+    let nested_branch_filter = branch_num
+        .map(|branch_num| {
+            format!(
+                "AND {}",
+                effective_branch_sql(&nested_alias, "group_members", branch_num)
             )
         })
         .unwrap_or_default();
     format!(
-        "EXISTS (
-           SELECT 1
-           FROM {} {member_alias}
-           JOIN jazz_tx {member_tx_alias}
-             ON {member_tx_alias}.tx_num = {member_alias}.visible_tx_num
-           WHERE {member_alias}.group_row_num = {group_row_expr}
-             AND {member_alias}.user_row_num = ({})
-             {branch_filter}
-             AND {member_alias}.is_deleted = 0
-             AND {member_tx_alias}.outcome != {}
+        "WITH RECURSIVE {cte_alias}(row_num) AS (
+           SELECT {direct_alias}.group_row_num
+           FROM {} {direct_alias}
+           JOIN jazz_tx {direct_tx_alias}
+             ON {direct_tx_alias}.tx_num = {direct_alias}.visible_tx_num
+           WHERE {direct_alias}.member = {}
+             {direct_branch_filter}
+             AND {direct_alias}.is_deleted = 0
+             AND {direct_tx_alias}.outcome != {}
+           UNION
+           SELECT {nested_alias}.group_row_num
+           FROM {} {nested_alias}
+           JOIN jazz_tx {nested_tx_alias}
+             ON {nested_tx_alias}.tx_num = {nested_alias}.visible_tx_num
+           JOIN {cte_alias} {parent_alias}
+             ON 1 = 1
+           JOIN jazz_row_id {parent_id_alias}
+             ON {parent_id_alias}.row_num = {parent_alias}.row_num
+           WHERE {nested_alias}.member = ('group:' || {parent_id_alias}.row_id)
+             {nested_branch_filter}
+             AND {nested_alias}.is_deleted = 0
+             AND {nested_tx_alias}.outcome != {}
          )",
         crate::schema::current_table("group_members"),
-        user_row_num_subquery(user),
+        sql_literal(&format!("user:{user}")),
+        tx::OUTCOME_REJECTED,
+        crate::schema::current_table("group_members"),
         tx::OUTCOME_REJECTED,
     )
 }
@@ -448,22 +556,14 @@ fn current_project_member_policy_sql(
 ) -> String {
     let project_member_alias = format!("policy_project_member_{depth}");
     let project_member_tx_alias = format!("policy_project_member_tx_{depth}");
-    let group_member_alias = format!("policy_project_group_member_{depth}");
-    let group_member_tx_alias = format!("policy_project_group_member_tx_{depth}");
-    let group_ids_alias = format!("policy_project_group_ids_{depth}");
+    let reachable_alias = format!("policy_project_reachable_group_{depth}");
+    let reachable_ids_alias = format!("policy_project_reachable_group_ids_{depth}");
+    let reachable_cte = current_reachable_group_rows_cte(&reachable_alias, user, branch_num, depth);
     let project_member_branch_filter = branch_num
         .map(|branch_num| {
             format!(
                 "AND {}",
                 effective_branch_sql(&project_member_alias, "project_members", branch_num)
-            )
-        })
-        .unwrap_or_default();
-    let group_member_branch_filter = branch_num
-        .map(|branch_num| {
-            format!(
-                "AND {}",
-                effective_branch_sql(&group_member_alias, "group_members", branch_num)
             )
         })
         .unwrap_or_default();
@@ -480,26 +580,18 @@ fn current_project_member_policy_sql(
              AND (
                {project_member_alias}.member = {}
                OR EXISTS (
+                 {reachable_cte}
                  SELECT 1
-                 FROM {} {group_member_alias}
-                 JOIN jazz_tx {group_member_tx_alias}
-                   ON {group_member_tx_alias}.tx_num = {group_member_alias}.visible_tx_num
-                 JOIN jazz_row_id {group_ids_alias}
-                   ON {group_ids_alias}.row_num = {group_member_alias}.group_row_num
-                 WHERE {group_member_alias}.user_row_num = ({})
-                   {group_member_branch_filter}
-                   AND {group_member_alias}.is_deleted = 0
-                   AND {group_member_tx_alias}.outcome != {}
-                   AND {project_member_alias}.member = ('group:' || {group_ids_alias}.row_id)
+                 FROM {reachable_alias}
+                 JOIN jazz_row_id {reachable_ids_alias}
+                   ON {reachable_ids_alias}.row_num = {reachable_alias}.row_num
+                 WHERE {project_member_alias}.member = ('group:' || {reachable_ids_alias}.row_id)
                )
              )
          )",
         crate::schema::current_table("project_members"),
         tx::OUTCOME_REJECTED,
         sql_literal(&format!("user:{user}")),
-        crate::schema::current_table("group_members"),
-        user_row_num_subquery(user),
-        tx::OUTCOME_REJECTED,
     )
 }
 
@@ -567,6 +659,9 @@ fn lower_policy(
             branch_num,
             depth,
         )),
+        PolicyDef::GroupRefMember { field } => {
+            current_group_ref_member_sql(table, alias, field, user, branch_num, depth)
+        }
         PolicyDef::ProjectMember => Ok(current_project_member_policy_sql(
             &format!("{alias}.row_num"),
             user,
@@ -661,6 +756,9 @@ fn lower_snapshot_policy(
             None,
             depth,
         )),
+        PolicyDef::GroupRefMember { field } => {
+            current_group_ref_member_sql(table, alias, field, user, None, depth)
+        }
         PolicyDef::ProjectMember => Ok(current_project_member_policy_sql(
             &format!("{alias}.row_num"),
             user,

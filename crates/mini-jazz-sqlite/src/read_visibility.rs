@@ -143,6 +143,7 @@ impl ReadVisibility<'_> {
             PolicyDef::RowIdEqualsUser
             | PolicyDef::UserRefEqualsSession { .. }
             | PolicyDef::GroupMember
+            | PolicyDef::GroupRefMember { .. }
             | PolicyDef::ProjectMember
             | PolicyDef::ProjectRefMember { .. } => policy::branch_read_policy_sql_for_alias(
                 self.schema,

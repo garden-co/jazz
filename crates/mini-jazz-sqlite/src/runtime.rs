@@ -6517,6 +6517,9 @@ fn export_policy_dependency_history(
         | PolicyDef::RowIdEqualsUser
         | PolicyDef::UserRefEqualsSession { .. } => Ok(Vec::new()),
         PolicyDef::GroupMember => export_group_membership_policy_dependencies(visibility, args),
+        PolicyDef::GroupRefMember { .. } => {
+            export_group_membership_policy_dependencies(visibility, args)
+        }
         PolicyDef::ProjectMember => {
             let project_row_nums = args.child_row_nums.map(|rows| rows.to_vec());
             export_project_membership_policy_dependencies(visibility, args, project_row_nums)
@@ -6706,36 +6709,38 @@ fn current_group_member_row_nums_for_groups(
     if matches!(group_row_nums, Some([])) {
         return Ok(Vec::new());
     }
+    let direct_branch_filter = branch_filter_sql("direct", branch_nums);
+    let nested_branch_filter = branch_filter_sql("nested", branch_nums);
     let sql = format!(
-        "SELECT DISTINCT current.row_num
-         FROM {} current
-         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
-         WHERE current.is_deleted = 0
-           AND {}
-           AND {}
-           AND current.user_row_num = (
-             SELECT row_num FROM jazz_row_id WHERE row_id = ?
-           )
-           AND tx.outcome != {}",
+        "WITH RECURSIVE reachable(group_row_num, member_row_num) AS (
+           SELECT direct.group_row_num, direct.row_num
+           FROM {} direct
+           JOIN jazz_tx direct_tx ON direct_tx.tx_num = direct.visible_tx_num
+           WHERE direct.is_deleted = 0
+             AND {direct_branch_filter}
+             AND direct.member = ?
+             AND direct_tx.outcome != {}
+           UNION
+           SELECT nested.group_row_num, nested.row_num
+           FROM {} nested
+           JOIN jazz_tx nested_tx ON nested_tx.tx_num = nested.visible_tx_num
+           JOIN reachable parent ON 1 = 1
+           JOIN jazz_row_id parent_ids ON parent_ids.row_num = parent.group_row_num
+           WHERE nested.is_deleted = 0
+             AND {nested_branch_filter}
+             AND nested.member = ('group:' || parent_ids.row_id)
+             AND nested_tx.outcome != {}
+         )
+         SELECT DISTINCT member_row_num
+         FROM reachable",
         crate::schema::current_table("group_members"),
-        branch_filter_sql("current", branch_nums),
-        group_row_nums
-            .map(|row_nums| {
-                format!(
-                    "current.group_row_num IN ({})",
-                    row_nums
-                        .iter()
-                        .map(i64::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })
-            .unwrap_or_else(|| "1 = 1".to_owned()),
+        tx::OUTCOME_REJECTED,
+        crate::schema::current_table("group_members"),
         tx::OUTCOME_REJECTED,
     );
     let mut stmt = conn.prepare(&sql)?;
     let row_nums = stmt
-        .query_map(params![user], |row| row.get::<_, i64>(0))?
+        .query_map(params![format!("user:{user}")], |row| row.get::<_, i64>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(row_nums)
 }

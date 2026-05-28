@@ -2006,6 +2006,7 @@ impl QueryContext<'_> {
                 Ok(row.values.get(field).and_then(JsonValue::as_str) == Some(self.user))
             }
             PolicyDef::GroupMember
+            | PolicyDef::GroupRefMember { .. }
             | PolicyDef::ProjectMember
             | PolicyDef::ProjectRefMember { .. } => {
                 let row_num = row_num(self.conn, &row.id)?;
