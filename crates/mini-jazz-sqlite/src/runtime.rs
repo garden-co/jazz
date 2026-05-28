@@ -1641,6 +1641,26 @@ impl Runtime {
         Ok(bundles)
     }
 
+    pub fn export_observed_query_refresh_deltas(
+        &self,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<Vec<HistoryDelta>> {
+        let reads = self.observed_query_reads()?;
+        self.export_query_read_refresh_deltas(&reads, remote_block_manifests)
+    }
+
+    pub fn export_query_read_refresh_deltas(
+        &self,
+        reads: &[QueryReadRecord],
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<Vec<HistoryDelta>> {
+        let mut deltas = Vec::new();
+        for read in reads {
+            deltas.push(self.export_query_read_refresh_delta(read, remote_block_manifests)?);
+        }
+        Ok(deltas)
+    }
+
     pub fn forget_observed_query_read(&mut self, read: &QueryReadRecord) -> Result<()> {
         self.conn.execute(
             "DELETE FROM jazz_query_read
@@ -1659,6 +1679,115 @@ impl Runtime {
             ],
         )?;
         Ok(())
+    }
+
+    fn export_query_read_refresh_delta(
+        &self,
+        read: &QueryReadRecord,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<HistoryDelta> {
+        if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
+            return Err(crate::Error::new("query refresh branch is not checked out"));
+        }
+        match read.op.as_str() {
+            "eq" => self.export_query_where_eq_history_delta(
+                &read.table,
+                &read.field,
+                read.value.clone(),
+                remote_block_manifests,
+            ),
+            "ne" => self.export_query_where_ne_history_delta(
+                &read.table,
+                &read.field,
+                read.value.clone(),
+                remote_block_manifests,
+            ),
+            "contains" => {
+                let Some(needle) = read.value.as_str() else {
+                    return Err(crate::Error::new("contains expects a string value"));
+                };
+                self.export_query_where_contains_history_delta(
+                    &read.table,
+                    &read.field,
+                    needle,
+                    remote_block_manifests,
+                )
+            }
+            "in" => {
+                let Some(values) = read.value.as_array() else {
+                    return Err(crate::Error::new("in predicate expects an array value"));
+                };
+                self.export_query_where_in_history_delta(
+                    &read.table,
+                    &read.field,
+                    values.clone(),
+                    remote_block_manifests,
+                )
+            }
+            "eq_top_created_at_desc" => {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
+                self.export_query_where_eq_top_created_at_desc_history_delta_with_previous_observed(
+                    &read.table,
+                    &read.field,
+                    value.clone(),
+                    limit as usize,
+                    observed_ids_from_query_value(&read.value)?,
+                    remote_block_manifests,
+                )
+            }
+            "eq_top_field_desc" => {
+                let value = read
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
+                let order_field = read
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
+                let limit = read
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
+                let rows = self.read_rows_where_eq_top_field_desc(
+                    &read.table,
+                    &read.field,
+                    value.clone(),
+                    order_field,
+                    limit as usize,
+                )?;
+                self.export_query_scope_history_delta(
+                    &read.table,
+                    &read.field,
+                    "eq_top_field_desc",
+                    json!({
+                        "eq": value,
+                        "order_field": order_field,
+                        "limit": limit,
+                        "observed_ids": observed_row_ids(&rows),
+                    }),
+                    rows,
+                    QueryScopeDeltaOptions {
+                        ref_include_fields: &[],
+                        extra_row_ids: &observed_ids_from_query_value(&read.value)?,
+                        remote_block_manifests,
+                    },
+                )
+            }
+            _ => Ok(HistoryDelta {
+                bundle: self.export_query_read_refresh(read)?,
+                blocks: Vec::new(),
+            }),
+        }
     }
 
     fn export_query_read_refresh(&self, read: &QueryReadRecord) -> Result<Bundle> {

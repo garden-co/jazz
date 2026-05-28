@@ -619,6 +619,87 @@ fn top_created_query_history_delta_syncs_matching_blocks() {
 }
 
 #[test]
+fn observed_query_refresh_history_delta_includes_sealed_blocks() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("new")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let initial = alice
+        .export_query_where_eq_top_created_at_desc_history_delta(
+            "notes",
+            "pinned",
+            json!(true),
+            1,
+            &[],
+        )
+        .unwrap();
+    bob.apply_history_delta(&initial.bundle, &initial.blocks)
+        .unwrap();
+    assert_eq!(bob.observed_query_reads().unwrap().len(), 1);
+
+    for idx in 0..4 {
+        alice
+            .update_row(
+                "notes",
+                "note-2",
+                BTreeMap::from([("body".to_owned(), json!(format!("new-v{idx}")))]),
+            )
+            .unwrap();
+    }
+    alice
+        .compact_accepted_history("notes", "note-2", 1)
+        .unwrap();
+
+    let deltas = alice
+        .export_query_read_refresh_deltas(
+            &bob.observed_query_reads().unwrap(),
+            &bob.all_history_block_manifests().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].blocks.len(), 1);
+
+    for delta in deltas {
+        bob.apply_history_delta(&delta.bundle, &delta.blocks)
+            .unwrap();
+    }
+
+    let rows = bob
+        .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 1)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-2");
+    assert_eq!(rows[0].values["body"], json!("new-v3"));
+    assert_eq!(bob.storage_stats().unwrap().history_blocks, 1);
+}
+
+#[test]
 fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

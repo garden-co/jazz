@@ -315,3 +315,11 @@ Scope impact: canvas-style coordinate columns now store sealed values as numeric
 Decision: Add a previous-observed variant for top-created block-native history deltas.
 
 Scope impact: top-created observed refreshes can now include caller-provided previous row ids in the open-history repair set while still sending matching sealed history as blocks. I deferred the equivalent top-field previous-observed method because its signature needs a small options type rather than another long positional API.
+
+## Thu May 28 01:42:41 PDT 2026 - Observed Refresh History Deltas
+
+Decision: Add observed-query refresh APIs that return `HistoryDelta` values instead of only ordinary bundles.
+
+Why: once peers remember observed queries, refresh is the normal sync path. It should be able to transfer missing sealed blocks directly for predicate and top-query reads, including previous-observed repair rows, rather than forcing all sealed history back through row-bundle inflation.
+
+Scope impact: simple predicates, top-created, and top-field observed refreshes now use block-native deltas. Query shapes without block-native support still fall back to ordinary bundle refreshes with no blocks, preserving behavior while making remaining gaps explicit.
