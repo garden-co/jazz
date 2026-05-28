@@ -516,11 +516,23 @@ index and decode the block on demand.
 Prototype note: block manifests include a SHA-256 hash of the compressed payload.
 Import verifies this hash before inserting the block, so manifest-only import
 can stay fast without blindly accepting corrupted payload bytes.
+The prototype storage schema also persists this hash in `history_blocks`, so
+local manifest listing and block-presence checks do not need to read and hash
+every compressed payload.
 
 Prototype note: the runtime exposes both per-table and all-table block
 manifest/export helpers. The all-table helpers are intended for maintenance and
 sync discovery, where a peer may not know which user tables contain sealed
 history.
+
+Prototype note: the runtime now has a block-native table delta path:
+`export_table_history_delta(table, remote_manifests)` returns an ordinary bundle
+for open/hot history plus the sealed blocks missing from the receiver's
+manifest inventory. `export_all_history_delta(remote_manifests)` does the same
+across every user table. Receivers import blocks first and then apply the open
+bundle. The open bundle contains full row values, so the receiver does not need
+an intermediate projection rebuild to preserve omitted fields in the hot tail.
+This is a table-scope sync shape, not yet query-scope block planning.
 
 That optimization is deliberately separate from the first storage change. The
 first goal is to prove that sealed blocks reduce local storage and historical
@@ -642,7 +654,7 @@ can distinguish "fewer durable commits" wins from "fewer stored bytes" wins.
 - virtual table integration
 - chunked block tables
 - storing pending or branch-local history in blocks
-- block-native sync protocol
+- query-scoped block-native sync planning
 - global repacking across many rows
 
 Virtual tables may become useful later as a SQL interface over blocks, but the

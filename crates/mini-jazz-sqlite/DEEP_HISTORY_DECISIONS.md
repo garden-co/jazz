@@ -243,3 +243,9 @@ Scope impact: block-native receiver timing should include block import plus open
 Decision: Add an all-table history delta API that merges per-table open-history bundles and exports only sealed blocks missing from the receiver inventory.
 
 Scope impact: compacted-history sync no longer requires callers to manually negotiate every table. This is still table-scope history, not query-scope block planning, but it matches the first peer inventory exchange shape.
+
+## Thu May 28 00:42:26 PDT 2026 - RFC Sync Prototype Alignment
+
+Decision: Update the RFC to treat table/all-table block-native deltas as implemented prototype scope, while keeping query-scoped block planning as future work.
+
+Scope impact: the RFC now matches the current API boundary: receiver manifest inventory, open-history bundle, missing sealed block payloads, and no projection rebuild between block import and hot bundle apply.
