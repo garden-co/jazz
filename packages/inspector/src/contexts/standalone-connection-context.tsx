@@ -218,7 +218,7 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
 
     // Schema selection is URL state. Saved connections keep defaults for partial route redirects.
     void navigate({
-      to: appRoutes.dataExplorer,
+      to: location.pathname.endsWith("/live-query") ? appRoutes.liveQuery : appRoutes.dataExplorer,
       params: {
         connectionId: runtimeConnection.id,
         branch: runtimeConnection.branch,
