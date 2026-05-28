@@ -8439,9 +8439,9 @@ impl ColumnarI64Column {
             }
             runs.push([*value, 1]);
         }
-        if runs.len() * 2 < values.len() {
-            return Self::Runs { i64_runs: runs };
-        }
+        let raw = Self::Raw(values.clone());
+        let mut candidates = vec![raw];
+        candidates.push(Self::Runs { i64_runs: runs });
         if values.len() > 1 {
             let mut previous = values[0];
             let deltas = values
@@ -8453,12 +8453,12 @@ impl ColumnarI64Column {
                     delta
                 })
                 .collect();
-            return Self::Delta {
+            candidates.push(Self::Delta {
                 i64_base: values[0],
                 i64_deltas: deltas,
-            };
+            });
         }
-        Self::Raw(values)
+        smallest_json_column(candidates)
     }
 
     fn len(&self) -> usize {
@@ -8530,13 +8530,12 @@ impl ColumnarNullableI64Column {
                 len: 1,
             });
         }
-        if runs.len() * 2 < values.len() {
+        smallest_json_column(vec![
+            Self::Raw(values),
             Self::Runs {
                 nullable_i64_runs: runs,
-            }
-        } else {
-            Self::Raw(values)
-        }
+            },
+        ])
     }
 
     fn len(&self) -> usize {
@@ -8596,13 +8595,12 @@ impl ColumnarNullableJsonColumn {
                 len: 1,
             });
         }
-        if runs.len() * 2 < values.len() {
+        smallest_json_column(vec![
+            Self::Raw(values),
             Self::Runs {
                 nullable_json_runs: runs,
-            }
-        } else {
-            Self::Raw(values)
-        }
+            },
+        ])
     }
 
     fn len(&self) -> usize {
@@ -8662,11 +8660,7 @@ impl ColumnarI64VecColumn {
                 len: 1,
             });
         }
-        if runs.len() * 2 < values.len() {
-            Self::Runs { i64_vec_runs: runs }
-        } else {
-            Self::Raw(values)
-        }
+        smallest_json_column(vec![Self::Raw(values), Self::Runs { i64_vec_runs: runs }])
     }
 
     fn len(&self) -> usize {
@@ -8949,18 +8943,17 @@ fn encode_json_value_dictionary(values: Vec<JsonValue>) -> ColumnarValueColumn {
         });
         refs.push(next);
     }
-    if dict.len() < refs.len() {
+    smallest_json_column(vec![
+        ColumnarValueColumn::Json(
+            refs.iter()
+                .map(|idx| dict[*idx].clone())
+                .collect::<Vec<_>>(),
+        ),
         ColumnarValueColumn::JsonDictionary {
             json_value_dict: dict,
             json_value_refs: refs,
-        }
-    } else {
-        ColumnarValueColumn::Json(
-            refs.into_iter()
-                .map(|idx| dict[idx].clone())
-                .collect::<Vec<_>>(),
-        )
-    }
+        },
+    ])
 }
 
 fn json_xy_string(value: &JsonValue) -> Option<(f64, f64)> {
@@ -8973,6 +8966,20 @@ fn json_xy_string(value: &JsonValue) -> Option<(f64, f64)> {
     } else {
         None
     }
+}
+
+fn smallest_json_column<T>(candidates: Vec<T>) -> T
+where
+    T: Serialize,
+{
+    candidates
+        .into_iter()
+        .min_by_key(|candidate| {
+            serde_json::to_vec(candidate)
+                .map(|bytes| bytes.len())
+                .unwrap_or(usize::MAX)
+        })
+        .expect("at least one column candidate")
 }
 
 fn ensure_column_len(name: &str, actual: usize, expected: usize) -> Result<()> {
@@ -11170,7 +11177,7 @@ mod tests {
     #[test]
     fn columnar_history_block_payload_dictionary_codes_repeated_user_values() {
         let mut bundle = sample_block_bundle();
-        for epoch in 2..=4 {
+        for epoch in 2..=40 {
             let mut tx = bundle.txs[0].clone();
             tx.tx_id = format!("tx-node-{epoch}");
             tx.local_epoch = epoch;
@@ -11206,7 +11213,7 @@ mod tests {
     #[test]
     fn columnar_history_block_payload_compresses_integer_runs_and_deltas() {
         let mut bundle = sample_block_bundle();
-        for epoch in 2..=5 {
+        for epoch in 2..=80 {
             let mut tx = bundle.txs[0].clone();
             tx.tx_id = format!("tx-node-{epoch}");
             tx.local_epoch = epoch;

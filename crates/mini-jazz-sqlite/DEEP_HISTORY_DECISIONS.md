@@ -483,3 +483,11 @@ Decision: route global sealed point reads through the runtime history block cach
 Why: node-local point reads and transaction lookup already avoid repeated lz4/JSON decode inside one `Runtime`. Global point reads should share that behavior instead of using an uncached free function path.
 
 Scope impact: repeated global historical reads against the same sealed block can reuse the decoded block in memory. The logical API is unchanged.
+
+## Thu May 28 02:54:53 PDT 2026 - Codec Choices Must Earn Their Bytes
+
+Decision: choose run, delta, and dictionary value columns only when their serialized JSON representation is smaller than the raw column.
+
+Why: with JSON as the temporary block container, a clever physical column can be worse for shallow or high-entropy columns because the variant object names cost bytes. The encoder should make this decision per column rather than assuming a codec is always better.
+
+Scope impact: block format stays v9; only the encoder's choice policy changes. Canonical Block payloads improved in the measured append, Automerge, and canvas runs.
