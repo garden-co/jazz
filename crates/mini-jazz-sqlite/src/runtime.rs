@@ -7,7 +7,7 @@ use crate::sync::{
 };
 use crate::types::{
     ApplyBundleProfile, BranchInfo, HistoryBlockExport, HistoryBlockManifest, HistoryBlockTxRange,
-    HistoryCompactionStats, QueryExportProfile, RejectionInfo, RowView, StorageStats,
+    HistoryCompactionStats, HistoryDelta, QueryExportProfile, RejectionInfo, RowView, StorageStats,
     TransactionInfo,
 };
 use crate::{
@@ -487,7 +487,7 @@ impl Runtime {
         &self,
         table_name: &str,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+    ) -> Result<HistoryDelta> {
         self.schema.table_def(table_name)?;
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
@@ -514,13 +514,13 @@ impl Runtime {
             .filter(|manifest| !remote_keys.contains(&history_block_manifest_key(manifest)))
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
-        Ok((bundle, blocks))
+        Ok(HistoryDelta { bundle, blocks })
     }
 
     pub fn export_all_history_delta(
         &self,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+    ) -> Result<HistoryDelta> {
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
         let txs = export_txs(&self.conn)?;
@@ -552,10 +552,10 @@ impl Runtime {
         let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
-        Ok((
-            make_bundle(&self.schema, branches, txs, reads, Vec::new(), history),
+        Ok(HistoryDelta {
+            bundle: make_bundle(&self.schema, branches, txs, reads, Vec::new(), history),
             blocks,
-        ))
+        })
     }
 
     pub fn compact_accepted_history(
@@ -3611,7 +3611,7 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+    ) -> Result<HistoryDelta> {
         let rows = self.read_rows_where_eq(table_name, field_name, value.clone())?;
         self.export_query_scope_history_delta(
             table_name,
@@ -3629,7 +3629,7 @@ impl Runtime {
         field_name: &str,
         needle: &str,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+    ) -> Result<HistoryDelta> {
         let rows = self.read_rows_where_contains(table_name, field_name, needle)?;
         self.export_query_scope_history_delta(
             table_name,
@@ -3647,7 +3647,7 @@ impl Runtime {
         field_name: &str,
         values: Vec<JsonValue>,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+    ) -> Result<HistoryDelta> {
         let rows = self.read_rows_where_in(table_name, field_name, values.clone())?;
         self.export_query_scope_history_delta(
             table_name,
@@ -3665,7 +3665,7 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+    ) -> Result<HistoryDelta> {
         let rows = self.read_rows_where_ne(table_name, field_name, value.clone())?;
         self.export_query_scope_history_delta(
             table_name,
@@ -4428,7 +4428,7 @@ impl Runtime {
         value: JsonValue,
         rows: Vec<RowView>,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+    ) -> Result<HistoryDelta> {
         let table = self.schema.table_def(table_name)?;
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
@@ -4539,7 +4539,7 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
-        Ok((bundle, blocks))
+        Ok(HistoryDelta { bundle, blocks })
     }
 
     fn export_batched_query_scopes(

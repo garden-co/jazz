@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::sync::Bundle;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
@@ -119,6 +120,12 @@ pub struct HistoryBlockExport {
     pub tx_ranges: Vec<HistoryBlockTxRange>,
     #[serde(skip)]
     pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct HistoryDelta {
+    pub bundle: Bundle,
+    pub blocks: Vec<HistoryBlockExport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

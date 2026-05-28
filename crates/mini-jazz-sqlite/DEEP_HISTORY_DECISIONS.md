@@ -291,3 +291,9 @@ Scope impact: table, all-table, and equality-query deltas now share one receiver
 Decision: Extend query-scoped history deltas from equality to `contains`, `in`, and `ne` predicates using the same open-bundle plus missing-block transfer shape.
 
 Scope impact: the first query-scoped block-native sync family now covers the simple predicate operators used by ordinary observed query refreshes. Top-N/page operators still need their own planning because they carry boundary/previous-observed state.
+
+## Thu May 28 01:27:52 PDT 2026 - Typed History Delta
+
+Decision: Introduce a `HistoryDelta` return type for block-native sync APIs instead of anonymous `(Bundle, Vec<HistoryBlockExport>)` tuples.
+
+Scope impact: table, all-table, and query predicate deltas now expose the same named shape. This keeps receiver code aligned with `apply_history_delta` and makes the API harder to misuse as more query operators gain block-native variants.

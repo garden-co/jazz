@@ -538,7 +538,8 @@ Simple predicate history deltas (`eq`, `contains`, `in`, and `ne`) apply the
 same block-native shape by filtering the sealed block set to the query's
 visible/repair row ids. This proves the query-scoped planning boundary for
 ordinary predicate classes, not top-N/page operators yet. Receivers can apply any
-of these deltas through `apply_history_delta(bundle, blocks)`, which imports
+of these APIs return a named `HistoryDelta { bundle, blocks }`. Receivers can
+apply any delta through `apply_history_delta(bundle, blocks)`, which imports
 missing blocks before applying the hot/open bundle.
 
 That optimization is deliberately separate from the first storage change. The

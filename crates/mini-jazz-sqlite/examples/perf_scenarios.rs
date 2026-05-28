@@ -5259,12 +5259,13 @@ fn run_naive_deep_history_case(
             ));
         }
         let block_export_started = Instant::now();
-        let (delta_bundle, history_blocks) = writer.export_table_history_delta(input.table, &[])?;
+        let delta = writer.export_table_history_delta(input.table, &[])?;
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
-        let delta_bundle_summary = BundleSummary::from(&delta_bundle)?;
-        block_native_blocks = Some(history_blocks.len());
+        let delta_bundle_summary = BundleSummary::from(&delta.bundle)?;
+        block_native_blocks = Some(delta.blocks.len());
         block_native_payload_bytes = Some(
-            history_blocks
+            delta
+                .blocks
                 .iter()
                 .map(|block| block.payload.len())
                 .sum::<usize>(),
@@ -5281,8 +5282,7 @@ fn run_naive_deep_history_case(
             input.schema.clone(),
         )?;
         let block_import_started = Instant::now();
-        block_peer.import_history_blocks(&history_blocks)?;
-        block_peer.profile_apply_bundle(&delta_bundle)?;
+        block_peer.apply_history_delta(&delta.bundle, &delta.blocks)?;
         let block_rows = block_peer.read_rows(input.table)?;
         if block_rows.len() != 1 {
             return Err(format!(

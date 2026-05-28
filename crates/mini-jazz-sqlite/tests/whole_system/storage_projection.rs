@@ -392,11 +392,12 @@ fn table_history_delta_syncs_open_rows_and_missing_blocks() {
         .compact_accepted_history("notes", "note-1", 1)
         .unwrap();
 
-    let (bundle, blocks) = alice.export_table_history_delta("notes", &[]).unwrap();
-    assert_eq!(bundle.history.len(), 1);
-    assert_eq!(blocks.len(), 1);
+    let delta = alice.export_table_history_delta("notes", &[]).unwrap();
+    assert_eq!(delta.bundle.history.len(), 1);
+    assert_eq!(delta.blocks.len(), 1);
 
-    bob.apply_history_delta(&bundle, &blocks).unwrap();
+    bob.apply_history_delta(&delta.bundle, &delta.blocks)
+        .unwrap();
 
     let rows = bob.read_rows("notes").unwrap();
     assert_eq!(rows.len(), 1);
@@ -406,10 +407,10 @@ fn table_history_delta_syncs_open_rows_and_missing_blocks() {
     assert_eq!(bob.storage_stats().unwrap().sealed_history_rows, 4);
 
     let receiver_inventory = bob.all_history_block_manifests().unwrap();
-    let (_, already_have_blocks) = alice
+    let already_have = alice
         .export_table_history_delta("notes", &receiver_inventory)
         .unwrap();
-    assert!(already_have_blocks.is_empty());
+    assert!(already_have.blocks.is_empty());
 }
 
 #[test]
@@ -452,14 +453,15 @@ fn query_history_delta_syncs_open_rows_and_matching_blocks() {
         .compact_accepted_history("notes", "note-1", 1)
         .unwrap();
 
-    let (bundle, blocks) = alice
+    let delta = alice
         .export_query_where_eq_history_delta("notes", "pinned", json!(true), &[])
         .unwrap();
-    assert_eq!(bundle.history.len(), 1);
-    assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].manifest.row_id, "note-1");
+    assert_eq!(delta.bundle.history.len(), 1);
+    assert_eq!(delta.blocks.len(), 1);
+    assert_eq!(delta.blocks[0].manifest.row_id, "note-1");
 
-    bob.apply_history_delta(&bundle, &blocks).unwrap();
+    bob.apply_history_delta(&delta.bundle, &delta.blocks)
+        .unwrap();
 
     let rows = bob
         .read_rows_where_eq("notes", "pinned", json!(true))
@@ -468,7 +470,7 @@ fn query_history_delta_syncs_open_rows_and_matching_blocks() {
     assert_eq!(rows[0].id, "note-1");
     assert_eq!(rows[0].values["body"], json!("v5"));
 
-    let (_, already_have_blocks) = alice
+    let already_have = alice
         .export_query_where_eq_history_delta(
             "notes",
             "pinned",
@@ -476,7 +478,7 @@ fn query_history_delta_syncs_open_rows_and_matching_blocks() {
             &bob.all_history_block_manifests().unwrap(),
         )
         .unwrap();
-    assert!(already_have_blocks.is_empty());
+    assert!(already_have.blocks.is_empty());
 }
 
 #[test]
@@ -519,13 +521,14 @@ fn contains_query_history_delta_syncs_matching_blocks() {
         .compact_accepted_history("notes", "note-1", 1)
         .unwrap();
 
-    let (bundle, blocks) = alice
+    let delta = alice
         .export_query_where_contains_history_delta("notes", "body", "alpha", &[])
         .unwrap();
-    assert_eq!(bundle.history.len(), 1);
-    assert_eq!(blocks.len(), 1);
+    assert_eq!(delta.bundle.history.len(), 1);
+    assert_eq!(delta.blocks.len(), 1);
 
-    bob.apply_history_delta(&bundle, &blocks).unwrap();
+    bob.apply_history_delta(&delta.bundle, &delta.blocks)
+        .unwrap();
     let rows = bob
         .read_rows_where_contains("notes", "body", "alpha")
         .unwrap();
@@ -587,11 +590,12 @@ fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
     }
     alice.compact_all_history(1, 1).unwrap();
 
-    let (bundle, blocks) = alice.export_all_history_delta(&[]).unwrap();
-    assert_eq!(bundle.history.len(), 2);
-    assert_eq!(blocks.len(), 2);
+    let delta = alice.export_all_history_delta(&[]).unwrap();
+    assert_eq!(delta.bundle.history.len(), 2);
+    assert_eq!(delta.blocks.len(), 2);
 
-    bob.apply_history_delta(&bundle, &blocks).unwrap();
+    bob.apply_history_delta(&delta.bundle, &delta.blocks)
+        .unwrap();
 
     let docs = bob.read_rows("docs").unwrap();
     assert_eq!(docs.len(), 1);
@@ -602,10 +606,10 @@ fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
     assert_eq!(comments[0].values["body"], json!("comment v4"));
     assert_eq!(comments[0].values["resolved"], json!(false));
 
-    let (_, already_have_blocks) = alice
+    let already_have = alice
         .export_all_history_delta(&bob.all_history_block_manifests().unwrap())
         .unwrap();
-    assert!(already_have_blocks.is_empty());
+    assert!(already_have.blocks.is_empty());
 }
 
 #[test]
