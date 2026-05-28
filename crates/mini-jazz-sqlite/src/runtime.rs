@@ -6185,24 +6185,7 @@ fn compactable_history_tx_nums(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let compact_len = tx_nums.len().saturating_sub(hot_tail);
-    let current_visible_tx_num = conn
-        .query_row(
-            &format!(
-                "SELECT visible_tx_num
-                 FROM {}
-                 WHERE row_num = ?
-                   AND j_branch_num = 1",
-                crate::schema::current_table(table_name),
-            ),
-            params![row_num],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    Ok(tx_nums
-        .into_iter()
-        .take(compact_len)
-        .filter(|tx_num| Some(*tx_num) != current_visible_tx_num)
-        .collect())
+    Ok(tx_nums.into_iter().take(compact_len).collect())
 }
 
 fn history_block_kind_name(kind: i64) -> &'static str {

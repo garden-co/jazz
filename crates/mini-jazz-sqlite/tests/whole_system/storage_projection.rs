@@ -464,7 +464,7 @@ fn compaction_keeps_visible_head_rebuildable_with_zero_hot_tail() {
     alice
         .compact_accepted_history("notes", "note-1", 0)
         .unwrap();
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 1);
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 0);
 
     alice.clear_current_projection_for_test().unwrap();
     assert!(alice.read_rows("notes").unwrap().is_empty());
@@ -673,7 +673,7 @@ fn compact_all_history_runs_accepted_and_rejected_passes() {
     assert_eq!(accepted.history_blocks, 1);
     assert_eq!(accepted.sealed_history_rows, 3);
     assert_eq!(rejected.history_blocks, 2);
-    assert_eq!(rejected.sealed_history_rows, 4);
+    assert_eq!(rejected.sealed_history_rows, 5);
 }
 
 #[test]

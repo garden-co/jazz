@@ -152,3 +152,10 @@ Wed May 27 23:45:50 PDT 2026
 Decision: teach the runtime rebuild path to replay the latest accepted sealed history version per row/branch after the ordinary open-history rebuild. Open history remains authoritative when it contains a newer visible version; sealed blocks fill gaps left by aggressive compaction or block-native import.
 
 Scope impact: this is a runtime-level bridge for the prototype, not yet a shared projection engine. It deliberately decodes whole blocks because rebuild is already an offline recovery path.
+Wed May 27 23:48:21 PDT 2026
+
+## Visible Head History Can Be Sealed
+
+Decision: allow accepted compaction with `hot_tail = 0` to seal the current visible history row. The current projection row remains the hot read copy, and the tx row remains open while current points at it; block-aware rebuild can recover the projection if current is cleared.
+
+Scope impact: this reduces open history rows further without forcing current reads to decode blocks or deleting transaction metadata still referenced by current rows.
