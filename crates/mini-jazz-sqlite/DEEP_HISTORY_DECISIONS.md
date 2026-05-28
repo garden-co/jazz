@@ -98,3 +98,11 @@ Decision: benchmark block compaction should call the table-level compaction API,
 Why: the maintenance boundary we want long-term is table/row-family compaction, not callers manually knowing a hot row id. Using the table API in benchmarks keeps the benchmark closer to the real maintenance shape while producing the same single-row behavior for the current canonical scenarios.
 
 Scope impact: the benchmark note now reports "table history block compaction". This is not expected to materially change current numbers because each canonical workload still has one hot row.
+
+## Wed May 27 23:28:45 PDT 2026
+
+Decision: prototype batched writes as "many logical Jazz transactions inside one SQLite transaction", starting with a narrow batched-update API.
+
+Why: this tests the stretch-goal premise without changing transaction identity or visibility semantics. Each logical update still receives its own tx id, history row, read set, write set, and sync representation; only the durable SQLite commit boundary is shared.
+
+Scope impact: `update_rows_batched` is intentionally narrow and does not yet provide scheduler/count/time policies. It is enough to benchmark whether reducing commit count matters for append/edit streams before designing the production API.

@@ -561,6 +561,61 @@ fn table_rejected_history_compaction_seals_each_rejected_row() {
 }
 
 #[test]
+fn batched_updates_keep_distinct_jazz_transactions_but_commit_together() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx_ids = alice
+        .update_rows_batched(
+            "notes",
+            vec![
+                (
+                    "note-1".to_owned(),
+                    BTreeMap::from([("body".to_owned(), json!("v2"))]),
+                ),
+                (
+                    "note-1".to_owned(),
+                    BTreeMap::from([("body".to_owned(), json!("v3"))]),
+                ),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(tx_ids, vec!["tx-alice-node-2", "tx-alice-node-3"]);
+    assert_eq!(
+        alice.read_rows("notes").unwrap()[0].values["body"],
+        json!("v3")
+    );
+    assert_eq!(
+        alice.export_table_history("notes").unwrap().history.len(),
+        3
+    );
+    assert_eq!(
+        alice.transaction_previous_read_rows(&tx_ids[1]).unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned())]
+    );
+
+    bob.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    assert_eq!(
+        bob.read_rows("notes").unwrap()[0].values["body"],
+        json!("v3")
+    );
+}
+
+#[test]
 fn delete_is_history_not_removal() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
