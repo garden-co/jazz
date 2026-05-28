@@ -411,3 +411,11 @@ Decision: Apply the `max_rows_per_block` policy knob to rejected-history compact
 Why: rejected histories can also grow deep, especially when a client repeatedly retries an invalid write. They should get the same block-size tradeoff as accepted histories and remain separate from accepted blocks.
 
 Scope impact: policy compaction now splits accepted and rejected row histories. Direct rejected row/table compaction keeps the existing single-block behavior unless called through the policy path.
+
+## Thu May 28 02:22:50 PDT 2026 - Benchmark Block Size Knob
+
+Decision: expose `MINI_JAZZ_DEEP_HISTORY_MAX_ROWS_PER_BLOCK` in the deep-history block benchmarks.
+
+Why: one huge block is the best-case compression point but the worst-case first cold point-read unit. We need to be able to measure smaller block sizes against the same canonical write workloads before choosing a production default or adaptive policy.
+
+Scope impact: the default Block column remains one block per compacted row history. Setting the env var routes benchmark compaction through `HistoryCompactionPolicy` and records the row cap in the benchmark notes.

@@ -1,7 +1,7 @@
 use mini_jazz_sqlite::sync::{merge_bundles, Bundle};
 use mini_jazz_sqlite::{
-    persisted_rope, ApplyBundleProfile, HistoryBlockManifest, QueryExportProfile, Result, RowDiff,
-    RowsSubscription, Runtime, SchemaDef, Storage,
+    persisted_rope, ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy,
+    QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -4164,6 +4164,7 @@ fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: None,
+        compact_max_rows_per_block: None,
         reclaim_after_compact: false,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec!["Naive baseline: one full-row text update per token-like append.".to_owned()],
@@ -4175,6 +4176,7 @@ fn run_append_stream_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 445).max(1);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let max_rows_per_block = deep_history_max_rows_per_block();
     let reclaim_after_compact = env_bool("MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT", false);
     let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
     let mut state = String::new();
@@ -4195,6 +4197,7 @@ fn run_append_stream_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: Some(hot_tail),
+        compact_max_rows_per_block: max_rows_per_block,
         reclaim_after_compact,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
@@ -4234,6 +4237,7 @@ fn run_automerge_paper_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: None,
+        compact_max_rows_per_block: None,
         reclaim_after_compact: false,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
@@ -4254,6 +4258,7 @@ fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseRepo
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 580).max(1);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let max_rows_per_block = deep_history_max_rows_per_block();
     let reclaim_after_compact = env_bool("MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT", false);
     let mut state = trace.start_content;
     let txns = trace.txns;
@@ -4275,6 +4280,7 @@ fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseRepo
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: Some(hot_tail),
+        compact_max_rows_per_block: max_rows_per_block,
         reclaim_after_compact,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
@@ -4362,6 +4368,7 @@ fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: Some(reference_json),
         compare_to_final_payload: false,
         compact_hot_tail: None,
+        compact_max_rows_per_block: None,
         reclaim_after_compact: false,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
@@ -4376,6 +4383,7 @@ fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseRep
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 780).max(1);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let max_rows_per_block = deep_history_max_rows_per_block();
     let reclaim_after_compact = env_bool("MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT", false);
     let mut all_positions = Vec::with_capacity(target_updates);
     for frame in 0..target_updates {
@@ -4397,6 +4405,7 @@ fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseRep
         final_reference_json: Some(reference_json),
         compare_to_final_payload: false,
         compact_hot_tail: Some(hot_tail),
+        compact_max_rows_per_block: max_rows_per_block,
         reclaim_after_compact,
         write_batch_size: deep_history_write_batch_size(),
         notes: vec![
@@ -4448,6 +4457,7 @@ struct DeepHistoryCaseInput {
     final_reference_json: Option<String>,
     compare_to_final_payload: bool,
     compact_hot_tail: Option<usize>,
+    compact_max_rows_per_block: Option<usize>,
     reclaim_after_compact: bool,
     write_batch_size: Option<usize>,
     notes: Vec<String>,
@@ -5237,8 +5247,20 @@ fn run_naive_deep_history_case(
     let mut block_native_payload_bytes = None;
     if let Some(hot_tail) = input.compact_hot_tail {
         let compaction_started = Instant::now();
-        let compaction = writer.compact_table_accepted_history(input.table, hot_tail, hot_tail)?;
+        let compaction = if let Some(max_rows_per_block) = input.compact_max_rows_per_block {
+            writer.compact_history_with_policy(
+                HistoryCompactionPolicy::accepted_only(hot_tail, hot_tail)
+                    .with_max_rows_per_block(max_rows_per_block),
+            )?
+        } else {
+            writer.compact_table_accepted_history(input.table, hot_tail, hot_tail)?
+        };
         let compaction_ms = ms(compaction_started.elapsed());
+        if let Some(max_rows_per_block) = input.compact_max_rows_per_block {
+            notes.push(format!(
+                "History block row cap: at most {max_rows_per_block} sealed history rows per block."
+            ));
+        }
         notes.push(format!(
             "Table history block compaction: hot tail {}, sealed rows {}, blocks {}, sealed tx rows {}, uncompressed bytes {}, compressed bytes {}, compaction {:.2} ms.",
             hot_tail,
@@ -5736,6 +5758,10 @@ fn env_optional_usize(name: &str) -> Option<usize> {
 
 fn deep_history_write_batch_size() -> Option<usize> {
     env_optional_usize("MINI_JAZZ_DEEP_HISTORY_WRITE_BATCH_SIZE").filter(|size| *size > 1)
+}
+
+fn deep_history_max_rows_per_block() -> Option<usize> {
+    env_optional_usize("MINI_JAZZ_DEEP_HISTORY_MAX_ROWS_PER_BLOCK").filter(|size| *size > 0)
 }
 
 fn env_bool(name: &str, default: bool) -> bool {

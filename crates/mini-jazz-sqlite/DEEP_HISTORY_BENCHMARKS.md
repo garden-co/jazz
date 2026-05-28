@@ -44,6 +44,15 @@ target/debug/examples/perf_scenarios
 
 Canvas `3900` frames is about 65 simulated seconds at 60 FPS.
 
+Block experiments also accept:
+
+```bash
+MINI_JAZZ_DEEP_HISTORY_MAX_ROWS_PER_BLOCK=500
+```
+
+Leave it unset for the current canonical Block column, which compacts each
+row's cold accepted history into one lz4 block.
+
 ## Experiment Columns
 
 | Short | Meaning                                                                        |
