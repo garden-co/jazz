@@ -163,3 +163,21 @@ intentionally `N/A`; compare to the gzipped position trace instead.
   row-history export still dominated.
 - Current text materialization is expensive in the incremental sequence probes;
   that is a useful pressure point for the next storage shape.
+
+## Batched Write Probe
+
+Quick non-canonical probe after adding `MINI_JAZZ_DEEP_HISTORY_WRITE_BATCH_SIZE`.
+Inputs were 2,000 updates per scenario, sample every 500 updates, max 10s,
+write batch size 64, no history block compaction. The point was only to
+separate SQLite commit cost from export/apply/cold-load cost.
+
+| Scenario  | total loop | write only | avg write/update | sampled receive | cold load | database bytes | bundle bytes |
+| --------- | ---------: | ---------: | ---------------: | --------------: | --------: | -------------: | -----------: |
+| Append    |  5089.6 ms |   499.4 ms |          0.25 ms |       4585.3 ms | 1604.2 ms |     15,663,104 |   12,343,821 |
+| Automerge |  3103.4 ms |   415.8 ms |          0.21 ms |       2633.5 ms |  964.0 ms |      5,431,296 |    2,324,985 |
+| Canvas    |  2543.3 ms |   356.6 ms |          0.18 ms |       2183.7 ms |  786.5 ms |        393,216 |      437,270 |
+
+Interpretation: grouped SQLite commits do help the pure write side, but the
+large remaining time is still history export/apply/cold load. This argues for
+tracking batched writes as an orthogonal benchmark dimension, not as a
+replacement for history blocks.
