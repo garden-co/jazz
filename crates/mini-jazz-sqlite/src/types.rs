@@ -115,8 +115,16 @@ pub struct HistoryBlockManifest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HistoryBlockExport {
     pub manifest: HistoryBlockManifest,
+    pub tx_ranges: Vec<HistoryBlockTxRange>,
     #[serde(skip)]
     pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HistoryBlockTxRange {
+    pub node_id: String,
+    pub min_local_epoch: i64,
+    pub max_local_epoch: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

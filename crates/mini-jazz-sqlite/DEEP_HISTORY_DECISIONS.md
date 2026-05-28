@@ -173,3 +173,10 @@ Wed May 27 23:55:30 PDT 2026
 Decision: keep history compaction and SQLite file reclamation separate. Compaction should free rows/pages quickly inside the normal write path; a separate explicit reclaim operation can checkpoint/truncate WAL and run `VACUUM` when the caller is willing to pay the latency.
 
 Scope impact: benchmarks can report both live database bytes after compaction and total file bytes after reclaim, instead of hiding vacuum cost inside every compaction call.
+Thu May 28 00:03:12 PDT 2026
+
+## Tx Ranges In Block Export Manifests
+
+Decision: include node-local tx ranges in exported history block records and use those ranges to build `history_block_tx_index` on import without decoding the full block payload. Payload decoding remains the on-demand path for exact transaction info and historical rows.
+
+Scope impact: block import becomes a manifest operation plus one payload insert; trusted/local block exchange gets faster, while future untrusted block exchange will need a separate integrity/hash validation layer.

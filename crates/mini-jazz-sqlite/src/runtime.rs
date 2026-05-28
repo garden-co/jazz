@@ -6,7 +6,7 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::types::{
-    ApplyBundleProfile, BranchInfo, HistoryBlockExport, HistoryBlockManifest,
+    ApplyBundleProfile, BranchInfo, HistoryBlockExport, HistoryBlockManifest, HistoryBlockTxRange,
     HistoryCompactionStats, QueryExportProfile, RejectionInfo, RowView, StorageStats,
     TransactionInfo,
 };
@@ -798,6 +798,7 @@ impl Runtime {
             };
             Ok(HistoryBlockExport {
                 manifest,
+                tx_ranges: history_block_tx_ranges(&self.conn, row.get(0)?)?,
                 payload: row.get(11)?,
             })
         })?;
@@ -813,12 +814,7 @@ impl Runtime {
             let table_num = crate::schema::table_num(&db, &block.manifest.table)?;
             let row_num = ensure_row_id(&db, &block.manifest.table, &block.manifest.row_id)?;
             let block_kind = history_block_kind_value(&block.manifest.kind)?;
-            let bundle = decode_history_block_payload(
-                &block.manifest.codec,
-                block.manifest.format_version,
-                &block.payload,
-            )?;
-            validate_history_block_export(block, &bundle)?;
+            validate_history_block_export_manifest(block)?;
             if history_block_exists(&db, block_kind, table_num, row_num, block)? {
                 continue;
             }
@@ -842,7 +838,7 @@ impl Runtime {
                 ],
             )?;
             let block_id = db.last_insert_rowid();
-            insert_history_block_tx_index_for_records(&db, block_id, &bundle.txs)?;
+            insert_history_block_tx_index_for_ranges(&db, block_id, &block.tx_ranges)?;
             imported += 1;
         }
         db.commit()?;
@@ -6244,40 +6240,14 @@ fn history_block_exists(
     Ok(count > 0)
 }
 
-fn validate_history_block_export(block: &HistoryBlockExport, bundle: &Bundle) -> Result<()> {
+fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<()> {
     if block.manifest.compressed_bytes != block.payload.len() as i64 {
         return Err(crate::Error::new(
             "history block compressed byte count mismatch",
         ));
     }
-    if block.manifest.row_count != bundle.history.len() as i64 {
-        return Err(crate::Error::new("history block row count mismatch"));
-    }
-    if block.manifest.tx_count != bundle.txs.len() as i64 {
-        return Err(crate::Error::new("history block tx count mismatch"));
-    }
-    let invalid_outcome = match block.manifest.kind.as_str() {
-        "accepted" => bundle
-            .txs
-            .iter()
-            .any(|record| record.outcome == tx::OUTCOME_REJECTED),
-        "rejected" => bundle
-            .txs
-            .iter()
-            .any(|record| record.outcome != tx::OUTCOME_REJECTED),
-        _ => return Err(crate::Error::new("history block has unknown kind")),
-    };
-    if invalid_outcome {
-        return Err(crate::Error::new(
-            "history block kind does not match contained transaction outcomes",
-        ));
-    }
-    if bundle.history.iter().any(|record| {
-        record.table != block.manifest.table || record.row_id != block.manifest.row_id
-    }) {
-        return Err(crate::Error::new(
-            "history block manifest row does not match contained history",
-        ));
+    if block.manifest.tx_count > 0 && block.tx_ranges.is_empty() {
+        return Err(crate::Error::new("history block missing tx ranges"));
     }
     Ok(())
 }
@@ -6455,31 +6425,47 @@ fn insert_history_block_tx_index(conn: &Connection, block_id: i64, tx_nums: &[i6
     Ok(())
 }
 
-fn insert_history_block_tx_index_for_records(
+fn insert_history_block_tx_index_for_ranges(
     conn: &Connection,
     block_id: i64,
-    txs: &[TxRecord],
+    ranges: &[HistoryBlockTxRange],
 ) -> Result<()> {
-    let mut by_node = BTreeMap::<i64, (i64, i64)>::new();
-    for tx in txs {
-        let node_num = tx::ensure_node(conn, &tx.node_id)?;
-        by_node
-            .entry(node_num)
-            .and_modify(|range| {
-                range.0 = range.0.min(tx.local_epoch);
-                range.1 = range.1.max(tx.local_epoch);
-            })
-            .or_insert((tx.local_epoch, tx.local_epoch));
-    }
-    for (node_num, (min_local_epoch, max_local_epoch)) in by_node {
+    for range in ranges {
+        let node_num = tx::ensure_node(conn, &range.node_id)?;
         conn.execute(
             "INSERT INTO history_block_tx_index
              (node_num, min_local_epoch, max_local_epoch, block_id)
              VALUES (?, ?, ?, ?)",
-            params![node_num, min_local_epoch, max_local_epoch, block_id],
+            params![
+                node_num,
+                range.min_local_epoch,
+                range.max_local_epoch,
+                block_id
+            ],
         )?;
     }
     Ok(())
+}
+
+fn history_block_tx_ranges(
+    conn: &Connection,
+    block_id: i64,
+) -> rusqlite::Result<Vec<HistoryBlockTxRange>> {
+    let mut stmt = conn.prepare(
+        "SELECT node.node_id, idx.min_local_epoch, idx.max_local_epoch
+         FROM history_block_tx_index idx
+         JOIN jazz_node node ON node.node_num = idx.node_num
+         WHERE idx.block_id = ?
+         ORDER BY node.node_id, idx.min_local_epoch, idx.max_local_epoch",
+    )?;
+    let rows = stmt.query_map(params![block_id], |row| {
+        Ok(HistoryBlockTxRange {
+            node_id: row.get(0)?,
+            min_local_epoch: row.get(1)?,
+            max_local_epoch: row.get(2)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
 }
 
 fn delete_history_rows_for_tx_nums(
