@@ -82,10 +82,12 @@ row's cold accepted history into one lz4 block.
 |   Block | Base3 plus sealed lz4 history blocks after the write loop                |
 | Block+S | Block plus immutable sequence sidecar roots and incremental sidecar sync |
 
-`Block+S` is the latest immutable sidecar implementation: text/position sidecar
-segments are immutable, old Jazz root history is sealed into lz4 blocks, and
-the current text root is rebuilt into large immutable leaves after compaction so
-recent/current reads stay shallow.
+`Block+S` is the latest immutable sidecar implementation for large text
+columns: text sidecar segments are immutable, old Jazz root history is sealed
+into lz4 blocks, and the current text root is rebuilt into large immutable
+leaves after compaction so recent/current reads stay shallow. Canvas stays inline
+in this column; its Block+S numbers are a no-sidecar control run through the same
+current code.
 
 ## Timing Fields
 
@@ -144,28 +146,28 @@ count; point reads and `transaction_info` stay as absolute per-call latencies.
 
 ### Canvas
 
-| Metric                        |      Base3 |    Block | Block+S |
-| ----------------------------- | ---------: | -------: | ------: |
-| completed updates             |       3900 |     3900 |     N/A |
-| total loop / update           |    2.18 ms |  2.16 ms |     N/A |
-| write only / update           |    0.21 ms |  0.23 ms |     N/A |
-| sampled receive / update      |    1.97 ms |  1.93 ms |     N/A |
-| current read                  |    0.16 ms |  0.13 ms |     N/A |
-| historical read avg           | 2080.19 ms | 98.32 ms |     N/A |
-| tx info avg                   |    2.35 ms |  0.39 ms |     N/A |
-| native export / update        |    0.04 ms | 0.008 ms |     N/A |
-| native import / update        |    0.58 ms |  0.08 ms |     N/A |
-| native sync bytes             |    858,561 |  337,476 |     N/A |
-| live database / position gzip |      8.61x |    5.11x |     N/A |
+| Metric                        |      Base3 |    Block |   Block+S |
+| ----------------------------- | ---------: | -------: | --------: |
+| completed updates             |       3900 |     3900 |      3900 |
+| total loop / update           |    2.18 ms |  2.16 ms |   2.18 ms |
+| write only / update           |    0.21 ms |  0.23 ms |   0.23 ms |
+| sampled receive / update      |    1.97 ms |  1.93 ms |   1.95 ms |
+| current read                  |    0.16 ms |  0.13 ms |   0.14 ms |
+| historical read avg           | 2080.19 ms | 98.32 ms | 100.07 ms |
+| tx info avg                   |    2.35 ms |  0.39 ms |   0.43 ms |
+| native export / update        |    0.04 ms | 0.008 ms |  0.008 ms |
+| native import / update        |    0.58 ms |  0.08 ms |   0.08 ms |
+| native sync bytes             |    858,561 |  337,476 |   337,675 |
+| live database / position gzip |      8.61x |    5.11x |     5.11x |
 
 ## Notes
 
 - Current reads remain fast in the naive baseline because the current projection
   is doing its job.
 - `Block+S` reduces native sync payloads by moving large text values into
-  immutable sidecar segments. Its
-  current write path is intentionally unbatched, so write cost is worse than
-  Base3/Block for now.
+  immutable sidecar segments. Its current write path is intentionally unbatched,
+  so write cost is worse than Base3/Block for now. Canvas does not use the
+  sidecar in `Block+S`; it is the inline history-block control.
 - Current-root compaction in `Block+S` makes text current reads shallow again,
   while sealed historical roots still preserve older versions.
 - The canonical Block experiment keeps one sample interval as the hot tail

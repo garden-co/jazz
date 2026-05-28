@@ -4194,6 +4194,9 @@ fn run_all_deep_history_block_rope_probes() -> BenchResult<Vec<DeepHistoryReport
         DeepHistoryReport::AutomergePaperHistoryBlocksJazzRope(
             run_automerge_paper_history_blocks_jazz_rope_probe()?,
         ),
+        DeepHistoryReport::CanvasPositionsHistoryBlocks(
+            run_canvas_positions_history_blocks_probe()?
+        ),
     ])
 }
 
