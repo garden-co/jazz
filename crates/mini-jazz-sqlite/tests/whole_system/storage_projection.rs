@@ -1924,6 +1924,73 @@ fn batched_writes_roll_back_atomically_on_validation_error() {
 }
 
 #[test]
+fn batched_writes_keep_policy_denials_per_logical_transaction() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice doc"))]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "docs",
+        "doc-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob doc"))]),
+    )
+    .unwrap();
+    bob.apply_bundle(&alice.export_table_history("docs").unwrap())
+        .unwrap();
+
+    let tx_ids = bob
+        .insert_rows_batched(
+            "comments",
+            vec![
+                (
+                    "comment-ok".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("allowed")),
+                        ("doc".to_owned(), json!("doc-bob")),
+                    ]),
+                ),
+                (
+                    "comment-denied".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("denied")),
+                        ("doc".to_owned(), json!("doc-alice")),
+                    ]),
+                ),
+            ],
+        )
+        .unwrap();
+
+    let comments = bob.read_rows("comments").unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].id, "comment-ok");
+    assert_eq!(
+        bob.transaction_info(&tx_ids[0]).unwrap().rejection_code,
+        None
+    );
+    assert_eq!(
+        bob.transaction_info(&tx_ids[1]).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn batched_upserts_can_mix_creates_and_updates() {
     let schema = support::notes_schema();
     let mut alice =

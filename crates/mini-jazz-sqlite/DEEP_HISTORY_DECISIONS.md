@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:49:47 PDT 2026
+
+Decision: keep policy denials per-logical-transaction inside grouped SQLite commits.
+
+Why: batching should change the durable commit boundary, not Jazz policy semantics. A denied write is still a rejected Jazz transaction, while allowed siblings in the same SQLite batch can commit.
+
+Scope impact: batched inserts now have a regression with one allowed comment and one policy-denied comment. The batch returns both tx ids, commits the allowed row, and records `policy_denied` only on the denied tx.
+
 ## Thu May 28 03:48:16 PDT 2026
 
 Decision: add grouped deep-history selectors for Block and Incr probes too.
