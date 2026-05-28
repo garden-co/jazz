@@ -1124,6 +1124,7 @@ fn branch_query_history_delta_with_compaction_stays_pinned_to_base_epoch() {
         .history
         .iter()
         .any(|record| record.values["title"] == json!("Main after branch")));
+    assert!(delta.blocks.is_empty());
 
     bob.apply_history_delta(&delta.bundle, &delta.blocks)
         .unwrap();

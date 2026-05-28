@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:28:36 PDT 2026
+
+Decision: branch-scoped history deltas filter accepted sealed block manifests by branch base epoch before attaching raw blocks.
+
+Why: sealed blocks are atomic. If a branch delta included an accepted block newer than the branch base, the receiver could import future main history that the branch snapshot must not see.
+
+Scope impact: a sealed accepted block is visible to a branch delta only when its maximum global epoch is at or before the branch base. Newer or overlapping blocks stay out; preserved branch-base anchors cover the compacted local branch cases we currently support.
+
 ## Wed May 27 22:53:30 PDT 2026
 
 Decision: implement the first sealed accepted-history block format as an lz4-compressed compact `Bundle` payload, rather than immediately building a bespoke binary columnar codec.

@@ -542,10 +542,14 @@ impl Runtime {
             .iter()
             .map(history_block_manifest_key)
             .collect::<BTreeSet<_>>();
+        let base_epoch = branch_base_epoch(&self.conn, self.branch_num)?;
         let missing_block_manifests = self
             .history_block_manifests(table_name)?
             .into_iter()
-            .filter(|manifest| !remote_keys.contains(&history_block_manifest_key(manifest)))
+            .filter(|manifest| {
+                history_block_manifest_visible_for_branch_base(manifest, base_epoch)
+                    && !remote_keys.contains(&history_block_manifest_key(manifest))
+            })
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
         Ok(HistoryDelta { bundle, blocks })
@@ -573,10 +577,14 @@ impl Runtime {
                 .iter()
                 .map(history_block_manifest_key)
                 .collect::<BTreeSet<_>>();
+            let base_epoch = branch_base_epoch(&self.conn, self.branch_num)?;
             let missing_block_manifests = self
                 .history_block_manifests(&table.name)?
                 .into_iter()
-                .filter(|manifest| !remote_keys.contains(&history_block_manifest_key(manifest)))
+                .filter(|manifest| {
+                    history_block_manifest_visible_for_branch_base(manifest, base_epoch)
+                        && !remote_keys.contains(&history_block_manifest_key(manifest))
+                })
                 .collect::<Vec<_>>();
             let table_blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
             blocks.extend(table_blocks);
@@ -1404,11 +1412,13 @@ impl Runtime {
             .iter()
             .map(history_block_manifest_key)
             .collect::<BTreeSet<_>>();
+        let base_epoch = branch_base_epoch(&self.conn, self.branch_num)?;
         let missing_block_manifests = self
             .history_block_manifests(table_name)?
             .into_iter()
             .filter(|manifest| {
                 row_ids.contains(&manifest.row_id)
+                    && history_block_manifest_visible_for_branch_base(manifest, base_epoch)
                     && !remote_keys.contains(&history_block_manifest_key(manifest))
             })
             .collect::<Vec<_>>();
@@ -5326,11 +5336,13 @@ impl Runtime {
             .iter()
             .map(history_block_manifest_key)
             .collect::<BTreeSet<_>>();
+        let base_epoch = branch_base_epoch(&self.conn, self.branch_num)?;
         let missing_block_manifests = self
             .history_block_manifests(table_name)?
             .into_iter()
             .filter(|manifest| {
                 row_ids.contains(&manifest.row_id)
+                    && history_block_manifest_visible_for_branch_base(manifest, base_epoch)
                     && !remote_keys.contains(&history_block_manifest_key(manifest))
             })
             .collect::<Vec<_>>();
@@ -7734,6 +7746,16 @@ fn history_block_manifest_key(
         manifest.compressed_bytes,
         manifest.payload_sha256.clone(),
     )
+}
+
+fn history_block_manifest_visible_for_branch_base(
+    manifest: &HistoryBlockManifest,
+    base_epoch: Option<i64>,
+) -> bool {
+    match base_epoch {
+        Some(base_epoch) if manifest.kind == "accepted" => manifest.max_global_epoch <= base_epoch,
+        _ => true,
+    }
 }
 
 fn history_block_export_for_manifest(
