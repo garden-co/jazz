@@ -506,11 +506,12 @@ A later optimization can make blocks a wire/storage unit:
   bounded decode pass
 
 Prototype note: the current spike exposes this boundary as
-`export_history_blocks(table)` / `import_history_blocks(blocks)`. The exported
-unit is the exact lz4 block payload plus manifest metadata. Import validates the
-manifest, inserts the block idempotently, and rebuilds the local tx lookup index
-from exported node/local-epoch ranges without decoding the payload or
-recreating ordinary user history rows. It also avoids recreating ordinary
+`export_history_blocks(table)` / `import_history_blocks(blocks)`, table/all-table
+history delta APIs, and a first equality-query history delta API. The exported
+block unit is the exact lz4 block payload plus manifest metadata. Import
+validates the manifest, inserts the block idempotently, and rebuilds the local tx
+lookup index from exported node/local-epoch ranges without decoding the payload
+or recreating ordinary user history rows. It also avoids recreating ordinary
 `jazz_tx` rows for cold archived txs; tx helpers resolve those through the block
 index and decode the block on demand.
 
@@ -533,7 +534,10 @@ manifest inventory. `export_all_history_delta(remote_manifests)` does the same
 across every user table. Receivers import blocks first and then apply the open
 bundle. The open bundle contains full row values, so the receiver does not need
 an intermediate projection rebuild to preserve omitted fields in the hot tail.
-This is a table-scope sync shape, not yet query-scope block planning.
+`export_query_where_eq_history_delta(...)` applies the same block-native shape to
+one equality query by filtering the sealed block set to the query's
+visible/repair row ids. This proves the query-scoped planning boundary for one
+predicate class, not every query operator yet.
 
 That optimization is deliberately separate from the first storage change. The
 first goal is to prove that sealed blocks reduce local storage and historical
@@ -655,7 +659,7 @@ can distinguish "fewer durable commits" wins from "fewer stored bytes" wins.
 - virtual table integration
 - chunked block tables
 - storing pending or branch-local history in blocks
-- query-scoped block-native sync planning
+- complete query-scoped block-native sync planning for every query operator
 - global repacking across many rows
 
 Virtual tables may become useful later as a SQL interface over blocks, but the

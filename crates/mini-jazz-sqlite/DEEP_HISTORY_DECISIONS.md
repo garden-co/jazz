@@ -273,3 +273,9 @@ Scope impact: repeated historical reads against the same cold block no longer re
 Decision: Add sampled `transaction_info(tx-id)` timing to deep-history benchmarks and route sealed transaction lookup through the Runtime block cache.
 
 Scope impact: the first append measurement showed sealed tx metadata lookup averaging roughly 72 ms through the uncached free-function path. With the cache-aware path, the same sampled lookup is sub-millisecond after the row historical reads have warmed the block. This validates the side-index plus cached decode approach for tx metadata while still leaving cold first-read latency unsolved.
+
+## Thu May 28 01:18:13 PDT 2026 - Query Equality Block Delta
+
+Decision: Add a narrow equality-query history delta API that returns hot/open query history as an ordinary bundle plus missing sealed blocks for the query row set.
+
+Scope impact: query-scoped sync no longer has to be all-or-nothing table delta in the prototype. The first shape covers equality predicates only and still uses the existing repair-row and policy-dependency machinery for open history; sealed history is transferred as blocks instead of expanded into row-history records.

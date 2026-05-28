@@ -414,6 +414,74 @@ fn table_history_delta_syncs_open_rows_and_missing_blocks() {
 }
 
 #[test]
+fn query_history_delta_syncs_open_rows_and_matching_blocks() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    for idx in 2..=5 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+    alice
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("other")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .compact_accepted_history("notes", "note-1", 1)
+        .unwrap();
+
+    let (bundle, blocks) = alice
+        .export_query_where_eq_history_delta("notes", "pinned", json!(true), &[])
+        .unwrap();
+    assert_eq!(bundle.history.len(), 1);
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].manifest.row_id, "note-1");
+
+    assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
+    bob.apply_bundle(&bundle).unwrap();
+
+    let rows = bob
+        .read_rows_where_eq("notes", "pinned", json!(true))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-1");
+    assert_eq!(rows[0].values["body"], json!("v5"));
+
+    let (_, already_have_blocks) = alice
+        .export_query_where_eq_history_delta(
+            "notes",
+            "pinned",
+            json!(true),
+            &bob.all_history_block_manifests().unwrap(),
+        )
+        .unwrap();
+    assert!(already_have_blocks.is_empty());
+}
+
+#[test]
 fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
     let schema = SchemaDef::new()
         .table("docs", |table| {
