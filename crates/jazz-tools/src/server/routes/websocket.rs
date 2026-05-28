@@ -26,6 +26,12 @@ const MAX_WS_SYNC_UPDATES_PER_FRAME: usize = 256;
 /// decompression bomb sent by an unauthenticated peer before any auth runs.
 const MAX_HANDSHAKE_DECOMPRESSED_BYTES: usize = 1024 * 1024;
 
+/// Maximum time the server waits for a client to send its `AuthHandshake`
+/// frame after the WS upgrade completes. Closes the slowloris pattern
+/// where an attacker pins server-side state by opening upgrades and never
+/// sending the first frame. See jaz0-a803.
+const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Maximum size of an inbound WebSocket message (the compressed bytes on the
 /// wire). This is axum's existing default, set explicitly so the limit is
 /// visible and can later be made configurable. It is *not* a bound on the
@@ -322,6 +328,8 @@ async fn handle_ws_connection(
     }
 
     // 1. Read the first binary frame — expected to be AuthHandshake.
+    //    Bounded read so unauthenticated peers can't pin server-side
+    //    resources by opening upgrades without sending a handshake.
     let first = tokio::select! {
         msg = socket.recv() => match msg {
             Some(Ok(Message::Binary(b))) => b,
@@ -336,6 +344,10 @@ async fn handle_ws_connection(
             } else {
                 let _ = socket.close().await;
             }
+            return;
+        }
+        _ = tokio::time::sleep(HANDSHAKE_READ_TIMEOUT) => {
+            close_ws_with_protocol_reason(&mut socket, "handshake timeout").await;
             return;
         }
     };

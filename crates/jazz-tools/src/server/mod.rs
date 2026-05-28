@@ -27,6 +27,12 @@ pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
 
 pub type DynStorage = Box<dyn Storage + Send>;
 
+/// Cap on concurrent connections sharing a single `client_id`. When a new
+/// connection would exceed this cap, the oldest connection(s) for the same
+/// `client_id` are evicted so a reconnecting client is never locked out by
+/// its own zombies. Bounds the fan-out memory described in jaz0-a803.
+const PER_CLIENT_CONNECTION_CAP: usize = 4;
+
 #[derive(Debug, Clone)]
 pub struct SequencedSyncUpdate {
     pub seq: u64,
@@ -66,6 +72,32 @@ impl ConnectionEventHub {
                 sender,
             },
         );
+
+        // Evict oldest connection(s) for this client_id past the cap.
+        // Connection IDs come from a monotonic counter, so the smallest
+        // IDs are the oldest registrations. Dropping a stream entry drops
+        // its sender, which causes the connection task's `sync_rx.recv()`
+        // to return `None` on its next select tick; that task then breaks
+        // its loop and runs `ws_cleanup`, removing itself from
+        // `ServerState::connections`.
+        let mut ids_for_client: Vec<u64> = streams
+            .iter()
+            .filter_map(|(id, state)| (state.client_id == client_id).then_some(*id))
+            .collect();
+        if ids_for_client.len() > PER_CLIENT_CONNECTION_CAP {
+            ids_for_client.sort_unstable();
+            let evict_count = ids_for_client.len() - PER_CLIENT_CONNECTION_CAP;
+            for evicted in &ids_for_client[..evict_count] {
+                streams.remove(evicted);
+            }
+            tracing::info!(
+                %client_id,
+                cap = PER_CLIENT_CONNECTION_CAP,
+                evicted = evict_count,
+                "evicting oldest ws connections past per-client cap"
+            );
+        }
+
         (1, receiver)
     }
 
