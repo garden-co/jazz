@@ -1,5 +1,9 @@
+import { installTestStorage } from "./testStorage";
+
 const dialogPrototype =
   globalThis.HTMLDialogElement?.prototype ?? globalThis.HTMLElement?.prototype;
+
+installTestStorage();
 
 if (typeof globalThis.confirm !== "function") {
   globalThis.confirm = () => false;

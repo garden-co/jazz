@@ -1,7 +1,12 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithRouter } from "../../test/renderWithRouter";
 import { LiveQuery } from "./index";
+
+const liveQueryRoute = {
+  initialEntry: "/conn/connection/main/schema/live-query",
+  routePath: "/conn/$connectionId/$branch/$schemaHash/live-query",
+} as const;
 
 const mockFetchServerSubscriptions = vi.fn();
 const mockGetActiveQuerySubscriptions = vi.fn();
@@ -58,14 +63,10 @@ describe("LiveQuery", () => {
     });
   });
 
-  it("renders an empty state when there are no active extension subscriptions", () => {
-    render(
-      <MemoryRouter>
-        <LiveQuery />
-      </MemoryRouter>,
-    );
+  it("renders an empty state when there are no active extension subscriptions", async () => {
+    renderWithRouter(<LiveQuery />, liveQueryRoute);
 
-    expect(screen.getByText("No active subscriptions")).not.toBeNull();
+    expect(await screen.findByText("No active subscriptions")).not.toBeNull();
   });
 
   it("renders traced subscriptions from the extension bridge", async () => {
@@ -83,11 +84,7 @@ describe("LiveQuery", () => {
       },
     ]);
 
-    render(
-      <MemoryRouter>
-        <LiveQuery />
-      </MemoryRouter>,
-    );
+    renderWithRouter(<LiveQuery />, liveQueryRoute);
 
     expect(await screen.findByRole("cell", { name: "todos" })).not.toBeNull();
     expect(await screen.findByRole("cell", { name: "full" })).not.toBeNull();
@@ -100,7 +97,7 @@ describe("LiveQuery", () => {
     expect(await screen.findByText(/at useAll/)).not.toBeNull();
   }, 15_000);
 
-  it("filters extension rows by table and tier", () => {
+  it("filters extension rows by table and tier", async () => {
     mockGetActiveQuerySubscriptions.mockReturnValue([
       {
         id: "sub-1",
@@ -124,13 +121,9 @@ describe("LiveQuery", () => {
       },
     ]);
 
-    render(
-      <MemoryRouter>
-        <LiveQuery />
-      </MemoryRouter>,
-    );
+    renderWithRouter(<LiveQuery />, liveQueryRoute);
 
-    fireEvent.change(screen.getByLabelText("Filter by table"), {
+    fireEvent.change(await screen.findByLabelText("Filter by table"), {
       target: { value: "projects" },
     });
 
@@ -144,7 +137,7 @@ describe("LiveQuery", () => {
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
   });
 
-  it("sorts extension rows by started date and tier, and allows toggling started order", () => {
+  it("sorts extension rows by started date and tier, and allows toggling started order", async () => {
     mockGetActiveQuerySubscriptions.mockReturnValue([
       {
         id: "sub-1",
@@ -186,12 +179,9 @@ describe("LiveQuery", () => {
       },
     });
 
-    render(
-      <MemoryRouter>
-        <LiveQuery />
-      </MemoryRouter>,
-    );
+    renderWithRouter(<LiveQuery />, liveQueryRoute);
 
+    await screen.findByRole("cell", { name: "users" });
     const rows = screen.getAllByRole("row");
     expect(rows[1]?.textContent).toContain("users");
     expect(rows[2]?.textContent).toContain("projects");
@@ -223,11 +213,7 @@ describe("LiveQuery", () => {
       ],
     });
 
-    render(
-      <MemoryRouter>
-        <LiveQuery />
-      </MemoryRouter>,
-    );
+    renderWithRouter(<LiveQuery />, liveQueryRoute);
 
     await waitFor(() => {
       expect(screen.getByRole("cell", { name: "todos" })).not.toBeNull();

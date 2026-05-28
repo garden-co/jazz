@@ -36,10 +36,17 @@ vi.mock("./contexts/devtools-context.js", () => ({
     devtoolsProviderMock(props);
     return children;
   },
+  useDevtoolsContext: () => ({
+    queryPropagation: "local-only",
+    runtime: "standalone",
+    setQueryPropagation: vi.fn(),
+    storedPermissions: null,
+    wasmSchema: {},
+  }),
 }));
 
-vi.mock("./routes.js", () => ({
-  InspectorRoutes: function MockInspectorRoutes() {
+vi.mock("#pages/data-explorer/index.tsx", () => ({
+  DataExplorer: function MockDataExplorer() {
     const standaloneContext = useStandaloneContext();
 
     return (
@@ -56,6 +63,7 @@ vi.mock("./routes.js", () => ({
 describe("App", () => {
   beforeEach(() => {
     localStorage.clear();
+    window.history.pushState(null, "", "/");
     window.location.hash = "";
     createJazzClientMock.mockReset();
     fetchSchemaHashesMock.mockReset();

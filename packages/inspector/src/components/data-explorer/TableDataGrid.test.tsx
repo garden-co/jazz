@@ -1,6 +1,6 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithRouter } from "../../test/renderWithRouter";
 import { TableDataGrid } from "./TableDataGrid";
 
 const mockUseAll = vi.fn();
@@ -32,15 +32,11 @@ function getLastTodosQuery(): { _build: () => string } {
 }
 
 function renderGridUi() {
-  return (
-    <MemoryRouter initialEntries={["/data-explorer/todos/data"]}>
-      <TableDataGrid />
-    </MemoryRouter>
-  );
+  return <TableDataGrid />;
 }
 
 function renderGrid() {
-  return render(renderGridUi());
+  return renderWithRouter(renderGridUi());
 }
 
 const mockWasmSchema = {
@@ -77,14 +73,6 @@ vi.mock("../../contexts/devtools-context.js", () => ({
     queryPropagation: "local-only",
   }),
 }));
-
-vi.mock("react-router", async () => {
-  const actual = await vi.importActual<typeof import("react-router")>("react-router");
-  return {
-    ...actual,
-    useParams: () => ({ table: "todos" }),
-  };
-});
 
 describe("TableDataGrid", () => {
   afterEach(() => {
@@ -162,10 +150,10 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("renders schema-derived columns and reactive rows", () => {
+  it("renders schema-derived columns and reactive rows", async () => {
     renderGrid();
 
-    expect(screen.getByRole("heading", { name: "todos" })).not.toBeNull();
+    expect(await screen.findByRole("heading", { name: "todos" })).not.toBeNull();
     expect(screen.queryByText("6 columns · 2 rows on page · 0 filters")).toBeNull();
     const header = screen.getByRole("heading", { name: "todos" }).closest("header");
     expect(header).not.toBeNull();
@@ -181,17 +169,17 @@ describe("TableDataGrid", () => {
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
   });
 
-  it("renders reference cells as links to the related table filtered by id", () => {
+  it("renders reference cells as links to the related table filtered by id", async () => {
     renderGrid();
 
-    expect(screen.getByText("Alice")).not.toBeNull();
+    expect(await screen.findByText("Alice")).not.toBeNull();
     const relationLink = screen.getByRole("link", { name: "Open Alice in users" });
     const href = relationLink.getAttribute("href");
     expect(href).not.toBeNull();
 
     const url = new URL(href!, "https://inspector.test");
-    expect(url.pathname).toBe("/data-explorer/users/data");
-    expect(JSON.parse(url.searchParams.get("filters") ?? "[]")).toMatchObject([
+    expect(url.pathname).toBe("/conn/connection/main/schema/data-explorer/users/data");
+    expect(JSON.parse(JSON.parse(url.searchParams.get("filters") ?? '"[]"'))).toMatchObject([
       {
         column: "id",
         operator: "eq",
@@ -200,16 +188,18 @@ describe("TableDataGrid", () => {
     ]);
   });
 
-  it("keeps the edit sidebar visible even when no row is selected", () => {
+  it("keeps the edit sidebar visible even when no row is selected", async () => {
     renderGrid();
 
-    expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
+    expect(await screen.findByRole("heading", { name: "Edit row" })).not.toBeNull();
     expect(screen.getByText("Select a row from the table to edit it.")).not.toBeNull();
     expect(screen.getAllByRole("separator")).toHaveLength(1);
   });
 
-  it("updates query sorting when a sortable column header is clicked", () => {
+  it("updates query sorting when a sortable column header is clicked", async () => {
     renderGrid();
+
+    await screen.findByRole("heading", { name: "todos" });
 
     const firstQuery = mockUseAll.mock.calls[0]?.[0] as { _build: () => string };
     expect(JSON.parse(firstQuery._build())).toMatchObject({
@@ -221,16 +211,20 @@ describe("TableDataGrid", () => {
     const titleHeader = screen.getByRole("columnheader", { name: "title" });
     fireEvent.click(titleHeader);
 
-    const sortedQuery = getLastTodosQuery();
-    expect(JSON.parse(sortedQuery._build())).toMatchObject({
-      orderBy: [["title", "asc"]],
-      limit: 26,
-      offset: 0,
+    await waitFor(() => {
+      const sortedQuery = getLastTodosQuery();
+      expect(JSON.parse(sortedQuery._build())).toMatchObject({
+        orderBy: [["title", "asc"]],
+        limit: 26,
+        offset: 0,
+      });
     });
   });
 
-  it("subscribes with local-only propagation in extension mode", () => {
+  it("subscribes with local-only propagation in extension mode", async () => {
     renderGrid();
+
+    await screen.findByRole("heading", { name: "todos" });
 
     expect(mockUseAll).toHaveBeenCalledWith(
       expect.any(Object),
@@ -241,28 +235,30 @@ describe("TableDataGrid", () => {
     );
   });
 
-  it("adds a where clause and compiles it into query conditions", () => {
+  it("adds a where clause and compiles it into query conditions", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Filter/ }));
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "title" } });
     fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "contains" } });
     fireEvent.change(screen.getByLabelText("Value"), { target: { value: "alpha" } });
     fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
 
-    const filteredQuery = getLastTodosQuery();
-    expect(JSON.parse(filteredQuery._build())).toMatchObject({
-      conditions: [{ column: "title", op: "contains", value: "alpha" }],
-      orderBy: [["id", "asc"]],
-      limit: 26,
-      offset: 0,
+    await waitFor(() => {
+      const filteredQuery = getLastTodosQuery();
+      expect(JSON.parse(filteredQuery._build())).toMatchObject({
+        conditions: [{ column: "title", op: "contains", value: "alpha" }],
+        orderBy: [["id", "asc"]],
+        limit: 26,
+        offset: 0,
+      });
     });
   });
 
   it("opens row edit sidebar and updates editable fields", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.click(await screen.findByRole("gridcell", { name: "zeta" }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("row-2")).not.toBeNull();
@@ -295,7 +291,7 @@ describe("TableDataGrid", () => {
   it("preserves unsaved edits when the current row live-updates", async () => {
     const { rerender } = renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.click(await screen.findByRole("gridcell", { name: "zeta" }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("row-2")).not.toBeNull();
@@ -312,7 +308,7 @@ describe("TableDataGrid", () => {
   it("uses the same editable sidebar for selected rows and saves changes from it", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.click(await screen.findByRole("gridcell", { name: "zeta" }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("row-2")).not.toBeNull();
@@ -344,7 +340,7 @@ describe("TableDataGrid", () => {
   it("clears the selected row on escape while keeping the edit sidebar visible", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.click(await screen.findByRole("gridcell", { name: "zeta" }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("row-2")).not.toBeNull();
@@ -362,7 +358,7 @@ describe("TableDataGrid", () => {
   it("queues inline cell edits on double click and saves them from the banner", async () => {
     renderGrid();
 
-    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.doubleClick(await screen.findByRole("gridcell", { name: "zeta" }));
     const editor = screen.getByLabelText("Edit title");
     fireEvent.change(editor, { target: { value: "zeta queued" } });
     fireEvent.blur(editor);
@@ -391,7 +387,7 @@ describe("TableDataGrid", () => {
   it("renders boolean table cells as always-on checkboxes and saves queued toggles", async () => {
     renderGrid();
 
-    const checkbox = screen.getByRole("checkbox", { name: "Toggle done for row-2" });
+    const checkbox = await screen.findByRole("checkbox", { name: "Toggle done for row-2" });
     expect((checkbox as HTMLInputElement).checked).toBe(false);
 
     fireEvent.click(checkbox);
@@ -414,14 +410,10 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("does not queue row deletion when backspace is pressed inside an active cell editor", () => {
-    render(
-      <MemoryRouter initialEntries={["/data-explorer/todos/data"]}>
-        <TableDataGrid />
-      </MemoryRouter>,
-    );
+  it("does not queue row deletion when backspace is pressed inside an active cell editor", async () => {
+    renderWithRouter(<TableDataGrid />);
 
-    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.doubleClick(await screen.findByRole("gridcell", { name: "zeta" }));
 
     const editor = screen.getByLabelText("Edit title");
     fireEvent.keyDown(editor, { key: "Backspace" });
@@ -430,8 +422,10 @@ describe("TableDataGrid", () => {
     expect(screen.getByLabelText("Edit title")).not.toBeNull();
   });
 
-  it("caps data column width so long cell values do not stretch the whole grid", () => {
+  it("caps data column width so long cell values do not stretch the whole grid", async () => {
     renderGrid();
+
+    await screen.findByRole("heading", { name: "todos" });
 
     const titleMeasuringCell = document.querySelector(
       '[data-measuring-cell-key="title"]',
@@ -440,15 +434,19 @@ describe("TableDataGrid", () => {
     expect(titleMeasuringCell?.style.maxWidth).toBe("360px");
   });
 
-  it("renders without frozen columns so actions stay last and id scrolls normally", () => {
+  it("renders without frozen columns so actions stay last and id scrolls normally", async () => {
     renderGrid();
+
+    await screen.findByRole("heading", { name: "todos" });
 
     expect(document.querySelector(".rdg-cell-frozen")).toBeNull();
   });
 
-  it("marks changed cells so live updates can pulse", () => {
-    vi.useFakeTimers();
+  it("marks changed cells so live updates can pulse", async () => {
     const { rerender } = renderGrid();
+
+    await screen.findByRole("heading", { name: "todos" });
+    vi.useFakeTimers();
 
     currentRows = [{ ...currentRows[0], title: "zeta updated live" }, currentRows[1]!];
     rerender(renderGridUi());
@@ -465,9 +463,11 @@ describe("TableDataGrid", () => {
     );
   });
 
-  it("highlights rows that were inserted by a live update", () => {
-    vi.useFakeTimers();
+  it("highlights rows that were inserted by a live update", async () => {
     const { rerender } = renderGrid();
+
+    await screen.findByRole("heading", { name: "todos" });
+    vi.useFakeTimers();
 
     currentRows = [
       {
@@ -493,9 +493,11 @@ describe("TableDataGrid", () => {
     expect(getContainingRow(screen.getByText("row-3"))?.dataset.rowChangeState).toBe(undefined);
   });
 
-  it("does not highlight rows when the first result set loads", () => {
+  it("does not highlight rows when the first result set loads", async () => {
     currentRows = [];
     const { rerender } = renderGrid();
+
+    await screen.findByRole("heading", { name: "todos" });
 
     currentRows = [
       {
@@ -530,9 +532,11 @@ describe("TableDataGrid", () => {
     expect(getContainingRow(screen.getByText("row-1"))?.dataset.rowChangeState).toBe(undefined);
   });
 
-  it("keeps removed rows around briefly so they can animate out", () => {
-    vi.useFakeTimers();
+  it("keeps removed rows around briefly so they can animate out", async () => {
     const { rerender } = renderGrid();
+
+    await screen.findByRole("heading", { name: "todos" });
+    vi.useFakeTimers();
 
     // before: row-2, row-1
     // after:  row-1
@@ -554,7 +558,7 @@ describe("TableDataGrid", () => {
   it("opens insert sidebar and inserts a new row", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Insert" }));
 
     expect(screen.getByRole("heading", { name: "Insert row" })).not.toBeNull();
     expect(screen.getByDisplayValue("auto-generated")).not.toBeNull();
@@ -577,10 +581,10 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("closes sidebar when clicking outside", () => {
+  it("closes sidebar when clicking outside", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Insert" }));
     expect(screen.getByRole("heading", { name: "Insert row" })).not.toBeNull();
 
     fireEvent.click(screen.getByTestId("row-mutation-overlay"));
@@ -590,7 +594,7 @@ describe("TableDataGrid", () => {
   it("deletes a row when delete is confirmed", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.click(await screen.findByRole("gridcell", { name: "zeta" }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("row-2")).not.toBeNull();
@@ -613,7 +617,7 @@ describe("TableDataGrid", () => {
   it("does not delete when delete is canceled", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.click(await screen.findByRole("gridcell", { name: "zeta" }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("row-2")).not.toBeNull();
