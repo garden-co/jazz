@@ -17,7 +17,8 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { Link, useParams } from "@tanstack/react-router";
+import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import { LiveQueryFilters } from "./LiveQueryFilters.js";
@@ -71,20 +72,17 @@ function extractFiltersFromIR(node: unknown): FilterClause[] {
   return filters;
 }
 
-function buildExplorerUrl(table: string, queryJson: string): string {
-  const base = `/data-explorer/${table}/data`;
+function buildExplorerSearch(queryJson: string): { filters?: string } {
   try {
     const parsed = JSON.parse(queryJson);
     const filters = extractFiltersFromIR(parsed.relation_ir);
     if (filters.length > 0) {
-      const params = new URLSearchParams();
-      params.set("filters", JSON.stringify(filters));
-      return `${base}?${params.toString()}`;
+      return { filters: JSON.stringify(filters) };
     }
   } catch {
     // ignore parse errors
   }
-  return base;
+  return {};
 }
 
 function getUserStackSummary(stack: string | undefined): string {
@@ -196,6 +194,7 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
 }
 
 function ExtensionLiveQuery() {
+  const routeParams = useParams({ strict: false });
   const { runtime, wasmSchema } = useDevtoolsContext();
   const subscriptions = useActiveSubscriptions(runtime);
   const [selectedTable, setSelectedTable] = useState("");
@@ -225,7 +224,14 @@ function ExtensionLiveQuery() {
         header: "Table",
         cell: ({ row }) => (
           <Link
-            to={buildExplorerUrl(row.original.table, row.original.query)}
+            to={appRoutes.tableData}
+            params={{
+              connectionId: routeParams.connectionId ?? "",
+              branch: routeParams.branch ?? "",
+              schemaHash: routeParams.schemaHash ?? "",
+              tableName: row.original.table,
+            }}
+            search={buildExplorerSearch(row.original.query)}
             className={styles.tableLink}
           >
             {row.original.table}
@@ -276,7 +282,7 @@ function ExtensionLiveQuery() {
         ),
       },
     ],
-    [],
+    [routeParams.branch, routeParams.connectionId, routeParams.schemaHash],
   );
 
   const table = useReactTable({
@@ -357,6 +363,7 @@ function ExtensionLiveQuery() {
 }
 
 function StandaloneLiveQuery() {
+  const routeParams = useParams({ strict: false });
   const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry("standalone");
   const [selectedTable, setSelectedTable] = useState("");
 
@@ -425,7 +432,14 @@ function StandaloneLiveQuery() {
                   <td>{query.count}</td>
                   <td>
                     <Link
-                      to={buildExplorerUrl(query.table, query.query)}
+                      to={appRoutes.tableData}
+                      params={{
+                        connectionId: routeParams.connectionId ?? "",
+                        branch: routeParams.branch ?? "",
+                        schemaHash: routeParams.schemaHash ?? "",
+                        tableName: query.table,
+                      }}
+                      search={buildExplorerSearch(query.query)}
                       className={styles.tableLink}
                     >
                       {query.table}

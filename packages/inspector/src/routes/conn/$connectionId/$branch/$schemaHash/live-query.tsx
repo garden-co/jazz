@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Outlet, createFileRoute } from "@tanstack/react-router";
 
 import { InspectorLayout } from "#inspector-layout/index";
 
@@ -7,5 +7,9 @@ export const Route = createFileRoute("/conn/$connectionId/$branch/$schemaHash/li
 });
 
 function LiveQueryLayoutRoute(): React.ReactElement {
-  return <InspectorLayout />;
+  return (
+    <InspectorLayout>
+      <Outlet />
+    </InspectorLayout>
+  );
 }

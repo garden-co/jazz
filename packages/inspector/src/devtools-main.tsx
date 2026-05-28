@@ -1,14 +1,14 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { MemoryRouter } from "react-router";
 import { createExtensionJazzClient, JazzClientProvider } from "jazz-tools/react";
 import { getRegisteredWasmSchema, onDevToolsPortDisconnect } from "jazz-tools";
 import { use, useEffect, useMemo } from "react";
 import { DevtoolsProvider } from "./contexts/devtools-context";
-import { InspectorRoutes } from "./routes";
+import { InspectorRouterProvider, createInspectorMemoryRouter } from "./createInspectorRouter";
 import "./index.css";
 
 const client = createExtensionJazzClient();
+const router = createInspectorMemoryRouter();
 
 function App() {
   const extensionClient = use(client);
@@ -27,9 +27,7 @@ function App() {
   return (
     <JazzClientProvider client={extensionClient}>
       <DevtoolsProvider wasmSchema={wasmSchema} runtime="extension">
-        <MemoryRouter>
-          <InspectorRoutes />
-        </MemoryRouter>
+        <InspectorRouterProvider router={router} />
       </DevtoolsProvider>
     </JazzClientProvider>
   );

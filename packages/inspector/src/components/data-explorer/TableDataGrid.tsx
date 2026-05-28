@@ -13,7 +13,8 @@ import { Group, Panel, Separator } from "react-resizable-panels";
 import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Link, Navigate, useParams, useSearchParams } from "react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import { RowMutationSidebar } from "./RowMutationSidebar.js";
@@ -27,7 +28,7 @@ import {
   getFieldReadOnlyReason,
   parseMutationFieldValue,
 } from "./row-mutation-form.js";
-import { buildRelationFilterHref } from "./relation-navigation.js";
+import { buildRelationFilterSearch } from "./relation-navigation.js";
 import styles from "./TableDataGrid.module.css";
 
 function formatCellValue(value: unknown): string {
@@ -463,16 +464,44 @@ function useAnimatedGridRows(
   return renderedRows;
 }
 
+// TODO: extract search state to a separate hook
 export function TableDataGrid() {
-  const { table } = useParams();
-
-  if (!table) {
-    return <Navigate to="/data-explorer" replace />;
-  }
+  const params = useParams({ strict: false });
+  const table = params.tableName ?? "";
 
   const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
   const db = useDb();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate({ from: appRoutes.tableData });
+  const search = useSearch({ strict: false }) as Record<string, unknown>;
+  const searchParams = useMemo(() => {
+    const nextSearchParams = new URLSearchParams();
+    for (const [key, value] of Object.entries(search)) {
+      if (typeof value === "string") {
+        nextSearchParams.set(key, value);
+      }
+    }
+    return nextSearchParams;
+  }, [search]);
+
+  const setSearchParams = (
+    updater: (currentSearchParams: URLSearchParams) => URLSearchParams,
+    options: { replace?: boolean } = {},
+  ) => {
+    void navigate({
+      replace: options.replace ?? true,
+      search: (currentSearch) => {
+        const currentSearchParams = new URLSearchParams();
+        for (const [key, value] of Object.entries(currentSearch as Record<string, unknown>)) {
+          if (typeof value === "string") {
+            currentSearchParams.set(key, value);
+          }
+        }
+
+        const nextSearchParams = updater(currentSearchParams);
+        return Object.fromEntries(nextSearchParams.entries());
+      },
+    });
+  };
 
   const sorting = useMemo<readonly SortColumn[]>(() => {
     const col = searchParams.get("sort");
@@ -805,7 +834,16 @@ export function TableDataGrid() {
       <header className={styles.header}>
         <h2 className={styles.title}>{table}</h2>
         <div className={styles.headerActions}>
-          <Link to={`/data-explorer/${table}/schema`} className={styles.secondaryButton}>
+          <Link
+            to={appRoutes.tableSchema}
+            params={{
+              connectionId: params.connectionId ?? "",
+              branch: params.branch ?? "",
+              schemaHash: params.schemaHash ?? "",
+              tableName: table,
+            }}
+            className={styles.secondaryButton}
+          >
             Schema
           </Link>
           <button
@@ -1178,6 +1216,7 @@ function RelationCell({
   relationId: string;
   queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
 }) {
+  const params = useParams({ strict: false });
   const queryBuilder = useMemo(
     () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
     [relationId, relationTable, schema],
@@ -1192,13 +1231,19 @@ function RelationCell({
     relationRow && displayColumn
       ? formatCellValue(relationRow[displayColumn.name])
       : formatCellValue(relationId);
-  const href = buildRelationFilterHref(relationTable, relationId);
 
   return (
     <div className={styles.relationCell} title={`${relationTable}.${relationId}`}>
       <span className={styles.cellContent}>{displayValue}</span>
       <Link
-        to={href}
+        to={appRoutes.tableData}
+        params={{
+          connectionId: params.connectionId ?? "",
+          branch: params.branch ?? "",
+          schemaHash: params.schemaHash ?? "",
+          tableName: relationTable,
+        }}
+        search={buildRelationFilterSearch(relationId)}
         className={styles.relationLink}
         aria-label={`Open ${displayValue} in ${relationTable}`}
         onClick={(event) => {
