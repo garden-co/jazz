@@ -241,6 +241,14 @@ fn accepted_history_compaction_seals_old_versions_without_changing_exports() {
     assert_eq!(stats.history_rows, 2);
     assert_eq!(stats.sealed_history_rows, 4);
     assert_eq!(stats.history_blocks, 1);
+    assert_eq!(
+        stats.history_block_uncompressed_bytes,
+        compacted.uncompressed_bytes
+    );
+    assert_eq!(
+        stats.history_block_compressed_bytes,
+        compacted.compressed_bytes
+    );
     let manifests = alice.history_block_manifests("notes").unwrap();
     assert_eq!(manifests.len(), 1);
     assert_eq!(manifests[0].kind, "accepted");

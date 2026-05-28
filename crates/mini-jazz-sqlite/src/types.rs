@@ -42,6 +42,8 @@ pub struct StorageStats {
     pub history_rows: i64,
     pub sealed_history_rows: i64,
     pub history_blocks: i64,
+    pub history_block_uncompressed_bytes: i64,
+    pub history_block_compressed_bytes: i64,
     pub current_rows: i64,
     pub rejected_transactions: i64,
     pub page_count: i64,
@@ -76,6 +78,8 @@ pub(crate) struct StorageHistoryCounts {
     pub open_rows: i64,
     pub sealed_rows: i64,
     pub blocks: i64,
+    pub block_uncompressed_bytes: i64,
+    pub block_compressed_bytes: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,6 +278,8 @@ impl StorageStats {
             history_rows: history_counts.open_rows,
             sealed_history_rows: history_counts.sealed_rows,
             history_blocks: history_counts.blocks,
+            history_block_uncompressed_bytes: history_counts.block_uncompressed_bytes,
+            history_block_compressed_bytes: history_counts.block_compressed_bytes,
             current_rows,
             rejected_transactions,
             page_count: page_bytes.count,

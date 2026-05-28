@@ -20,6 +20,14 @@ pub(crate) fn collect(conn: &Connection, schema: &SchemaDef) -> Result<StorageSt
         [],
         |row| row.get(0),
     )?;
+    let (history_block_uncompressed_bytes, history_block_compressed_bytes): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(uncompressed_bytes), 0),
+                    COALESCE(SUM(compressed_bytes), 0)
+             FROM history_blocks",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
     let open_rejected_transactions: i64 = conn.query_row(
         "SELECT COUNT(*) FROM jazz_tx WHERE outcome = ?",
         params![tx::OUTCOME_REJECTED],
@@ -49,6 +57,8 @@ pub(crate) fn collect(conn: &Connection, schema: &SchemaDef) -> Result<StorageSt
             open_rows: history_rows,
             sealed_rows: sealed_history_rows,
             blocks: history_blocks,
+            block_uncompressed_bytes: history_block_uncompressed_bytes,
+            block_compressed_bytes: history_block_compressed_bytes,
         },
         current_rows,
         rejected_transactions,

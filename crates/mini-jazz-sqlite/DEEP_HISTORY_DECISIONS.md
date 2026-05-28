@@ -363,3 +363,11 @@ Decision: Extend `HistoryCompactionPolicy` with an optional wall-clock budget.
 Why: block-count budgets bound work coarsely, but foreground callers often need a latency-shaped budget. A zero-duration budget should be a valid way to ask the maintenance path to skip work when the caller's slice is already spent.
 
 Scope impact: policy compaction checks the wall-clock budget before starting each row block. Age and byte-estimate triggers remain higher-level scheduling work.
+
+## Thu May 28 02:05:18 PDT 2026 - Storage Stats Block Bytes
+
+Decision: Add sealed history block compressed and uncompressed byte totals to `StorageStats`.
+
+Why: once history can live in both ordinary rows and sealed blobs, row counts and page counts are not enough to explain storage behavior. The block byte totals make it clear how much payload is useful sealed history versus SQLite pages, freelist, and other metadata.
+
+Scope impact: storage stats now expose block payload totals directly. This is observability only; it does not change compaction or sync semantics.
