@@ -3,10 +3,10 @@ use mini_jazz_sqlite::{
     persisted_rope, ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy,
     QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::error::Error;
 use std::io::Write;
@@ -4770,9 +4770,14 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         persisted_rope::install(&block_peer_rope)?;
         let block_import_started = Instant::now();
         block_peer.apply_history_delta(&delta.bundle, &delta.blocks)?;
-        copy_rope_sidecar(&writer_rope, &block_peer_rope)?;
         let block_rows = block_peer.read_rows("documents")?;
         let block_root = row_root_id(&block_rows, "body_root")?;
+        let block_sidecar_bytes =
+            copy_rope_sidecar_reachable(&writer_rope, &block_peer_rope, &[block_root])?;
+        input.notes.push(format!(
+            "Block-native sidecar delta: current root reachable bytes {}.",
+            block_sidecar_bytes
+        ));
         let block_text = persisted_rope::materialize(&block_peer_rope, Some(block_root))?;
         if block_text.len() != final_payload_bytes {
             return Err("block+incr import materialized unexpected length".into());
@@ -5234,6 +5239,130 @@ fn copy_rope_sidecar_incremental(
     }
 
     Ok(bytes)
+}
+
+fn copy_rope_sidecar_reachable(
+    source: &Connection,
+    target: &Connection,
+    roots: &[i64],
+) -> BenchResult<usize> {
+    const ROPE_KIND_CONCAT: i64 = 2;
+    const ROPE_KIND_POSITION_LEAF: i64 = 3;
+
+    let mut copied_bytes = 0usize;
+    let mut visited_nodes = BTreeSet::new();
+    let mut copied_text_segments = BTreeSet::new();
+    let mut copied_position_segments = BTreeSet::new();
+    let mut stack = roots.to_vec();
+
+    while let Some(node_id) = stack.pop() {
+        if !visited_nodes.insert(node_id) {
+            continue;
+        }
+
+        let row = source
+            .query_row(
+                "SELECT kind, byte_len, left_node_id, right_node_id, segment_id, segment_start
+                 FROM jazz_rope_node
+                 WHERE node_id = ?",
+                params![node_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| format!("missing reachable rope node {node_id}"))?;
+        let (kind, byte_len, left, right, segment_id, segment_start) = row;
+
+        target.execute(
+            "INSERT OR REPLACE INTO jazz_rope_node
+             (node_id, kind, byte_len, left_node_id, right_node_id, segment_id, segment_start)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                node_id,
+                kind,
+                byte_len,
+                left,
+                right,
+                segment_id,
+                segment_start
+            ],
+        )?;
+        copied_bytes += 56;
+
+        if kind == ROPE_KIND_CONCAT {
+            if let Some(left) = left {
+                stack.push(left);
+            }
+            if let Some(right) = right {
+                stack.push(right);
+            }
+            continue;
+        }
+
+        let Some(segment_id) = segment_id else {
+            continue;
+        };
+        if kind == ROPE_KIND_POSITION_LEAF {
+            if !copied_position_segments.insert(segment_id) {
+                continue;
+            }
+            let (base_x, base_y, last_x, last_y, sample_count, deltas) = source.query_row(
+                "SELECT base_x, base_y, last_x, last_y, sample_count, deltas
+                 FROM jazz_rope_position_segment
+                 WHERE segment_id = ?",
+                params![segment_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )?;
+            copied_bytes += 32 + deltas.len();
+            target.execute(
+                "INSERT OR REPLACE INTO jazz_rope_position_segment
+                 (segment_id, base_x, base_y, last_x, last_y, sample_count, deltas)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    segment_id,
+                    base_x,
+                    base_y,
+                    last_x,
+                    last_y,
+                    sample_count,
+                    deltas
+                ],
+            )?;
+        } else {
+            if !copied_text_segments.insert(segment_id) {
+                continue;
+            }
+            let text: String = source.query_row(
+                "SELECT text FROM jazz_rope_segment WHERE segment_id = ?",
+                params![segment_id],
+                |row| row.get(0),
+            )?;
+            copied_bytes += text.len();
+            target.execute(
+                "INSERT OR REPLACE INTO jazz_rope_segment (segment_id, text) VALUES (?, ?)",
+                params![segment_id, text],
+            )?;
+        }
+    }
+
+    Ok(copied_bytes)
 }
 
 fn copy_rope_sidecar(source: &Connection, target: &Connection) -> BenchResult<()> {

@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 10:24:47 PDT 2026
+
+Decision: make the Block+Incr benchmark's block-native import sync only sidecar data reachable from the received current rope root.
+
+Why: the previous prototype applied the sealed Jazz history delta and then copied the entire rope sidecar snapshot. That made block-native sync look worse than necessary and mixed two different protocols: block-native Jazz history plus compatibility sidecar transfer. A root-reachable sidecar copy is closer to the intended native protocol and gives us a lower bound before adding explicit sidecar root manifests for sealed historical roots.
+
+Scope impact: Block+Incr import now walks `jazz_rope_node` from the received `body_root`, copies referenced text/position segments, and reports approximate current-root sidecar bytes. This improves Automerge block-native import in the canonical run from roughly `4865 ms` to `1683 ms`; append remains around `1.6-1.7 s` because the final append root reaches the whole append chain.
+
 ## Thu May 28 07:44:02 PDT 2026
 
 Decision: add a combined Block+Incr benchmark for append and Automerge text rows.

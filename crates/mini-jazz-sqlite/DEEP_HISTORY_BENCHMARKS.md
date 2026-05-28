@@ -270,8 +270,10 @@ replacement for history blocks.
 
 Canonical append and Automerge run combining the incremental rope sidecar with
 history blocks. Jazz row history stores only rope root refs, then cold root
-history is sealed into lz4 blocks. The sidecar is still copied as a snapshot for
-cold load and block-native import in this prototype.
+history is sealed into lz4 blocks. Cold load still imports a full sidecar
+snapshot for compatibility-bundle import. Block-native import now applies the
+history delta first, then imports only the sidecar nodes/segments reachable from
+the received current root.
 
 Run:
 
@@ -284,18 +286,24 @@ MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY=580 \
 target/debug/examples/perf_scenarios
 ```
 
-Output: `/tmp/deep_history_block_incr_append_automerge.json`.
+Output: `/tmp/deep_history_block_incr_reachable_sidecar.json`.
 
-| Scenario  | total loop | write only | sampled receive | cold load | current read | historical read avg | tx info avg | block import | block payload bytes | database bytes | live database bytes | bundle bytes |
-| --------- | ---------: | ---------: | --------------: | --------: | -----------: | ------------------: | ----------: | -----------: | ------------------: | -------------: | ------------------: | -----------: |
-| Append    |    7309 ms |    2576 ms |         4731 ms |   2207 ms |     53.30 ms |            62.50 ms |     0.27 ms |      1727 ms |              31,085 |        479,232 |             315,392 |      533,420 |
-| Automerge |   23284 ms |    9150 ms |        14130 ms |   6334 ms |     41.36 ms |            83.57 ms |     0.31 ms |      4865 ms |              41,993 |        778,240 |             561,152 |    1,066,270 |
+| Scenario  | total loop | write only | sampled receive | cold load | current read | historical read avg | tx info avg | block import | block payload bytes | current-root sidecar bytes | database bytes | live database bytes | bundle bytes |
+| --------- | ---------: | ---------: | --------------: | --------: | -----------: | ------------------: | ----------: | -----------: | ------------------: | -------------------------: | -------------: | ------------------: | -----------: |
+| Append    |    7424 ms |    2804 ms |         4617 ms |   2998 ms |     52.35 ms |            62.37 ms |     0.26 ms |      1660 ms |              30,971 |                    262,494 |        479,232 |             315,392 |      533,420 |
+| Automerge |   18500 ms |    6999 ms |        11498 ms |  11308 ms |     40.73 ms |            82.75 ms |     0.33 ms |      1683 ms |              41,291 |                    198,269 |        778,240 |             561,152 |    1,066,270 |
 
 Interpretation: the storage wins stack nicely, especially for append
 (`35.90x` database/final payload, better than Incr alone at `42.95x` and far
-better than Block at `1402.46x`). The time story does not stack yet:
-Automerge's sidecar write/materialization cost dominates, and block-native
-import is currently paying for full sidecar snapshot copy plus block validation.
+better than Block at `1402.46x`). Reachable sidecar sync helps block-native
+import materially for Automerge (`4865 ms` before, `1683 ms` now) because the
+final document root can skip abandoned edit structure. Append barely changes
+because the final append root still reaches almost the entire append chain.
+
+This is not the final sidecar protocol yet: historical roots sealed inside
+blocks still need explicit sidecar root manifests/deltas if a receiver should be
+able to answer historical reads from block-native sync without asking for a
+compatibility sidecar snapshot.
 
 ## Block Size Probe
 
