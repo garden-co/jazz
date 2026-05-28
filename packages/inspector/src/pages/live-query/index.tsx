@@ -18,6 +18,8 @@ import {
 } from "@tanstack/react-table";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
+import type { TableDataSearch } from "#data-explorer/tableSearchParams.ts";
+import type { TableFilterClause } from "#data-explorer/TableFilterBuilder.tsx";
 import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
@@ -26,23 +28,16 @@ import styles from "./index.module.css";
 
 const SERVER_SUBSCRIPTIONS_POLL_MS = 20_000;
 
-const IR_OP_TO_FILTER_OP: Record<string, string> = {
+const IR_OP_TO_FILTER_OP = {
   Eq: "eq",
   Ne: "ne",
   Gt: "gt",
   Gte: "gte",
   Lt: "lt",
   Lte: "lte",
-};
+} satisfies Record<string, TableFilterClause["operator"]>;
 
-interface FilterClause {
-  id: string;
-  column: string;
-  operator: string;
-  value: unknown;
-}
-
-function extractFiltersFromIR(node: unknown): FilterClause[] {
+function extractFiltersFromIR(node: unknown): TableFilterClause[] {
   if (!node || typeof node !== "object") return [];
   const obj = node as Record<string, unknown>;
 
@@ -50,7 +45,7 @@ function extractFiltersFromIR(node: unknown): FilterClause[] {
     const cmp = obj.Cmp as Record<string, unknown>;
     const left = cmp.left as Record<string, unknown> | undefined;
     const right = cmp.right as Record<string, unknown> | undefined;
-    const op = IR_OP_TO_FILTER_OP[cmp.op as string];
+    const op = getFilterOperator(cmp.op);
     const column = left?.column as string | undefined;
     const literal = right?.Literal as Record<string, unknown> | undefined;
     if (op && column && literal && "value" in literal) {
@@ -63,7 +58,7 @@ function extractFiltersFromIR(node: unknown): FilterClause[] {
     return obj.And.flatMap((child: unknown) => extractFiltersFromIR(child));
   }
 
-  const filters: FilterClause[] = [];
+  const filters: TableFilterClause[] = [];
   for (const value of Object.values(obj)) {
     if (value && typeof value === "object") {
       filters.push(...extractFiltersFromIR(value));
@@ -72,12 +67,20 @@ function extractFiltersFromIR(node: unknown): FilterClause[] {
   return filters;
 }
 
-function buildExplorerSearch(queryJson: string): { filters?: string } {
+function getFilterOperator(value: unknown): TableFilterClause["operator"] | undefined {
+  if (typeof value !== "string" || !(value in IR_OP_TO_FILTER_OP)) {
+    return undefined;
+  }
+
+  return IR_OP_TO_FILTER_OP[value as keyof typeof IR_OP_TO_FILTER_OP];
+}
+
+function buildExplorerSearch(queryJson: string): TableDataSearch {
   try {
     const parsed = JSON.parse(queryJson);
     const filters = extractFiltersFromIR(parsed.relation_ir);
     if (filters.length > 0) {
-      return { filters: JSON.stringify(filters) };
+      return { filters };
     }
   } catch {
     // ignore parse errors

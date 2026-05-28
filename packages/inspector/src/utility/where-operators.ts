@@ -1,15 +1,18 @@
 import type { ColumnType } from "jazz-tools";
 
-export type WhereOperator =
-  | "eq"
-  | "ne"
-  | "gt"
-  | "gte"
-  | "lt"
-  | "lte"
-  | "contains"
-  | "in"
-  | "isNull";
+export const WHERE_OPERATORS = [
+  "eq",
+  "ne",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "contains",
+  "in",
+  "isNull",
+] as const;
+
+export type WhereOperator = (typeof WHERE_OPERATORS)[number];
 
 export interface WhereOperatorColumn {
   name: string;
