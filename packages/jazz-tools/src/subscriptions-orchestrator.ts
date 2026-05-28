@@ -194,10 +194,12 @@ export class SubscriptionsOrchestrator {
     snapshot?: T[],
   ): string {
     const key = `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
+    const previous = this.queryDefinitions.get(key) as QueryDefinition<T> | undefined;
+    const resolvedSnapshot = snapshot ? [...snapshot] : previous?.snapshot;
     this.queryDefinitions.set(key, {
       query,
       options,
-      snapshot: snapshot ? [...snapshot] : undefined,
+      snapshot: resolvedSnapshot,
     });
 
     const existing = this.entries.get(key) as InternalCacheEntry<T> | undefined;
@@ -207,6 +209,24 @@ export class SubscriptionsOrchestrator {
     }
 
     return key;
+  }
+
+  seedSnapshot<T extends { id: string }>(key: string, snapshot: T[]): void {
+    const previous = this.queryDefinitions.get(key) as QueryDefinition<T> | undefined;
+    this.queryDefinitions.set(key, {
+      query: previous?.query as QueryBuilder<T>,
+      options: previous?.options,
+      snapshot: [...snapshot],
+    });
+
+    const existing = this.entries.get(key) as InternalCacheEntry<T> | undefined;
+    if (existing && existing.state.status === "pending") {
+      existing.state = { status: "fulfilled", data: [...snapshot], error: null };
+      existing.resolvefulfilled([...snapshot]);
+      for (const listener of Array.from(existing.listeners)) {
+        listener.onfulfilled?.(existing.state.data);
+      }
+    }
   }
 
   getCacheEntry<T extends { id: string }>(key: string): CacheEntryHandle<T> {
@@ -376,6 +396,14 @@ function sessionsEqual(a: Session | null, b: Session | null): boolean {
   }
 
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export function computeQueryKey<T extends { id: string }>(
+  appId: string,
+  query: QueryBuilder<T>,
+  options?: QueryOptions,
+): string {
+  return `${appId}:${serializeQueryOptions(options)}:${query._build()}`;
 }
 
 function serializeQueryOptions(options?: QueryOptions): string {

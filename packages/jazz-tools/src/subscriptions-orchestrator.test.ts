@@ -526,6 +526,52 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("SO-U19b seedSnapshot pre-fills the cache for a precomputed key", async () => {
+    const harness = createUnitHarness("app-seed");
+    try {
+      const query = makeQuery();
+      const expectedKey = `app-seed:{}:${query._build()}`;
+      const snapshot = [makeTodo("seeded", "from-server")];
+
+      harness.manager.seedSnapshot<Todo>(expectedKey, snapshot);
+
+      const clientKey = harness.manager.makeQueryKey(query);
+      expect(clientKey).toBe(expectedKey);
+
+      const entry = harness.manager.getCacheEntry<Todo>(clientKey);
+      expect(entry.status).toBe("fulfilled");
+      expect(entry.state).toEqual({
+        status: "fulfilled",
+        data: snapshot,
+        error: null,
+      });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U19c makeQueryKey without snapshot preserves a previously seeded snapshot", async () => {
+    const harness = createUnitHarness("app-seed-preserve");
+    try {
+      const query = makeQuery();
+      const expectedKey = `app-seed-preserve:{}:${query._build()}`;
+      const snapshot = [makeTodo("seeded", "from-server")];
+
+      harness.manager.seedSnapshot<Todo>(expectedKey, snapshot);
+      harness.manager.makeQueryKey(query);
+
+      const entry = harness.manager.getCacheEntry<Todo>(expectedKey);
+      expect(entry.status).toBe("fulfilled");
+      expect(entry.state).toEqual({
+        status: "fulfilled",
+        data: snapshot,
+        error: null,
+      });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U20 listener unsubscribe is idempotent", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness();
