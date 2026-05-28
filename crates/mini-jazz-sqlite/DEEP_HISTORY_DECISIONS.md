@@ -219,3 +219,9 @@ Scope impact: manifest listing and block existence checks can use metadata colum
 Decision: Make manifest-selected export query exact block identities instead of exporting all local blocks and filtering in memory. Duplicate requested manifests are deduped before querying.
 
 Scope impact: this keeps block sync scalable with the number of requested missing blocks, not total local cold history, and preserves `block_id` as a receiver-local detail.
+
+## Thu May 28 00:29:17 PDT 2026 - Block-Native Table Delta
+
+Decision: Add a table delta export that leaves sealed history as raw history blocks and sends only open history rows in the ordinary bundle. The receiver imports missing blocks, rebuilds from sealed state if needed, then applies the open bundle.
+
+Scope impact: this creates the first end-to-end sync shape for compacted history without decoding cold blocks back into row-version bundles on the sender. It still uses existing bundle semantics for hot/open history.

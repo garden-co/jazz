@@ -363,6 +363,58 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
 }
 
 #[test]
+fn table_history_delta_syncs_open_rows_and_missing_blocks() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    for idx in 2..=5 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+    alice
+        .compact_accepted_history("notes", "note-1", 1)
+        .unwrap();
+
+    let (bundle, blocks) = alice.export_table_history_delta("notes", &[]).unwrap();
+    assert_eq!(bundle.history.len(), 1);
+    assert_eq!(blocks.len(), 1);
+
+    assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
+    bob.rebuild_current_projection().unwrap();
+    bob.apply_bundle(&bundle).unwrap();
+
+    let rows = bob.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("v5"));
+    assert_eq!(rows[0].values["pinned"], json!(false));
+    assert_eq!(bob.storage_stats().unwrap().history_rows, 1);
+    assert_eq!(bob.storage_stats().unwrap().sealed_history_rows, 4);
+
+    let receiver_inventory = bob.all_history_block_manifests().unwrap();
+    let (_, already_have_blocks) = alice
+        .export_table_history_delta("notes", &receiver_inventory)
+        .unwrap();
+    assert!(already_have_blocks.is_empty());
+}
+
+#[test]
 fn point_read_at_global_epoch_can_decode_sealed_history_block() {
     let schema = support::notes_schema();
     let mut alice =
