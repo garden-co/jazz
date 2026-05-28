@@ -4173,9 +4173,7 @@ fn run_all_deep_history_rope_probes() -> BenchResult<Vec<DeepHistoryReport>> {
 
 fn run_deep_history_group_probe(kind: &str) -> BenchResult<Option<Vec<DeepHistoryReport>>> {
     match kind {
-        "all" | "canonical" | "all-baseline" | "all-base" => {
-            Ok(Some(run_all_deep_history_probes()?))
-        }
+        "all" | "all-baseline" | "all-base" => Ok(Some(run_all_deep_history_probes()?)),
         "all-history-blocks" | "all-blocks" | "all-block" => {
             Ok(Some(run_all_deep_history_block_probes()?))
         }
