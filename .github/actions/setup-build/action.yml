@@ -1,0 +1,115 @@
+name: Setup build environment
+description: |
+  Composite action consolidating the Rust toolchain + Node/pnpm + caches setup
+  used by the Jazz build/publish workflows. Each capability is opt-in via
+  inputs so callers only pay for what they need.
+
+  Expects the calling workflow to set the `CACHE_SCOPE_REPOSITORY_ID` env var
+  (the build/publish workflows already do this at the workflow level).
+
+inputs:
+  rust-toolchain:
+    description: "Rust toolchain version to install. Pass an empty string to skip Rust setup entirely."
+    required: false
+    default: "1.93.1"
+  rust-targets:
+    description: "Comma-separated Rust targets to install (e.g. wasm32-unknown-unknown). Empty means no extra targets."
+    required: false
+    default: ""
+  rust-components:
+    description: "Comma-separated Rust components to install (e.g. clippy,rustfmt). Empty means none."
+    required: false
+    default: ""
+  rust-cache:
+    description: "Run Swatinem/rust-cache after installing the toolchain."
+    required: false
+    default: "true"
+  rust-cache-key:
+    description: "Cache key passed to Swatinem/rust-cache. Defaults to repo-<CACHE_SCOPE_REPOSITORY_ID>."
+    required: false
+    default: ""
+  rust-cache-bin:
+    description: "Forwarded to Swatinem/rust-cache cache-bin."
+    required: false
+    default: "false"
+  setup-node:
+    description: "Install Node.js + pnpm and run `pnpm install --frozen-lockfile`."
+    required: false
+    default: "true"
+  sccache:
+    description: "Install sccache, mount the Blacksmith sticky disk, and export RUSTC_WRAPPER=sccache."
+    required: false
+    default: "false"
+  sccache-key:
+    description: "Blacksmith sticky-disk key used when sccache is enabled."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Write cache scope
+      shell: bash
+      run: echo "${CACHE_SCOPE_REPOSITORY_ID}" > .github-cache-scope
+      env:
+        CACHE_SCOPE_REPOSITORY_ID: ${{ env.CACHE_SCOPE_REPOSITORY_ID }}
+
+    - name: Set up pnpm
+      if: inputs.setup-node == 'true'
+      uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      with:
+        version: 10.14.0
+        run_install: false
+
+    - name: Set up Node.js
+      if: inputs.setup-node == 'true'
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      with:
+        node-version-file: .nvmrc
+        cache: pnpm
+        cache-dependency-path: |
+          pnpm-lock.yaml
+          .github-cache-scope
+
+    - name: Install pnpm dependencies
+      if: inputs.setup-node == 'true'
+      shell: bash
+      run: pnpm install --frozen-lockfile
+
+    - name: Install Rust toolchain
+      if: inputs.rust-toolchain != ''
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+        targets: ${{ inputs.rust-targets }}
+        components: ${{ inputs.rust-components }}
+
+    - name: Cache Rust build artifacts
+      if: inputs.rust-toolchain != '' && inputs.rust-cache == 'true'
+      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      with:
+        cache-on-failure: true
+        cache-bin: ${{ inputs.rust-cache-bin }}
+        prefix-key: rocksdb-v1
+        key: ${{ inputs.rust-cache-key != '' && inputs.rust-cache-key || format('repo-{0}', env.CACHE_SCOPE_REPOSITORY_ID) }}
+
+    - name: Install sccache
+      if: inputs.sccache == 'true'
+      uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+      with:
+        tool: sccache
+
+    - name: Mount sccache sticky disk
+      if: inputs.sccache == 'true'
+      uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
+      with:
+        key: ${{ inputs.sccache-key != '' && inputs.sccache-key || format('sccache-{0}-{1}-v1', env.CACHE_SCOPE_REPOSITORY_ID, runner.os) }}
+        path: /home/runner/.cache/sccache
+
+    - name: Export sccache environment
+      if: inputs.sccache == 'true'
+      shell: bash
+      run: |
+        echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
+        echo "SCCACHE_DIR=/home/runner/.cache/sccache" >> "${GITHUB_ENV}"
+        echo "SCCACHE_CACHE_SIZE=8G" >> "${GITHUB_ENV}"

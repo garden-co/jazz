@@ -1,0 +1,432 @@
+name: Build Jazz packages
+
+on:
+  workflow_call:
+    outputs:
+      tools_artifact:
+        description: Artifact name for the assembled jazz-tools package.
+        value: pkg-jazz-tools
+      wasm_artifact:
+        description: Artifact name for the assembled jazz-wasm package.
+        value: pkg-jazz-wasm
+      napi_artifact:
+        description: Artifact name for the assembled jazz-napi package (loader + npm/ platform packages).
+        value: pkg-jazz-napi
+      rn_artifact:
+        description: Artifact name for the assembled jazz-rn package (with iOS xcframework + Android jniLibs).
+        value: pkg-jazz-rn
+      create_jazz_artifact:
+        description: Artifact name for the assembled create-jazz package.
+        value: pkg-create-jazz
+
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+
+jobs:
+  build-linux:
+    name: Build CLI Linux (${{ matrix.arch }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x64
+            output: jazz-tools-linux-x64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+            output: jazz-tools-linux-arm64
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          setup-node: "false"
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.14.0
+          cache-key: ${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ matrix.target }}
+
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build CLI binary
+        run: cargo zigbuild -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+          if-no-files-found: error
+
+  build-macos:
+    name: Build CLI macOS (${{ matrix.arch }})
+    runs-on: blacksmith-6vcpu-macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            output: jazz-tools-darwin-arm64
+          - target: x86_64-apple-darwin
+            arch: x64
+            output: jazz-tools-darwin-x64
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          setup-node: "false"
+
+      - name: Build CLI binary
+        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+          if-no-files-found: error
+
+  build-wasm:
+    name: Build jazz-wasm
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: release-wasm-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Build jazz-wasm npm package
+        run: pnpm --filter jazz-wasm build
+
+      - name: Verify built jazz-wasm publish artifacts
+        run: |
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-wasm/pkg/jazz_wasm.js
+          test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+          if-no-files-found: error
+
+  build-napi:
+    name: Build jazz-napi (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: blacksmith-4vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64-gnu
+            use_sccache: true
+          - os: blacksmith-6vcpu-macos-15
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+            use_sccache: false
+          - os: blacksmith-6vcpu-macos-15
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+            use_sccache: false
+          - os: blacksmith-2vcpu-windows-2025
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64-msvc
+            use_sccache: false
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: ${{ matrix.target }}
+          sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
+          sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
+
+      - name: Build jazz-napi binding
+        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-napi-binding-${{ matrix.platform }}
+          path: crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.platform == 'linux-x64-gnu'
+        with:
+          name: jazz-napi-loader
+          path: |
+            crates/jazz-napi/index.js
+            crates/jazz-napi/index.d.ts
+          if-no-files-found: error
+
+  build-rn-ios:
+    name: Build jazz-rn iOS payload
+    runs-on: blacksmith-6vcpu-macos-15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Install/build React Native iOS prerequisites
+        env:
+          JAZZ_RN_PLATFORM: ios
+        run: pnpm run ensure:rust-toolchain
+
+      - name: Build jazz-rn iOS native payload
+        run: pnpm --filter jazz-rn build:rn:ios
+
+      - name: Verify built jazz-rn iOS native payload
+        run: |
+          test -d crates/jazz-rn/JazzRnFramework.xcframework
+          test -f crates/jazz-rn/JazzRnFramework.xcframework/Info.plist
+
+      - name: Stage jazz-rn iOS payload artifact
+        run: |
+          mkdir -p dist/rn-ios
+          cp -R crates/jazz-rn/JazzRnFramework.xcframework dist/rn-ios/
+          cp -R crates/jazz-rn/cpp/generated dist/rn-ios/cpp-generated
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-ios-payload
+          path: dist/rn-ios
+          if-no-files-found: error
+
+  build-rn-android:
+    name: Build jazz-rn Android payload (${{ matrix.abi }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            abi: arm64-v8a
+          - target: armv7-linux-androideabi
+            abi: armeabi-v7a
+          - target: i686-linux-android
+            abi: x86
+          - target: x86_64-linux-android
+            abi: x86_64
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: cargo-ndk
+
+      - name: Install/build React Native Android prerequisites
+        env:
+          JAZZ_RN_PLATFORM: android
+          JAZZ_RN_ANDROID_TARGETS: ${{ matrix.target }}
+        run: pnpm run ensure:rust-toolchain
+
+      - name: Build jazz-rn Android native payload
+        run: pnpm --filter jazz-rn exec ubrn build android --targets ${{ matrix.target }} --and-generate --release
+
+      - name: Verify built jazz-rn Android native payload
+        run: test -f crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }}/libjazz_rn.a
+
+      - name: Stage jazz-rn Android payload artifact
+        run: |
+          mkdir -p dist/rn-android/jniLibs
+          cp -R crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }} dist/rn-android/jniLibs/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-android-payload-${{ matrix.abi }}
+          path: dist/rn-android
+          if-no-files-found: error
+
+  assemble-packages:
+    name: Assemble npm packages
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - build-linux
+      - build-macos
+      - build-wasm
+      - build-napi
+      - build-rn-ios
+      - build-rn-android
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-tools-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-napi-loader
+          path: crates/jazz-napi
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-napi-binding-*
+          path: crates/jazz-napi/artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-ios-payload
+          path: dist/rn-ios
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-rn-android-payload-*
+          path: dist/rn-android
+          merge-multiple: true
+
+      - name: Stage jazz-rn native payload into npm package sources
+        run: |
+          rm -rf crates/jazz-rn/JazzRnFramework.xcframework
+          rm -rf crates/jazz-rn/android/src/main/jniLibs
+          rm -rf crates/jazz-rn/cpp/generated
+          mkdir -p crates/jazz-rn/android/src/main
+          mkdir -p crates/jazz-rn/cpp
+          cp -R dist/rn-ios/JazzRnFramework.xcframework crates/jazz-rn/
+          cp -R dist/rn-ios/cpp-generated crates/jazz-rn/cpp/generated
+          cp -R dist/rn-android/jniLibs crates/jazz-rn/android/src/main/
+
+      - name: Stage jazz-napi platform package artifacts
+        run: |
+          cd crates/jazz-napi
+          pnpm exec napi create-npm-dirs
+          pnpm exec napi artifacts -d artifacts --npm-dir npm
+
+      - name: Verify staged jazz-napi platform artifacts
+        run: |
+          test -f crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node
+          test -f crates/jazz-napi/npm/darwin-x64/jazz-napi.darwin-x64.node
+          test -f crates/jazz-napi/npm/darwin-arm64/jazz-napi.darwin-arm64.node
+          test -f crates/jazz-napi/npm/win32-x64-msvc/jazz-napi.win32-x64-msvc.node
+
+      - name: Build jazz-tools TypeScript package
+        run: pnpm --filter jazz-tools build
+
+      - name: Build create-jazz TypeScript package
+        run: pnpm --filter create-jazz build
+
+      - name: Verify jazz-tools publish artifacts
+        run: |
+          test -f packages/jazz-tools/dist/index.js
+          test -f packages/jazz-tools/dist/index.d.ts
+          test -f packages/jazz-tools/dist/backend/index.js
+          test -f packages/jazz-tools/dist/react/index.js
+          test -f packages/jazz-tools/dist/permissions/index.js
+
+      - name: Stage CLI binaries into jazz-tools npm package
+        run: |
+          mkdir -p packages/jazz-tools/bin/native
+          for bin in \
+            jazz-tools-darwin-arm64 \
+            jazz-tools-darwin-x64 \
+            jazz-tools-linux-arm64 \
+            jazz-tools-linux-x64; do
+            SOURCE="dist/${bin}"
+            test -f "${SOURCE}" || { echo "Missing release native binary ${bin}"; exit 1; }
+            cp "${SOURCE}" packages/jazz-tools/bin/native/
+          done
+          chmod 755 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-x64
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pkg-jazz-tools
+          path: |
+            packages/jazz-tools
+            !packages/jazz-tools/node_modules
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pkg-jazz-wasm
+          path: |
+            crates/jazz-wasm
+            !crates/jazz-wasm/node_modules
+            !crates/jazz-wasm/target
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pkg-jazz-napi
+          path: |
+            crates/jazz-napi
+            !crates/jazz-napi/node_modules
+            !crates/jazz-napi/target
+            !crates/jazz-napi/artifacts
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pkg-jazz-rn
+          path: |
+            crates/jazz-rn
+            !crates/jazz-rn/node_modules
+            !crates/jazz-rn/target
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pkg-create-jazz
+          path: |
+            packages/create-jazz
+            !packages/create-jazz/node_modules
+          include-hidden-files: true
+          if-no-files-found: error
