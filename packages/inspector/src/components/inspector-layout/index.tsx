@@ -1,7 +1,30 @@
-import { useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router";
+import { createContext, useContext, useState } from "react";
+import { Link, Outlet, useLocation, useParams } from "@tanstack/react-router";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
+import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import styles from "./index.module.css";
+
+export interface InspectorLayoutProps {
+  children?: React.ReactNode;
+}
+
+interface InspectorLayoutContextValue {
+  isTablesPanelOpen: boolean;
+}
+
+const InspectorLayoutContext = createContext<InspectorLayoutContextValue | null>(null);
+
+export function useInspectorLayoutContext(): InspectorLayoutContextValue {
+  const context = useContext(InspectorLayoutContext);
+  if (context === null) {
+    throw new Error("useInspectorLayoutContext must be used inside InspectorLayout");
+  }
+  return context;
+}
+
+export function useOptionalInspectorLayoutContext(): InspectorLayoutContextValue | null {
+  return useContext(InspectorLayoutContext);
+}
 
 interface TablesPanelIconProps {
   direction: "open" | "close";
@@ -27,12 +50,18 @@ function TablesPanelIcon({ direction }: TablesPanelIconProps) {
   );
 }
 
-export function InspectorLayout() {
+export function InspectorLayout({ children }: InspectorLayoutProps) {
   const standaloneContext = useStandaloneContext();
   const location = useLocation();
+  const params = useParams({ strict: false });
   const [isTablesPanelOpen, setIsTablesPanelOpen] = useState(true);
 
-  const isDataExplorerRoute = location.pathname.startsWith("/data-explorer");
+  const routeParams = {
+    connectionId: params.connectionId ?? "",
+    branch: params.branch ?? "",
+    schemaHash: params.schemaHash ?? "",
+  };
+  const isDataExplorerRoute = location.pathname.includes("/data-explorer");
 
   const onToggleTablesPanel = () => {
     setIsTablesPanelOpen((isOpen) => !isOpen);
@@ -53,22 +82,22 @@ export function InspectorLayout() {
               <TablesPanelIcon direction={isTablesPanelOpen ? "close" : "open"} />
             </button>
           ) : null}
-          <NavLink
-            to="/data-explorer"
-            className={({ isActive }) =>
-              `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
-            }
+          <Link
+            to={appRoutes.dataExplorer}
+            params={routeParams}
+            className={styles.tabLink}
+            activeProps={{ className: styles.tabLinkActive }}
           >
             Data Explorer
-          </NavLink>
-          <NavLink
-            to="/live-query"
-            className={({ isActive }) =>
-              `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
-            }
+          </Link>
+          <Link
+            to={appRoutes.liveQuery}
+            params={routeParams}
+            className={styles.tabLink}
+            activeProps={{ className: styles.tabLinkActive }}
           >
             Live Query
-          </NavLink>
+          </Link>
         </nav>
         <div className={styles.topBarActions}>
           {standaloneContext ? (
@@ -91,7 +120,9 @@ export function InspectorLayout() {
         </div>
       </header>
       <section className={styles.content}>
-        <Outlet context={{ isTablesPanelOpen }} />
+        <InspectorLayoutContext.Provider value={{ isTablesPanelOpen }}>
+          {children ?? <Outlet />}
+        </InspectorLayoutContext.Provider>
       </section>
     </main>
   );

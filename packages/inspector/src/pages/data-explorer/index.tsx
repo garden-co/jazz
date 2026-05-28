@@ -1,23 +1,25 @@
 import { useMemo } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { NavLink, Outlet, useOutletContext, useParams } from "react-router";
+import { Link, Outlet, useParams } from "@tanstack/react-router";
+import { useOptionalInspectorLayoutContext } from "#inspector-layout/index";
+import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./index.module.css";
 
-interface DataExplorerOutletContext {
-  isTablesPanelOpen: boolean;
+interface DataExplorerProps {
+  children?: React.ReactNode;
 }
 
-export function DataExplorer() {
+export function DataExplorer({ children }: DataExplorerProps = {}) {
   const {
     wasmSchema: schema,
     runtime,
     queryPropagation,
     setQueryPropagation,
   } = useDevtoolsContext();
-  const isTablesPanelOpen =
-    useOutletContext<DataExplorerOutletContext | null>()?.isTablesPanelOpen ?? true;
-  const { table } = useParams();
+  const isTablesPanelOpen = useOptionalInspectorLayoutContext()?.isTablesPanelOpen ?? true;
+  const params = useParams({ strict: false });
+  const table = params.tableName;
 
   const tableNames = useMemo(() => Object.keys(schema ?? {}).sort(), [schema]);
 
@@ -52,13 +54,19 @@ export function DataExplorer() {
               <ul className={styles.tableList}>
                 {tableNames.map((tableName) => (
                   <li key={tableName}>
-                    <NavLink
-                      to={`/data-explorer/${tableName}/data`}
+                    <Link
+                      to={appRoutes.tableData}
+                      params={{
+                        connectionId: params.connectionId ?? "",
+                        branch: params.branch ?? "",
+                        schemaHash: params.schemaHash ?? "",
+                        tableName,
+                      }}
                       className={`${styles.tableLink} ${table === tableName ? styles.tableLinkActive : ""}`}
                       aria-label={`View ${tableName} data`}
                     >
                       {tableName}
-                    </NavLink>
+                    </Link>
                   </li>
                 ))}
               </ul>
@@ -75,7 +83,7 @@ export function DataExplorer() {
               <p className={styles.emptyText}>Choose a table from the left sidebar to view rows.</p>
             </section>
           ) : null}
-          <Outlet />
+          {children ?? <Outlet />}
         </main>
       </Panel>
     </Group>

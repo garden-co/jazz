@@ -1,5 +1,5 @@
 // Central route patterns used by typed navigation, redirects, and active route matching.
-// It avoids duplicating raw path strings across consumers of these routes.
+// Keep this in sync with the generated TanStack route tree.
 
 export const appRoutes = {
   connections: "/conn",
@@ -9,6 +9,6 @@ export const appRoutes = {
   schemaHash: "/conn/$connectionId/$branch/$schemaHash",
   dataExplorer: "/conn/$connectionId/$branch/$schemaHash/data-explorer",
   liveQuery: "/conn/$connectionId/$branch/$schemaHash/live-query",
-  tableData: "/conn/$connectionId/$branch/$schemaHash/table/$tableName/data",
-  tableSchema: "/conn/$connectionId/$branch/$schemaHash/table/$tableName/schema",
+  tableData: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data",
+  tableSchema: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema",
 } as const;

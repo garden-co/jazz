@@ -8,6 +8,12 @@ export default defineConfig(({ mode }) => {
 
   return {
     resolve: {
+      alias: {
+        "#data-explorer": resolve(__dirname, "src/components/data-explorer"),
+        "#inspector-layout": resolve(__dirname, "src/components/inspector-layout"),
+        "#lib": resolve(__dirname, "src/lib"),
+        "#pages": resolve(__dirname, "src/pages"),
+      },
       tsconfigPaths: true,
     },
     plugins: [
