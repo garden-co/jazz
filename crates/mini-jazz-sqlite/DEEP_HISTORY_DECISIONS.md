@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:53:54 PDT 2026
+
+Decision: verify the grouped Incr/rope selector with real canonical caps.
+
+Why: after adding grouped selectors, each experiment-column family should have at least one real-sized smoke run. The Incr sidecar path is slower, so this also confirms the grouped command remains interruptible by the normal process boundary if needed.
+
+Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-incr` completed append, Automerge, and canvas at canonical update counts. The output was saved in `/tmp/deep_history_all_canonical_incr.json`; comparison-table numbers were not changed because this was a selector verification pass.
+
 ## Thu May 28 03:52:33 PDT 2026
 
 Decision: verify the grouped Block selector with real canonical caps.
