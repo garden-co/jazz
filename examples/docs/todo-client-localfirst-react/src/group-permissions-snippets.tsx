@@ -1,4 +1,4 @@
-import { schema as s } from "jazz-tools";
+import { schema as s, type RowRefValue } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
 
 // #region group-schema
@@ -9,7 +9,7 @@ const schema = {
   workspaceMembers: s.table({
     workspaceId: s.ref("workspaces"),
     user_id: s.string(),
-    role: s.enum(["reader", "writer", "contributor", "admin"]),
+    role: s.enum("reader", "writer", "contributor", "admin"),
   }),
   documents: s.table({
     title: s.string(),
@@ -26,14 +26,16 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 type Role = "reader" | "writer" | "contributor" | "admin";
 
 s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
-  // Re-usable helpers to improve readability
-  const isMember = (workspaceId: string) =>
+  // Re-usable helpers to improve readability.
+  // Where-callbacks receive row columns as RowRefValue references rather than
+  // raw scalars, so helpers accept `string | RowRefValue` for the id parameter.
+  const isMember = (workspaceId: string | RowRefValue) =>
     policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user_id });
 
-  const hasRole = (workspaceId: string, role: Role) =>
+  const hasRole = (workspaceId: string | RowRefValue, role: Role) =>
     policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user_id, role });
 
-  const isAdmin = (workspaceId: string) => hasRole(workspaceId, "admin");
+  const isAdmin = (workspaceId: string | RowRefValue) => hasRole(workspaceId, "admin");
 
   // --- documents ---
 
@@ -98,7 +100,7 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
 
 // #region group-create
 export function createWorkspace(db: ReturnType<typeof useDb>, name: string, creatorId: string) {
-  const workspace = db.insert(app.workspaces, { name });
+  const { value: workspace } = db.insert(app.workspaces, { name });
   // Add the creator as admin immediately so they can manage the workspace
   db.insert(app.workspaceMembers, {
     workspaceId: workspace.id,
