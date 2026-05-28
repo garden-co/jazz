@@ -5,6 +5,7 @@ import { InspectorLayout } from "./index";
 
 const mockUseStandaloneContext = vi.fn();
 const mockUseDevtoolsContext = vi.fn();
+const routeParams = { branch: "main", connectionId: "local", schemaHash: "hash-a" };
 
 vi.mock("../../contexts/standalone-context.js", () => ({
   useStandaloneContext: () => mockUseStandaloneContext(),
@@ -38,7 +39,7 @@ describe("InspectorLayout", () => {
       isSwitchingSchema: false,
     });
 
-    renderWithRouter(<InspectorLayout />);
+    renderWithRouter(<InspectorLayout routeParams={routeParams} />);
 
     expect(await screen.findByRole("button", { name: "Connections" })).not.toBeNull();
     expect(screen.getByRole("combobox")).not.toBeNull();
@@ -59,7 +60,7 @@ describe("InspectorLayout", () => {
       isSwitchingSchema: false,
     });
 
-    renderWithRouter(<InspectorLayout />);
+    renderWithRouter(<InspectorLayout routeParams={routeParams} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Connections" }));
 
@@ -78,7 +79,7 @@ describe("InspectorLayout", () => {
       isSwitchingSchema: false,
     });
 
-    renderWithRouter(<InspectorLayout />);
+    renderWithRouter(<InspectorLayout routeParams={routeParams} />);
 
     fireEvent.change(await screen.findByRole("combobox"), { target: { value: "hash-b" } });
 
@@ -95,7 +96,7 @@ describe("InspectorLayout", () => {
       isSwitchingSchema: true,
     });
 
-    renderWithRouter(<InspectorLayout />);
+    renderWithRouter(<InspectorLayout routeParams={routeParams} />);
 
     expect((await screen.findByRole("combobox")).hasAttribute("disabled")).toBe(true);
 
@@ -109,7 +110,7 @@ describe("InspectorLayout", () => {
     });
 
     cleanup();
-    renderWithRouter(<InspectorLayout />);
+    renderWithRouter(<InspectorLayout routeParams={routeParams} />);
 
     expect((await screen.findByRole("combobox")).hasAttribute("disabled")).toBe(true);
   });
@@ -117,7 +118,7 @@ describe("InspectorLayout", () => {
   it("hides schema actions when config reset context is unavailable", () => {
     mockUseStandaloneContext.mockReturnValue(null);
 
-    renderWithRouter(<InspectorLayout />);
+    renderWithRouter(<InspectorLayout routeParams={routeParams} />);
 
     expect(screen.queryByRole("button", { name: "Connections" })).toBeNull();
     expect(screen.queryByRole("combobox")).toBeNull();

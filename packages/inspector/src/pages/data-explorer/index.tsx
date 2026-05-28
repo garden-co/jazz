@@ -1,16 +1,17 @@
 import { useMemo } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
+import { appRoutes, type InspectorRouteParams } from "#lib/navigation/appRoutes.ts";
 import { Link, Outlet, useParams } from "@tanstack/react-router";
 import { useOptionalInspectorLayoutContext } from "#inspector-layout/index";
-import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./index.module.css";
 
 interface DataExplorerProps {
   children?: React.ReactNode;
+  routeParams: InspectorRouteParams;
 }
 
-export function DataExplorer({ children }: DataExplorerProps = {}) {
+export function DataExplorer({ children, routeParams }: DataExplorerProps) {
   const {
     wasmSchema: schema,
     runtime,
@@ -57,9 +58,9 @@ export function DataExplorer({ children }: DataExplorerProps = {}) {
                     <Link
                       to={appRoutes.tableData}
                       params={{
-                        connectionId: params.connectionId ?? "",
-                        branch: params.branch ?? "",
-                        schemaHash: params.schemaHash ?? "",
+                        connectionId: routeParams.connectionId,
+                        branch: routeParams.branch,
+                        schemaHash: routeParams.schemaHash,
                         tableName,
                       }}
                       className={`${styles.tableLink} ${table === tableName ? styles.tableLinkActive : ""}`}

@@ -28,7 +28,7 @@ import {
   buildRelationFilterSearch,
   PAGE_SIZE_OPTIONS,
   useTableExplorerSearchParams,
-} from "./tableSearchParams.js";
+} from "#data-explorer/tableSearchParams.ts";
 import styles from "./TableDataGrid.module.css";
 
 function formatCellValue(value: unknown): string {
@@ -463,8 +463,13 @@ function useAnimatedGridRows(
 }
 
 export function TableDataGrid() {
-  const params = useParams({ strict: false });
-  const table = params.tableName ?? "";
+  const params = useParams({ from: appRoutes.tableData });
+  const table = params.tableName;
+  const routeParams = {
+    branch: params.branch,
+    connectionId: params.connectionId,
+    schemaHash: params.schemaHash,
+  };
 
   const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
   const db = useDb();
@@ -704,9 +709,7 @@ export function TableDataGrid() {
           <Link
             to={appRoutes.tableSchema}
             params={{
-              connectionId: params.connectionId ?? "",
-              branch: params.branch ?? "",
-              schemaHash: params.schemaHash ?? "",
+              ...routeParams,
               tableName: table,
             }}
             className={styles.secondaryButton}
@@ -1083,7 +1086,12 @@ function RelationCell({
   relationId: string;
   queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
 }) {
-  const params = useParams({ strict: false });
+  const params = useParams({ from: appRoutes.tableData });
+  const routeParams = {
+    branch: params.branch,
+    connectionId: params.connectionId,
+    schemaHash: params.schemaHash,
+  };
   const queryBuilder = useMemo(
     () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
     [relationId, relationTable, schema],
@@ -1105,9 +1113,7 @@ function RelationCell({
       <Link
         to={appRoutes.tableData}
         params={{
-          connectionId: params.connectionId ?? "",
-          branch: params.branch ?? "",
-          schemaHash: params.schemaHash ?? "",
+          ...routeParams,
           tableName: relationTable,
         }}
         search={buildRelationFilterSearch(relationId)}

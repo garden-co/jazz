@@ -216,6 +216,7 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
     setError(null);
     clearRuntime();
 
+    // Schema selection is URL state. Saved connections keep defaults for partial route redirects.
     void navigate({
       to: appRoutes.dataExplorer,
       params: {
@@ -416,6 +417,7 @@ function resolveRuntimeConnection(
     return null;
   }
 
+  // Full route params are authoritative; stored values supply credentials and saved defaults only.
   return {
     ...storedConnection,
     branch,

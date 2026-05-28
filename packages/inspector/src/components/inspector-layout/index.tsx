@@ -1,11 +1,12 @@
 import { createContext, useContext, useState } from "react";
-import { Link, Outlet, useLocation, useParams } from "@tanstack/react-router";
+import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
-import { appRoutes } from "#lib/navigation/appRoutes.ts";
+import { appRoutes, type InspectorRouteParams } from "#lib/navigation/appRoutes.ts";
 import styles from "./index.module.css";
 
 export interface InspectorLayoutProps {
   children?: React.ReactNode;
+  routeParams: InspectorRouteParams;
 }
 
 interface InspectorLayoutContextValue {
@@ -50,17 +51,10 @@ function TablesPanelIcon({ direction }: TablesPanelIconProps) {
   );
 }
 
-export function InspectorLayout({ children }: InspectorLayoutProps) {
+export function InspectorLayout({ children, routeParams }: InspectorLayoutProps) {
   const standaloneContext = useStandaloneContext();
   const location = useLocation();
-  const params = useParams({ strict: false });
   const [isTablesPanelOpen, setIsTablesPanelOpen] = useState(true);
-
-  const routeParams = {
-    connectionId: params.connectionId ?? "",
-    branch: params.branch ?? "",
-    schemaHash: params.schemaHash ?? "",
-  };
   const isDataExplorerRoute = location.pathname.includes("/data-explorer");
 
   const onToggleTablesPanel = () => {
