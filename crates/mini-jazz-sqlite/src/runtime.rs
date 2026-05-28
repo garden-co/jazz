@@ -3850,7 +3850,8 @@ impl Runtime {
                AND idx.node_num = ?
                AND idx.min_local_epoch <= ?
                AND idx.max_local_epoch > ?
-             ORDER BY idx.max_local_epoch DESC, idx.min_local_epoch, idx.block_id",
+             ORDER BY idx.max_local_epoch DESC, idx.min_local_epoch, idx.block_id
+             LIMIT 1",
         )?;
         let rows = stmt.query_map(
             params![

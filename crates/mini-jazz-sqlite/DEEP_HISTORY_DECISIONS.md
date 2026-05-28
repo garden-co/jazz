@@ -459,3 +459,11 @@ Decision: keep `max_rows_per_block` as a first-class compaction policy knob rath
 Why: a quick append sweep showed historical point-read average improving as the per-block row cap dropped, while compressed payload bytes stayed in the same order of magnitude. The exact optimum will vary by workload, but the policy needs to expose this storage/read-latency tradeoff.
 
 Scope impact: no API change in this step; document the measured non-canonical sweep so future tuning can compare against it.
+
+## Thu May 28 02:46:28 PDT 2026 - Point Reads Choose One Candidate Block
+
+Decision: limit node-local sealed point reads to the newest candidate block range instead of decoding every older block up to the requested epoch.
+
+Why: after block splitting, the old lookup defeated the point-read benefit by returning all sealed blocks whose max epoch was newer than the open-history candidate. A point lookup only needs the newest sealed block that can contain or precede the requested local epoch.
+
+Scope impact: split-block historical reads decode fewer blocks. The append cap-100 probe improved from roughly 57 ms to roughly 43 ms average historical read time with the same logical results.
