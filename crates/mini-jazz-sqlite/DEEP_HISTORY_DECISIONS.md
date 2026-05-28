@@ -547,3 +547,11 @@ Decision: branch query-scope exports should scan sealed accepted blocks for rows
 Why: once `hot_tail = 0` can seal the branch base, the current/open query path may not discover a matching base row at all. Exporting only the rows returned by current query evaluation would omit the pinned base row, while exporting all sealed history would leak future main versions. The query exporter therefore needs a narrow sealed-base predicate repair path.
 
 Scope impact: support equality, not-equal, contains, and in predicates over sealed branch-base records. The table and query sealed-branch regression tests now cover both over-export and under-export.
+
+## Thu May 28 03:18:08 PDT 2026 - Refresh Canonical Block Benchmarks
+
+Decision: refresh the benchmark table's Block column after the sealed-read/cache/export fixes.
+
+Why: the storage numbers stayed in the same range, but historical point-read averages moved materially: append is now about 41 ms, Automerge about 61 ms, and canvas about 99 ms in the canonical one-block runs. The table should reflect the current code before the next optimization cycle.
+
+Scope impact: update only the canonical Block column cells from fresh append, Automerge, and canvas runs. The Base/Base1/Base2/Base3/Incr columns are unchanged.
