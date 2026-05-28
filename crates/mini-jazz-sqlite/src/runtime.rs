@@ -731,21 +731,39 @@ impl Runtime {
         row_id: &str,
         hot_tail: usize,
     ) -> Result<HistoryCompactionStats> {
+        self.compact_rejected_history_with_block_limit(table_name, row_id, hot_tail, None)
+    }
+
+    fn compact_rejected_history_with_block_limit(
+        &mut self,
+        table_name: &str,
+        row_id: &str,
+        hot_tail: usize,
+        max_rows_per_block: Option<usize>,
+    ) -> Result<HistoryCompactionStats> {
         self.schema.table_def(table_name)?;
-        let table_num = crate::schema::table_num(&self.conn, table_name)?;
         let row_num = row_num(&self.conn, row_id)?;
         let selected =
             compactable_rejected_history_tx_nums(&self.conn, table_name, row_num, hot_tail)?;
         if selected.is_empty() {
-            return Ok(HistoryCompactionStats {
-                sealed_history_rows: 0,
-                history_blocks: 0,
-                sealed_transactions: 0,
-                uncompressed_bytes: 0,
-                compressed_bytes: 0,
-            });
+            return Ok(empty_history_compaction_stats());
         }
+        let chunk_size = max_rows_per_block.unwrap_or(selected.len()).max(1);
+        let mut total = empty_history_compaction_stats();
+        for chunk in selected.chunks(chunk_size) {
+            let stats = self.compact_rejected_history_tx_nums(table_name, row_num, chunk)?;
+            add_history_compaction_stats(&mut total, stats);
+        }
+        Ok(total)
+    }
 
+    fn compact_rejected_history_tx_nums(
+        &mut self,
+        table_name: &str,
+        row_num: i64,
+        selected: &[i64],
+    ) -> Result<HistoryCompactionStats> {
+        let table_num = crate::schema::table_num(&self.conn, table_name)?;
         let mut history = export_history_versions_for_rows(
             &self.conn,
             &self.schema,
@@ -753,10 +771,9 @@ impl Runtime {
             Some(&[row_num]),
             None,
         )?;
-        let selected_set = selected.iter().copied().collect::<BTreeSet<_>>();
         history.retain(|record| {
             tx::tx_num(&self.conn, &record.tx_id)
-                .map(|tx_num| selected_set.contains(&tx_num))
+                .map(|tx_num| selected.contains(&tx_num))
                 .unwrap_or(false)
         });
         let tx_ids = history
@@ -815,9 +832,9 @@ impl Runtime {
             ],
         )?;
         let block_id = db.last_insert_rowid();
-        insert_history_block_tx_index(&db, block_id, &selected)?;
-        delete_history_rows_for_tx_nums(&db, table_name, row_num, &selected)?;
-        let sealed_transactions = delete_rejected_compacted_tx_rows(&db, &self.schema, &selected)?;
+        insert_history_block_tx_index(&db, block_id, selected)?;
+        delete_history_rows_for_tx_nums(&db, table_name, row_num, selected)?;
+        let sealed_transactions = delete_rejected_compacted_tx_rows(&db, &self.schema, selected)?;
         db.commit()?;
 
         Ok(HistoryCompactionStats {
@@ -1117,8 +1134,12 @@ impl Runtime {
                     ) {
                         return Ok(total);
                     }
-                    let stats =
-                        self.compact_rejected_history(&table_name, &row_id, policy.hot_tail)?;
+                    let stats = self.compact_rejected_history_with_block_limit(
+                        &table_name,
+                        &row_id,
+                        policy.hot_tail,
+                        policy.max_rows_per_block,
+                    )?;
                     add_history_compaction_stats(&mut total, stats);
                 }
             }

@@ -403,3 +403,11 @@ Decision: Add a `max_rows_per_block` compaction policy knob for accepted history
 Why: one huge block per deep row is good for compression but bad for cold point reads, because the first read has to decode and scan the whole blob. Smaller per-row blocks give us a direct storage/read-latency tradeoff without changing semantics.
 
 Scope impact: policy compaction can now split one row's compacted accepted history into multiple blocks. Existing direct row/table compaction keeps the old single-block behavior unless the policy knob is used.
+
+## Thu May 28 02:20:35 PDT 2026 - Rejected Block Splitting
+
+Decision: Apply the `max_rows_per_block` policy knob to rejected-history compaction too.
+
+Why: rejected histories can also grow deep, especially when a client repeatedly retries an invalid write. They should get the same block-size tradeoff as accepted histories and remain separate from accepted blocks.
+
+Scope impact: policy compaction now splits accepted and rejected row histories. Direct rejected row/table compaction keeps the existing single-block behavior unless called through the policy path.
