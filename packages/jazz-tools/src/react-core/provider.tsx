@@ -6,10 +6,14 @@ import React, {
   useState,
   type ReactNode,
 } from "react";
+import type { DehydratedSnapshot } from "../backend/ssr.js";
+import { computeSchemaFingerprint } from "../drivers/schema-wire.js";
+import type { WasmSchema } from "../drivers/types.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
+import { applySnapshot } from "./apply-snapshot.js";
 
 type CoreJazzDb = {
   getAuthState(): AuthState;
@@ -33,6 +37,9 @@ export type JwtRefreshFn = () => Promise<string | null | undefined>;
 export type JazzClientProviderProps = {
   client: Promise<CoreJazzClient> | CoreJazzClient;
   onJWTExpired?: JwtRefreshFn;
+  snapshot?: DehydratedSnapshot;
+  expectedAppId?: string;
+  expectedSchemaFingerprint?: string;
   children: ReactNode;
 };
 
@@ -42,6 +49,21 @@ export type JazzProviderProps = {
   children: ReactNode;
   createJazzClient: CreateJazzClient;
   onJWTExpired?: JwtRefreshFn;
+  /**
+   * Server-rendered snapshot produced by `createSnapshotBuilder().dehydrate()`.
+   * Seeded into the orchestrator before children render so the first paint
+   * after hydration isn't blocked on a sync fetch. Discarded if the
+   * envelope's `appId`, `principalId`, or `schemaFingerprint` doesn't
+   * match the live client.
+   */
+  snapshot?: DehydratedSnapshot;
+  /**
+   * Optional schema, used only to validate the snapshot envelope's
+   * `schemaFingerprint`. When omitted the fingerprint check is skipped;
+   * the user is responsible for keeping server and client schemas in
+   * sync.
+   */
+  schema?: WasmSchema;
 };
 
 type JazzContextValue = {
@@ -187,9 +209,29 @@ function usePromise<T extends object>(promise: Promise<T> | T): T {
 export function JazzClientProvider({
   client: clientPromise,
   onJWTExpired,
+  snapshot,
+  expectedAppId,
+  expectedSchemaFingerprint,
   children,
 }: JazzClientProviderProps) {
   const client = usePromise(clientPromise);
+
+  // useState initialiser runs once per mount, before the first child render.
+  // This ensures the orchestrator is seeded before any useDb hook below
+  // calls makeQueryKey / getCacheEntry on it.
+  useState(() => {
+    if (!snapshot) return null;
+    applySnapshot({
+      manager: client.manager,
+      snapshot,
+      expected: {
+        appId: expectedAppId ?? snapshot.appId,
+        principalId: client.session?.user_id ?? null,
+        schemaFingerprint: expectedSchemaFingerprint ?? snapshot.schemaFingerprint,
+      },
+    });
+    return null;
+  });
 
   const authRev = useAuthSubscription(client, onJWTExpired);
 
@@ -210,7 +252,13 @@ export function JazzProvider({
   children,
   createJazzClient,
   onJWTExpired,
+  snapshot,
+  schema,
 }: JazzProviderProps) {
+  const expectedSchemaFingerprint = React.useMemo(
+    () => (schema ? computeSchemaFingerprint(schema) : undefined),
+    [schema],
+  );
   // Stable per-provider identity; used as the Set key so the useState
   // initializer and useEffect don't double-count the same provider.
   const holder = useRef({}).current;
@@ -238,7 +286,13 @@ export function JazzProvider({
 
   return (
     <React.Suspense fallback={fallback}>
-      <JazzClientProvider client={clientPromise} onJWTExpired={onJWTExpired}>
+      <JazzClientProvider
+        client={clientPromise}
+        onJWTExpired={onJWTExpired}
+        snapshot={snapshot}
+        expectedAppId={config.appId}
+        expectedSchemaFingerprint={expectedSchemaFingerprint}
+      >
         {children}
       </JazzClientProvider>
     </React.Suspense>
