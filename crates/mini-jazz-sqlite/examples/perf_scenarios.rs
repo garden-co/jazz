@@ -1,12 +1,12 @@
 use mini_jazz_sqlite::sync::{merge_bundles, Bundle};
 use mini_jazz_sqlite::{
-    persisted_rope, ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy,
+    persisted_text_ops, ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy,
     QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::io::Write;
@@ -205,11 +205,8 @@ enum DeepHistoryReport {
     AppendStreamHistoryBlocks(DeepHistoryCaseReport),
     AutomergePaperHistoryBlocks(DeepHistoryCaseReport),
     CanvasPositionsHistoryBlocks(DeepHistoryCaseReport),
-    AppendStreamJazzRope(DeepHistoryCaseReport),
-    AutomergePaperJazzRope(DeepHistoryCaseReport),
-    CanvasPositionsJazzRope(DeepHistoryCaseReport),
-    AppendStreamHistoryBlocksJazzRope(DeepHistoryCaseReport),
-    AutomergePaperHistoryBlocksJazzRope(DeepHistoryCaseReport),
+    AppendStreamBlockOps(DeepHistoryCaseReport),
+    AutomergePaperBlockOps(DeepHistoryCaseReport),
 }
 
 #[derive(Serialize)]
@@ -4120,14 +4117,9 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
         "append-history-blocks" | "append-stream-history-blocks" => Ok(
             DeepHistoryReport::AppendStreamHistoryBlocks(run_append_stream_history_blocks_probe()?),
         ),
-        "append-jazz-rope" | "append-stream-jazz-rope" => Ok(
-            DeepHistoryReport::AppendStreamJazzRope(run_append_stream_jazz_rope_probe()?),
+        "append-text-ops" | "append-oplog" => Ok(
+            DeepHistoryReport::AppendStreamBlockOps(run_append_text_ops_probe()?),
         ),
-        "append-history-blocks-jazz-rope" | "append-block-incr" | "append-blocks-incr" => {
-            Ok(DeepHistoryReport::AppendStreamHistoryBlocksJazzRope(
-                run_append_stream_history_blocks_jazz_rope_probe()?,
-            ))
-        }
         "automerge" | "automerge-paper" => {
             Ok(DeepHistoryReport::AutomergePaper(run_automerge_paper_probe()?))
         }
@@ -4136,25 +4128,17 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
                 run_automerge_paper_history_blocks_probe()?,
             ),
         ),
-        "automerge-jazz-rope" | "automerge-paper-jazz-rope" => Ok(
-            DeepHistoryReport::AutomergePaperJazzRope(run_automerge_paper_jazz_rope_probe()?),
+        "automerge-text-ops" | "automerge-oplog" => Ok(
+            DeepHistoryReport::AutomergePaperBlockOps(run_automerge_text_ops_probe()?),
         ),
-        "automerge-history-blocks-jazz-rope" | "automerge-block-incr" | "automerge-blocks-incr" => {
-            Ok(DeepHistoryReport::AutomergePaperHistoryBlocksJazzRope(
-                run_automerge_paper_history_blocks_jazz_rope_probe()?,
-            ))
-        }
         "canvas" | "canvas-positions" => {
             Ok(DeepHistoryReport::CanvasPositions(run_canvas_positions_probe()?))
         }
         "canvas-history-blocks" | "canvas-positions-history-blocks" => Ok(
             DeepHistoryReport::CanvasPositionsHistoryBlocks(run_canvas_positions_history_blocks_probe()?),
         ),
-        "canvas-jazz-rope" | "canvas-positions-jazz-rope" => Ok(
-            DeepHistoryReport::CanvasPositionsJazzRope(run_canvas_positions_jazz_rope_probe()?),
-        ),
         other => Err(format!(
-            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected all, all-history-blocks, all-jazz-rope, all-block-incr, append, append-history-blocks, append-jazz-rope, append-block-incr, automerge-paper, automerge-history-blocks, automerge-paper-jazz-rope, automerge-block-incr, canvas, canvas-history-blocks, or canvas-jazz-rope"
+            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected all, all-history-blocks, all-block-ops, append, append-history-blocks, append-text-ops, automerge-paper, automerge-history-blocks, automerge-text-ops, canvas, or canvas-history-blocks"
         )
         .into()),
     }
@@ -4178,22 +4162,10 @@ fn run_all_deep_history_block_probes() -> BenchResult<Vec<DeepHistoryReport>> {
     ])
 }
 
-fn run_all_deep_history_rope_probes() -> BenchResult<Vec<DeepHistoryReport>> {
+fn run_all_deep_history_block_ops_probes() -> BenchResult<Vec<DeepHistoryReport>> {
     Ok(vec![
-        DeepHistoryReport::AppendStreamJazzRope(run_append_stream_jazz_rope_probe()?),
-        DeepHistoryReport::AutomergePaperJazzRope(run_automerge_paper_jazz_rope_probe()?),
-        DeepHistoryReport::CanvasPositionsJazzRope(run_canvas_positions_jazz_rope_probe()?),
-    ])
-}
-
-fn run_all_deep_history_block_rope_probes() -> BenchResult<Vec<DeepHistoryReport>> {
-    Ok(vec![
-        DeepHistoryReport::AppendStreamHistoryBlocksJazzRope(
-            run_append_stream_history_blocks_jazz_rope_probe()?,
-        ),
-        DeepHistoryReport::AutomergePaperHistoryBlocksJazzRope(
-            run_automerge_paper_history_blocks_jazz_rope_probe()?,
-        ),
+        DeepHistoryReport::AppendStreamBlockOps(run_append_text_ops_probe()?),
+        DeepHistoryReport::AutomergePaperBlockOps(run_automerge_text_ops_probe()?),
         DeepHistoryReport::CanvasPositionsHistoryBlocks(
             run_canvas_positions_history_blocks_probe()?
         ),
@@ -4206,10 +4178,7 @@ fn run_deep_history_group_probe(kind: &str) -> BenchResult<Option<Vec<DeepHistor
         "all-history-blocks" | "all-blocks" | "all-block" => {
             Ok(Some(run_all_deep_history_block_probes()?))
         }
-        "all-jazz-rope" | "all-rope" | "all-incr" => Ok(Some(run_all_deep_history_rope_probes()?)),
-        "all-history-blocks-jazz-rope" | "all-block-incr" | "all-blocks-incr" => {
-            Ok(Some(run_all_deep_history_block_rope_probes()?))
-        }
+        "all-block-ops" | "all-ops" => Ok(Some(run_all_deep_history_block_ops_probes()?)),
         _ => Ok(None),
     }
 }
@@ -4367,88 +4336,35 @@ fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseRepo
     })
 }
 
-fn run_append_stream_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
-    let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 2_225);
-    let sample_every = deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY", 445);
-    let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
-    let mut state_len = 0usize;
-    run_jazz_rope_text_case(JazzRopeTextCaseInput {
-        target_updates,
-        sample_every,
-        compact_hot_tail: None,
-        compact_max_rows_per_block: None,
-        reference_gzip_bytes: None,
-        next_edit: Box::new(move |conn, root, _index| {
-            state_len += token.len();
-            Ok((persisted_rope::append(conn, root, &token)?, state_len))
-        }),
-        final_reference_json: None,
-        notes: vec![
-            "Incremental sequence sidecar: Jazz row history stores sequence root refs; appended text lives in immutable UTF-8 sidecar segments.".to_owned(),
-        ],
-    })
-}
-
-fn run_append_stream_history_blocks_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
+fn run_append_text_ops_probe() -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 2_225);
     let sample_every = deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY", 445);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let snapshot_every = env_usize("MINI_JAZZ_DEEP_HISTORY_TEXT_OP_SNAPSHOT_EVERY", 256);
     let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
     let mut state_len = 0usize;
-    run_jazz_rope_text_case(JazzRopeTextCaseInput {
+    run_text_ops_case(TextOpsCaseInput {
         target_updates,
         sample_every,
         compact_hot_tail: Some(hot_tail),
-        compact_max_rows_per_block: deep_history_max_rows_per_block(),
         reference_gzip_bytes: None,
-        next_edit: Box::new(move |conn, root, _index| {
+        snapshot_every,
+        next_edit: Box::new(move |conn, root, _index, snapshot_every| {
             state_len += token.len();
-            Ok((persisted_rope::append(conn, root, &token)?, state_len))
+            Ok((
+                persisted_text_ops::append(conn, root, &token, snapshot_every)?,
+                state_len,
+            ))
         }),
-        final_reference_json: None,
         notes: vec![
-            "Block+Incr: Jazz row history stores sequence root refs and seals cold root history into lz4 blocks; appended text lives in immutable UTF-8 sidecar segments.".to_owned(),
+            format!(
+                "Text op-log sidecar: current roots are latest op ids; snapshots are content-addressed fixed chunks every {snapshot_every} ops."
+            ),
         ],
     })
 }
 
-fn run_automerge_paper_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
-    let trace_path = automerge_trace_path()?;
-    let trace_bytes = std::fs::metadata(&trace_path)?.len() as usize;
-    let trace_json = gzip_decode_to_string(&trace_path)?;
-    let trace: AutomergeTrace = serde_json::from_str(&trace_json)?;
-    let target_updates = env_optional_usize("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_UPDATES")
-        .unwrap_or(2_900)
-        .min(trace.txns.len());
-    let sample_every =
-        deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY", 580);
-    let mut materialized = trace.start_content;
-    let txns = trace.txns;
-    let available_txns = txns.len();
-    run_jazz_rope_text_case(JazzRopeTextCaseInput {
-        target_updates,
-        sample_every,
-        compact_hot_tail: None,
-        compact_max_rows_per_block: None,
-        reference_gzip_bytes: Some(trace_bytes),
-        next_edit: Box::new(move |conn, mut root, index| {
-            for (pos, del, ins) in &txns[index].patches {
-                let start = byte_index_for_char(&materialized, *pos)?;
-                let end = byte_index_for_char(&materialized, pos + del)?;
-                root = persisted_rope::replace_range(conn, root, start, end - start, ins)?;
-                materialized.replace_range(start..end, ins);
-            }
-            Ok((root, materialized.len()))
-        }),
-        final_reference_json: None,
-        notes: vec![
-            format!("Source trace transactions available: {available_txns}"),
-            "Incremental sequence sidecar: Jazz row history stores sequence root refs; document text lives in immutable UTF-8 sidecar segments.".to_owned(),
-        ],
-    })
-}
-
-fn run_automerge_paper_history_blocks_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
+fn run_automerge_text_ops_probe() -> BenchResult<DeepHistoryCaseReport> {
     let trace_path = automerge_trace_path()?;
     let trace_bytes = std::fs::metadata(&trace_path)?.len() as usize;
     let trace_json = gzip_decode_to_string(&trace_path)?;
@@ -4459,28 +4375,37 @@ fn run_automerge_paper_history_blocks_jazz_rope_probe() -> BenchResult<DeepHisto
     let sample_every =
         deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY", 580);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let snapshot_every = env_usize("MINI_JAZZ_DEEP_HISTORY_TEXT_OP_SNAPSHOT_EVERY", 256);
     let mut materialized = trace.start_content;
     let txns = trace.txns;
     let available_txns = txns.len();
-    run_jazz_rope_text_case(JazzRopeTextCaseInput {
+    run_text_ops_case(TextOpsCaseInput {
         target_updates,
         sample_every,
         compact_hot_tail: Some(hot_tail),
-        compact_max_rows_per_block: deep_history_max_rows_per_block(),
         reference_gzip_bytes: Some(trace_bytes),
-        next_edit: Box::new(move |conn, mut root, index| {
+        snapshot_every,
+        next_edit: Box::new(move |conn, mut root, index, snapshot_every| {
             for (pos, del, ins) in &txns[index].patches {
                 let start = byte_index_for_char(&materialized, *pos)?;
                 let end = byte_index_for_char(&materialized, pos + del)?;
-                root = persisted_rope::replace_range(conn, root, start, end - start, ins)?;
+                root = persisted_text_ops::replace_range(
+                    conn,
+                    root,
+                    start,
+                    end - start,
+                    ins,
+                    snapshot_every,
+                )?;
                 materialized.replace_range(start..end, ins);
             }
             Ok((root, materialized.len()))
         }),
-        final_reference_json: None,
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
-            "Block+Incr: Jazz row history stores sequence root refs and seals cold root history into lz4 blocks; document text lives in immutable UTF-8 sidecar segments.".to_owned(),
+            format!(
+                "Text op-log sidecar: current roots are latest op ids; snapshots are content-addressed fixed chunks every {snapshot_every} ops."
+            ),
         ],
     })
 }
@@ -4558,33 +4483,6 @@ fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseRep
     })
 }
 
-fn run_canvas_positions_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
-    let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES", 3_900);
-    let sample_every = deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_CANVAS_SAMPLE_EVERY", 780);
-    let mut all_positions = Vec::with_capacity(target_updates);
-    for frame in 0..target_updates {
-        all_positions.push(canvas_position(frame));
-    }
-    let reference_json = serde_json::to_string(
-        &all_positions
-            .iter()
-            .map(|position| serde_json::json!({ "x": position.x, "y": position.y }))
-            .collect::<Vec<_>>(),
-    )?;
-    let reference_gzip_bytes = Some(gzip_bytes(reference_json.as_bytes())?);
-    run_jazz_rope_position_case(JazzRopePositionCaseInput {
-        target_updates,
-        sample_every,
-        reference_gzip_bytes,
-        positions: all_positions,
-        final_reference_json: Some(reference_json),
-        notes: vec![
-            "Incremental sequence sidecar: Jazz row history stores sequence root refs; position samples live in immutable sidecar segments.".to_owned(),
-            "Final-payload ratios are not meaningful for presence-like coordinates and are emitted as null.".to_owned(),
-        ],
-    })
-}
-
 struct DeepHistoryCaseInput {
     target_updates: usize,
     max_seconds: u64,
@@ -4605,39 +4503,30 @@ struct DeepHistoryCaseInput {
     notes: Vec<String>,
 }
 
-struct JazzRopePositionCaseInput {
-    target_updates: usize,
-    sample_every: usize,
-    reference_gzip_bytes: Option<usize>,
-    positions: Vec<persisted_rope::Position>,
-    final_reference_json: Option<String>,
-    notes: Vec<String>,
-}
-
-struct JazzRopeTextCaseInput {
+struct TextOpsCaseInput {
     target_updates: usize,
     sample_every: usize,
     compact_hot_tail: Option<usize>,
-    compact_max_rows_per_block: Option<usize>,
     reference_gzip_bytes: Option<usize>,
-    next_edit: Box<JazzRopeTextEditFn>,
-    final_reference_json: Option<String>,
+    snapshot_every: usize,
+    next_edit: Box<TextOpsEditFn>,
     notes: Vec<String>,
 }
 
-struct PendingRopeTextWrite {
-    root: persisted_rope::RopeRoot,
+type TextOpsEditFn = dyn FnMut(
+    &Connection,
+    persisted_text_ops::TextRoot,
+    usize,
+    usize,
+) -> BenchResult<(persisted_text_ops::TextRoot, usize)>;
+
+struct PendingTextOpWrite {
+    root: persisted_text_ops::TextRoot,
 }
 
-type JazzRopeTextEditFn = dyn FnMut(
-    &Connection,
-    persisted_rope::RopeRoot,
-    usize,
-) -> BenchResult<(persisted_rope::RopeRoot, usize)>;
-
-fn flush_jazz_rope_text_writes(
+fn flush_text_op_writes(
     writer: &mut Runtime,
-    pending_writes: &mut Vec<PendingRopeTextWrite>,
+    pending_writes: &mut Vec<PendingTextOpWrite>,
 ) -> BenchResult<()> {
     if pending_writes.is_empty() {
         return Ok(());
@@ -4658,12 +4547,33 @@ fn flush_jazz_rope_text_writes(
     Ok(())
 }
 
-fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<DeepHistoryCaseReport> {
+fn copy_text_ops_incremental(
+    source: &Connection,
+    target: &Connection,
+    watermark: &mut persisted_text_ops::DeltaWatermark,
+) -> BenchResult<usize> {
+    let delta = persisted_text_ops::export_delta(source, *watermark)?;
+    persisted_text_ops::apply_delta(target, &delta.bytes, watermark)?;
+    Ok(delta.stats.compressed_bytes)
+}
+
+fn copy_text_ops_incremental_batched(
+    source: &Connection,
+    target: &mut Connection,
+    watermark: &mut persisted_text_ops::DeltaWatermark,
+) -> BenchResult<usize> {
+    let tx = target.transaction()?;
+    let bytes = copy_text_ops_incremental(source, &tx, watermark)?;
+    tx.commit()?;
+    Ok(bytes)
+}
+
+fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCaseReport> {
     let tmp = tempdir()?;
     let writer_db_path = tmp.path().join("writer.sqlite");
-    let writer_rope_path = tmp.path().join("writer-rope.sqlite");
-    let receiver_rope_path = tmp.path().join("receiver-rope.sqlite");
-    let cold_rope_path = tmp.path().join("cold-rope.sqlite");
+    let writer_ops_path = tmp.path().join("writer-text-ops.sqlite");
+    let receiver_ops_path = tmp.path().join("receiver-text-ops.sqlite");
+    let cold_ops_path = tmp.path().join("cold-text-ops.sqlite");
     let schema = SchemaDef::new().table("documents", |table| {
         table.text("body_root");
     });
@@ -4675,14 +4585,15 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     )?;
     let mut receiver =
         Runtime::open_with_schema(Storage::Memory, "receiver-node", "bob", schema.clone())?;
-    let mut writer_rope = Connection::open(&writer_rope_path)?;
-    let mut receiver_rope = Connection::open(&receiver_rope_path)?;
-    persisted_rope::install(&writer_rope)?;
-    persisted_rope::install(&receiver_rope)?;
-    let mut receiver_sidecar_watermark = SidecarWatermark::default();
+    let mut writer_ops = Connection::open(&writer_ops_path)?;
+    let mut receiver_ops = Connection::open(&receiver_ops_path)?;
+    persisted_text_ops::install(&writer_ops)?;
+    persisted_text_ops::install(&receiver_ops)?;
+    let mut receiver_watermark = persisted_text_ops::DeltaWatermark::default();
 
     let mut root = None;
-    let (initial_root, mut final_payload_bytes) = (input.next_edit)(&writer_rope, root, 0)?;
+    let (initial_root, mut final_payload_bytes) =
+        (input.next_edit)(&writer_ops, root, 0, input.snapshot_every)?;
     root = initial_root;
     writer.insert_row(
         "documents",
@@ -4690,11 +4601,7 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         map1("body_root", json!(root.unwrap_or_default().to_string())),
     )?;
     receiver.apply_bundle(&writer.export_table_history("documents")?)?;
-    copy_rope_sidecar_incremental_batched(
-        &writer_rope,
-        &mut receiver_rope,
-        &mut receiver_sidecar_watermark,
-    )?;
+    copy_text_ops_incremental_batched(&writer_ops, &mut receiver_ops, &mut receiver_watermark)?;
     let mut subscription = receiver.subscribe_rows("documents")?;
 
     let started = Instant::now();
@@ -4703,21 +4610,22 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     let mut sampled_receive_total_ms = 0.0;
     let batch_window = deep_history_sqlite_tx_batch_window();
     input.notes.push(format!(
-        "SQLite transaction batching enabled for Jazz root writes and sidecar edits: flush window {} ms.",
+        "SQLite transaction batching enabled for Jazz root writes and text op sidecar edits: flush window {} ms.",
         batch_window.as_millis()
     ));
     let mut pending_writes = Vec::new();
     let mut index = 1usize;
     while index < input.target_updates {
         let write_started = Instant::now();
-        let sidecar_tx = writer_rope.transaction()?;
+        let sidecar_tx = writer_ops.transaction()?;
         let batch_started = Instant::now();
         let mut should_sample = false;
         loop {
-            let (next_root, payload_bytes) = (input.next_edit)(&sidecar_tx, root, index)?;
+            let (next_root, payload_bytes) =
+                (input.next_edit)(&sidecar_tx, root, index, input.snapshot_every)?;
             root = next_root;
             final_payload_bytes = payload_bytes;
-            pending_writes.push(PendingRopeTextWrite { root });
+            pending_writes.push(PendingTextOpWrite { root });
             should_sample = should_sample
                 || index == 1
                 || (index + 1).is_multiple_of(input.sample_every)
@@ -4731,27 +4639,27 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
             }
         }
         sidecar_tx.commit()?;
-        flush_jazz_rope_text_writes(&mut writer, &mut pending_writes)?;
+        flush_text_op_writes(&mut writer, &mut pending_writes)?;
         write_only_ms += ms(write_started.elapsed());
 
         if should_sample {
             let receive_started = Instant::now();
             let bundle = writer.export_table_history("documents")?;
             receiver.profile_apply_bundle(&bundle)?;
-            copy_rope_sidecar_incremental_batched(
-                &writer_rope,
-                &mut receiver_rope,
-                &mut receiver_sidecar_watermark,
+            copy_text_ops_incremental_batched(
+                &writer_ops,
+                &mut receiver_ops,
+                &mut receiver_watermark,
             )?;
             let diffs = receiver.poll_subscription(&mut subscription)?;
             if diffs.is_empty() {
-                return Err("jazz rope text listener did not observe sampled edit".into());
+                return Err("text op listener did not observe sampled edit".into());
             }
             let rows = receiver.read_rows("documents")?;
             let observed_root = row_root_id(&rows, "body_root")?;
-            let observed = persisted_rope::materialize(&receiver_rope, Some(observed_root))?;
+            let observed = persisted_text_ops::materialize(&receiver_ops, Some(observed_root))?;
             if observed.len() != final_payload_bytes {
-                return Err("jazz rope text listener materialized unexpected length".into());
+                return Err("text op listener materialized unexpected length".into());
             }
             let receive_ms = ms(receive_started.elapsed());
             sampled_receive_total_ms += receive_ms;
@@ -4768,124 +4676,100 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     let mut native_export_ms = None;
     let mut native_import_ms = None;
     if let Some(hot_tail) = input.compact_hot_tail {
-        let compaction_started = Instant::now();
-        let compaction = if let Some(max_rows_per_block) = input.compact_max_rows_per_block {
-            writer.compact_history_with_policy(
-                HistoryCompactionPolicy::accepted_only(hot_tail, hot_tail)
-                    .with_max_rows_per_block(max_rows_per_block),
-            )?
-        } else {
-            writer.compact_table_accepted_history("documents", hot_tail, hot_tail)?
-        };
-        let compaction_ms = ms(compaction_started.elapsed());
-        if let Some(max_rows_per_block) = input.compact_max_rows_per_block {
-            input.notes.push(format!(
-                "History block row cap: at most {max_rows_per_block} sealed root-history rows per block."
-            ));
-        }
+        let compaction = writer.compact_table_accepted_history("documents", hot_tail, hot_tail)?;
         input.notes.push(format!(
-            "Root history block compaction: hot tail {}, sealed rows {}, blocks {}, sealed tx rows {}, uncompressed bytes {}, compressed bytes {}, compaction {:.2} ms.",
+            "Root history block compaction: hot tail {}, sealed rows {}, blocks {}, sealed tx rows {}, uncompressed bytes {}, compressed bytes {}.",
             hot_tail,
             compaction.sealed_history_rows,
             compaction.history_blocks,
             compaction.sealed_transactions,
             compaction.uncompressed_bytes,
             compaction.compressed_bytes,
-            compaction_ms
         ));
-        let root_compaction_started = Instant::now();
-        let current_rows = writer.read_rows("documents")?;
-        let current_root = row_root_id(&current_rows, "body_root")?;
-        let pre_compact_leaf_count =
-            persisted_rope::root_leaf_count(&writer_rope, Some(current_root))?;
-        let pre_compact_depth = persisted_rope::root_depth(&writer_rope, Some(current_root))?;
-        let compacted_root = persisted_rope::compact_text_root(&writer_rope, Some(current_root))?
-            .ok_or("compacted non-empty rope lost root")?;
-        writer.update_row(
-            "documents",
-            "doc",
-            map1("body_root", json!(compacted_root.to_string())),
-        )?;
-        input.notes.push(format!(
-            "Current root sidecar compaction: old leaves {}, old depth {}, new leaves {}, compaction+root write {:.2} ms.",
-            pre_compact_leaf_count,
-            pre_compact_depth,
-            persisted_rope::root_leaf_count(&writer_rope, Some(compacted_root))?,
-            ms(root_compaction_started.elapsed())
-        ));
-
+        persisted_text_ops::snapshot(&writer_ops, root)?;
         let block_export_started = Instant::now();
         let delta = writer.export_table_history_delta("documents", &[])?;
+        let sidecar_delta = persisted_text_ops::export_delta(
+            &writer_ops,
+            persisted_text_ops::DeltaWatermark::default(),
+        )?;
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
         let delta_bundle_summary = BundleSummary::from(&delta.bundle)?;
         block_native_blocks = Some(delta.blocks.len());
-        block_native_payload_bytes = Some(
-            delta
-                .blocks
-                .iter()
-                .map(|block| block.payload.len())
-                .sum::<usize>(),
-        );
-        input.notes.push(format!(
-            "Block-native root delta: open bundle bytes {}, block payload bytes {}.",
-            delta_bundle_summary.bytes,
-            block_native_payload_bytes.unwrap_or(0)
-        ));
+        block_native_payload_bytes =
+            Some(delta.blocks.iter().map(|block| block.payload.len()).sum());
         native_export_ms = block_native_export_ms;
         let mut block_peer =
             Runtime::open_with_schema(Storage::Memory, "block-peer-node", "bob", schema.clone())?;
-        let block_peer_rope_path = tmp.path().join("block-peer-rope.sqlite");
-        let mut block_peer_rope = Connection::open(&block_peer_rope_path)?;
-        persisted_rope::install(&block_peer_rope)?;
+        let block_peer_ops_path = tmp.path().join("block-peer-text-ops.sqlite");
+        let mut block_peer_ops = Connection::open(&block_peer_ops_path)?;
+        persisted_text_ops::install(&block_peer_ops)?;
+        let mut block_watermark = persisted_text_ops::DeltaWatermark::default();
         let block_import_started = Instant::now();
         block_peer.apply_history_delta(&delta.bundle, &delta.blocks)?;
+        {
+            let sidecar_tx = block_peer_ops.transaction()?;
+            persisted_text_ops::apply_delta(
+                &sidecar_tx,
+                &sidecar_delta.bytes,
+                &mut block_watermark,
+            )?;
+            sidecar_tx.commit()?;
+        }
         let block_rows = block_peer.read_rows("documents")?;
         let block_root = row_root_id(&block_rows, "body_root")?;
-        let block_sidecar_bytes =
-            copy_rope_sidecar_reachable_batched(&writer_rope, &mut block_peer_rope, &[block_root])?;
-        input.notes.push(format!(
-            "Block-native sidecar delta: current root reachable bytes {}.",
-            block_sidecar_bytes
-        ));
-        native_sync_bytes = Some(
-            delta_bundle_summary.bytes
-                + block_native_payload_bytes.unwrap_or(0)
-                + block_sidecar_bytes,
-        );
-        let block_text = persisted_rope::materialize(&block_peer_rope, Some(block_root))?;
+        let block_text = persisted_text_ops::materialize(&block_peer_ops, Some(block_root))?;
         if block_text.len() != final_payload_bytes {
-            return Err("block+incr import materialized unexpected length".into());
+            return Err("text op block import materialized unexpected length".into());
         }
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
         native_import_ms = block_native_import_ms;
+        native_sync_bytes = Some(
+            delta_bundle_summary.bytes
+                + block_native_payload_bytes.unwrap_or(0)
+                + sidecar_delta.stats.compressed_bytes,
+        );
     }
 
     let current_started = Instant::now();
     let current_rows = writer.read_rows("documents")?;
     let current_root = row_root_id(&current_rows, "body_root")?;
-    let current = persisted_rope::materialize(&writer_rope, Some(current_root))?;
+    let current = persisted_text_ops::materialize(&writer_ops, Some(current_root))?;
     let current_read_ms = ms(current_started.elapsed());
     if current.len() != final_payload_bytes {
-        return Err("jazz rope text current read materialized unexpected length".into());
+        return Err("text op current read materialized unexpected length".into());
     }
 
     let final_bundle_export_started = Instant::now();
     let final_bundle = writer.export_table_history("documents")?;
+    let sidecar_full_delta = persisted_text_ops::export_delta(
+        &writer_ops,
+        persisted_text_ops::DeltaWatermark::default(),
+    )?;
     let final_bundle_export_ms = ms(final_bundle_export_started.elapsed());
     let final_bundle_summary = BundleSummary::from(&final_bundle)?;
-    let sidecar_bundle_bytes = rope_sidecar_bundle_bytes(&writer_rope)?;
+    let sidecar_bundle_bytes = sidecar_full_delta.stats.compressed_bytes;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
-    let cold_rope = Connection::open(&cold_rope_path)?;
-    persisted_rope::install(&cold_rope)?;
+    let mut cold_ops = Connection::open(&cold_ops_path)?;
+    persisted_text_ops::install(&cold_ops)?;
+    let mut cold_watermark = persisted_text_ops::DeltaWatermark::default();
     let cold_started = Instant::now();
     cold.profile_apply_bundle(&final_bundle)?;
-    copy_rope_sidecar(&writer_rope, &cold_rope)?;
+    {
+        let sidecar_tx = cold_ops.transaction()?;
+        persisted_text_ops::apply_delta(
+            &sidecar_tx,
+            &sidecar_full_delta.bytes,
+            &mut cold_watermark,
+        )?;
+        sidecar_tx.commit()?;
+    }
     let cold_rows = cold.read_rows("documents")?;
     let cold_root = row_root_id(&cold_rows, "body_root")?;
-    let cold_text = persisted_rope::materialize(&cold_rope, Some(cold_root))?;
+    let cold_text = persisted_text_ops::materialize(&cold_ops, Some(cold_root))?;
     let cold_load_ms = ms(cold_started.elapsed());
     if cold_text.len() != final_payload_bytes {
-        return Err("jazz rope text cold load materialized unexpected length".into());
+        return Err("text op cold load materialized unexpected length".into());
     }
 
     let historical_epochs = historical_read_epochs_for_case(
@@ -4903,9 +4787,11 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
                 .values
                 .get("body_root")
                 .and_then(serde_json::Value::as_str)
-                .ok_or("historical rope row missing body_root")?;
-            let historical_text =
-                persisted_rope::materialize(&writer_rope, Some(historical_root.parse::<i64>()?))?;
+                .ok_or("historical text op row missing body_root")?;
+            let historical_text = persisted_text_ops::materialize(
+                &writer_ops,
+                Some(historical_root.parse::<i64>()?),
+            )?;
             if historical_text.len() <= final_payload_bytes {
                 historical_read_count += 1;
             }
@@ -4919,34 +4805,17 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     }
     let transaction_info_total_ms = ms(tx_info_started.elapsed());
     let transaction_info_count = tx_info_ids.len();
-    let rope_stats = persisted_rope::stats(&writer_rope)?;
-    let rope_depth = persisted_rope::root_depth(&writer_rope, Some(current_root))?;
     let writer_stats = writer.storage_stats()?;
-    let rope_database_bytes = sqlite_database_bytes(&writer_rope)?;
-    let database_bytes = writer_stats.database_bytes + rope_database_bytes;
-    let live_database_bytes = writer_stats.live_database_bytes + rope_database_bytes;
+    let sidecar_database_bytes = persisted_text_ops::database_bytes(&writer_ops)?;
+    let database_bytes = writer_stats.database_bytes + sidecar_database_bytes;
+    let live_database_bytes = writer_stats.live_database_bytes + sidecar_database_bytes;
     let total_file_bytes =
-        writer_stats.total_file_bytes + sqlite_path_total_file_bytes(&writer_rope_path);
+        writer_stats.total_file_bytes + sqlite_path_total_file_bytes(&writer_ops_path);
     let mut notes = input.notes;
     notes.push(format!(
-        "Rope nodes: {}, leaf nodes: {}, concat nodes: {}, root depth: {}, leaf bytes: {}, segment bytes: {}",
-        rope_stats.nodes,
-        rope_stats.leaf_nodes,
-        rope_stats.concat_nodes,
-        rope_depth,
-        rope_stats.leaf_bytes,
-        rope_stats.segment_bytes
+        "Text op sidecar bytes: database {}, bundle {}.",
+        sidecar_database_bytes, sidecar_bundle_bytes
     ));
-    notes.push(format!(
-        "Bundle bytes include Jazz bundle ({}) plus sidecar snapshot ({}).",
-        final_bundle_summary.bytes, sidecar_bundle_bytes
-    ));
-    if let Some(reference_json) = input.final_reference_json {
-        notes.push(format!(
-            "Reference uncompressed JSON bytes: {}",
-            reference_json.len()
-        ));
-    }
 
     Ok(DeepHistoryCaseReport {
         target_updates: input.target_updates,
@@ -5019,605 +4888,6 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         extrapolated_database_bytes_for_target: None,
         notes,
     })
-}
-
-fn run_jazz_rope_position_case(
-    input: JazzRopePositionCaseInput,
-) -> BenchResult<DeepHistoryCaseReport> {
-    let tmp = tempdir()?;
-    let writer_db_path = tmp.path().join("writer.sqlite");
-    let writer_rope_path = tmp.path().join("writer-rope.sqlite");
-    let receiver_rope_path = tmp.path().join("receiver-rope.sqlite");
-    let cold_rope_path = tmp.path().join("cold-rope.sqlite");
-    let schema = SchemaDef::new().table("canvas_objects", |table| {
-        table.text("position_root");
-    });
-    let mut writer = Runtime::open_with_schema(
-        Storage::File(writer_db_path.clone()),
-        "writer-node",
-        "alice",
-        schema.clone(),
-    )?;
-    let mut receiver =
-        Runtime::open_with_schema(Storage::Memory, "receiver-node", "bob", schema.clone())?;
-    let writer_rope = Connection::open(&writer_rope_path)?;
-    let mut receiver_rope = Connection::open(&receiver_rope_path)?;
-    persisted_rope::install(&writer_rope)?;
-    persisted_rope::install(&receiver_rope)?;
-    let mut receiver_sidecar_watermark = SidecarWatermark::default();
-
-    let mut root = None;
-    root = persisted_rope::append_position(&writer_rope, root, input.positions[0])?;
-    writer.insert_row(
-        "canvas_objects",
-        "object",
-        map1("position_root", json!(root.unwrap().to_string())),
-    )?;
-    receiver.apply_bundle(&writer.export_table_history("canvas_objects")?)?;
-    copy_rope_sidecar_incremental_batched(
-        &writer_rope,
-        &mut receiver_rope,
-        &mut receiver_sidecar_watermark,
-    )?;
-    let mut subscription = receiver.subscribe_rows("canvas_objects")?;
-
-    let started = Instant::now();
-    let mut receive_samples = Vec::new();
-    let mut write_only_ms = 0.0;
-    let mut sampled_receive_total_ms = 0.0;
-    let mut latest = input.positions[0];
-    for (index, position) in input.positions.iter().copied().enumerate().skip(1) {
-        let write_started = Instant::now();
-        root = persisted_rope::append_position(&writer_rope, root, position)?;
-        latest = position;
-        writer.update_row(
-            "canvas_objects",
-            "object",
-            map1("position_root", json!(root.unwrap().to_string())),
-        )?;
-        write_only_ms += ms(write_started.elapsed());
-
-        if index == 1 || (index + 1) % input.sample_every == 0 || index + 1 == input.target_updates
-        {
-            let receive_started = Instant::now();
-            let bundle = writer.export_table_history("canvas_objects")?;
-            receiver.profile_apply_bundle(&bundle)?;
-            copy_rope_sidecar_incremental_batched(
-                &writer_rope,
-                &mut receiver_rope,
-                &mut receiver_sidecar_watermark,
-            )?;
-            let diffs = receiver.poll_subscription(&mut subscription)?;
-            if diffs.is_empty() {
-                return Err("jazz rope listener did not observe sampled position edit".into());
-            }
-            let rows = receiver.read_rows("canvas_objects")?;
-            let observed_root = row_root_id(&rows, "position_root")?;
-            let observed = persisted_rope::latest_position(&receiver_rope, Some(observed_root))?
-                .ok_or_else(|| "jazz rope listener observed no position".to_owned())?;
-            if !positions_close(observed, latest) {
-                return Err("jazz rope listener observed unexpected latest position".into());
-            }
-            let receive_ms = ms(receive_started.elapsed());
-            sampled_receive_total_ms += receive_ms;
-            receive_samples.push(receive_ms);
-        }
-    }
-    let total_loop_ms = ms(started.elapsed());
-    let current_started = Instant::now();
-    let current_rows = writer.read_rows("canvas_objects")?;
-    let current_root = row_root_id(&current_rows, "position_root")?;
-    let current = persisted_rope::latest_position(&writer_rope, Some(current_root))?
-        .ok_or_else(|| "jazz rope current position missing".to_owned())?;
-    let current_read_ms = ms(current_started.elapsed());
-    if !positions_close(current, latest) {
-        return Err("jazz rope current read observed unexpected latest position".into());
-    }
-
-    let final_bundle_export_started = Instant::now();
-    let final_bundle = writer.export_table_history("canvas_objects")?;
-    let final_bundle_export_ms = ms(final_bundle_export_started.elapsed());
-    let final_bundle_summary = BundleSummary::from(&final_bundle)?;
-    let sidecar_bundle_bytes = rope_sidecar_bundle_bytes(&writer_rope)?;
-    let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
-    let cold_rope = Connection::open(&cold_rope_path)?;
-    persisted_rope::install(&cold_rope)?;
-    let cold_started = Instant::now();
-    cold.profile_apply_bundle(&final_bundle)?;
-    copy_rope_sidecar(&writer_rope, &cold_rope)?;
-    let cold_rows = cold.read_rows("canvas_objects")?;
-    let cold_root = row_root_id(&cold_rows, "position_root")?;
-    let cold_position = persisted_rope::latest_position(&cold_rope, Some(cold_root))?
-        .ok_or_else(|| "jazz rope cold position missing".to_owned())?;
-    let cold_load_ms = ms(cold_started.elapsed());
-    if !positions_close(cold_position, latest) {
-        return Err("jazz rope cold load observed unexpected latest position".into());
-    }
-
-    let rope_stats = persisted_rope::stats(&writer_rope)?;
-    let writer_stats = writer.storage_stats()?;
-    let rope_database_bytes = sqlite_database_bytes(&writer_rope)?;
-    let database_bytes = writer_stats.database_bytes + rope_database_bytes;
-    let live_database_bytes = writer_stats.live_database_bytes + rope_database_bytes;
-    let total_file_bytes =
-        writer_stats.total_file_bytes + sqlite_path_total_file_bytes(&writer_rope_path);
-    let mut notes = input.notes;
-    notes.push(format!(
-        "Rope nodes: {}, position leaf nodes: {}, concat nodes: {}, position segment bytes: {}",
-        rope_stats.nodes,
-        rope_stats.position_leaf_nodes,
-        rope_stats.concat_nodes,
-        rope_stats.position_segment_bytes
-    ));
-    notes.push(format!(
-        "Bundle bytes include Jazz bundle ({}) plus sidecar snapshot ({}).",
-        final_bundle_summary.bytes, sidecar_bundle_bytes
-    ));
-    if let Some(reference_json) = input.final_reference_json {
-        notes.push(format!(
-            "Reference uncompressed JSON bytes: {}",
-            reference_json.len()
-        ));
-    }
-
-    Ok(DeepHistoryCaseReport {
-        target_updates: input.target_updates,
-        completed_updates: input.target_updates,
-        stopped_early: false,
-        stop_reason: None,
-        elapsed_write_ms: total_loop_ms,
-        average_write_ms: total_loop_ms / input.target_updates as f64,
-        total_loop_ms,
-        write_only_ms,
-        average_write_only_ms: write_only_ms / input.target_updates as f64,
-        sampled_receive_total_ms,
-        live_receive_sample_count: receive_samples.len(),
-        live_receive_average_ms: average(&receive_samples),
-        live_receive_p50_ms: percentile(receive_samples.clone(), 0.50),
-        live_receive_p95_ms: percentile(receive_samples.clone(), 0.95),
-        live_receive_p99_ms: percentile(receive_samples.clone(), 0.99),
-        live_receive_last_ms: receive_samples.last().copied(),
-        cold_load_ms,
-        current_read_ms,
-        historical_read_total_ms: 0.0,
-        historical_read_count: 0,
-        historical_read_average_ms: None,
-        transaction_info_total_ms: 0.0,
-        transaction_info_count: 0,
-        transaction_info_average_ms: None,
-        final_payload_bytes: canvas_position_json(input.target_updates - 1).len(),
-        extrapolated_final_payload_bytes_for_target: None,
-        reference_gzip_bytes: input.reference_gzip_bytes,
-        bundle_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
-        native_sync_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
-        native_export_ms: final_bundle_export_ms,
-        native_import_ms: cold_load_ms,
-        block_native_export_ms: None,
-        block_native_import_ms: None,
-        block_native_blocks: None,
-        block_native_payload_bytes: None,
-        database_bytes,
-        live_database_bytes,
-        freelist_bytes: writer_stats.freelist_bytes,
-        total_file_bytes,
-        history_rows: writer_stats.history_rows,
-        current_rows: writer_stats.current_rows,
-        database_to_final_payload_ratio: None,
-        total_file_to_final_payload_ratio: None,
-        database_to_extrapolated_final_payload_ratio: None,
-        total_file_to_extrapolated_final_payload_ratio: None,
-        database_to_reference_gzip_ratio: input
-            .reference_gzip_bytes
-            .and_then(|bytes| ratio_i64_usize(database_bytes, bytes)),
-        bundle_to_reference_gzip_ratio: input.reference_gzip_bytes.and_then(|bytes| {
-            ratio_usize(final_bundle_summary.bytes + sidecar_bundle_bytes, bytes)
-        }),
-        extrapolated_write_ms_for_target: None,
-        extrapolated_database_bytes_for_target: None,
-        notes,
-    })
-}
-
-fn row_root_id(rows: &[mini_jazz_sqlite::RowView], field: &str) -> BenchResult<i64> {
-    rows.first()
-        .and_then(|row| row.values.get(field))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "missing rope root field".into())
-        .and_then(|value| value.parse::<i64>().map_err(Into::into))
-}
-
-#[derive(Default)]
-struct SidecarWatermark {
-    node_id: i64,
-    text_segment_id: i64,
-    position_segment_id: i64,
-}
-
-fn copy_rope_sidecar_incremental(
-    source: &Connection,
-    target: &Connection,
-    watermark: &mut SidecarWatermark,
-) -> BenchResult<usize> {
-    let mut bytes = 0usize;
-
-    let mut text_stmt = source.prepare(
-        "SELECT segment_id, text
-         FROM jazz_rope_segment
-         WHERE segment_id > ?
-         ORDER BY segment_id",
-    )?;
-    let text_after = watermark.text_segment_id.saturating_sub(1);
-    let text_rows = text_stmt.query_map(params![text_after], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    })?;
-    for row in text_rows {
-        let (segment_id, text) = row?;
-        bytes += text.len();
-        target.execute(
-            "INSERT OR REPLACE INTO jazz_rope_segment (segment_id, text) VALUES (?, ?)",
-            params![segment_id, text],
-        )?;
-        watermark.text_segment_id = watermark.text_segment_id.max(segment_id);
-    }
-
-    let mut position_stmt = source.prepare(
-        "SELECT segment_id, base_x, base_y, last_x, last_y, sample_count, deltas
-         FROM jazz_rope_position_segment
-         WHERE segment_id > ?
-         ORDER BY segment_id",
-    )?;
-    let position_after = watermark.position_segment_id.saturating_sub(1);
-    let position_rows = position_stmt.query_map(params![position_after], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, Vec<u8>>(6)?,
-        ))
-    })?;
-    for row in position_rows {
-        let (segment_id, base_x, base_y, last_x, last_y, sample_count, deltas) = row?;
-        bytes += 32 + deltas.len();
-        target.execute(
-            "INSERT OR REPLACE INTO jazz_rope_position_segment
-             (segment_id, base_x, base_y, last_x, last_y, sample_count, deltas)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                segment_id,
-                base_x,
-                base_y,
-                last_x,
-                last_y,
-                sample_count,
-                deltas
-            ],
-        )?;
-        watermark.position_segment_id = watermark.position_segment_id.max(segment_id);
-    }
-
-    let mut node_stmt = source.prepare(
-        "SELECT node_id, kind, byte_len, left_node_id, right_node_id, segment_id, segment_start
-         FROM jazz_rope_node
-         WHERE node_id > ?
-         ORDER BY node_id",
-    )?;
-    let node_rows = node_stmt.query_map(params![watermark.node_id], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, Option<i64>>(3)?,
-            row.get::<_, Option<i64>>(4)?,
-            row.get::<_, Option<i64>>(5)?,
-            row.get::<_, Option<i64>>(6)?,
-        ))
-    })?;
-    for row in node_rows {
-        let (node_id, kind, byte_len, left, right, segment_id, segment_start) = row?;
-        bytes += 56;
-        target.execute(
-            "INSERT INTO jazz_rope_node
-             (node_id, kind, byte_len, left_node_id, right_node_id, segment_id, segment_start)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                node_id,
-                kind,
-                byte_len,
-                left,
-                right,
-                segment_id,
-                segment_start
-            ],
-        )?;
-        watermark.node_id = watermark.node_id.max(node_id);
-    }
-
-    Ok(bytes)
-}
-
-fn copy_rope_sidecar_incremental_batched(
-    source: &Connection,
-    target: &mut Connection,
-    watermark: &mut SidecarWatermark,
-) -> BenchResult<usize> {
-    let tx = target.transaction()?;
-    let bytes = copy_rope_sidecar_incremental(source, &tx, watermark)?;
-    tx.commit()?;
-    Ok(bytes)
-}
-
-fn copy_rope_sidecar_reachable(
-    source: &Connection,
-    target: &Connection,
-    roots: &[i64],
-) -> BenchResult<usize> {
-    const ROPE_KIND_CONCAT: i64 = 2;
-    const ROPE_KIND_POSITION_LEAF: i64 = 3;
-
-    let mut copied_bytes = 0usize;
-    let mut visited_nodes = BTreeSet::new();
-    let mut copied_text_segments = BTreeSet::new();
-    let mut copied_position_segments = BTreeSet::new();
-    let mut stack = roots.to_vec();
-
-    while let Some(node_id) = stack.pop() {
-        if !visited_nodes.insert(node_id) {
-            continue;
-        }
-
-        let row = source
-            .query_row(
-                "SELECT kind, byte_len, left_node_id, right_node_id, segment_id, segment_start
-                 FROM jazz_rope_node
-                 WHERE node_id = ?",
-                params![node_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| format!("missing reachable rope node {node_id}"))?;
-        let (kind, byte_len, left, right, segment_id, segment_start) = row;
-
-        target.execute(
-            "INSERT OR REPLACE INTO jazz_rope_node
-             (node_id, kind, byte_len, left_node_id, right_node_id, segment_id, segment_start)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                node_id,
-                kind,
-                byte_len,
-                left,
-                right,
-                segment_id,
-                segment_start
-            ],
-        )?;
-        copied_bytes += 56;
-
-        if kind == ROPE_KIND_CONCAT {
-            if let Some(left) = left {
-                stack.push(left);
-            }
-            if let Some(right) = right {
-                stack.push(right);
-            }
-            continue;
-        }
-
-        let Some(segment_id) = segment_id else {
-            continue;
-        };
-        if kind == ROPE_KIND_POSITION_LEAF {
-            if !copied_position_segments.insert(segment_id) {
-                continue;
-            }
-            let (base_x, base_y, last_x, last_y, sample_count, deltas) = source.query_row(
-                "SELECT base_x, base_y, last_x, last_y, sample_count, deltas
-                 FROM jazz_rope_position_segment
-                 WHERE segment_id = ?",
-                params![segment_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, Vec<u8>>(5)?,
-                    ))
-                },
-            )?;
-            copied_bytes += 32 + deltas.len();
-            target.execute(
-                "INSERT OR REPLACE INTO jazz_rope_position_segment
-                 (segment_id, base_x, base_y, last_x, last_y, sample_count, deltas)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    segment_id,
-                    base_x,
-                    base_y,
-                    last_x,
-                    last_y,
-                    sample_count,
-                    deltas
-                ],
-            )?;
-        } else {
-            if !copied_text_segments.insert(segment_id) {
-                continue;
-            }
-            let text: String = source.query_row(
-                "SELECT text FROM jazz_rope_segment WHERE segment_id = ?",
-                params![segment_id],
-                |row| row.get(0),
-            )?;
-            copied_bytes += text.len();
-            target.execute(
-                "INSERT OR REPLACE INTO jazz_rope_segment (segment_id, text) VALUES (?, ?)",
-                params![segment_id, text],
-            )?;
-        }
-    }
-
-    Ok(copied_bytes)
-}
-
-fn copy_rope_sidecar_reachable_batched(
-    source: &Connection,
-    target: &mut Connection,
-    roots: &[i64],
-) -> BenchResult<usize> {
-    let tx = target.transaction()?;
-    let bytes = copy_rope_sidecar_reachable(source, &tx, roots)?;
-    tx.commit()?;
-    Ok(bytes)
-}
-
-fn copy_rope_sidecar(source: &Connection, target: &Connection) -> BenchResult<()> {
-    target.execute("DELETE FROM jazz_rope_node", [])?;
-    target.execute("DELETE FROM jazz_rope_segment", [])?;
-    target.execute("DELETE FROM jazz_rope_position_segment", [])?;
-
-    let mut text_stmt =
-        source.prepare("SELECT segment_id, text FROM jazz_rope_segment ORDER BY segment_id")?;
-    let text_rows = text_stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    })?;
-    for row in text_rows {
-        let (segment_id, text) = row?;
-        target.execute(
-            "INSERT INTO jazz_rope_segment (segment_id, text) VALUES (?, ?)",
-            params![segment_id, text],
-        )?;
-    }
-
-    let mut position_stmt = source.prepare(
-        "SELECT segment_id, base_x, base_y, last_x, last_y, sample_count, deltas
-         FROM jazz_rope_position_segment
-         ORDER BY segment_id",
-    )?;
-    let position_rows = position_stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, Vec<u8>>(6)?,
-        ))
-    })?;
-    for row in position_rows {
-        let (segment_id, base_x, base_y, last_x, last_y, sample_count, deltas) = row?;
-        target.execute(
-            "INSERT INTO jazz_rope_position_segment
-             (segment_id, base_x, base_y, last_x, last_y, sample_count, deltas)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                segment_id,
-                base_x,
-                base_y,
-                last_x,
-                last_y,
-                sample_count,
-                deltas
-            ],
-        )?;
-    }
-
-    let mut node_stmt = source.prepare(
-        "SELECT node_id, kind, byte_len, left_node_id, right_node_id, segment_id, segment_start
-         FROM jazz_rope_node
-         ORDER BY node_id",
-    )?;
-    let node_rows = node_stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, Option<i64>>(3)?,
-            row.get::<_, Option<i64>>(4)?,
-            row.get::<_, Option<i64>>(5)?,
-            row.get::<_, Option<i64>>(6)?,
-        ))
-    })?;
-    for row in node_rows {
-        let (node_id, kind, byte_len, left, right, segment_id, segment_start) = row?;
-        target.execute(
-            "INSERT INTO jazz_rope_node
-             (node_id, kind, byte_len, left_node_id, right_node_id, segment_id, segment_start)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                node_id,
-                kind,
-                byte_len,
-                left,
-                right,
-                segment_id,
-                segment_start
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-fn rope_sidecar_bundle_bytes(source: &Connection) -> BenchResult<usize> {
-    let mut bytes = 0;
-    bytes += serde_json::to_vec(&query_json_rows(
-        source,
-        "SELECT segment_id, text FROM jazz_rope_segment ORDER BY segment_id",
-    )?)?
-    .len();
-    bytes += serde_json::to_vec(&query_json_rows(
-        source,
-        "SELECT segment_id, base_x, base_y, last_x, last_y, sample_count, hex(deltas)
-         FROM jazz_rope_position_segment
-         ORDER BY segment_id",
-    )?)?
-    .len();
-    bytes += serde_json::to_vec(&query_json_rows(
-        source,
-        "SELECT node_id, kind, byte_len, left_node_id, right_node_id, segment_id, segment_start
-         FROM jazz_rope_node
-         ORDER BY node_id",
-    )?)?
-    .len();
-    Ok(bytes)
-}
-
-fn query_json_rows(source: &Connection, sql: &str) -> BenchResult<Vec<Vec<serde_json::Value>>> {
-    let mut stmt = source.prepare(sql)?;
-    let column_count = stmt.column_count();
-    let rows = stmt.query_map([], |row| {
-        let mut values = Vec::new();
-        for index in 0..column_count {
-            let value = row.get::<_, rusqlite::types::Value>(index)?;
-            values.push(sql_value_json(value));
-        }
-        Ok(values)
-    })?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-}
-
-fn sql_value_json(value: rusqlite::types::Value) -> serde_json::Value {
-    match value {
-        rusqlite::types::Value::Null => serde_json::Value::Null,
-        rusqlite::types::Value::Integer(value) => json!(value),
-        rusqlite::types::Value::Real(value) => json!(value),
-        rusqlite::types::Value::Text(value) => json!(value),
-        rusqlite::types::Value::Blob(value) => json!(value),
-    }
 }
 
 fn run_naive_deep_history_case(
@@ -6058,19 +5328,18 @@ fn gzip_bytes(input: &[u8]) -> BenchResult<usize> {
 }
 
 fn canvas_position_json(frame: usize) -> String {
-    let position = canvas_position(frame);
-    serde_json::json!({ "x": position.x, "y": position.y }).to_string()
-}
-
-fn canvas_position(frame: usize) -> persisted_rope::Position {
     let t = frame as f64 / 60.0;
     let x = 500.0 + (t * 1.7).sin() * 320.0 + t * 0.05;
     let y = 300.0 + (t * 2.3).cos() * 180.0;
-    persisted_rope::Position { x, y }
+    serde_json::json!({ "x": x, "y": y }).to_string()
 }
 
-fn positions_close(left: persisted_rope::Position, right: persisted_rope::Position) -> bool {
-    (left.x - right.x).abs() < 0.001 && (left.y - right.y).abs() < 0.001
+fn row_root_id(rows: &[mini_jazz_sqlite::RowView], field: &str) -> BenchResult<i64> {
+    rows.first()
+        .and_then(|row| row.values.get(field))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "missing text op root field".into())
+        .and_then(|value| value.parse::<i64>().map_err(Into::into))
 }
 
 fn text_document_schema() -> SchemaDef {

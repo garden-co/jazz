@@ -1,7 +1,7 @@
 mod branch;
 mod effective;
 mod error;
-pub mod persisted_rope;
+pub mod persisted_text_ops;
 mod policy;
 mod projection;
 mod query;

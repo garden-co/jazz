@@ -3,38 +3,6 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
-## Thu May 28 14:57:33 PDT 2026
-
-Decision: record the current Block+S2 checkpoint with SQLite transaction batching for sidecar/root writes and current-derived remote-pending visibility.
-
-Why: profiling showed the per-history-row durable-version query dominated receive after Block+S. Deriving the remote-pending guard from the current visible tx removes that common scan without keeping a separate in-memory durable-row cache, while preserving the broader durable-history query as a no-current fallback.
-
-Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-block-incr` was rerun and the benchmark overview now includes a `Block+S2` column. The latest measured output is `/tmp/deep_history_block_s_current_durable.json`.
-
-## Thu May 28 12:38:37 PDT 2026
-
-Decision: make persisted rope sidecar segments immutable and use root compaction after sealing Jazz root history in the Block+Incr text benchmark.
-
-Why: sync and GC are much easier if durable sidecar objects never change after a row/root references them. We accept the short-term append triangle, then rely on frequent history compaction plus a current-root rebuild to keep recent/current reads and block-native current-root sync shallow.
-
-Scope impact: text appends and position samples now create new segment rows instead of extending the previous segment. `compact_text_root` materializes a text root and rebuilds it into large immutable leaves; the Block+Incr text benchmark calls it after history block compaction and records the extra root write. The latest canonical run is `/tmp/deep_history_block_incr_immutable_compacted.json`.
-
-## Thu May 28 10:24:47 PDT 2026
-
-Decision: make the Block+Incr benchmark's block-native import sync only sidecar data reachable from the received current rope root.
-
-Why: the previous prototype applied the sealed Jazz history delta and then copied the entire rope sidecar snapshot. That made block-native sync look worse than necessary and mixed two different protocols: block-native Jazz history plus compatibility sidecar transfer. A root-reachable sidecar copy is closer to the intended native protocol and gives us a lower bound before adding explicit sidecar root manifests for sealed historical roots.
-
-Scope impact: Block+Incr import now walks `jazz_rope_node` from the received `body_root`, copies referenced text/position segments, and reports approximate current-root sidecar bytes. This improves Automerge block-native import in the canonical run from roughly `4865 ms` to `1683 ms`; append remains around `1.6-1.7 s` because the final append root reaches the whole append chain.
-
-## Thu May 28 07:44:02 PDT 2026
-
-Decision: add a combined Block+Incr benchmark for append and Automerge text rows.
-
-Why: the separate Block and Incr columns answer different questions: sealed blocks reduce Jazz root-history overhead, while the sidecar avoids rewriting full text values. Combining them shows whether those wins stack for text workloads before designing a production integration.
-
-Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-block-incr` runs append and Automerge with rope sidecar content plus sealed lz4 blocks for cold Jazz root history. The first canonical run is saved at `/tmp/deep_history_block_incr_append_automerge.json`.
-
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.
@@ -115,14 +83,6 @@ Why: raw block sync already treats the payload hash and compressed size as integ
 
 Scope impact: import now rejects any `HistoryBlockTxRange` whose `min_local_epoch` is greater than `max_local_epoch`. The raw-block sync test covers this alongside hash validation.
 
-## Thu May 28 03:53:54 PDT 2026
-
-Decision: verify the grouped Incr/rope selector with real canonical caps.
-
-Why: after adding grouped selectors, each experiment-column family should have at least one real-sized smoke run. The Incr sidecar path is slower, so this also confirms the grouped command remains interruptible by the normal process boundary if needed.
-
-Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-incr` completed append, Automerge, and canvas at canonical update counts. The output was saved in `/tmp/deep_history_all_canonical_incr.json`; comparison-table numbers were not changed because this was a selector verification pass.
-
 ## Thu May 28 03:52:33 PDT 2026
 
 Decision: verify the grouped Block selector with real canonical caps.
@@ -149,11 +109,11 @@ Scope impact: batched inserts now have a regression with one allowed comment and
 
 ## Thu May 28 03:48:16 PDT 2026
 
-Decision: add grouped deep-history selectors for Block and Incr probes too.
+Decision: add grouped deep-history selectors for Block probes.
 
-Why: the comparison table is organized by experiment column, so benchmark smoke runs should be able to run all three scenarios for the baseline, Block, or Incr/rope shapes without invoking unrelated perf probes.
+Why: the comparison table is organized by experiment column, so benchmark smoke runs should be able to run all three scenarios for the baseline or Block shapes without invoking unrelated perf probes.
 
-Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-history-blocks` runs the three Block probes and `all-jazz-rope`/`all-incr` runs the three sidecar probes. Tiny smoke runs verified both selectors.
+Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-history-blocks` runs the three Block probes. A tiny smoke run verified the selector.
 
 ## Thu May 28 03:47:01 PDT 2026
 
