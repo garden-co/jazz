@@ -59,6 +59,19 @@ Queries are immutable and chainable. Each method returns a new query, so you can
 
 See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of `where` operators, `orderBy`, `limit`, and `offset`.
 
+### Branch-scoped reads
+
+Branch selection belongs to the database handle, not the query builder. Use `db.branch(id)` when
+you want one-shot reads, writes, or `Db` subscriptions to run against a branch:
+
+```ts
+const draftDb = db.branch("draft");
+const todos = await draftDb.all(app.todos.where({ done: false }));
+```
+
+Query builders and `db.all` / `db.one` options do not accept `branch`. Framework hooks expose
+branch selection as an adapter option instead, for example `useAll(app.todos, { branch: "draft" })`.
+
 ## Read durability
 
 Queries and subscriptions return results as soon as they are available locally by default. Local reads are effectively instant, and remote updates stream in as they arrive, which is normally a good default. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.

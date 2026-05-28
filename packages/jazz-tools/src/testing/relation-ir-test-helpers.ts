@@ -42,6 +42,8 @@ function toLegacyRelValueRefForTest(value: unknown): unknown {
       return { type: "Literal", value: toLegacyValueForTest(payload) };
     case "SessionRef":
       return { type: "SessionRef", path: payload };
+    case "BranchRef":
+      return { type: "BranchRef", column: payload };
     case "OuterColumn":
       return { type: "OuterColumn", column: payload };
     case "FrontierColumn":

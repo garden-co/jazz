@@ -53,6 +53,7 @@ export interface NormalizedBuiltQuery {
   offset?: number;
   hops: string[];
   gather?: BuiltGather;
+  union?: BuiltRelation["union"];
 }
 
 type BuiltQueryShape = {
@@ -66,6 +67,7 @@ type BuiltQueryShape = {
   offset?: unknown;
   hops?: unknown;
   gather?: unknown;
+  union?: unknown;
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -263,5 +265,11 @@ export function normalizeBuiltQuery(raw: unknown, fallbackTable: string): Normal
       ? value.hops.filter((hop): hop is string => typeof hop === "string")
       : [],
     gather: normalizeGather(value.gather),
+    union:
+      isPlainObject(value.union) && Array.isArray(value.union.inputs)
+        ? {
+            inputs: value.union.inputs.map((input) => normalizeBuiltRelation(input)),
+          }
+        : undefined,
   };
 }

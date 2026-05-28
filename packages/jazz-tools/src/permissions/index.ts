@@ -18,6 +18,7 @@ import type {
 } from "../ir.js";
 
 type QueryBuilderLike = {
+  _table: string;
   _rowType: unknown;
   where(input: unknown): unknown;
 };
@@ -83,6 +84,11 @@ interface RowRefValue {
   readonly column: string;
 }
 
+interface BranchRowRefValue {
+  readonly __jazzPermissionKind: "branch-row-ref";
+  readonly column: string;
+}
+
 interface ExistsCondition {
   readonly __jazzPermissionKind: "exists";
   readonly table: string;
@@ -142,9 +148,9 @@ function relationJoinAlias(
   return join.viaHop ? `__hop_${index}` : `__join_${index}`;
 }
 
-interface TableJoinTarget {
+interface TableJoinTarget<TTable extends string = string> {
   readonly __jazzPermissionKind: "table-builder";
-  readonly __jazzPermissionTable: string;
+  readonly __jazzPermissionTable: TTable;
 }
 
 type RelationJoinTarget = string | TableJoinTarget;
@@ -425,12 +431,17 @@ interface Rule {
   action: PolicyAction;
   using?: Condition;
   withCheck?: Condition;
+  branchTable?: string;
 }
 
 type RuleLike = Rule | UpdateRuleBuilder<unknown, unknown>;
 
 type RowContext<Row> = {
   [K in keyof Row & string]: RowRefValue;
+};
+
+type BranchRowContext<Row> = {
+  [K in keyof Row & string]: BranchRowRefValue;
 };
 
 export type WhereInputOrCallback<WhereInput, Row> =
@@ -483,14 +494,19 @@ interface ActionBuilder<WhereInput, Row> {
   never(): Rule;
 }
 
-interface TableRelationBuilder<WhereInput, Row> extends TableJoinTarget, PermissionRelation {
+interface TableRelationBuilder<WhereInput, Row, TTable extends string = string>
+  extends TableJoinTarget<TTable>, PermissionRelation {
   where(
     input: PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): PermissionRelation;
   select(columns: Record<string, string>): PermissionRelation;
 }
 
-interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<WhereInput, Row> {
+interface TablePolicyBuilder<
+  WhereInput,
+  Row,
+  TTable extends string = string,
+> extends TableRelationBuilder<WhereInput, Row, TTable> {
   allowRead: ActionBuilder<WhereInput, Row>;
   allowReads: ActionBuilder<WhereInput, Row>;
   allowInsert: ActionBuilder<WhereInput, Row>;
@@ -503,15 +519,37 @@ interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<Where
   exists: ExistsBuilder<WhereInput>;
 }
 
+type BranchPolicyContext<TApp extends AppLike, TBranchKey extends TableKey<TApp>> = {
+  $branch: BranchRowContext<RowFor<QueryBuilderFor<TApp, TBranchKey>>>;
+  branchPolicy: {
+    [K in TableKey<TApp>]: TablePolicyBuilder<
+      WhereFor<QueryBuilderFor<TApp, K>>,
+      RowFor<QueryBuilderFor<TApp, K>>,
+      K
+    >;
+  };
+};
+
+type BranchTarget<TApp extends AppLike, TBranchKey extends TableKey<TApp>> = TablePolicyBuilder<
+  WhereFor<QueryBuilderFor<TApp, TBranchKey>>,
+  RowFor<QueryBuilderFor<TApp, TBranchKey>>,
+  TBranchKey
+>;
+
 export type PolicyContext<TApp extends AppLike> = {
   policy: {
     [K in TableKey<TApp>]: TablePolicyBuilder<
       WhereFor<QueryBuilderFor<TApp, K>>,
-      RowFor<QueryBuilderFor<TApp, K>>
+      RowFor<QueryBuilderFor<TApp, K>>,
+      K
     >;
   } & {
     exists(relation: PermissionRelation): ExistsRelationCondition;
     union(relations: readonly PermissionRelation[]): PermissionRelation;
+    forBranch<TBranchKey extends TableKey<TApp>>(
+      branchTable: BranchTarget<TApp, TBranchKey>,
+      callback: (ctx: BranchPolicyContext<TApp, TBranchKey>) => void,
+    ): void;
   };
   anyOf: (conditions: readonly unknown[]) => Condition;
   allOf: (conditions: readonly unknown[]) => Condition;
@@ -522,18 +560,29 @@ export type PolicyContext<TApp extends AppLike> = {
 
 export type CompiledPermissions = Record<string, TablePolicies>;
 
-type PermissionWhereLeaf<T> = T | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+type PermissionWhereLeaf<T> =
+  | T
+  | SessionRefValue
+  | RowRefValue
+  | BranchRowRefValue
+  | RecursiveCurrentValue;
 
 type PermissionWhereObjectBase<T> = {
   [K in keyof T]?:
     | PermissionWhereInput<T[K]>
     | SessionRefValue
     | RowRefValue
+    | BranchRowRefValue
     | RecursiveCurrentValue;
 };
 
 type QualifiedPermissionWhereEntries = {
-  [K in `${string}.${string}`]?: unknown | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+  [K in `${string}.${string}`]?:
+    | unknown
+    | SessionRefValue
+    | RowRefValue
+    | BranchRowRefValue
+    | RecursiveCurrentValue;
 };
 
 type PermissionWhereObject<T> =
@@ -555,6 +604,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
   constructor(
     private readonly table: string,
     private readonly registerRule?: (ruleLike: RuleLike) => void,
+    private readonly branchTable?: string,
   ) {}
 
   where(
@@ -564,6 +614,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
     const rule: Rule = {
       table: this.table,
       action: "update",
+      branchTable: this.branchTable,
       using: condition,
       withCheck: condition,
     };
@@ -610,6 +661,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
     return {
       table: this.table,
       action: "update",
+      branchTable: this.branchTable,
       using: this.oldCondition ?? this.newCondition,
       withCheck: this.newCondition ?? this.oldCondition,
     };
@@ -622,7 +674,7 @@ export function definePermissions<TApp extends AppLike>(
 ): CompiledPermissions {
   const fkReferencesByTable = collectFkReferencesByTable(app);
   const relationsByTable = collectRelationsByTable(app);
-  const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
+  const tableNames = Object.keys(app).filter((key) => isQueryBuilderLike(app[key as keyof TApp]));
   const rules: RuleLike[] = [];
   const seenRules = new Set<RuleLike>();
   const collectRule = (ruleLike: RuleLike): void => {
@@ -642,6 +694,17 @@ export function definePermissions<TApp extends AppLike>(
   } as unknown as PolicyContext<TApp>;
   factory(ctx);
   return compileRules(rules, fkReferencesByTable, relationsByTable);
+}
+
+function isQueryBuilderLike(value: unknown): value is QueryBuilderLike {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "_table" in value &&
+    typeof (value as { _table?: unknown })._table === "string" &&
+    "where" in value &&
+    typeof (value as { where?: unknown }).where === "function"
+  );
 }
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
@@ -699,6 +762,37 @@ function buildPolicyContext(
   });
   context.union = (relations: readonly PermissionRelation[]): PermissionRelation =>
     createUnionRelation(relations, relationsByTable);
+  context.forBranch = (
+    branchTableBuilder: unknown,
+    callback: (ctx: {
+      $branch: BranchRowContext<unknown>;
+      branchPolicy: Record<string, unknown>;
+    }) => void,
+  ): void => {
+    const branchTable = expectPolicyTableBuilder(branchTableBuilder);
+    callback({
+      $branch: createBranchRowContext(),
+      branchPolicy: buildBranchPolicyContext(
+        tableNames,
+        relationsByTable,
+        collectRule,
+        branchTable,
+      ),
+    });
+  };
+  return context;
+}
+
+function buildBranchPolicyContext(
+  tableNames: string[],
+  relationsByTable: Map<string, Relation[]>,
+  collectRule: (ruleLike: RuleLike) => void,
+  branchTable: string,
+): Record<string, unknown> {
+  const context: Record<string, unknown> = {};
+  for (const table of tableNames) {
+    context[table] = buildTablePolicyBuilder(table, relationsByTable, collectRule, branchTable);
+  }
   return context;
 }
 
@@ -706,10 +800,12 @@ function buildTablePolicyBuilder(
   table: string,
   relationsByTable: Map<string, Relation[]>,
   collectRule: (ruleLike: RuleLike) => void,
+  branchTable?: string,
 ): Record<string, unknown> {
   const registerRule = (rule: Rule): Rule => {
-    collectRule(rule);
-    return rule;
+    const branchRule = { ...rule, branchTable };
+    collectRule(branchRule);
+    return branchRule;
   };
   const read: ActionBuilder<unknown, unknown> = {
     where: (input) => registerRule({ table, action: "read", using: resolveWhereInput(input) }),
@@ -728,7 +824,7 @@ function buildTablePolicyBuilder(
     never: () => del.where(neverCondition()),
   };
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
-    new UpdateRuleBuilder(table, collectRule);
+    new UpdateRuleBuilder(table, collectRule, branchTable);
   const managedByCreator = (): void => {
     read.where(CREATOR_CONDITION);
     insert.where(CREATOR_CONDITION);
@@ -996,6 +1092,18 @@ function relationJoinTargetToTable(target: RelationJoinTarget): string {
   throw new Error("join(...) expects a table builder (policy.<table>) or table name string.");
 }
 
+function expectPolicyTableBuilder(input: unknown): string {
+  if (
+    input &&
+    typeof input === "object" &&
+    (input as { __jazzPermissionKind?: unknown }).__jazzPermissionKind === "table-builder" &&
+    typeof (input as { __jazzPermissionTable?: unknown }).__jazzPermissionTable === "string"
+  ) {
+    return (input as { __jazzPermissionTable: string }).__jazzPermissionTable;
+  }
+  throw new Error("policy.forBranch(...) expects a table builder such as policy.branches.");
+}
+
 function resolveNamedRelation(
   relationsByTable: Map<string, Relation[]>,
   table: string,
@@ -1164,6 +1272,9 @@ function toRelValueRef(value: unknown, options: { allowRowRefs: boolean }): RelV
   if (isSessionRefValue(value)) {
     return { SessionRef: value.path };
   }
+  if (isBranchRowRefValue(value)) {
+    return { BranchRef: value.column };
+  }
   if (isRowRefValue(value)) {
     if (!options.allowRowRefs) {
       throw new Error("Row references are only valid inside exists() clauses.");
@@ -1182,7 +1293,7 @@ function relationFilterToPredicates(filter: RelationFilterEntry): RelPredicateEx
   if (raw === null) {
     return [{ IsNull: { column: left } }];
   }
-  if (isSessionRefValue(raw) || isRowRefValue(raw)) {
+  if (isSessionRefValue(raw) || isBranchRowRefValue(raw) || isRowRefValue(raw)) {
     return [
       {
         Cmp: {
@@ -1582,6 +1693,20 @@ function createRowContext(): RowContext<Record<string, unknown>> {
   });
 }
 
+function createBranchRowContext(): BranchRowContext<Record<string, unknown>> {
+  return new Proxy({} as BranchRowContext<Record<string, unknown>>, {
+    get(_target, prop) {
+      if (typeof prop === "string") {
+        return {
+          __jazzPermissionKind: "branch-row-ref",
+          column: prop,
+        } satisfies BranchRowRefValue;
+      }
+      return undefined;
+    },
+  });
+}
+
 function normalizeWhereObject(input: unknown): Record<string, unknown> {
   if (!isPlainObject(input)) {
     throw new Error("Expected a where-object condition.");
@@ -1748,6 +1873,9 @@ function columnFilterToExprs(
   if (isSessionRefValue(raw)) {
     return [cmpExpr(column, "Eq", raw, options)];
   }
+  if (isBranchRowRefValue(raw)) {
+    return [cmpExpr(column, "Eq", raw, options)];
+  }
   if (isRowRefValue(raw)) {
     if (!options.allowRowRefs) {
       throw new Error("Row references are only valid inside exists() clauses.");
@@ -1844,6 +1972,7 @@ function sessionPathFilterToExprs(path: string, raw: unknown): PolicyExpr[] {
     !isPlainObject(raw) ||
     isSessionRefValue(raw) ||
     isRowRefValue(raw) ||
+    isBranchRowRefValue(raw) ||
     isRecursiveCurrentValue(raw) ||
     isExistsCondition(raw) ||
     isExistsRelationCondition(raw) ||
@@ -1967,6 +2096,12 @@ function toPolicyValue(value: unknown, options: { allowRowRefs: boolean }): Poli
       path: [OUTER_ROW_SESSION_PREFIX, value.column],
     };
   }
+  if (isBranchRowRefValue(value)) {
+    return {
+      type: "BranchRef",
+      column: value.column,
+    };
+  }
   return { type: "Literal", value };
 }
 
@@ -1983,6 +2118,9 @@ function assertSessionWhereLiteralValue(value: unknown, context: string): void {
   }
   if (isRowRefValue(value)) {
     throw new Error(`${context} only accepts literal values; row references are not supported.`);
+  }
+  if (isBranchRowRefValue(value)) {
+    throw new Error(`${context} only accepts literal values; branch references are not supported.`);
   }
   if (isRecursiveCurrentValue(value)) {
     throw new Error(
@@ -2064,14 +2202,17 @@ function compileRules(
       compiled[rule.table] = emptyTablePolicies();
     }
     const tablePolicies = compiled[rule.table]!;
+    const targetPolicies = rule.branchTable
+      ? ((tablePolicies.for_branch ??= {})[rule.branchTable] ??= emptyTablePolicies())
+      : tablePolicies;
     switch (rule.action) {
       case "read":
-        tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {
+        targetPolicies.select = mergeOperationPolicy(targetPolicies.select, {
           using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
         });
         break;
       case "insert":
-        tablePolicies.insert = mergeOperationPolicy(tablePolicies.insert, {
+        targetPolicies.insert = mergeOperationPolicy(targetPolicies.insert, {
           with_check: compileCondition(
             rule.withCheck,
             rule.table,
@@ -2081,7 +2222,7 @@ function compileRules(
         });
         break;
       case "update":
-        tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
+        targetPolicies.update = mergeOperationPolicy(targetPolicies.update, {
           using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
           with_check: compileCondition(
             rule.withCheck,
@@ -2092,7 +2233,7 @@ function compileRules(
         });
         break;
       case "delete":
-        tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
+        targetPolicies.delete = mergeOperationPolicy(targetPolicies.delete, {
           using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
         });
         break;
@@ -2337,6 +2478,14 @@ function isRowRefValue(input: unknown): input is RowRefValue {
   return (
     isPlainObject(input) &&
     input.__jazzPermissionKind === "row-ref" &&
+    typeof input.column === "string"
+  );
+}
+
+function isBranchRowRefValue(input: unknown): input is BranchRowRefValue {
+  return (
+    isPlainObject(input) &&
+    input.__jazzPermissionKind === "branch-row-ref" &&
     typeof input.column === "string"
   );
 }

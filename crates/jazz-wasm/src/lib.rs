@@ -34,7 +34,7 @@
 //! });
 //!
 //! // Query with builder
-//! const query = new WasmQueryBuilder('todos').branch('main').build();
+//! const query = new WasmQueryBuilder('todos').build();
 //! const results = await runtime.query(query);
 //!
 //! // Subscribe to changes

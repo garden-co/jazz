@@ -60,12 +60,11 @@ fn test_parse_schema_invalid() {
 #[wasm_bindgen_test]
 fn test_query_builder_basic() {
     let builder = WasmQueryBuilder::new("todos");
-    let query = builder.branch("main").build();
+    let query = builder.build();
 
     assert!(query.is_ok());
     let query_str = query.unwrap();
     assert!(query_str.contains("todos"));
-    assert!(query_str.contains("main"));
 }
 
 #[wasm_bindgen_test]
@@ -75,7 +74,7 @@ fn test_query_builder_with_filters() {
     // Create a boolean value for filtering
     let value = serde_wasm_bindgen::to_value(&Value::Boolean(true)).unwrap();
 
-    let result = builder.branch("main").filter_eq("completed", value);
+    let result = builder.filter_eq("completed", value);
 
     assert!(result.is_ok());
 
@@ -90,7 +89,6 @@ fn test_query_builder_with_filters() {
 fn test_query_builder_order_and_limit() {
     let builder = WasmQueryBuilder::new("todos");
     let query = builder
-        .branch("main")
         .order_by_desc("created_at")
         .limit(10)
         .offset(5)
@@ -106,7 +104,6 @@ fn test_query_builder_order_and_limit() {
 fn test_query_builder_select() {
     let builder = WasmQueryBuilder::new("todos");
     let query = builder
-        .branch("main")
         .select(vec!["title".to_string(), "completed".to_string()])
         .build();
 
@@ -120,7 +117,6 @@ fn test_query_builder_select() {
 fn test_query_builder_join() {
     let builder = WasmQueryBuilder::new("posts");
     let query = builder
-        .branch("main")
         .alias("p")
         .join("users")
         .alias("u")
@@ -140,7 +136,7 @@ fn test_query_builder_or() {
     let value1 = serde_wasm_bindgen::to_value(&Value::Text("urgent".to_string())).unwrap();
     let value2 = serde_wasm_bindgen::to_value(&Value::Boolean(true)).unwrap();
 
-    let result = builder.branch("main").filter_eq("priority", value1);
+    let result = builder.filter_eq("priority", value1);
 
     assert!(result.is_ok());
 
@@ -150,19 +146,6 @@ fn test_query_builder_or() {
 
     let query = result2.unwrap().build();
     assert!(query.is_ok());
-}
-
-#[wasm_bindgen_test]
-fn test_query_builder_multiple_branches() {
-    let builder = WasmQueryBuilder::new("todos");
-    let query = builder
-        .branches(vec!["main".to_string(), "draft".to_string()])
-        .build();
-
-    assert!(query.is_ok());
-    let query_str = query.unwrap();
-    assert!(query_str.contains("main"));
-    assert!(query_str.contains("draft"));
 }
 
 // Note: WasmRuntime tests require a JS driver implementation,

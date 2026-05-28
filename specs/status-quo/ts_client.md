@@ -86,6 +86,11 @@ The typed query builders expose the table-first operations most application code
 
 These builders are immutable. Each call returns a new query shape that `Db` can translate into the runtime query representation.
 
+Branch selection is deliberately not part of the query builder surface. DB callers scope a single
+logical branch with `db.branch(id)` and then reuse the normal `Db` methods. Framework adapters expose
+the same choice as adapter-local options such as `useAll(query, { branch: id })`; shared `QueryOptions`
+and query builders do not accept branch fields.
+
 ## Runtime Surface
 
 The current `Db` API centers around a small set of predictable operations:

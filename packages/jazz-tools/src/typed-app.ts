@@ -1395,9 +1395,10 @@ function createAppForTables(
 
       const first = relations[0]!;
       const builder = new TypedTableQueryBuilder(first._table, wasmSchema);
+      const inputs = relations.map((relation) => relation._serializeRelation() as BuiltRelation);
       (builder as any)._unionVal = {
         union: {
-          inputs: relations.map((relation) => relation._serializeRelation() as BuiltRelation),
+          inputs,
         },
       };
       return builder;

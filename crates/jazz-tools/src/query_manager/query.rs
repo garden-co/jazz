@@ -5,7 +5,10 @@ use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey, SortTarget};
 use crate::query_manager::magic_columns::is_magic_column_name;
-use crate::query_manager::types::{ColumnType, RowDescriptor, TableName, TupleDescriptor, Value};
+use crate::query_manager::types::{
+    ColumnType, ComposedBranchName, RowDescriptor, TableName, TupleDescriptor, Value,
+};
+use crate::schema_manager::SchemaContext;
 
 use super::query_to_relation_ir::normalize_query_to_rel_expr;
 use super::relation_ir::ColumnRef;
@@ -14,6 +17,8 @@ use super::relation_ir::ColumnRef;
 pub enum QueryBuildError {
     UnsupportedShape,
     NullBetweenBound { column: String },
+    MultipleBranchScopesUnsupported,
+    NestedBranchScopesUnsupported,
 }
 
 impl fmt::Display for QueryBuildError {
@@ -30,6 +35,12 @@ impl fmt::Display for QueryBuildError {
                     f,
                     "BETWEEN does not support NULL bounds for column '{column}'"
                 )
+            }
+            QueryBuildError::MultipleBranchScopesUnsupported => {
+                write!(f, "queries may only target one logical branch")
+            }
+            QueryBuildError::NestedBranchScopesUnsupported => {
+                write!(f, "branch scoping is only supported at the query root")
             }
         }
     }
@@ -568,8 +579,11 @@ pub struct Query {
     /// Optional table alias (for self-joins).
     #[serde(default)]
     pub alias: Option<String>,
-    /// Branches to query (required - at least one must be specified).
-    /// For multi-branch queries, results are combined with LWW merge for same ObjectId.
+    /// Runtime branch carriers.
+    ///
+    /// Public runtime ingress accepts zero or one logical user branch. Internal
+    /// schema-manager paths may carry multiple resolved schema branches for a
+    /// single logical branch.
     #[serde(default)]
     pub branches: Vec<String>,
     /// Joined tables.
@@ -618,6 +632,108 @@ fn default_disjuncts() -> Vec<Conjunction> {
 }
 
 impl Query {
+    fn runtime_branch_for_logical_branch(
+        schema_context: &SchemaContext,
+        user_branch: &str,
+    ) -> String {
+        ComposedBranchName::new(
+            &schema_context.env,
+            schema_context.current_hash,
+            user_branch,
+        )
+        .to_branch_name()
+        .as_str()
+        .to_string()
+    }
+
+    fn compose_logical_branch_list(branches: &mut [String], schema_context: &SchemaContext) {
+        for branch in branches {
+            *branch = Self::runtime_branch_for_logical_branch(schema_context, branch);
+        }
+    }
+
+    fn compose_logical_relation_branches(
+        relation: &mut crate::query_manager::relation_ir::RelExpr,
+        schema_context: &SchemaContext,
+    ) {
+        use crate::query_manager::relation_ir::RelExpr;
+
+        match relation {
+            RelExpr::TableScan { .. } => {}
+            RelExpr::Branch { input, branches } => {
+                Self::compose_logical_branch_list(branches, schema_context);
+                Self::compose_logical_relation_branches(input, schema_context);
+            }
+            RelExpr::Filter { input, .. }
+            | RelExpr::Project { input, .. }
+            | RelExpr::Distinct { input, .. }
+            | RelExpr::OrderBy { input, .. }
+            | RelExpr::Offset { input, .. }
+            | RelExpr::Limit { input, .. } => {
+                Self::compose_logical_relation_branches(input, schema_context);
+            }
+            RelExpr::Union { inputs } => {
+                for input in inputs {
+                    Self::compose_logical_relation_branches(input, schema_context);
+                }
+            }
+            RelExpr::Join { left, right, .. } => {
+                Self::compose_logical_relation_branches(left, schema_context);
+                Self::compose_logical_relation_branches(right, schema_context);
+            }
+            RelExpr::Gather { seed, step, .. } => {
+                Self::compose_logical_relation_branches(seed, schema_context);
+                Self::compose_logical_relation_branches(step, schema_context);
+            }
+        }
+    }
+
+    /// Convert public query branch ids into runtime branch names for this schema context.
+    ///
+    /// This is called at runtime API ingress. QueryManager internals still use
+    /// composed branch names so internal callers can keep constructing
+    /// low-level queries directly.
+    pub fn compose_logical_branches_for_context(&mut self, schema_context: &SchemaContext) {
+        Self::compose_logical_branch_list(&mut self.branches, schema_context);
+        Self::compose_logical_relation_branches(&mut self.relation_ir, schema_context);
+    }
+
+    fn relation_contains_branch_scope(
+        relation: &crate::query_manager::relation_ir::RelExpr,
+    ) -> bool {
+        use crate::query_manager::relation_ir::RelExpr;
+
+        match relation {
+            RelExpr::TableScan { .. } => false,
+            RelExpr::Branch { .. } => true,
+            RelExpr::Filter { input, .. }
+            | RelExpr::Project { input, .. }
+            | RelExpr::Distinct { input, .. }
+            | RelExpr::OrderBy { input, .. }
+            | RelExpr::Offset { input, .. }
+            | RelExpr::Limit { input, .. } => Self::relation_contains_branch_scope(input),
+            RelExpr::Union { inputs } => inputs.iter().any(Self::relation_contains_branch_scope),
+            RelExpr::Join { left, right, .. } => {
+                Self::relation_contains_branch_scope(left)
+                    || Self::relation_contains_branch_scope(right)
+            }
+            RelExpr::Gather { seed, step, .. } => {
+                Self::relation_contains_branch_scope(seed)
+                    || Self::relation_contains_branch_scope(step)
+            }
+        }
+    }
+
+    pub fn validate_public_branch_scope(&self) -> Result<(), QueryBuildError> {
+        if self.branches.len() > 1 {
+            return Err(QueryBuildError::MultipleBranchScopesUnsupported);
+        }
+        if Self::relation_contains_branch_scope(&self.relation_ir) {
+            return Err(QueryBuildError::NestedBranchScopesUnsupported);
+        }
+        Ok(())
+    }
+
     fn validate_conditions(conditions: &[Condition]) -> Result<(), QueryBuildError> {
         for condition in conditions {
             match condition {
@@ -674,14 +790,8 @@ impl Query {
 
     /// Create a new query for a table.
     ///
-    /// Note: Branch must be set explicitly before execution.
     pub fn new(table: impl Into<TableName>) -> Self {
         Self::new_internal(table)
-    }
-
-    /// Check if this is a multi-branch query.
-    pub fn is_multi_branch(&self) -> bool {
-        self.branches.len() > 1
     }
 
     /// Check if this query has array subqueries.
@@ -770,36 +880,25 @@ pub struct QueryBuilder {
 impl QueryBuilder {
     /// Start building a query for a table.
     ///
-    /// Note: Branch must be explicitly specified via `.branch()` or `.branches()`.
-    /// Queries without branches will error at execution time unless a SchemaContext
-    /// is present (which provides branch expansion).
     pub fn new(table: impl Into<TableName>) -> Self {
         Self {
-            // Use new_internal which doesn't set default branch
-            // The branch will be set via .branch() or .branches()
             query: Query::new_internal(table),
         }
     }
 
-    /// Query a single branch (required).
+    /// Set the internal top-level branch carrier for runtime/schema-manager callers.
     ///
-    /// # Example
-    /// ```ignore
-    /// QueryBuilder::new("users").branch("main").build()
-    /// QueryBuilder::new("users").branch("draft").build()
-    /// ```
-    pub fn branch(mut self, branch: impl Into<String>) -> Self {
+    /// Public callers scope logical branches through the typed `Db` API; this is only for
+    /// resolved runtime branch names.
+    pub(crate) fn branch(mut self, branch: impl Into<String>) -> Self {
         self.query.branches = vec![branch.into()];
         self
     }
 
-    /// Query multiple branches (results merged with LWW for same ObjectId).
+    /// Set internal top-level branch carriers for schema-version fan-out callers.
     ///
-    /// # Example
-    /// ```ignore
-    /// QueryBuilder::new("users").branches(&["main", "draft"]).build()
-    /// ```
-    pub fn branches(mut self, branches: &[&str]) -> Self {
+    /// Public queries cannot request multiple logical user branches.
+    pub(crate) fn branches(mut self, branches: &[&str]) -> Self {
         self.query.branches = branches.iter().map(|s| s.to_string()).collect();
         self
     }
@@ -1059,10 +1158,9 @@ impl QueryBuilder {
 
     /// Build the query.
     ///
-    /// Branches should be specified via `.branch()` or `.branches()`.
-    /// If no branches specified:
-    /// - With SchemaManager: automatically expands to all live schema branches
-    /// - Without SchemaManager: QueryManager returns an error
+    /// Query execution supplies the branch scope. Internal callers may leave
+    /// branches empty so SchemaManager can expand the current logical branch
+    /// across live schema branches.
     pub fn try_build(self) -> Result<Query, QueryBuildError> {
         let mut query = self.query;
         query.refresh_relation_ir()?;
@@ -1880,19 +1978,18 @@ mod tests {
     }
 
     // ========================================================================
-    // Branch tests
+    // Internal branch carrier tests
     // ========================================================================
 
     #[test]
-    fn query_builder_single_branch() {
+    fn query_builder_internal_single_branch_carrier() {
         let query = QueryBuilder::new("users").branch("draft").build();
 
         assert_eq!(query.branches, vec!["draft".to_string()]);
-        assert!(!query.is_multi_branch());
     }
 
     #[test]
-    fn query_builder_multiple_branches() {
+    fn query_builder_internal_schema_branch_fanout_carriers() {
         let query = QueryBuilder::new("users")
             .branches(&["main", "draft"])
             .build();
@@ -1901,21 +1998,19 @@ mod tests {
             query.branches,
             vec!["main".to_string(), "draft".to_string()]
         );
-        assert!(query.is_multi_branch());
     }
 
     #[test]
-    fn query_builder_no_default_branch() {
-        // Without calling .branch(), branches is empty
+    fn query_builder_has_no_default_branch_carrier() {
+        // Without an internal branch carrier, branches is empty.
         let query = QueryBuilder::new("users").build();
 
         assert!(query.branches.is_empty());
-        assert!(!query.is_multi_branch());
     }
 
     #[test]
-    fn query_builder_branch_overrides_previous() {
-        // Calling .branch() multiple times should override
+    fn query_builder_internal_branch_carrier_overrides_previous() {
+        // Setting the internal branch carrier multiple times should override.
         let query = QueryBuilder::new("users")
             .branch("draft")
             .branch("staging")
@@ -1925,8 +2020,8 @@ mod tests {
     }
 
     #[test]
-    fn query_builder_branches_overrides_branch() {
-        // Calling .branches() after .branch() should override
+    fn query_builder_internal_branch_carriers_override_single_carrier() {
+        // Setting internal branch carriers after one carrier should override.
         let query = QueryBuilder::new("users")
             .branch("draft")
             .branches(&["main", "staging"])
@@ -1935,6 +2030,34 @@ mod tests {
         assert_eq!(
             query.branches,
             vec!["main".to_string(), "staging".to_string()]
+        );
+    }
+
+    #[test]
+    fn public_branch_scope_rejects_multiple_logical_branches() {
+        let query = QueryBuilder::new("users")
+            .branches(&["main", "draft"])
+            .build();
+
+        assert_eq!(
+            query.validate_public_branch_scope(),
+            Err(QueryBuildError::MultipleBranchScopesUnsupported)
+        );
+    }
+
+    #[test]
+    fn public_branch_scope_rejects_nested_relation_branch_scope() {
+        let mut query = QueryBuilder::new("users").branch("main").build();
+        query.relation_ir = crate::query_manager::relation_ir::RelExpr::Branch {
+            input: Box::new(crate::query_manager::relation_ir::RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            branches: vec!["draft".to_string()],
+        };
+
+        assert_eq!(
+            query.validate_public_branch_scope(),
+            Err(QueryBuildError::NestedBranchScopesUnsupported)
         );
     }
 

@@ -39,6 +39,7 @@ use crate::query_manager::types::{
     SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 use crate::row_histories::{RowState, StoredRowBatch};
+use crate::schema_manager::{Lens, LensOp, LensTransform};
 
 /// Helper to create QueryManager with schema on default branch.
 fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
@@ -818,6 +819,7 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     schema
 }
 
+mod branch_policies;
 mod declared_fk_inheritance;
 mod exists_policies;
 mod exists_rel_policies;

@@ -2,6 +2,10 @@ import { SubscriptionManager, type SubscriptionDelta } from "./runtime/subscript
 import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { Session } from "./runtime/context.js";
 
+export type QuerySubscriptionOptions = QueryOptions & {
+  branch?: string;
+};
+
 type UseAllStatePending<T> = {
   status: "pending";
   data: undefined;
@@ -122,14 +126,14 @@ export function makeDeferred<T>(snapshot?: {
 
 interface QueryDefinition<T extends { id: string }> {
   query: QueryBuilder<T>;
-  options?: QueryOptions;
+  options?: QuerySubscriptionOptions;
   snapshot?: T[];
 }
 
 interface InternalCacheEntry<T extends { id: string }> {
   key: string;
   query: QueryBuilder<T>;
-  options?: QueryOptions;
+  options?: QuerySubscriptionOptions;
   state: UseAllState<T>;
   promise: TrackedPromise<T[]>;
   resolvefulfilled: (data: T[]) => void;
@@ -144,6 +148,7 @@ interface InternalCacheEntry<T extends { id: string }> {
 }
 
 interface DbLike {
+  branch(branchId: string): DbLike;
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
@@ -190,7 +195,7 @@ export class SubscriptionsOrchestrator {
 
   makeQueryKey<T extends { id: string }>(
     query: QueryBuilder<T>,
-    options?: QueryOptions,
+    options?: QuerySubscriptionOptions,
     snapshot?: T[],
   ): string {
     const key = `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
@@ -321,7 +326,7 @@ export class SubscriptionsOrchestrator {
         entry.subscriptionManager = new SubscriptionManager<T>();
       }
 
-      entry.unsubscribe = this.db.subscribeAll<T>(
+      entry.unsubscribe = subscriptionDb(this.db, entry.options).subscribeAll<T>(
         entry.query,
         (delta) => {
           const wasPending = entry.state.status === "pending";
@@ -347,7 +352,7 @@ export class SubscriptionsOrchestrator {
             this.scheduleCleanup(entry);
           }
         },
-        entry.options,
+        runtimeQueryOptions(entry.options),
         this.session ?? undefined,
       );
     } catch (error) {
@@ -378,7 +383,20 @@ function sessionsEqual(a: Session | null, b: Session | null): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function serializeQueryOptions(options?: QueryOptions): string {
+function runtimeQueryOptions(options?: QuerySubscriptionOptions): QueryOptions | undefined {
+  if (!options) {
+    return undefined;
+  }
+
+  const { branch: _branch, ...queryOptions } = options;
+  return Object.keys(queryOptions).length > 0 ? queryOptions : undefined;
+}
+
+function subscriptionDb(db: DbLike, options?: QuerySubscriptionOptions): DbLike {
+  return options?.branch ? db.branch(options.branch) : db;
+}
+
+function serializeQueryOptions(options?: QuerySubscriptionOptions): string {
   if (!options) {
     return "{}";
   }

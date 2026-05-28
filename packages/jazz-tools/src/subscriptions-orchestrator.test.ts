@@ -29,8 +29,19 @@ type UnitHarness = {
     entry: CacheEntryHandle<Todo>;
   };
   calls: SubscribeCall[];
+  branchCalls: string[];
   emit: (index: number, delta: SubscriptionDelta<Todo>) => void;
   setThrowOnSubscribe: (error: Error | null) => void;
+};
+
+type TestDbLike = {
+  branch(branchId: string): TestDbLike;
+  subscribeAll<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): () => void;
 };
 
 function makeTodo(id: string, title = `todo-${id}`): Todo {
@@ -67,16 +78,14 @@ function createUnitHarness(
   initialSession?: Session | null,
 ): UnitHarness {
   const calls: SubscribeCall[] = [];
+  const branchCalls: string[] = [];
   let throwOnSubscribe: Error | null = null;
 
-  const db: {
-    subscribeAll<T extends { id: string }>(
-      query: QueryBuilder<T>,
-      callback: (delta: SubscriptionDelta<T>) => void,
-      options?: QueryOptions,
-      session?: Session,
-    ): () => void;
-  } = {
+  const db: TestDbLike = {
+    branch(branchId: string): TestDbLike {
+      branchCalls.push(branchId);
+      return db;
+    },
     subscribeAll<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
@@ -108,6 +117,7 @@ function createUnitHarness(
       return { key, entry };
     },
     calls,
+    branchCalls,
     emit(index, delta) {
       const call = calls[index];
       if (!call) {
@@ -274,6 +284,28 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
       expect(harness.calls).toHaveLength(1);
       expect(harness.calls[0]?.options).toEqual(options);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U09c getCacheEntry scopes branch options through db.branch and strips runtime options", async () => {
+    const harness = createUnitHarness();
+    try {
+      const key = harness.manager.makeQueryKey(makeQuery(), {
+        branch: "draft-branch",
+        tier: "edge",
+        propagation: "local-only",
+      });
+
+      harness.manager.getCacheEntry<Todo>(key);
+
+      expect(harness.branchCalls).toEqual(["draft-branch"]);
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]?.options).toEqual({
+        tier: "edge",
+        propagation: "local-only",
+      });
     } finally {
       await harness.manager.shutdown();
     }

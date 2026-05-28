@@ -25,21 +25,6 @@ impl WasmQueryBuilder {
         }
     }
 
-    /// Set the branch to query.
-    #[wasm_bindgen(js_name = branch)]
-    pub fn branch(mut self, branch: &str) -> Self {
-        self.inner = self.inner.branch(branch);
-        self
-    }
-
-    /// Set multiple branches to query.
-    #[wasm_bindgen(js_name = branches)]
-    pub fn branches(mut self, branches: Vec<String>) -> Self {
-        let branch_refs: Vec<&str> = branches.iter().map(|s| s.as_str()).collect();
-        self.inner = self.inner.branches(&branch_refs);
-        self
-    }
-
     /// Add an equals filter.
     #[wasm_bindgen(js_name = filterEq)]
     pub fn filter_eq(mut self, column: &str, value: JsValue) -> Result<WasmQueryBuilder, JsError> {

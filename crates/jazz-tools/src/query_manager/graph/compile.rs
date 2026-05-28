@@ -4,7 +4,7 @@ use std::{cmp::Ordering, ops::Bound};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode,
-    Schema, SchemaHash, TableName, TupleDescriptor, Value,
+    Schema, SchemaHash, TableName, TableSchema, TupleDescriptor, Value,
 };
 use crate::schema_manager::{
     SchemaContext, translate_column_for_index, translate_table_name_to_schema,
@@ -18,7 +18,7 @@ use super::super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::super::graph_nodes::magic_columns::{MagicColumnRequest, MagicColumnsNode};
 use super::super::graph_nodes::materialize::MaterializeNode;
 use super::super::graph_nodes::output::{OutputMode, OutputNode};
-use super::super::graph_nodes::policy_filter::PolicyFilterNode;
+use super::super::graph_nodes::policy_filter::{PolicyFilterNode, PolicyFilterOptions};
 use super::super::graph_nodes::project::ProjectNode;
 use super::super::graph_nodes::recursive_relation::{
     CorrelationSource, RecursiveHop, RecursiveRelationNode,
@@ -30,10 +30,11 @@ use super::super::graph_nodes::union::UnionNode;
 use super::super::graph_nodes::{NodeId, RowNode};
 use super::super::index::ScanCondition;
 use super::super::magic_columns::{MagicColumnKind, magic_column_descriptor, magic_column_kind};
-use super::super::policy::PolicyExpr;
 use super::super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
-use super::super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
+use super::super::relation_ir_query_plan::{
+    ExecutionQueryPlan, QueryEnvelope, lower_relation_to_execution_plan, unwrap_query_envelope,
+};
 use super::super::session::Session;
 use uuid::Uuid;
 
@@ -48,15 +49,65 @@ fn resolve_branch_schema_hash(schema_context: &SchemaContext, branch: &str) -> O
         .find(|hash| hash.short() == composed.schema_hash.short())
 }
 
-fn effective_select_policy(
-    table_schema: &crate::query_manager::types::TableSchema,
-    row_policy_mode: RowPolicyMode,
-) -> Option<PolicyExpr> {
-    table_schema.policies.select_policy().cloned().or_else(|| {
-        row_policy_mode
-            .denies_missing_explicit_policy()
-            .then_some(PolicyExpr::False)
-    })
+struct BranchCompileContext {
+    branches: Vec<String>,
+    schema_hash_by_branch: HashMap<String, SchemaHash>,
+    policy_branch: String,
+}
+
+impl BranchCompileContext {
+    fn new(requested_branches: &[String], schema_context: &SchemaContext) -> Self {
+        let branches = if requested_branches.is_empty() {
+            schema_context
+                .all_branch_names()
+                .into_iter()
+                .map(|branch| branch.as_str().to_string())
+                .collect()
+        } else {
+            requested_branches.to_vec()
+        };
+        let mut schema_hash_by_branch = HashMap::new();
+        for schema_hash in schema_context.all_live_hashes() {
+            let branch_name = ComposedBranchName::new(
+                &schema_context.env,
+                schema_hash,
+                &schema_context.user_branch,
+            )
+            .to_branch_name();
+            schema_hash_by_branch.insert(branch_name.as_str().to_string(), schema_hash);
+        }
+        let policy_branch = branches
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "main".to_string());
+
+        Self {
+            branches,
+            schema_hash_by_branch,
+            policy_branch,
+        }
+    }
+
+    fn branches(&self) -> &[String] {
+        &self.branches
+    }
+
+    fn policy_branch(&self) -> &str {
+        &self.policy_branch
+    }
+
+    fn schema_hash_for(&self, schema_context: &SchemaContext, branch: &str) -> Option<SchemaHash> {
+        self.schema_hash_by_branch
+            .get(branch)
+            .copied()
+            .or_else(|| resolve_branch_schema_hash(schema_context, branch))
+    }
+}
+
+fn needs_select_policy_filter(table_schema: &TableSchema, row_policy_mode: RowPolicyMode) -> bool {
+    row_policy_mode.denies_missing_explicit_policy()
+        || table_schema.policies.select_policy().is_some()
+        || !table_schema.policies.for_branch.is_empty()
 }
 
 fn natural_row_projection_element_index(
@@ -124,6 +175,46 @@ fn translate_scan_table_name(
     };
 
     translated_table.map(|name| TableName::new(&name))
+}
+
+fn translate_scan_column_name(
+    schema_context: &SchemaContext,
+    table: &str,
+    column: &str,
+    branch_schema_hash: Option<SchemaHash>,
+) -> String {
+    if let Some(target_hash) = branch_schema_hash
+        && target_hash != schema_context.current_hash
+    {
+        return translate_column_for_index(schema_context, table, column, &target_hash)
+            .unwrap_or_else(|| column.to_string());
+    }
+
+    column.to_string()
+}
+
+struct BranchIndexScanSpec {
+    column: String,
+    condition: ScanCondition,
+    translate_column: bool,
+}
+
+impl BranchIndexScanSpec {
+    fn translated(column: impl Into<String>, condition: ScanCondition) -> Self {
+        Self {
+            column: column.into(),
+            condition,
+            translate_column: true,
+        }
+    }
+
+    fn raw(column: impl Into<String>, condition: ScanCondition) -> Self {
+        Self {
+            column: column.into(),
+            condition,
+            translate_column: false,
+        }
+    }
 }
 
 fn push_unique_magic_ref(
@@ -328,6 +419,61 @@ impl QueryGraph {
         Some(remap(other.output_node))
     }
 
+    fn compile_branch_index_scans(
+        &mut self,
+        schema_context: &SchemaContext,
+        branch_context: &BranchCompileContext,
+        table: TableName,
+        descriptor: &RowDescriptor,
+        scan_specs: &[BranchIndexScanSpec],
+    ) -> Option<NodeId> {
+        let mut scan_ids = Vec::new();
+        let table_str = table.as_str();
+        for branch in branch_context.branches() {
+            let branch_schema_hash = branch_context.schema_hash_for(schema_context, branch);
+            let Some(scan_table_name) =
+                translate_scan_table_name(schema_context, table_str, branch_schema_hash)
+            else {
+                continue;
+            };
+
+            for spec in scan_specs {
+                let scan_column = if spec.translate_column {
+                    translate_scan_column_name(
+                        schema_context,
+                        table_str,
+                        &spec.column,
+                        branch_schema_hash,
+                    )
+                } else {
+                    spec.column.clone()
+                };
+                let scan_column_name = ColumnName::new(&scan_column);
+                let scan_node = IndexScanNode::new_with_branch(
+                    scan_table_name,
+                    scan_column_name,
+                    branch,
+                    spec.condition.clone(),
+                    descriptor.clone(),
+                );
+                let scan_id = self.add_node(GraphNode::IndexScan(scan_node));
+                self.index_scan_nodes
+                    .push((scan_id, scan_table_name, scan_column_name));
+                scan_ids.push(scan_id);
+            }
+        }
+
+        if scan_ids.len() > 1 {
+            let union_id = self.add_node(GraphNode::Union(UnionNode::new()));
+            for scan_id in scan_ids {
+                self.add_edge(union_id, scan_id);
+            }
+            Some(union_id)
+        } else {
+            scan_ids.first().copied()
+        }
+    }
+
     /// Compile a query into a graph (without policy filtering).
     pub fn compile(query: &Query, schema: &Schema) -> Option<Self> {
         let schema_context = Self::default_schema_context(schema);
@@ -436,15 +582,38 @@ impl QueryGraph {
         features: RelationCompileFeatures,
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
-        if let RelExpr::Union { inputs } = relation {
-            return Self::compile_relation_ir_union_with_schema_context_and_features(
+        if let RelExpr::Branch {
+            input,
+            branches: branch_scope,
+        } = relation
+        {
+            let effective_branches = if branch_scope.is_empty() {
+                branches
+            } else {
+                branch_scope.as_slice()
+            };
+            return Self::compile_relation_ir_with_schema_context_and_features(
+                input,
+                schema,
+                effective_branches,
+                session,
+                schema_context,
+                features,
+                row_policy_mode,
+            );
+        }
+
+        let envelope = unwrap_query_envelope(relation);
+        if let RelExpr::Union { inputs } = envelope.core {
+            let graph = Self::compile_relation_ir_union_with_schema_context_and_features(
                 inputs,
                 schema,
                 branches,
                 session,
                 schema_context,
                 row_policy_mode,
-            );
+            )?;
+            return Self::append_query_envelope_to_graph(graph, envelope);
         }
         let plan = lower_relation_to_execution_plan(
             relation,
@@ -529,6 +698,48 @@ impl QueryGraph {
         Some(graph)
     }
 
+    fn append_query_envelope_to_graph(mut graph: Self, envelope: QueryEnvelope) -> Option<Self> {
+        if envelope.order_by.is_empty() && envelope.offset == 0 && envelope.limit.is_none() {
+            return Some(graph);
+        }
+
+        let output_tuple_descriptor = match graph.get_node(graph.output_node) {
+            Some(GraphNode::Output(node)) => node.output_tuple_descriptor().clone(),
+            _ => return None,
+        };
+        let output_descriptor = output_tuple_descriptor.combined_descriptor();
+        let mut phase_input = graph.output_node;
+
+        let sort_keys = sort_keys_from_order_by(&envelope.order_by, &output_descriptor);
+        if !sort_keys.is_empty() {
+            let sort_node =
+                SortNode::with_tuple_descriptor(output_tuple_descriptor.clone(), sort_keys);
+            let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+            graph.add_edge(sort_id, phase_input);
+            phase_input = sort_id;
+        }
+
+        if envelope.limit.is_some() || envelope.offset > 0 {
+            let limit_offset_node = LimitOffsetNode::with_tuple_descriptor(
+                output_tuple_descriptor.clone(),
+                envelope.limit,
+                envelope.offset,
+            );
+            let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
+            graph.add_edge(limit_offset_id, phase_input);
+            graph.pagination_node = Some(limit_offset_id);
+            phase_input = limit_offset_id;
+        }
+
+        let output_node =
+            OutputNode::with_tuple_descriptor(output_tuple_descriptor, OutputMode::Delta);
+        let output_id = graph.add_node(GraphNode::Output(output_node));
+        graph.add_edge(output_id, phase_input);
+        graph.output_node = output_id;
+
+        Some(graph)
+    }
+
     fn compile_execution_plan_with_schema_context(
         plan: &ExecutionQueryPlan,
         schema: &Schema,
@@ -536,36 +747,13 @@ impl QueryGraph {
         schema_context: &SchemaContext,
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
-        // Build branch -> schema hash map for column translation.
-        // Use full hashes from SchemaContext (do not re-parse branch strings, which only encode
-        // a shortened hash prefix).
-        let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
-        for schema_hash in schema_context.all_live_hashes() {
-            let branch_name = ComposedBranchName::new(
-                &schema_context.env,
-                schema_hash,
-                &schema_context.user_branch,
-            )
-            .to_branch_name();
-            branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
-        }
-
-        // Expand branches to include all live schema branches if not specified
-        let branches: Vec<String> = if plan.branches.is_empty() {
-            schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        } else {
-            plan.branches.clone()
-        };
+        let branch_context = BranchCompileContext::new(&plan.branches, schema_context);
 
         if plan.seed_relation.is_some() || !plan.joins.is_empty() {
             return Self::compile_join_plan(
                 plan,
                 schema,
-                &branches,
+                &branch_context,
                 session.clone(),
                 schema_context,
                 row_policy_mode,
@@ -574,99 +762,32 @@ impl QueryGraph {
 
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.columns.clone();
-        let select_policy = effective_select_policy(table_schema, row_policy_mode);
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
-        let table_str = plan.table.as_str();
 
-        // Phase 1: Build IndexScan nodes (one per disjunct per branch)
-        // For multi-branch queries, we create scans for each branch and union them
-        // Column names are translated for old schema branches
-        let mut phase1_outputs: Vec<NodeId> = Vec::new();
         let scan_plans: Vec<_> = plan
             .disjuncts
             .iter()
             .map(|disjunct| index_scan_plan(disjunct, table_schema))
             .collect();
-
-        for branch in &branches {
-            // Get schema hash for this branch to determine if column translation is needed
-            let branch_schema_hash = branch_schema_map
-                .get(branch)
-                .copied()
-                .or_else(|| resolve_branch_schema_hash(schema_context, branch));
-            let Some(scan_table_name) =
-                translate_scan_table_name(schema_context, table_str, branch_schema_hash)
-            else {
-                continue;
-            };
-            for scan_plan in &scan_plans {
-                let scan_column = &scan_plan.column;
-
-                // Translate column name for old schema branches
-                let translated_column = if let Some(target_hash) = branch_schema_hash {
-                    if target_hash != schema_context.current_hash {
-                        // This branch uses an old schema - translate column name
-                        translate_column_for_index(
-                            schema_context,
-                            table_str,
-                            scan_column,
-                            &target_hash,
-                        )
-                        .unwrap_or_else(|| scan_column.clone())
-                    } else {
-                        scan_column.clone()
-                    }
-                } else {
-                    scan_column.clone()
-                };
-
-                let scan_column_name = ColumnName::new(&translated_column);
-
-                let scan_node = IndexScanNode::new_with_branch(
-                    scan_table_name,
-                    scan_column_name,
-                    branch,
+        let mut scan_specs: Vec<_> = scan_plans
+            .iter()
+            .map(|scan_plan| {
+                BranchIndexScanSpec::translated(
+                    scan_plan.column.clone(),
                     scan_plan.condition.clone(),
-                    descriptor.clone(),
-                );
-                let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
-                graph
-                    .index_scan_nodes
-                    .push((scan_id, scan_table_name, scan_column_name));
-                phase1_outputs.push(scan_id);
-            }
-
-            // If include_deleted is set, also scan _id_deleted index for this branch
-            if plan.include_deleted {
-                let deleted_column = ColumnName::new("_id_deleted");
-                let deleted_scan_node = IndexScanNode::new_with_branch(
-                    scan_table_name,
-                    deleted_column,
-                    branch,
-                    ScanCondition::All,
-                    descriptor.clone(),
-                );
-                let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
-                graph
-                    .index_scan_nodes
-                    .push((deleted_scan_id, scan_table_name, deleted_column));
-                phase1_outputs.push(deleted_scan_id);
-            }
+                )
+            })
+            .collect();
+        if plan.include_deleted {
+            scan_specs.push(BranchIndexScanSpec::raw("_id_deleted", ScanCondition::All));
         }
-
-        // If multiple outputs, add Union node
-        let phase1_output = if phase1_outputs.len() > 1 {
-            let union_node = UnionNode::new();
-            let union_id = graph.add_node(GraphNode::Union(union_node));
-            for scan_id in &phase1_outputs {
-                graph.add_edge(union_id, *scan_id);
-            }
-            union_id
-        } else if !phase1_outputs.is_empty() {
-            phase1_outputs[0]
-        } else {
-            return None;
-        };
+        let phase1_output = graph.compile_branch_index_scans(
+            schema_context,
+            &branch_context,
+            plan.table,
+            &descriptor,
+            &scan_specs,
+        )?;
 
         // Materialize node (boundary between Phase 1 and Phase 2). Lens transforms are
         // applied in the row_loader using the current schema, but the materialize hint
@@ -686,20 +807,18 @@ impl QueryGraph {
         );
         let scope_table_map = HashMap::from([(plan.base_scope.clone(), plan.table)]);
 
-        // Policy filter node (if session provided and table has SELECT policy)
-        if let (Some(session), Some(policy)) = (&session, select_policy) {
-            let branch_for_policy = branches
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+        // Policy filter node (if session provided and table needs SELECT policy routing)
+        if let Some(session) = &session
+            && needs_select_policy_filter(table_schema, row_policy_mode)
+        {
+            let policy_node = PolicyFilterNode::new_for_table_policy(
                 current_descriptor.clone(),
-                policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
-                branch_for_policy,
-                row_policy_mode,
+                PolicyFilterOptions::for_branch(branch_context.policy_branch())
+                    .with_schema_context(schema_context)
+                    .with_row_policy_mode(row_policy_mode),
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -720,7 +839,7 @@ impl QueryGraph {
                 subquery_spec,
                 &current_descriptor,
                 schema,
-                &branches,
+                branch_context.branches(),
                 schema_context,
                 session.as_ref(),
                 row_policy_mode,
@@ -783,10 +902,7 @@ impl QueryGraph {
                     &requests,
                     session.clone(),
                     schema.clone(),
-                    branches
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "main".to_string()),
+                    branch_context.policy_branch(),
                     row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -854,10 +970,7 @@ impl QueryGraph {
                     &requests,
                     session.clone(),
                     schema.clone(),
-                    branches
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "main".to_string()),
+                    branch_context.policy_branch(),
                     row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -902,7 +1015,7 @@ impl QueryGraph {
                 recursive_spec,
                 &current_descriptor,
                 schema,
-                &branches,
+                branch_context.branches(),
                 schema_context,
                 session.as_ref(),
                 row_policy_mode,
@@ -973,26 +1086,29 @@ impl QueryGraph {
         };
         ensure_relation_tables_exist(&query.relation_ir, schema)?;
 
-        let plan = lower_relation_to_execution_plan(
+        let features = RelationCompileFeatures {
+            include_deleted: query.include_deleted,
+            array_subqueries: query.array_subqueries.clone(),
+            select_columns: query.select_columns.clone(),
+        };
+
+        if let Some(plan) = lower_relation_to_execution_plan(
             &query.relation_ir,
             &branches,
-            query.include_deleted,
-            query.array_subqueries.clone(),
-            query.select_columns.clone(),
-        )
-        .ok_or_else(|| {
-            QueryCompileError::InvalidPlan(
-                "unsupported relation_ir shape for schema-context query compilation".to_string(),
-            )
-        })?;
+            features.include_deleted,
+            features.array_subqueries.clone(),
+            features.select_columns.clone(),
+        ) {
+            validate_execution_plan(&plan, schema)?;
+        }
 
-        validate_execution_plan(&plan, schema)?;
-
-        Self::compile_execution_plan_with_schema_context(
-            &plan,
+        Self::compile_relation_ir_with_schema_context_and_features(
+            &query.relation_ir,
             schema,
+            &branches,
             session,
             schema_context,
+            features,
             row_policy_mode,
         )
         .ok_or_else(|| {
@@ -1031,7 +1147,7 @@ impl QueryGraph {
             None => return None,
         };
 
-        // Build base query for subgraph, inheriting branches from outer query.
+        // Build base query for subgraph, inheriting outer query branches.
         let mut base_builder = QueryBuilder::new(spec.table);
         if !branches.is_empty() {
             let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
@@ -1294,31 +1410,14 @@ impl QueryGraph {
     fn compile_join_plan(
         plan: &ExecutionQueryPlan,
         schema: &Schema,
-        branches: &[String],
+        branch_context: &BranchCompileContext,
         session: Option<Session>,
         schema_context: &SchemaContext,
         row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
-        let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
-        for schema_hash in schema_context.all_live_hashes() {
-            let branch_name = ComposedBranchName::new(
-                &schema_context.env,
-                schema_hash,
-                &schema_context.user_branch,
-            )
-            .to_branch_name();
-            branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
-        }
-
         let base_table_schema = schema.get(&plan.table)?;
         let base_descriptor = base_table_schema.columns.clone();
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
-
-        let join_branches: Vec<&str> = if branches.is_empty() {
-            vec!["main"]
-        } else {
-            branches.iter().map(String::as_str).collect()
-        };
 
         // Track all table names and descriptors for TupleDescriptor
         let mut table_names = vec![plan.base_scope.clone()];
@@ -1329,7 +1428,7 @@ impl QueryGraph {
             let seed_graph = Self::compile_relation_ir_with_schema_context_and_features(
                 seed_relation,
                 schema,
-                branches,
+                branch_context.branches(),
                 session.clone(),
                 schema_context,
                 RelationCompileFeatures::default(),
@@ -1352,41 +1451,13 @@ impl QueryGraph {
             table_descriptors[0] = seed_output_descriptor.clone();
             (seed_output_id, seed_output_descriptor)
         } else {
-            // Build pipeline for base table: per-branch IndexScan (+Union) -> Materialize.
-            let mut base_scan_ids = Vec::new();
-            for branch in &join_branches {
-                let branch_schema_hash = branch_schema_map.get(*branch).copied();
-                let Some(base_scan_table) = translate_scan_table_name(
-                    schema_context,
-                    plan.table.as_str(),
-                    branch_schema_hash,
-                ) else {
-                    continue;
-                };
-                let id_column = ColumnName::new("_id");
-                let base_scan = IndexScanNode::new_with_branch(
-                    base_scan_table,
-                    id_column,
-                    *branch,
-                    ScanCondition::All,
-                    base_descriptor.clone(),
-                );
-                let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
-                graph
-                    .index_scan_nodes
-                    .push((base_scan_id, base_scan_table, id_column));
-                base_scan_ids.push(base_scan_id);
-            }
-            let base_scan_output = if base_scan_ids.len() > 1 {
-                let union_node = UnionNode::new();
-                let union_id = graph.add_node(GraphNode::Union(union_node));
-                for scan_id in base_scan_ids {
-                    graph.add_edge(union_id, scan_id);
-                }
-                union_id
-            } else {
-                *base_scan_ids.first()?
-            };
+            let base_scan_output = graph.compile_branch_index_scans(
+                schema_context,
+                branch_context,
+                plan.table,
+                &base_descriptor,
+                &[BranchIndexScanSpec::raw("_id", ScanCondition::All)],
+            )?;
 
             let base_tuple_desc = TupleDescriptor::single_with_materialization(
                 plan.base_scope.as_str(),
@@ -1399,22 +1470,17 @@ impl QueryGraph {
 
             // Track current left side descriptor (accumulates columns from joins)
             let mut left_id = base_mat_id;
-            if let (Some(session), Some(policy)) = (
-                &session,
-                effective_select_policy(base_table_schema, row_policy_mode),
-            ) {
-                let branch_for_policy = branches
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "main".to_string());
-                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+            if let Some(session) = &session
+                && needs_select_policy_filter(base_table_schema, row_policy_mode)
+            {
+                let policy_node = PolicyFilterNode::new_for_table_policy(
                     base_descriptor.clone(),
-                    policy,
                     session.clone(),
                     schema.clone(),
                     plan.table.as_str(),
-                    branch_for_policy,
-                    row_policy_mode,
+                    PolicyFilterOptions::for_branch(branch_context.policy_branch())
+                        .with_schema_context(schema_context)
+                        .with_row_policy_mode(row_policy_mode),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -1436,7 +1502,7 @@ impl QueryGraph {
                 recursive_spec,
                 &left_descriptor,
                 schema,
-                branches,
+                branch_context.branches(),
                 schema_context,
                 session.as_ref(),
                 row_policy_mode,
@@ -1464,41 +1530,13 @@ impl QueryGraph {
             let right_table_schema = schema.get(&join_spec.table)?;
             let right_descriptor = right_table_schema.columns.clone();
 
-            // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
-            let mut right_scan_ids = Vec::new();
-            for branch in &join_branches {
-                let branch_schema_hash = branch_schema_map.get(*branch).copied();
-                let Some(right_scan_table) = translate_scan_table_name(
-                    schema_context,
-                    join_spec.table.as_str(),
-                    branch_schema_hash,
-                ) else {
-                    continue;
-                };
-                let id_column = ColumnName::new("_id");
-                let right_scan = IndexScanNode::new_with_branch(
-                    right_scan_table,
-                    id_column,
-                    *branch,
-                    ScanCondition::All,
-                    right_descriptor.clone(),
-                );
-                let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
-                graph
-                    .index_scan_nodes
-                    .push((right_scan_id, right_scan_table, id_column));
-                right_scan_ids.push(right_scan_id);
-            }
-            let right_scan_output = if right_scan_ids.len() > 1 {
-                let union_node = UnionNode::new();
-                let union_id = graph.add_node(GraphNode::Union(union_node));
-                for scan_id in right_scan_ids {
-                    graph.add_edge(union_id, scan_id);
-                }
-                union_id
-            } else {
-                *right_scan_ids.first()?
-            };
+            let right_scan_output = graph.compile_branch_index_scans(
+                schema_context,
+                branch_context,
+                join_spec.table,
+                &right_descriptor,
+                &[BranchIndexScanSpec::raw("_id", ScanCondition::All)],
+            )?;
 
             let right_tuple_desc = TupleDescriptor::single_with_materialization(
                 join_spec.effective_name(),
@@ -1509,22 +1547,17 @@ impl QueryGraph {
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
             graph.add_edge(right_mat_id, right_scan_output);
             let mut right_input_id = right_mat_id;
-            if let (Some(session), Some(policy)) = (
-                &session,
-                effective_select_policy(right_table_schema, row_policy_mode),
-            ) {
-                let branch_for_policy = branches
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "main".to_string());
-                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+            if let Some(session) = &session
+                && needs_select_policy_filter(right_table_schema, row_policy_mode)
+            {
+                let policy_node = PolicyFilterNode::new_for_table_policy(
                     right_descriptor.clone(),
-                    policy,
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
-                    branch_for_policy,
-                    row_policy_mode,
+                    PolicyFilterOptions::for_branch(branch_context.policy_branch())
+                        .with_schema_context(schema_context)
+                        .with_row_policy_mode(row_policy_mode),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -1633,10 +1666,7 @@ impl QueryGraph {
                     &requests,
                     session.clone(),
                     schema.clone(),
-                    branches
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "main".to_string()),
+                    branch_context.policy_branch(),
                     row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -1701,10 +1731,7 @@ impl QueryGraph {
                     &requests,
                     session.clone(),
                     schema.clone(),
-                    branches
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "main".to_string()),
+                    branch_context.policy_branch(),
                     row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -1816,6 +1843,7 @@ fn ensure_relation_tables_exist(
             Ok(())
         }
         RelExpr::Filter { input, .. }
+        | RelExpr::Branch { input, .. }
         | RelExpr::Project { input, .. }
         | RelExpr::Distinct { input, .. }
         | RelExpr::OrderBy { input, .. }

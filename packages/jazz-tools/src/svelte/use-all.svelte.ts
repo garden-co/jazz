@@ -1,8 +1,11 @@
 import { onDestroy } from "svelte";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import type { QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { applyDelta } from "../reconcile-array.js";
+import type { QuerySubscriptionOptions as BaseQuerySubscriptionOptions } from "../subscriptions-orchestrator.js";
 import { getJazzContext } from "./context.svelte.js";
+
+export type QuerySubscriptionOptions = BaseQuerySubscriptionOptions;
 
 type MaybeGetter<T> = T | (() => T);
 
@@ -45,7 +48,7 @@ export class QuerySubscription<T extends { id: string }> {
 
   constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
-    options?: MaybeGetter<QueryOptions | undefined>,
+    options?: MaybeGetter<QuerySubscriptionOptions | undefined>,
   ) {
     const ctx = getJazzContext();
     this.current = resolve(options)?.tier ? undefined : [];

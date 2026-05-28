@@ -1,16 +1,21 @@
 use std::collections::HashSet;
 
 use crate::object::ObjectId;
+use crate::query_manager::permission_routing::{
+    BranchBackingResolution, PermissionRoute, ResolvedBranchPolicyBacking, branch_policy_scope,
+    resolve_permission_route_with_backing_loader,
+};
 use crate::query_manager::policy::{
-    Operation, PolicyExpr, bind_outer_row_refs, bind_relation_refs,
-    evaluate_expr_recursive_with_row_id, normalize_recursive_max_depth,
+    BranchPolicyContext, Operation, PolicyExpr, bind_branch_refs, bind_outer_row_refs,
+    bind_relation_refs, evaluate_expr_recursive_with_context, normalize_recursive_max_depth,
 };
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
 use crate::query_manager::session::Session;
 use crate::query_manager::settlement_eval_cache::{RefAccessSubexprKey, SettlementEvalCache};
 use crate::query_manager::types::{
-    ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Value,
+    ColumnType, LoadedRow, PermissionPhase, Row, RowDescriptor, RowPolicyMode, Schema, TableName,
+    Value,
 };
 use crate::storage::Storage;
 
@@ -21,6 +26,7 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     session: &'a Session,
     branch: &'a str,
     row_policy_mode: RowPolicyMode,
+    branch_context: Option<&'a BranchPolicyContext<'a>>,
     settlement_eval_cache: Option<&'a mut SettlementEvalCache>,
 }
 
@@ -36,8 +42,17 @@ impl<'a> PolicyContextEvaluator<'a> {
             session,
             branch,
             row_policy_mode,
+            branch_context: None,
             settlement_eval_cache: None,
         }
+    }
+
+    pub(crate) fn with_branch_context(
+        mut self,
+        branch_context: &'a BranchPolicyContext<'a>,
+    ) -> Self {
+        self.branch_context = Some(branch_context);
+        self
     }
 
     pub(crate) fn with_settlement_eval_cache(
@@ -99,6 +114,173 @@ impl<'a> PolicyContextEvaluator<'a> {
 
         visited_referencing.remove(&(table, row.id, operation));
         local_allow
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn evaluate_row_access_with_branch_route(
+        &mut self,
+        operation: Operation,
+        row: &Row,
+        descriptor: &RowDescriptor,
+        table_name: &str,
+        policy_branch: crate::object::BranchName,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+        depth: usize,
+        visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
+    ) -> bool {
+        let Some(route) =
+            self.resolve_permission_route(io, policy_branch, TableName::new(table_name))
+        else {
+            return self.evaluate_row_access(
+                operation,
+                row,
+                descriptor,
+                table_name,
+                None,
+                io,
+                row_loader,
+                depth,
+                visited_referencing,
+            );
+        };
+        if route.is_denied() {
+            return false;
+        }
+
+        let Some(policy) = route.policy_for_operation(operation, PermissionPhase::Using) else {
+            return route.allows_missing_policy(operation, self.row_policy_mode);
+        };
+
+        let branch_context = route.branch_context();
+        let mut evaluator = PolicyContextEvaluator::new(
+            self.schema,
+            self.session,
+            policy_branch.as_str(),
+            self.row_policy_mode,
+        );
+        if let Some(branch_context) = branch_context.as_ref() {
+            evaluator = evaluator.with_branch_context(branch_context);
+        }
+        evaluator.evaluate_row_access(
+            operation,
+            row,
+            descriptor,
+            table_name,
+            Some(policy),
+            io,
+            row_loader,
+            depth,
+            visited_referencing,
+        )
+    }
+
+    fn resolve_permission_route(
+        &self,
+        io: &dyn Storage,
+        policy_branch: crate::object::BranchName,
+        target_table: TableName,
+    ) -> Option<PermissionRoute<'_>> {
+        branch_policy_scope(&policy_branch)?;
+        Some(resolve_permission_route_with_backing_loader(
+            policy_branch,
+            target_table,
+            self.schema,
+            self.row_policy_mode,
+            |backing_table, backing_schema, branch_object_id, current_branch| {
+                self.resolve_branch_backing(
+                    io,
+                    backing_table,
+                    backing_schema,
+                    branch_object_id,
+                    current_branch,
+                )
+            },
+        ))
+    }
+
+    fn resolve_branch_backing(
+        &self,
+        io: &dyn Storage,
+        backing_table: &TableName,
+        backing_schema: &crate::query_manager::types::TableSchema,
+        branch_object_id: ObjectId,
+        current_branch: crate::object::BranchName,
+    ) -> BranchBackingResolution {
+        let Ok(Some(backing_row)) = io.load_visible_region_row(
+            backing_table.as_str(),
+            current_branch.as_str(),
+            branch_object_id,
+        ) else {
+            return BranchBackingResolution::NotFound;
+        };
+        if backing_row.is_hard_deleted() {
+            return BranchBackingResolution::Denied;
+        }
+
+        let backing_provenance = backing_row.row_provenance();
+        let backing_content = backing_row.data.clone();
+        let backing_policy = backing_schema.policies.select_policy();
+        let backing_allowed = if let Some(policy) = backing_policy {
+            let backing_row_for_policy = Row::new(
+                branch_object_id,
+                backing_content.clone(),
+                backing_row.batch_id,
+                backing_provenance.clone(),
+            );
+            let mut evaluator = PolicyContextEvaluator::new(
+                self.schema,
+                self.session,
+                current_branch.as_str(),
+                self.row_policy_mode,
+            );
+            let mut visited_referencing = HashSet::new();
+            let mut backing_dependency_loader = |id: ObjectId,
+                                                 table_hint: Option<TableName>|
+             -> Option<LoadedRow> {
+                let table_hint = table_hint?;
+                let Ok(Some(row)) =
+                    io.load_visible_region_row(table_hint.as_str(), current_branch.as_str(), id)
+                else {
+                    return None;
+                };
+                if row.is_hard_deleted() {
+                    return None;
+                }
+                let row_provenance = row.row_provenance();
+                let row_branch = crate::object::BranchName::new(row.branch.as_str());
+                Some(LoadedRow::new(
+                    row.data,
+                    row_provenance,
+                    [(id, row_branch)].into_iter().collect(),
+                    row.batch_id,
+                ))
+            };
+            evaluator.evaluate_row_access(
+                Operation::Select,
+                &backing_row_for_policy,
+                &backing_schema.columns,
+                backing_table.as_str(),
+                Some(policy),
+                io,
+                &mut backing_dependency_loader,
+                0,
+                &mut visited_referencing,
+            )
+        } else {
+            !self.row_policy_mode.denies_missing_explicit_policy()
+        };
+        if !backing_allowed {
+            return BranchBackingResolution::Denied;
+        }
+
+        BranchBackingResolution::Found(ResolvedBranchPolicyBacking {
+            backing_table: *backing_table,
+            row_id: branch_object_id,
+            descriptor: backing_schema.columns.clone(),
+            content: backing_content.to_vec(),
+            provenance: backing_provenance,
+        })
     }
 
     fn policy_for_operation(
@@ -307,13 +489,14 @@ impl<'a> PolicyContextEvaluator<'a> {
                 visited,
                 visited_referencing,
             ),
-            _ => evaluate_expr_recursive_with_row_id(
+            _ => evaluate_expr_recursive_with_context(
                 expr,
                 &row.data,
                 &row.provenance,
                 descriptor,
                 self.session,
                 Some(row.id),
+                self.branch_context,
                 depth,
             ),
         }
@@ -407,6 +590,39 @@ impl<'a> PolicyContextEvaluator<'a> {
             None => return false,
         };
 
+        let parent_row = Row::new(
+            parent_id,
+            parent_row.data,
+            parent_row.batch_id,
+            parent_row.row_provenance,
+        );
+        let policy_branch = crate::object::BranchName::new(self.branch);
+        if branch_policy_scope(&policy_branch).is_some() {
+            let mut evaluator = PolicyContextEvaluator::new(
+                self.schema,
+                self.session,
+                self.branch,
+                self.row_policy_mode,
+            );
+            let result = evaluator.evaluate_row_access_with_branch_route(
+                operation,
+                &parent_row,
+                &parent_schema.columns,
+                parent_table_name.as_str(),
+                policy_branch,
+                io,
+                row_loader,
+                depth + 1,
+                visited_referencing,
+            );
+            if let Some(cache_key) = cache_key
+                && let Some(cache) = self.settlement_eval_cache.as_mut()
+            {
+                cache.ref_access_insert(cache_key, result);
+            }
+            return result;
+        }
+
         let parent_policy = match operation {
             Operation::Select => parent_schema.policies.select_policy(),
             Operation::Insert => parent_schema.policies.insert_policy(),
@@ -419,12 +635,6 @@ impl<'a> PolicyContextEvaluator<'a> {
             None => return false,
         };
 
-        let parent_row = Row::new(
-            parent_id,
-            parent_row.data,
-            parent_row.batch_id,
-            parent_row.row_provenance,
-        );
         let result = self.evaluate_expr_with_context(
             parent_policy,
             operation,
@@ -466,6 +676,14 @@ impl<'a> PolicyContextEvaluator<'a> {
                 Some(expr) => expr,
                 None => return false,
             };
+        let bound_condition = if let Some(branch_context) = self.branch_context {
+            match bind_branch_refs(&bound_condition, branch_context) {
+                Some(expr) => expr,
+                None => return false,
+            }
+        } else {
+            bound_condition
+        };
 
         let table_name = TableName::new(table);
         let mut graph = match PolicyGraph::for_exists(
@@ -510,11 +728,17 @@ impl<'a> PolicyContextEvaluator<'a> {
             return false;
         }
 
-        let bound_rel =
-            match bind_relation_refs(rel, &row.data, descriptor, self.session, Some(row.id)) {
-                Some(expr) => expr,
-                None => return false,
-            };
+        let bound_rel = match bind_relation_refs(
+            rel,
+            &row.data,
+            descriptor,
+            self.session,
+            Some(row.id),
+            self.branch_context,
+        ) {
+            Some(expr) => expr,
+            None => return false,
+        };
 
         let current_table = TableName::new(table_name);
         let mut graph = match PolicyGraph::for_exists_rel(
@@ -615,6 +839,7 @@ fn collect_relation_tables(rel: &RelExpr, tables: &mut HashSet<String>) {
             }
         }
         RelExpr::Filter { input, .. }
+        | RelExpr::Branch { input, .. }
         | RelExpr::Project { input, .. }
         | RelExpr::Distinct { input, .. }
         | RelExpr::OrderBy { input, .. }

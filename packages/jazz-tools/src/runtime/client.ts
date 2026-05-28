@@ -110,6 +110,13 @@ export interface Runtime {
   onAuthFailure?(callback: (reason: string) => void): void;
 }
 
+type WasmRuntimeConstructor = new (...args: unknown[]) => Runtime;
+
+function createWasmRuntime(wasmModule: WasmModule, ...args: unknown[]): Runtime {
+  const RuntimeCtor = wasmModule.WasmRuntime as unknown as WasmRuntimeConstructor;
+  return new RuntimeCtor(...args);
+}
+
 /**
  * Authentication configuration for connecting to a Jazz server.
  *
@@ -859,7 +866,7 @@ abstract class BatchHandleBase {
     this.markTouchedRow(options.id);
   }
 
-  update(objectId: string, updates: Record<string, Value>): void {
+  update(objectId: string, updates: Record<string, Value>, updatedAt?: number): void {
     this.ensureActive();
     this.client.updateInternal(
       objectId,
@@ -867,6 +874,7 @@ abstract class BatchHandleBase {
       this.session,
       this.attribution,
       this.batchContext,
+      updatedAt,
     );
     this.markTouchedRow(objectId);
   }
@@ -1012,7 +1020,8 @@ export class JazzClient {
 
     // Create WASM runtime (storage is now synchronous in-memory)
     const schemaJson = serializeRuntimeSchema(context.schema);
-    const runtime = new wasmModule.WasmRuntime(
+    const runtime = createWasmRuntime(
+      wasmModule,
       schemaJson,
       context.appId,
       context.env ?? "dev",
@@ -1047,7 +1056,8 @@ export class JazzClient {
   ): JazzClient {
     // Create WASM runtime (storage is now synchronous in-memory)
     const schemaJson = serializeRuntimeSchema(context.schema);
-    const runtime = new wasmModule.WasmRuntime(
+    const runtime = createWasmRuntime(
+      wasmModule,
       schemaJson,
       context.appId,
       context.env ?? "dev",
@@ -1108,27 +1118,39 @@ export class JazzClient {
     return runInBatch(batch, callback, this);
   }
 
-  private createBatchContext(batchMode: BatchMode): BatchWriteContext {
+  branchNameForUserBranch(userBranch: string): string {
+    return composeTargetBranchName({ ...this.getSchemaContext(), user_branch: userBranch });
+  }
+
+  private createBatchContext(batchMode: BatchMode, targetBranchName?: string): BatchWriteContext {
     return {
       batchMode,
       batchId: generateBatchId(),
-      targetBranchName: composeTargetBranchName(this.getSchemaContext()),
+      targetBranchName: targetBranchName ?? composeTargetBranchName(this.getSchemaContext()),
     };
   }
 
-  beginTransactionInternal(session?: Session, attribution?: string): Transaction {
+  beginTransactionInternal(
+    session?: Session,
+    attribution?: string,
+    targetBranchName?: string,
+  ): Transaction {
     return new Transaction(
       this,
-      this.createBatchContext("transactional"),
+      this.createBatchContext("transactional", targetBranchName),
       this.resolveWriteSession(session, attribution),
       attribution,
     );
   }
 
-  beginBatchInternal(session?: Session, attribution?: string): DirectBatch {
+  beginBatchInternal(
+    session?: Session,
+    attribution?: string,
+    targetBranchName?: string,
+  ): DirectBatch {
     return new DirectBatch(
       this,
-      this.createBatchContext("direct"),
+      this.createBatchContext("direct", targetBranchName),
       this.resolveWriteSession(session, attribution),
       attribution,
     );

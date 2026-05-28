@@ -1,7 +1,7 @@
 use ahash::{AHashMap, AHashSet};
 use std::collections::HashSet;
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::graph_nodes::policy_eval::{
     PolicyContextEvaluator, collect_policy_dependency_tables,
@@ -318,11 +318,13 @@ impl MagicColumnsNode {
                 .descriptor;
             let row = input_element.to_row()?;
             let mut values = decode_row(input_descriptor, input_element.content()?).ok()?;
+            let branch = tuple_branch_for_row(tuple, row.id, &self.branch);
 
             for kind in &request.kinds {
                 values.push(self.evaluate_magic_column(
                     *kind,
                     request.table_name,
+                    branch,
                     &row,
                     input_descriptor,
                     io,
@@ -343,10 +345,12 @@ impl MagicColumnsNode {
         Some(projected)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_magic_column(
         &self,
         kind: MagicColumnKind,
         table_name: TableName,
+        branch: BranchName,
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
@@ -365,7 +369,7 @@ impl MagicColumnsNode {
                 let mut evaluator = PolicyContextEvaluator::new(
                     &self.schema,
                     session,
-                    &self.branch,
+                    branch.as_str(),
                     self.row_policy_mode,
                 );
                 let operation = match kind {
@@ -378,12 +382,12 @@ impl MagicColumnsNode {
                     | MagicColumnKind::UpdatedAt => unreachable!(),
                 };
                 let mut visited = HashSet::new();
-                let allowed = evaluator.evaluate_row_access(
+                let allowed = evaluator.evaluate_row_access_with_branch_route(
                     operation,
                     row,
                     descriptor,
                     table_name.as_str(),
-                    None,
+                    branch,
                     io,
                     row_loader,
                     0,
@@ -393,6 +397,14 @@ impl MagicColumnsNode {
             }
         }
     }
+}
+
+fn tuple_branch_for_row(tuple: &Tuple, row_id: ObjectId, fallback_branch: &str) -> BranchName {
+    tuple
+        .provenance()
+        .iter()
+        .find_map(|(id, branch)| (*id == row_id).then_some(*branch))
+        .unwrap_or_else(|| BranchName::new(fallback_branch))
 }
 
 impl RowNode for MagicColumnsNode {

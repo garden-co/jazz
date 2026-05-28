@@ -4,7 +4,8 @@ use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
-    ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
+    ColumnType, ComposedBranchName, SchemaBuilder, SchemaHash, TableName, TablePolicies,
+    TableSchema,
 };
 use crate::row_format::encode_row;
 use crate::row_histories::BatchId;
