@@ -1,6 +1,7 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { InspectorLayout } from "#inspector-layout/index";
+import { renderWithRouter } from "../../test/renderWithRouter";
 import { DataExplorer } from "./index";
 
 const mockSetQueryPropagation = vi.fn();
@@ -29,17 +30,16 @@ describe("DataExplorer", () => {
     });
   });
 
-  it("renders a resizable table list panel", () => {
-    render(
-      <MemoryRouter initialEntries={["/data-explorer/todos/data"]}>
-        <Routes>
-          <Route path="/data-explorer/:table/*" element={<DataExplorer />}>
-            <Route path="data" element={<div>table content</div>} />
-          </Route>
-        </Routes>
-      </MemoryRouter>,
+  it("renders a resizable table list panel", async () => {
+    renderWithRouter(
+      <InspectorLayout>
+        <DataExplorer>
+          <div>table content</div>
+        </DataExplorer>
+      </InspectorLayout>,
     );
 
+    expect(await screen.findByText("table content")).not.toBeNull();
     expect(screen.getAllByRole("separator")).toHaveLength(1);
     expect(screen.getByText("table content")).not.toBeNull();
   });

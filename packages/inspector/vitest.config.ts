@@ -18,6 +18,30 @@ export default defineConfig({
         find: "jazz-tools",
         replacement: resolve(__dirname, "../jazz-tools/src/index.ts"),
       },
+      {
+        find: "#contexts",
+        replacement: resolve(__dirname, "src/contexts"),
+      },
+      {
+        find: "#data-explorer",
+        replacement: resolve(__dirname, "src/components/data-explorer"),
+      },
+      {
+        find: "#db-config-form",
+        replacement: resolve(__dirname, "src/components/db-config-form"),
+      },
+      {
+        find: "#inspector-layout",
+        replacement: resolve(__dirname, "src/components/inspector-layout"),
+      },
+      {
+        find: "#lib",
+        replacement: resolve(__dirname, "src/lib"),
+      },
+      {
+        find: "#pages",
+        replacement: resolve(__dirname, "src/pages"),
+      },
     ],
   },
   test: {

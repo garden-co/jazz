@@ -1,6 +1,6 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { renderWithRouter } from "../../test/renderWithRouter";
 import { TableSchemaDefinition } from "./TableSchemaDefinition";
 
 const mockUseDevtoolsContext = vi.fn();
@@ -18,7 +18,7 @@ describe("TableSchemaDefinition", () => {
     cleanup();
   });
 
-  it("renders schema and standalone permissions for the active table", () => {
+  it("renders schema and standalone permissions for the active table", async () => {
     mockUseDevtoolsContext.mockReturnValue({
       runtime: "standalone",
       wasmSchema: {
@@ -45,21 +45,18 @@ describe("TableSchemaDefinition", () => {
       },
     });
 
-    render(
-      <MemoryRouter initialEntries={["/data-explorer/users/schema"]}>
-        <Routes>
-          <Route path="/data-explorer/:table/schema" element={<TableSchemaDefinition />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderWithRouter(<TableSchemaDefinition />, {
+      initialEntry: "/conn/connection/main/schema/data-explorer/users/schema",
+      routePath: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema",
+    });
 
-    expect(screen.getByRole("heading", { name: "users schema" })).not.toBeNull();
+    expect(await screen.findByRole("heading", { name: "users schema" })).not.toBeNull();
     expect(screen.getByRole("heading", { name: "users permissions" })).not.toBeNull();
     expect(screen.getByText(/"columns"/)).not.toBeNull();
     expect(screen.getByText(/"select"/)).not.toBeNull();
   });
 
-  it("shows an empty state when no permissions head has been published", () => {
+  it("shows an empty state when no permissions head has been published", async () => {
     mockUseDevtoolsContext.mockReturnValue({
       runtime: "standalone",
       wasmSchema: {
@@ -73,20 +70,17 @@ describe("TableSchemaDefinition", () => {
       },
     });
 
-    render(
-      <MemoryRouter initialEntries={["/data-explorer/users/schema"]}>
-        <Routes>
-          <Route path="/data-explorer/:table/schema" element={<TableSchemaDefinition />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderWithRouter(<TableSchemaDefinition />, {
+      initialEntry: "/conn/connection/main/schema/data-explorer/users/schema",
+      routePath: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema",
+    });
 
     expect(
-      screen.getByText("No published sync-server permissions found for this app."),
+      await screen.findByText("No published sync-server permissions found for this app."),
     ).not.toBeNull();
   });
 
-  it("shows a table-specific empty state when the current table has no stored permissions", () => {
+  it("shows a table-specific empty state when the current table has no stored permissions", async () => {
     mockUseDevtoolsContext.mockReturnValue({
       runtime: "standalone",
       wasmSchema: {
@@ -113,15 +107,12 @@ describe("TableSchemaDefinition", () => {
       },
     });
 
-    render(
-      <MemoryRouter initialEntries={["/data-explorer/users/schema"]}>
-        <Routes>
-          <Route path="/data-explorer/:table/schema" element={<TableSchemaDefinition />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderWithRouter(<TableSchemaDefinition />, {
+      initialEntry: "/conn/connection/main/schema/data-explorer/users/schema",
+      routePath: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema",
+    });
 
-    expect(screen.getByText('No stored permissions for table "users".')).not.toBeNull();
+    expect(await screen.findByText('No stored permissions for table "users".')).not.toBeNull();
   });
 
   it("hides the permissions section in extension mode", () => {
@@ -151,13 +142,10 @@ describe("TableSchemaDefinition", () => {
       },
     });
 
-    render(
-      <MemoryRouter initialEntries={["/data-explorer/users/schema"]}>
-        <Routes>
-          <Route path="/data-explorer/:table/schema" element={<TableSchemaDefinition />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderWithRouter(<TableSchemaDefinition />, {
+      initialEntry: "/conn/connection/main/schema/data-explorer/users/schema",
+      routePath: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema",
+    });
 
     expect(screen.queryByRole("heading", { name: "users permissions" })).toBeNull();
   });
