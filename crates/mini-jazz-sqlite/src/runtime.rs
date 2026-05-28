@@ -6,8 +6,9 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::types::{
-    ApplyBundleProfile, BranchInfo, HistoryBlockManifest, HistoryCompactionStats,
-    QueryExportProfile, RejectionInfo, RowView, StorageStats, TransactionInfo,
+    ApplyBundleProfile, BranchInfo, HistoryBlockExport, HistoryBlockManifest,
+    HistoryCompactionStats, QueryExportProfile, RejectionInfo, RowView, StorageStats,
+    TransactionInfo,
 };
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
@@ -763,6 +764,90 @@ impl Runtime {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    pub fn export_history_blocks(&self, table_name: &str) -> Result<Vec<HistoryBlockExport>> {
+        self.schema.table_def(table_name)?;
+        let table_num = crate::schema::table_num(&self.conn, table_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT block.block_id, block.block_kind, ids.row_id,
+                    block.min_global_epoch, block.max_global_epoch,
+                    block.row_count, block.tx_count, block.codec,
+                    block.format_version, block.uncompressed_bytes,
+                    block.compressed_bytes, block.payload
+             FROM history_blocks block
+             JOIN jazz_row_id ids ON ids.row_num = block.row_num
+             WHERE block.table_num = ?
+             ORDER BY block.block_kind, block.row_num, block.min_global_epoch, block.block_id",
+        )?;
+        let rows = stmt.query_map(params![table_num], |row| {
+            let block_kind = row.get::<_, i64>(1)?;
+            let manifest = HistoryBlockManifest {
+                block_id: row.get(0)?,
+                kind: history_block_kind_name(block_kind).to_owned(),
+                table: table_name.to_owned(),
+                row_id: row.get(2)?,
+                min_global_epoch: row.get(3)?,
+                max_global_epoch: row.get(4)?,
+                row_count: row.get(5)?,
+                tx_count: row.get(6)?,
+                codec: row.get(7)?,
+                format_version: row.get(8)?,
+                uncompressed_bytes: row.get(9)?,
+                compressed_bytes: row.get(10)?,
+            };
+            Ok(HistoryBlockExport {
+                manifest,
+                payload: row.get(11)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn import_history_blocks(&mut self, blocks: &[HistoryBlockExport]) -> Result<usize> {
+        let db = self.conn.transaction()?;
+        let mut imported = 0;
+        for block in blocks {
+            self.schema.table_def(&block.manifest.table)?;
+            let table_num = crate::schema::table_num(&db, &block.manifest.table)?;
+            let row_num = ensure_row_id(&db, &block.manifest.table, &block.manifest.row_id)?;
+            let block_kind = history_block_kind_value(&block.manifest.kind)?;
+            let bundle = decode_history_block_payload(
+                &block.manifest.codec,
+                block.manifest.format_version,
+                &block.payload,
+            )?;
+            validate_history_block_export(block, &bundle)?;
+            if history_block_exists(&db, block_kind, table_num, row_num, block)? {
+                continue;
+            }
+            db.execute(
+                "INSERT INTO history_blocks
+                 (block_kind, table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    block_kind,
+                    table_num,
+                    row_num,
+                    block.manifest.min_global_epoch,
+                    block.manifest.max_global_epoch,
+                    block.manifest.row_count,
+                    block.manifest.tx_count,
+                    block.manifest.codec,
+                    block.manifest.format_version,
+                    block.manifest.uncompressed_bytes,
+                    block.manifest.compressed_bytes,
+                    block.payload,
+                ],
+            )?;
+            let block_id = db.last_insert_rowid();
+            let tx_nums = ensure_tx_ids_for_history_block(&db, &bundle)?;
+            insert_history_block_tx_index(&db, block_id, &tx_nums)?;
+            imported += 1;
+        }
+        db.commit()?;
+        Ok(imported)
     }
 
     pub fn compact_all_history(
@@ -6125,6 +6210,188 @@ fn history_block_kind_name(kind: i64) -> &'static str {
         HISTORY_BLOCK_KIND_REJECTED => "rejected",
         _ => "unknown",
     }
+}
+
+fn history_block_kind_value(kind: &str) -> Result<i64> {
+    match kind {
+        "accepted" => Ok(HISTORY_BLOCK_KIND_ACCEPTED),
+        "rejected" => Ok(HISTORY_BLOCK_KIND_REJECTED),
+        _ => Err(crate::Error::new(format!(
+            "unknown history block kind {kind}"
+        ))),
+    }
+}
+
+fn history_block_exists(
+    conn: &Connection,
+    block_kind: i64,
+    table_num: i64,
+    row_num: i64,
+    block: &HistoryBlockExport,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM history_blocks
+         WHERE block_kind = ?
+           AND table_num = ?
+           AND row_num = ?
+           AND min_global_epoch = ?
+           AND max_global_epoch = ?
+           AND compressed_bytes = ?
+           AND payload = ?",
+        params![
+            block_kind,
+            table_num,
+            row_num,
+            block.manifest.min_global_epoch,
+            block.manifest.max_global_epoch,
+            block.manifest.compressed_bytes,
+            block.payload,
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn validate_history_block_export(block: &HistoryBlockExport, bundle: &Bundle) -> Result<()> {
+    if block.manifest.compressed_bytes != block.payload.len() as i64 {
+        return Err(crate::Error::new(
+            "history block compressed byte count mismatch",
+        ));
+    }
+    if block.manifest.row_count != bundle.history.len() as i64 {
+        return Err(crate::Error::new("history block row count mismatch"));
+    }
+    if block.manifest.tx_count != bundle.txs.len() as i64 {
+        return Err(crate::Error::new("history block tx count mismatch"));
+    }
+    let invalid_outcome = match block.manifest.kind.as_str() {
+        "accepted" => bundle
+            .txs
+            .iter()
+            .any(|record| record.outcome == tx::OUTCOME_REJECTED),
+        "rejected" => bundle
+            .txs
+            .iter()
+            .any(|record| record.outcome != tx::OUTCOME_REJECTED),
+        _ => return Err(crate::Error::new("history block has unknown kind")),
+    };
+    if invalid_outcome {
+        return Err(crate::Error::new(
+            "history block kind does not match contained transaction outcomes",
+        ));
+    }
+    if bundle.history.iter().any(|record| {
+        record.table != block.manifest.table || record.row_id != block.manifest.row_id
+    }) {
+        return Err(crate::Error::new(
+            "history block manifest row does not match contained history",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_tx_ids_for_history_block(conn: &Connection, bundle: &Bundle) -> Result<Vec<i64>> {
+    let mut tx_nums_by_id = BTreeMap::new();
+    for tx_record in &bundle.txs {
+        let tx_num = ensure_tx_record_for_history_block(conn, tx_record)?;
+        tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
+    }
+    for history_record in &bundle.history {
+        let tx_num = tx_nums_by_id
+            .get(&history_record.tx_id)
+            .copied()
+            .ok_or_else(|| crate::Error::new("history block references missing tx"))?;
+        let table_num = crate::schema::table_num(conn, &history_record.table)?;
+        let row_num = ensure_row_id(conn, &history_record.table, &history_record.row_id)?;
+        record_tx_write_num(conn, tx_num, table_num, row_num, history_record.op)?;
+    }
+    for read_record in &bundle.reads {
+        let tx_num = tx_nums_by_id
+            .get(&read_record.tx_id)
+            .copied()
+            .ok_or_else(|| crate::Error::new("history block read references missing tx"))?;
+        let table_num = crate::schema::table_num(conn, &read_record.table)?;
+        let row_num = ensure_row_id(conn, &read_record.table, &read_record.row_id)?;
+        let observed_tx_num = read_record
+            .observed_tx_id
+            .as_deref()
+            .map(|tx_id| {
+                tx_nums_by_id
+                    .get(tx_id)
+                    .copied()
+                    .map(Ok)
+                    .unwrap_or_else(|| tx::tx_num(conn, tx_id))
+            })
+            .transpose()?;
+        tx::append_read(
+            conn,
+            tx_num,
+            table_num,
+            row_num,
+            read_record.reason,
+            observed_tx_num,
+        )?;
+    }
+    Ok(tx_nums_by_id.into_values().collect())
+}
+
+fn ensure_tx_record_for_history_block(conn: &Connection, tx_record: &TxRecord) -> Result<i64> {
+    let node_num = tx::ensure_node(conn, &tx_record.node_id)?;
+    let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
+    conn.execute(
+        "INSERT INTO jazz_tx
+         (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json, writes_json, reads_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]')
+         ON CONFLICT(node_num, local_epoch) DO UPDATE SET
+           outcome = MAX(jazz_tx.outcome, excluded.outcome),
+           global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
+           conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
+           metadata_json = COALESCE(excluded.metadata_json, jazz_tx.metadata_json)",
+        params![
+            node_num,
+            tx_record.local_epoch,
+            tx_record.global_epoch,
+            tx::KIND_DATA,
+            tx_record.conflict_mode,
+            tx_record.outcome,
+            tx_record.created_at,
+            metadata_json
+        ],
+    )?;
+    let tx_num = tx::tx_num(conn, &tx_record.tx_id)?;
+    if tx_record.outcome == tx::OUTCOME_REJECTED {
+        if let Some(code) = &tx_record.rejection_code {
+            let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
+            conn.execute(
+                "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
+                 VALUES (?, ?, ?)",
+                params![tx_num, code, detail_json],
+            )?;
+        }
+    }
+    if let Some(global_epoch) = tx_record.global_epoch {
+        conn.execute(
+            "INSERT OR REPLACE INTO jazz_tx_receipt
+             (tx_num, tier, observed_at, receipt_json)
+             VALUES (?, ?, ?, '{}')",
+            params![tx_num, tx::TIER_GLOBAL, global_epoch],
+        )?;
+    }
+    for tier in &tx_record.receipt_tiers {
+        let observed_at = if *tier == tx::TIER_GLOBAL {
+            tx_record.global_epoch.unwrap_or(tx_record.created_at)
+        } else {
+            tx_record.created_at
+        };
+        conn.execute(
+            "INSERT OR REPLACE INTO jazz_tx_receipt
+             (tx_num, tier, observed_at, receipt_json)
+             VALUES (?, ?, ?, '{}')",
+            params![tx_num, tier, observed_at],
+        )?;
+    }
+    Ok(tx_num)
 }
 
 fn compactable_rejected_history_tx_nums(

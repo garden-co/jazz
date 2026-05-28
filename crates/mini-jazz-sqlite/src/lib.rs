@@ -24,6 +24,6 @@ pub use schema::SchemaDef;
 pub use storage::Storage;
 pub use subscription::RowsSubscription;
 pub use types::{
-    ApplyBundleProfile, HistoryCompactionStats, QueryExportProfile, RejectionInfo, RowDiff,
-    RowView, StorageStats, TransactionInfo,
+    ApplyBundleProfile, HistoryBlockExport, HistoryCompactionStats, QueryExportProfile,
+    RejectionInfo, RowDiff, RowView, StorageStats, TransactionInfo,
 };

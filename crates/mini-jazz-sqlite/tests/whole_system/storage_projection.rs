@@ -273,6 +273,58 @@ fn accepted_history_compaction_seals_old_versions_without_changing_exports() {
 }
 
 #[test]
+fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    for idx in 2..=5 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+    let before_bundle = alice.export_table_history("notes").unwrap();
+    alice
+        .compact_accepted_history("notes", "note-1", 1)
+        .unwrap();
+
+    let blocks = alice.export_history_blocks("notes").unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
+    assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 0);
+
+    assert_eq!(bob.storage_stats().unwrap().history_rows, 0);
+    assert_eq!(bob.storage_stats().unwrap().sealed_history_rows, 4);
+    assert_eq!(
+        bob.transaction_info("tx-alice-node-2").unwrap(),
+        alice.transaction_info("tx-alice-node-2").unwrap()
+    );
+    assert_eq!(
+        bob.transaction_write_rows("tx-alice-node-2").unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned())]
+    );
+
+    let sealed_only = bob.export_table_history("notes").unwrap();
+    assert_eq!(sealed_only.history.len(), 4);
+    assert_eq!(sealed_only.history, before_bundle.history[..4].to_vec());
+}
+
+#[test]
 fn point_read_at_global_epoch_can_decode_sealed_history_block() {
     let schema = support::notes_schema();
     let mut alice =

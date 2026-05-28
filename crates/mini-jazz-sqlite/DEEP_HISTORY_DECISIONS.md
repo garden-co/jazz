@@ -138,3 +138,10 @@ Decision: rejected tx metadata can leave `jazz_tx` only after every open history
 Why: rejected multi-row transactions can write multiple rows. Compacting one row must not delete the shared tx/rejection metadata while sibling rejected rows still live in ordinary history tables, or those rows become relationally stranded.
 
 Scope impact: rejected compaction now mirrors accepted compaction's conservative metadata deletion rule: seal row history first, delete tx metadata only when no open history row still references it.
+Wed May 27 23:41:40 PDT 2026
+
+## Block-Native History Payload Exchange
+
+Decision: expose history blocks as raw lz4 payload records with manifest metadata, and import them idempotently by rebuilding the local tx index from the decoded block contents. This keeps sync experiments from expanding sealed history into ordinary rows while preserving existing Bundle decoding as the semantic validation step.
+
+Scope impact: this is not yet a full protocol; it is a local/runtime API that lets benchmarks and future sync code move sealed blocks as blocks.

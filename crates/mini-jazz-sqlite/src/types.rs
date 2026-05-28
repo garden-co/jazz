@@ -112,6 +112,13 @@ pub struct HistoryBlockManifest {
     pub compressed_bytes: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HistoryBlockExport {
+    pub manifest: HistoryBlockManifest,
+    #[serde(skip)]
+    pub payload: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RejectionInfo {
     pub tx_id: String,
