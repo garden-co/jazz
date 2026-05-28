@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 04:07:17 PDT 2026
+
+Decision: document the accepted-block settledness gap instead of hiding it.
+
+Why: the current prototype compacts visible non-rejected local history, and import validation therefore accepts non-rejected txs in accepted blocks while rejecting rejected txs. The RFC's ideal says accepted blocks should contain genuinely settled accepted txs only, so the prototype status needs to call out that remaining semantic tightening explicitly.
+
+Scope impact: the RFC partial-status list now records that production should tighten accepted-block compaction once the runtime has a crisp accepted-vs-optimistic cutoff.
+
 ## Thu May 28 04:06:08 PDT 2026
 
 Decision: refresh the Block benchmark column after import validation.

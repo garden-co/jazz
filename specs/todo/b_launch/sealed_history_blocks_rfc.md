@@ -652,6 +652,9 @@ Implemented in the current spike:
 Still deliberately partial:
 
 - query-scoped block planning does not cover every future query shape
+- the prototype accepted-block compactor currently seals visible non-rejected
+  local history; production should tighten this to genuinely settled accepted
+  transactions once the runtime has a crisp accepted-vs-optimistic cutoff
 - the block payload is JSON inside lz4, not the final compact binary format
 - branch reads rely on open branch-base anchors rather than arbitrary sealed
   snapshot reads
