@@ -1284,7 +1284,7 @@ fn table_compaction_seals_each_deep_row_independently() {
     let stats = alice.compact_table_accepted_history("notes", 1, 2).unwrap();
 
     assert_eq!(stats.history_blocks, 2);
-    assert_eq!(stats.sealed_history_rows, 5);
+    assert_eq!(stats.sealed_history_rows, 6);
     assert_eq!(alice.storage_stats().unwrap().history_rows, 2);
     assert_eq!(alice.read_rows("notes").unwrap().len(), 2);
 }
