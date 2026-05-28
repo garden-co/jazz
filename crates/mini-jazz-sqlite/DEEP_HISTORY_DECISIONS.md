@@ -42,3 +42,11 @@ Decision: keep the first public historical read API narrow: one row on main acce
 Why: this proves the block lookup/decode path without prematurely claiming full branch/query snapshot support. Branch-local overlays, policy-filtered historical queries, and rejected diagnostic reads need separate semantics.
 
 Scope impact: `read_row_at_global_epoch` can use sealed accepted blocks plus open history. Broader snapshot APIs remain future work.
+
+## Wed May 27 23:12:25 PDT 2026
+
+Decision: accepted compaction must always retain the current visible history row in open history, even when the requested hot tail is zero.
+
+Why: current reads use the current projection, but rebuild/replay still needs an ordinary open head until projection rebuild is block-aware. Deleting the visible head would make compaction appear correct until a rebuild or restart path needed history as the source of truth.
+
+Scope impact: the first compactor can seal old history aggressively but treats the current visible tx as operational state.

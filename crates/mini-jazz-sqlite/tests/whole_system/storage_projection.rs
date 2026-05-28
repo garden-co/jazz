@@ -312,6 +312,46 @@ fn point_read_at_global_epoch_can_decode_sealed_history_block() {
 }
 
 #[test]
+fn compaction_keeps_visible_head_rebuildable_with_zero_hot_tail() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    for epoch in 2..=4 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{epoch}")))]),
+            )
+            .unwrap();
+    }
+
+    alice
+        .compact_accepted_history("notes", "note-1", 0)
+        .unwrap();
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 1);
+
+    alice.clear_current_projection_for_test().unwrap();
+    assert!(alice.read_rows("notes").unwrap().is_empty());
+
+    alice.rebuild_current_projection().unwrap();
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("v4"));
+}
+
+#[test]
 fn delete_is_history_not_removal() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
