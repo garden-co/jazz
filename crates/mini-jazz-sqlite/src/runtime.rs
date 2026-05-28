@@ -27,6 +27,7 @@ const HISTORY_BLOCK_FORMAT_VERSION: i64 = 9;
 const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
 const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
 const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
+const HISTORY_BLOCK_CACHE_CAPACITY: usize = 64;
 const HISTORY_BLOCK_KIND_ACCEPTED: i64 = 1;
 const HISTORY_BLOCK_KIND_REJECTED: i64 = 2;
 
@@ -3188,19 +3189,7 @@ impl Runtime {
         let mut bundles = Vec::new();
         for row in rows {
             let (block_id, codec, format_version, payload) = row?;
-            if let Some(cached) = self.history_block_cache.borrow().get(&block_id).cloned() {
-                bundles.push(cached);
-                continue;
-            }
-            let bundle = Arc::new(decode_history_block_payload(
-                &codec,
-                format_version,
-                &payload,
-            )?);
-            self.history_block_cache
-                .borrow_mut()
-                .insert(block_id, Arc::clone(&bundle));
-            bundles.push(bundle);
+            bundles.push(self.cached_history_block(block_id, &codec, format_version, &payload)?);
         }
         Ok(bundles)
     }
@@ -3790,19 +3779,7 @@ impl Runtime {
         let mut bundles = Vec::new();
         for row in rows {
             let (block_id, codec, format_version, payload) = row?;
-            if let Some(cached) = self.history_block_cache.borrow().get(&block_id).cloned() {
-                bundles.push(cached);
-                continue;
-            }
-            let bundle = Arc::new(decode_history_block_payload(
-                &codec,
-                format_version,
-                &payload,
-            )?);
-            self.history_block_cache
-                .borrow_mut()
-                .insert(block_id, Arc::clone(&bundle));
-            bundles.push(bundle);
+            bundles.push(self.cached_history_block(block_id, &codec, format_version, &payload)?);
         }
         Ok(bundles)
     }
@@ -3961,21 +3938,34 @@ impl Runtime {
         let mut bundles = Vec::new();
         for row in rows {
             let (block_id, codec, format_version, payload) = row?;
-            if let Some(cached) = self.history_block_cache.borrow().get(&block_id).cloned() {
-                bundles.push(cached);
-                continue;
-            }
-            let bundle = Arc::new(decode_history_block_payload(
-                &codec,
-                format_version,
-                &payload,
-            )?);
-            self.history_block_cache
-                .borrow_mut()
-                .insert(block_id, Arc::clone(&bundle));
-            bundles.push(bundle);
+            bundles.push(self.cached_history_block(block_id, &codec, format_version, &payload)?);
         }
         Ok(bundles)
+    }
+
+    fn cached_history_block(
+        &self,
+        block_id: i64,
+        codec: &str,
+        format_version: i64,
+        payload: &[u8],
+    ) -> Result<Arc<Bundle>> {
+        if let Some(cached) = self.history_block_cache.borrow().get(&block_id).cloned() {
+            return Ok(cached);
+        }
+        let bundle = Arc::new(decode_history_block_payload(
+            codec,
+            format_version,
+            payload,
+        )?);
+        let mut cache = self.history_block_cache.borrow_mut();
+        if cache.len() >= HISTORY_BLOCK_CACHE_CAPACITY {
+            if let Some(evicted) = cache.keys().next().copied() {
+                cache.remove(&evicted);
+            }
+        }
+        cache.insert(block_id, Arc::clone(&bundle));
+        Ok(bundle)
     }
 
     pub fn read_rows_require_ref(

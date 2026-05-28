@@ -491,3 +491,11 @@ Decision: choose run, delta, and dictionary value columns only when their serial
 Why: with JSON as the temporary block container, a clever physical column can be worse for shallow or high-entropy columns because the variant object names cost bytes. The encoder should make this decision per column rather than assuming a codec is always better.
 
 Scope impact: block format stays v9; only the encoder's choice policy changes. Canonical Block payloads improved in the measured append, Automerge, and canvas runs.
+
+## Thu May 28 02:57:22 PDT 2026 - Bound The Decoded Block Cache
+
+Decision: cap the per-runtime decoded history block cache at 64 blocks.
+
+Why: the cache improves repeated historical reads and transaction lookups, but an unbounded cache undermines the memory part of the RFC goal. Decoded blocks should be temporary accelerators, not a way for point reads to pin all cold history in RAM.
+
+Scope impact: all runtime block-cache users now share one bounded insertion path. The eviction policy is intentionally simple for the spike; a later version can make it true LRU if measured.
