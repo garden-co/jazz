@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:51:24 PDT 2026
+
+Decision: verify the documented grouped baseline selector with real canonical caps, but do not rewrite the comparison table from that smoke.
+
+Why: the run was intended to validate benchmark ergonomics after adding grouped selectors and per-scenario sample intervals. The current codebase already includes later storage-format changes, so treating this as a fresh historical Base column update would muddy the table.
+
+Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all` completed append, Automerge, and canvas at the canonical update counts. The output was saved in `/tmp/deep_history_all_canonical_base.json` for handoff context only.
+
 ## Thu May 28 03:49:47 PDT 2026
 
 Decision: keep policy denials per-logical-transaction inside grouped SQLite commits.
