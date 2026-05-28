@@ -6,8 +6,8 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::types::{
-    ApplyBundleProfile, BranchInfo, HistoryCompactionStats, QueryExportProfile, RejectionInfo,
-    RowView, StorageStats, TransactionInfo,
+    ApplyBundleProfile, BranchInfo, HistoryBlockManifest, HistoryCompactionStats,
+    QueryExportProfile, RejectionInfo, RowView, StorageStats, TransactionInfo,
 };
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
@@ -728,6 +728,41 @@ impl Runtime {
             total.compressed_bytes += stats.compressed_bytes;
         }
         Ok(total)
+    }
+
+    pub fn history_block_manifests(&self, table_name: &str) -> Result<Vec<HistoryBlockManifest>> {
+        self.schema.table_def(table_name)?;
+        let table_num = crate::schema::table_num(&self.conn, table_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT block.block_id, block.block_kind, ids.row_id,
+                    block.min_global_epoch, block.max_global_epoch,
+                    block.row_count, block.tx_count, block.codec,
+                    block.format_version, block.uncompressed_bytes,
+                    block.compressed_bytes
+             FROM history_blocks block
+             JOIN jazz_row_id ids ON ids.row_num = block.row_num
+             WHERE block.table_num = ?
+             ORDER BY block.block_kind, block.row_num, block.min_global_epoch, block.block_id",
+        )?;
+        let rows = stmt.query_map(params![table_num], |row| {
+            let block_kind = row.get::<_, i64>(1)?;
+            Ok(HistoryBlockManifest {
+                block_id: row.get(0)?,
+                kind: history_block_kind_name(block_kind).to_owned(),
+                table: table_name.to_owned(),
+                row_id: row.get(2)?,
+                min_global_epoch: row.get(3)?,
+                max_global_epoch: row.get(4)?,
+                row_count: row.get(5)?,
+                tx_count: row.get(6)?,
+                codec: row.get(7)?,
+                format_version: row.get(8)?,
+                uncompressed_bytes: row.get(9)?,
+                compressed_bytes: row.get(10)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn export_exclusive_transaction_forwarding(
@@ -6045,6 +6080,14 @@ fn compactable_history_tx_nums(
         .take(compact_len)
         .filter(|tx_num| Some(*tx_num) != current_visible_tx_num)
         .collect())
+}
+
+fn history_block_kind_name(kind: i64) -> &'static str {
+    match kind {
+        HISTORY_BLOCK_KIND_ACCEPTED => "accepted",
+        HISTORY_BLOCK_KIND_REJECTED => "rejected",
+        _ => "unknown",
+    }
 }
 
 fn compactable_rejected_history_tx_nums(

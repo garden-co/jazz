@@ -241,6 +241,12 @@ fn accepted_history_compaction_seals_old_versions_without_changing_exports() {
     assert_eq!(stats.history_rows, 2);
     assert_eq!(stats.sealed_history_rows, 4);
     assert_eq!(stats.history_blocks, 1);
+    let manifests = alice.history_block_manifests("notes").unwrap();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0].kind, "accepted");
+    assert_eq!(manifests[0].row_id, "note-1");
+    assert_eq!(manifests[0].row_count, 4);
+    assert!(manifests[0].compressed_bytes > 0);
     assert_eq!(alice.read_rows("notes").unwrap(), before_rows);
     assert_eq!(
         alice.transaction_info("tx-alice-node-2").unwrap(),

@@ -114,3 +114,11 @@ Decision: expose batched logical updates in the deep-history benchmark behind `M
 Why: batching is a write-throughput optimization, not a storage compaction optimization. The benchmark should let us turn it on independently for Base, Block, and future experiments so we can tell whether wins come from fewer SQLite commits or fewer persisted bytes.
 
 Scope impact: benchmark sampling flushes any pending batch before listener/export measurement. This preserves end-to-end listener correctness while allowing normal non-sampled writes to share SQLite commits.
+
+## Wed May 27 23:33:39 PDT 2026
+
+Decision: add a payload-free history block manifest API before attempting block-native sync.
+
+Why: sync and maintenance need a cheap way to discover which blocks exist, what row/table/epoch range they cover, and how large they are without decompressing payloads. This is also the right inspection boundary for future "do I already have this block?" negotiation.
+
+Scope impact: `history_block_manifests(table)` exposes accepted and rejected block metadata with row ids and byte counts. It deliberately does not expose payload bytes or decode logical records.

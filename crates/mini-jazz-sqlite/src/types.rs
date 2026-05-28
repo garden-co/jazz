@@ -96,6 +96,22 @@ pub struct HistoryCompactionStats {
     pub compressed_bytes: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HistoryBlockManifest {
+    pub block_id: i64,
+    pub kind: String,
+    pub table: String,
+    pub row_id: String,
+    pub min_global_epoch: i64,
+    pub max_global_epoch: i64,
+    pub row_count: i64,
+    pub tx_count: i64,
+    pub codec: String,
+    pub format_version: i64,
+    pub uncompressed_bytes: i64,
+    pub compressed_bytes: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RejectionInfo {
     pub tx_id: String,
