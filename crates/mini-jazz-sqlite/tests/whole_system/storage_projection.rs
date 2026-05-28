@@ -396,8 +396,7 @@ fn table_history_delta_syncs_open_rows_and_missing_blocks() {
     assert_eq!(bundle.history.len(), 1);
     assert_eq!(blocks.len(), 1);
 
-    assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
-    bob.apply_bundle(&bundle).unwrap();
+    bob.apply_history_delta(&bundle, &blocks).unwrap();
 
     let rows = bob.read_rows("notes").unwrap();
     assert_eq!(rows.len(), 1);
@@ -460,8 +459,7 @@ fn query_history_delta_syncs_open_rows_and_matching_blocks() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].manifest.row_id, "note-1");
 
-    assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
-    bob.apply_bundle(&bundle).unwrap();
+    bob.apply_history_delta(&bundle, &blocks).unwrap();
 
     let rows = bob
         .read_rows_where_eq("notes", "pinned", json!(true))
@@ -538,8 +536,7 @@ fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
     assert_eq!(bundle.history.len(), 2);
     assert_eq!(blocks.len(), 2);
 
-    assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 2);
-    bob.apply_bundle(&bundle).unwrap();
+    bob.apply_history_delta(&bundle, &blocks).unwrap();
 
     let docs = bob.read_rows("docs").unwrap();
     assert_eq!(docs.len(), 1);

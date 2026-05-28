@@ -1275,6 +1275,15 @@ impl Runtime {
         self.apply_bundle_inner(bundle, true).map(|_| ())
     }
 
+    pub fn apply_history_delta(
+        &mut self,
+        bundle: &Bundle,
+        blocks: &[HistoryBlockExport],
+    ) -> Result<()> {
+        self.import_history_blocks(blocks)?;
+        self.apply_bundle(bundle)
+    }
+
     pub fn profile_apply_bundle(&mut self, bundle: &Bundle) -> Result<ApplyBundleProfile> {
         self.apply_bundle_inner(bundle, true)
     }

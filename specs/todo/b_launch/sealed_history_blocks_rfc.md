@@ -537,7 +537,9 @@ an intermediate projection rebuild to preserve omitted fields in the hot tail.
 `export_query_where_eq_history_delta(...)` applies the same block-native shape to
 one equality query by filtering the sealed block set to the query's
 visible/repair row ids. This proves the query-scoped planning boundary for one
-predicate class, not every query operator yet.
+predicate class, not every query operator yet. Receivers can apply any of these
+deltas through `apply_history_delta(bundle, blocks)`, which imports missing
+blocks before applying the hot/open bundle.
 
 That optimization is deliberately separate from the first storage change. The
 first goal is to prove that sealed blocks reduce local storage and historical

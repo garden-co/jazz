@@ -279,3 +279,9 @@ Scope impact: the first append measurement showed sealed tx metadata lookup aver
 Decision: Add a narrow equality-query history delta API that returns hot/open query history as an ordinary bundle plus missing sealed blocks for the query row set.
 
 Scope impact: query-scoped sync no longer has to be all-or-nothing table delta in the prototype. The first shape covers equality predicates only and still uses the existing repair-row and policy-dependency machinery for open history; sealed history is transferred as blocks instead of expanded into row-history records.
+
+## Thu May 28 01:21:43 PDT 2026 - Delta Apply Helper
+
+Decision: Add `apply_history_delta(bundle, blocks)` as the receiver-side API for block-native deltas.
+
+Scope impact: table, all-table, and equality-query deltas now share one receiver call shape: import any missing sealed blocks, then apply the hot/open bundle. This reduces call-site footguns while keeping the operation semantics explicit.
