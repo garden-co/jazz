@@ -4625,11 +4625,38 @@ struct JazzRopeTextCaseInput {
     notes: Vec<String>,
 }
 
+struct PendingRopeTextWrite {
+    root: persisted_rope::RopeRoot,
+}
+
 type JazzRopeTextEditFn = dyn FnMut(
     &Connection,
     persisted_rope::RopeRoot,
     usize,
 ) -> BenchResult<(persisted_rope::RopeRoot, usize)>;
+
+fn flush_jazz_rope_text_writes(
+    writer: &mut Runtime,
+    pending_writes: &mut Vec<PendingRopeTextWrite>,
+) -> BenchResult<()> {
+    if pending_writes.is_empty() {
+        return Ok(());
+    }
+    let updates = pending_writes
+        .drain(..)
+        .map(|write| {
+            (
+                "doc".to_owned(),
+                map1(
+                    "body_root",
+                    json!(write.root.unwrap_or_default().to_string()),
+                ),
+            )
+        })
+        .collect();
+    writer.update_rows_batched("documents", updates)?;
+    Ok(())
+}
 
 fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<DeepHistoryCaseReport> {
     let tmp = tempdir()?;
@@ -4648,8 +4675,8 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     )?;
     let mut receiver =
         Runtime::open_with_schema(Storage::Memory, "receiver-node", "bob", schema.clone())?;
-    let writer_rope = Connection::open(&writer_rope_path)?;
-    let receiver_rope = Connection::open(&receiver_rope_path)?;
+    let mut writer_rope = Connection::open(&writer_rope_path)?;
+    let mut receiver_rope = Connection::open(&receiver_rope_path)?;
     persisted_rope::install(&writer_rope)?;
     persisted_rope::install(&receiver_rope)?;
     let mut receiver_sidecar_watermark = SidecarWatermark::default();
@@ -4663,9 +4690,9 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         map1("body_root", json!(root.unwrap_or_default().to_string())),
     )?;
     receiver.apply_bundle(&writer.export_table_history("documents")?)?;
-    copy_rope_sidecar_incremental(
+    copy_rope_sidecar_incremental_batched(
         &writer_rope,
-        &receiver_rope,
+        &mut receiver_rope,
         &mut receiver_sidecar_watermark,
     )?;
     let mut subscription = receiver.subscribe_rows("documents")?;
@@ -4674,26 +4701,46 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     let mut receive_samples = Vec::new();
     let mut write_only_ms = 0.0;
     let mut sampled_receive_total_ms = 0.0;
-    for index in 1..input.target_updates {
+    let batch_window = deep_history_sqlite_tx_batch_window();
+    input.notes.push(format!(
+        "SQLite transaction batching enabled for Jazz root writes and sidecar edits: flush window {} ms.",
+        batch_window.as_millis()
+    ));
+    let mut pending_writes = Vec::new();
+    let mut index = 1usize;
+    while index < input.target_updates {
         let write_started = Instant::now();
-        let (next_root, payload_bytes) = (input.next_edit)(&writer_rope, root, index)?;
-        root = next_root;
-        final_payload_bytes = payload_bytes;
-        writer.update_row(
-            "documents",
-            "doc",
-            map1("body_root", json!(root.unwrap_or_default().to_string())),
-        )?;
+        let sidecar_tx = writer_rope.transaction()?;
+        let batch_started = Instant::now();
+        let mut should_sample = false;
+        loop {
+            let (next_root, payload_bytes) = (input.next_edit)(&sidecar_tx, root, index)?;
+            root = next_root;
+            final_payload_bytes = payload_bytes;
+            pending_writes.push(PendingRopeTextWrite { root });
+            should_sample = should_sample
+                || index == 1
+                || (index + 1).is_multiple_of(input.sample_every)
+                || index + 1 == input.target_updates;
+            index += 1;
+            if index >= input.target_updates
+                || should_sample
+                || batch_started.elapsed() >= batch_window
+            {
+                break;
+            }
+        }
+        sidecar_tx.commit()?;
+        flush_jazz_rope_text_writes(&mut writer, &mut pending_writes)?;
         write_only_ms += ms(write_started.elapsed());
 
-        if index == 1 || (index + 1) % input.sample_every == 0 || index + 1 == input.target_updates
-        {
+        if should_sample {
             let receive_started = Instant::now();
             let bundle = writer.export_table_history("documents")?;
             receiver.profile_apply_bundle(&bundle)?;
-            copy_rope_sidecar_incremental(
+            copy_rope_sidecar_incremental_batched(
                 &writer_rope,
-                &receiver_rope,
+                &mut receiver_rope,
                 &mut receiver_sidecar_watermark,
             )?;
             let diffs = receiver.poll_subscription(&mut subscription)?;
@@ -4784,14 +4831,14 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         let mut block_peer =
             Runtime::open_with_schema(Storage::Memory, "block-peer-node", "bob", schema.clone())?;
         let block_peer_rope_path = tmp.path().join("block-peer-rope.sqlite");
-        let block_peer_rope = Connection::open(&block_peer_rope_path)?;
+        let mut block_peer_rope = Connection::open(&block_peer_rope_path)?;
         persisted_rope::install(&block_peer_rope)?;
         let block_import_started = Instant::now();
         block_peer.apply_history_delta(&delta.bundle, &delta.blocks)?;
         let block_rows = block_peer.read_rows("documents")?;
         let block_root = row_root_id(&block_rows, "body_root")?;
         let block_sidecar_bytes =
-            copy_rope_sidecar_reachable(&writer_rope, &block_peer_rope, &[block_root])?;
+            copy_rope_sidecar_reachable_batched(&writer_rope, &mut block_peer_rope, &[block_root])?;
         input.notes.push(format!(
             "Block-native sidecar delta: current root reachable bytes {}.",
             block_sidecar_bytes
@@ -4988,7 +5035,7 @@ fn run_jazz_rope_position_case(
     let mut receiver =
         Runtime::open_with_schema(Storage::Memory, "receiver-node", "bob", schema.clone())?;
     let writer_rope = Connection::open(&writer_rope_path)?;
-    let receiver_rope = Connection::open(&receiver_rope_path)?;
+    let mut receiver_rope = Connection::open(&receiver_rope_path)?;
     persisted_rope::install(&writer_rope)?;
     persisted_rope::install(&receiver_rope)?;
     let mut receiver_sidecar_watermark = SidecarWatermark::default();
@@ -5001,9 +5048,9 @@ fn run_jazz_rope_position_case(
         map1("position_root", json!(root.unwrap().to_string())),
     )?;
     receiver.apply_bundle(&writer.export_table_history("canvas_objects")?)?;
-    copy_rope_sidecar_incremental(
+    copy_rope_sidecar_incremental_batched(
         &writer_rope,
-        &receiver_rope,
+        &mut receiver_rope,
         &mut receiver_sidecar_watermark,
     )?;
     let mut subscription = receiver.subscribe_rows("canvas_objects")?;
@@ -5029,9 +5076,9 @@ fn run_jazz_rope_position_case(
             let receive_started = Instant::now();
             let bundle = writer.export_table_history("canvas_objects")?;
             receiver.profile_apply_bundle(&bundle)?;
-            copy_rope_sidecar_incremental(
+            copy_rope_sidecar_incremental_batched(
                 &writer_rope,
-                &receiver_rope,
+                &mut receiver_rope,
                 &mut receiver_sidecar_watermark,
             )?;
             let diffs = receiver.poll_subscription(&mut subscription)?;
@@ -5285,6 +5332,17 @@ fn copy_rope_sidecar_incremental(
     Ok(bytes)
 }
 
+fn copy_rope_sidecar_incremental_batched(
+    source: &Connection,
+    target: &mut Connection,
+    watermark: &mut SidecarWatermark,
+) -> BenchResult<usize> {
+    let tx = target.transaction()?;
+    let bytes = copy_rope_sidecar_incremental(source, &tx, watermark)?;
+    tx.commit()?;
+    Ok(bytes)
+}
+
 fn copy_rope_sidecar_reachable(
     source: &Connection,
     target: &Connection,
@@ -5407,6 +5465,17 @@ fn copy_rope_sidecar_reachable(
     }
 
     Ok(copied_bytes)
+}
+
+fn copy_rope_sidecar_reachable_batched(
+    source: &Connection,
+    target: &mut Connection,
+    roots: &[i64],
+) -> BenchResult<usize> {
+    let tx = target.transaction()?;
+    let bytes = copy_rope_sidecar_reachable(source, &tx, roots)?;
+    tx.commit()?;
+    Ok(bytes)
 }
 
 fn copy_rope_sidecar(source: &Connection, target: &Connection) -> BenchResult<()> {
@@ -6201,6 +6270,10 @@ fn deep_history_sample_every(specific_name: &str, default: usize) -> usize {
 
 fn deep_history_write_batch_size() -> Option<usize> {
     env_optional_usize("MINI_JAZZ_DEEP_HISTORY_WRITE_BATCH_SIZE").filter(|size| *size > 1)
+}
+
+fn deep_history_sqlite_tx_batch_window() -> Duration {
+    Duration::from_millis(env_usize("MINI_JAZZ_DEEP_HISTORY_SQLITE_TX_BATCH_MS", 10) as u64)
 }
 
 fn deep_history_max_rows_per_block() -> Option<usize> {

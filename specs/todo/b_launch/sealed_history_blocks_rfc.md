@@ -731,6 +731,14 @@ Open questions:
 Benchmarks should add a write-batch dimension beside storage compaction so we
 can distinguish "fewer durable commits" wins from "fewer stored bytes" wins.
 
+Once the currently measured write, receive, and storage paths are low enough to
+make longer runs useful, add a full-system realtime max-speed ingest benchmark:
+keep one Jazz transaction/history row per logical update, batch SQLite write and
+sidecar commits into low-latency slices such as 10ms, export one native sync
+delta per ingest slice, apply the matching native and sidecar deltas on a
+receiver, and measure end-to-end time until a live listener observes the latest
+update in each slice.
+
 ## Non-Goals For The First Version
 
 - custom SQLite VFS

@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 14:57:33 PDT 2026
+
+Decision: record the current Block+S2 checkpoint with SQLite transaction batching for sidecar/root writes and current-derived remote-pending visibility.
+
+Why: profiling showed the per-history-row durable-version query dominated receive after Block+S. Deriving the remote-pending guard from the current visible tx removes that common scan without keeping a separate in-memory durable-row cache, while preserving the broader durable-history query as a no-current fallback.
+
+Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-block-incr` was rerun and the benchmark overview now includes a `Block+S2` column. The latest measured output is `/tmp/deep_history_block_s_current_durable.json`.
+
 ## Thu May 28 12:38:37 PDT 2026
 
 Decision: make persisted rope sidecar segments immutable and use root compaction after sealing Jazz root history in the Block+Incr text benchmark.

@@ -2992,16 +2992,21 @@ impl Runtime {
         if outcome == tx::OUTCOME_PENDING && tx_info.conflict_mode == tx::MODE_EXCLUSIVE {
             return Ok(());
         }
-        if tx_info.outcome == tx::OUTCOME_PENDING
-            && tx_info.node_num != context.local_node_num
-            && durable_version_exists_for_row(context.db, &record.table, row_num, branch_num)?
-        {
-            return Ok(());
+        let current_tx_num =
+            current_visible_tx_num(context.db, &record.table, row_num, branch_num)?;
+        if tx_info.outcome == tx::OUTCOME_PENDING && tx_info.node_num != context.local_node_num {
+            if let Some(current_tx_num) = current_tx_num {
+                if tx_apply_info(context.db, current_tx_num)?.is_durable {
+                    return Ok(());
+                }
+            } else if !context.row_nums_created_in_apply.contains(&row_num)
+                && durable_version_exists_for_row(context.db, &record.table, row_num, branch_num)?
+            {
+                return Ok(());
+            }
         }
         if outcome != tx::OUTCOME_REJECTED {
-            if let Some(current_tx_num) =
-                current_visible_tx_num(context.db, &record.table, row_num, branch_num)?
-            {
+            if let Some(current_tx_num) = current_tx_num {
                 if let Some(is_newer) =
                     tx_is_newer_than_current_fast_path(context.db, tx_num, current_tx_num)?
                 {
@@ -7267,6 +7272,7 @@ struct ApplyTxInfo {
     node_num: i64,
     outcome: i64,
     conflict_mode: i64,
+    is_durable: bool,
 }
 
 struct ApplyHistoryContext<'a> {
@@ -7284,13 +7290,17 @@ struct ApplyHistoryContext<'a> {
 
 fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {
     Ok(conn.query_row(
-        "SELECT node_num, outcome, conflict_mode FROM jazz_tx WHERE tx_num = ?",
-        params![tx_num],
+        "SELECT node_num, outcome, conflict_mode,
+                outcome = ? OR global_epoch IS NOT NULL
+         FROM jazz_tx
+         WHERE tx_num = ?",
+        params![tx::OUTCOME_ACCEPTED, tx_num],
         |row| {
             Ok(ApplyTxInfo {
                 node_num: row.get(0)?,
                 outcome: row.get(1)?,
                 conflict_mode: row.get(2)?,
+                is_durable: row.get(3)?,
             })
         },
     )?)
@@ -7310,15 +7320,18 @@ fn durable_version_exists_for_row(
     row_num: i64,
     branch_num: i64,
 ) -> Result<bool> {
-    let count: i64 = conn.query_row(
+    let exists: bool = conn.query_row(
         &format!(
-            "SELECT COUNT(*)
-             FROM {} h
-             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
-             WHERE h.row_num = ?
-               AND h.j_branch_num = ?
-               AND tx.outcome != ?
-               AND (tx.outcome = ? OR tx.global_epoch IS NOT NULL)",
+            "SELECT EXISTS(
+               SELECT 1
+               FROM {} h
+               JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
+               WHERE h.row_num = ?
+                 AND h.j_branch_num = ?
+                 AND tx.outcome != ?
+                 AND (tx.outcome = ? OR tx.global_epoch IS NOT NULL)
+               LIMIT 1
+             )",
             crate::schema::history_table(table_name)
         ),
         params![
@@ -7329,7 +7342,7 @@ fn durable_version_exists_for_row(
         ],
         |row| row.get(0),
     )?;
-    Ok(count > 0)
+    Ok(exists)
 }
 
 fn write_allowed_for_history_record(
