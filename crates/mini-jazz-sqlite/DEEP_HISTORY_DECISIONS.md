@@ -571,3 +571,11 @@ Decision: accepted compaction should not seal the latest main row version at any
 Why: ordinary branch reads use the current/open sparse-overlay model and should stay fast without decoding cold blocks. If compaction with `hot_tail = 0` removes the exact main row version that a branch is pinned to, local branch reads can no longer materialize the base row. Keeping one sparse anchor per pinned base epoch is a small storage cost for preserving branch snapshot semantics and read performance.
 
 Scope impact: compaction still seals older and newer accepted history, but skips branch-base anchor txs. Added a regression test for local branch reads after history compaction.
+
+## Thu May 28 03:21:15 PDT 2026 - Document Branch Base Anchor Policy
+
+Decision: update the RFC reads section to describe branch-base anchors as the current prototype policy.
+
+Why: the earlier RFC left branch snapshots open-ended between sealed history and future sparse caches. The implemented policy is more concrete: keep sparse base anchors in `history_open` so ordinary branch reads remain cheap, while using blocks for colder non-anchor history and block-native sync/rebuild.
+
+Scope impact: documentation only.

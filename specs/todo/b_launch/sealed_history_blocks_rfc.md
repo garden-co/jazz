@@ -489,6 +489,13 @@ If branch snapshots require repeated random access into sealed accepted history,
 we may add sparse snapshot/cache tables later. That should be driven by
 benchmark data rather than designed up front.
 
+Prototype refinement: accepted compaction keeps the latest main row version at
+each live branch base epoch in `history_open`. These sparse branch-base anchors
+let ordinary branch reads stay on the current/open-history path instead of
+decoding blocks. Older non-anchor history can still be sealed, and block-native
+sync/rebuild can still use sealed records when an anchor arrives as a block from
+another peer.
+
 Prototype note: `rebuild_current_projection()` now performs the ordinary
 open-history replay and then considers the latest accepted sealed row version
 per `(table, row, branch)`. Sealed candidates fill gaps left by block-native
