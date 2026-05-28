@@ -587,3 +587,11 @@ Decision: when scanning sealed branch-base rows for query repair, choose the lat
 Why: branch base snapshots already care about deterministic latest-row choice when multiple transactions share a global epoch. The sealed predicate repair does not have local physical `tx_num` from the sender, but including local epoch is a better stable ordering than epoch alone.
 
 Scope impact: no API change. Focused branch sealed-history tests and clippy pass.
+
+## Thu May 28 03:24:19 PDT 2026 - Add Prototype Status To RFC
+
+Decision: add an explicit implemented/partial status section to the sealed-history RFC.
+
+Why: the overnight spike now covers more than the original design sketch: compaction, block-native deltas, columnar codecs, cache policy, branch anchors, and benchmark integration are all real. The RFC should make the boundary visible so the next iteration can focus on the remaining hard problems instead of rediscovering what is already in place.
+
+Scope impact: documentation only.

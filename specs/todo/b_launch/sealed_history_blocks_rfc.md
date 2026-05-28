@@ -622,6 +622,41 @@ Required invariants:
 - compaction is atomic: a crash leaves either the old open rows or the new block
   visible to the storage layer, not half of each
 
+## Prototype Status
+
+Implemented in the current spike:
+
+- accepted and rejected sealed block families in one `history_blocks` table
+- columnar JSON payloads compressed with lz4, currently format v9
+- dictionary/run/delta column encodings selected only when smaller than raw JSON
+- payload hashes, byte accounting, block manifests, and tx-range indexes
+- accepted/rejected compaction by row, table, all tables, and bounded policy
+- optional rows-per-block splitting for point-read/storage tradeoff tuning
+- explicit storage reclamation separate from compaction
+- block-native table, all-table, predicate, top-query, observed-refresh, and
+  recursive-reference history deltas
+- block import without reopening sealed history rows or recreating cold `jazz_tx`
+  rows
+- transaction metadata lookup from sealed blocks
+- accepted point reads by global epoch and node/local epoch
+- runtime decoded-block LRU cache with a fixed cap
+- branch-base anchor preservation in `history_open`
+- branch export and branch query export guards for sealed main history
+- canonical benchmark metrics for Base/Base1/Base2/Base3/Block/Incr
+- a narrow batched-update API and benchmark switch for grouped SQLite commits
+
+Still deliberately partial:
+
+- query-scoped block planning does not cover every future query shape
+- the block payload is JSON inside lz4, not the final compact binary format
+- branch reads rely on open branch-base anchors rather than arbitrary sealed
+  snapshot reads
+- the write-batching API is a benchmark/prototype hook, not a scheduler
+- segment-tree value storage and sealed history blocks are both present in the
+  spike, but a final production policy for when to use each is not settled
+- block compaction scheduling is manual/policy-driven, not automatic by age or
+  byte pressure
+
 ## Benchmark Plan
 
 Extend the deep-history benchmark with a sealed-block experiment:
