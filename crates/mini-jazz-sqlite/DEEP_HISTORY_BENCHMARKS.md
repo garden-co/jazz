@@ -105,105 +105,117 @@ For append and document edits, final-payload ratios compare storage to the text
 content produced by the run. For canvas positions, final-payload ratios are
 intentionally `N/A`; compare to the gzipped position trace instead.
 
-## Comparison Table
+## Comparison Tables
 
-| Scenario  | Metric                     |      Base3 |      Block |   Block+S |
-| --------- | -------------------------- | ---------: | ---------: | --------: |
-| Append    | completed updates          |       2225 |       2225 |      2225 |
-| Append    | total loop                 |    7609 ms |    7733 ms |   8331 ms |
-| Append    | write only                 |     767 ms |     680 ms |   2934 ms |
-| Append    | avg loop/update            |    3.42 ms |    3.48 ms |   3.74 ms |
-| Append    | avg write/update           |    0.34 ms |    0.31 ms |   1.32 ms |
-| Append    | sampled receive            |    6839 ms |    7048 ms |   5395 ms |
-| Append    | live receive avg           |    1140 ms |    1175 ms |    899 ms |
-| Append    | live receive p50           |     969 ms |    1000 ms |    974 ms |
-| Append    | live receive p95           |    3369 ms |    3484 ms |   1762 ms |
-| Append    | cold load                  |    1961 ms |    2012 ms |   2589 ms |
-| Append    | current read               |    0.15 ms |    0.14 ms |   0.32 ms |
-| Append    | historical read avg        |        N/A |   41.79 ms |  49.98 ms |
-| Append    | tx info avg                |        N/A |    0.27 ms |   0.26 ms |
-| Append    | history rows               |       2226 |        445 |       446 |
-| Append    | final payload bytes        |     13,350 |     13,350 |    13,350 |
-| Append    | bundle bytes               | 15,235,071 | 15,235,071 |   567,966 |
-| Append    | block-native export        |        N/A |   21.72 ms |  18.35 ms |
-| Append    | block-native import        |        N/A |  302.87 ms |    137 ms |
-| Append    | block-native blocks        |        N/A |          1 |         1 |
-| Append    | block-native payload bytes |        N/A |     67,005 |    31,452 |
-| Append    | current-root sidecar bytes |        N/A |        N/A |    13,742 |
-| Append    | database bytes             | 18,657,280 | 18,722,816 |   503,808 |
-| Append    | live database bytes        |        N/A |  6,053,888 |   339,968 |
-| Append    | freelist bytes             |        N/A | 12,668,928 |   163,840 |
-| Append    | total file bytes           | 22,388,624 | 22,405,008 | 4,640,368 |
-| Append    | database / final payload   |   1397.55x |   1402.46x |    37.74x |
-| Append    | total file / final payload |   1677.05x |   1678.28x |   347.59x |
-| Append    | sidecar nodes              |        N/A |        N/A |      4456 |
-| Append    | sidecar leaves             |        N/A |        N/A |      2229 |
-| Append    | sidecar concat nodes       |        N/A |        N/A |      2227 |
-| Append    | sidecar segment bytes      |        N/A |        N/A |    26,700 |
-| Automerge | completed updates          |       2900 |       2900 |      2900 |
-| Automerge | total loop                 |    7999 ms |    8176 ms |  18423 ms |
-| Automerge | write only                 |     969 ms |     764 ms |   6840 ms |
-| Automerge | avg loop/update            |    2.76 ms |    2.82 ms |   6.35 ms |
-| Automerge | avg write/update           |    0.33 ms |    0.26 ms |   2.36 ms |
-| Automerge | sampled receive            |    7025 ms |    7303 ms |  11580 ms |
-| Automerge | live receive avg           |    1171 ms |    1217 ms |   1930 ms |
-| Automerge | live receive p50           |     938 ms |     980 ms |   1948 ms |
-| Automerge | live receive p95           |    3532 ms |    3677 ms |   5017 ms |
-| Automerge | cold load                  |    2031 ms |    2100 ms |   7055 ms |
-| Automerge | current read               |    0.13 ms |    0.14 ms |   0.19 ms |
-| Automerge | historical read avg        |        N/A |   61.47 ms |  72.89 ms |
-| Automerge | tx info avg                |        N/A |    0.36 ms |   0.33 ms |
-| Automerge | history rows               |       2901 |        580 |       581 |
-| Automerge | final payload bytes        |       1750 |       1750 |      1750 |
-| Automerge | source trace gzip bytes    |    904,360 |    904,360 |   904,360 |
-| Automerge | bundle bytes               |  4,152,081 |  4,152,081 | 1,090,481 |
-| Automerge | block-native export        |        N/A |   25.94 ms |  23.71 ms |
-| Automerge | block-native import        |        N/A |  272.37 ms |    188 ms |
-| Automerge | block-native blocks        |        N/A |          1 |         1 |
-| Automerge | block-native payload bytes |        N/A |     87,526 |    41,677 |
-| Automerge | current-root sidecar bytes |        N/A |        N/A |     1,806 |
-| Automerge | database bytes             |  9,687,040 |  9,785,344 |   802,816 |
-| Automerge | live database bytes        |        N/A |  2,965,504 |   585,728 |
-| Automerge | freelist bytes             |        N/A |  6,819,840 |   217,088 |
-| Automerge | total file bytes           | 13,778,664 | 13,807,408 | 4,931,184 |
-| Automerge | database / final payload   |   5535.45x |   5591.63x |   458.75x |
-| Automerge | total file / final payload |   7873.52x |   7889.95x |  2817.82x |
-| Automerge | database / source gzip     |     10.71x |     10.83x |     0.89x |
-| Automerge | bundle / source gzip       |      4.59x |      4.59x |     1.21x |
-| Automerge | sidecar nodes              |        N/A |        N/A |    17,043 |
-| Automerge | sidecar leaves             |        N/A |        N/A |      2326 |
-| Automerge | sidecar concat nodes       |        N/A |        N/A |    14,717 |
-| Automerge | sidecar segment bytes      |        N/A |        N/A |     4,075 |
-| Canvas    | completed updates          |       3900 |       3900 |       N/A |
-| Canvas    | total loop                 |    8455 ms |    8513 ms |       N/A |
-| Canvas    | write only                 |     903 ms |     817 ms |       N/A |
-| Canvas    | avg loop/update            |    2.17 ms |    2.18 ms |       N/A |
-| Canvas    | avg write/update           |    0.23 ms |    0.21 ms |       N/A |
-| Canvas    | sampled receive            |    7548 ms |    7691 ms |       N/A |
-| Canvas    | live receive avg           |    1258 ms |    1282 ms |       N/A |
-| Canvas    | live receive p50           |    1263 ms |    1275 ms |       N/A |
-| Canvas    | live receive p95           |    3274 ms |    3345 ms |       N/A |
-| Canvas    | cold load                  |    2236 ms |    2269 ms |       N/A |
-| Canvas    | current read               |    0.13 ms |    0.13 ms |       N/A |
-| Canvas    | historical read avg        |        N/A |   98.89 ms |       N/A |
-| Canvas    | tx info avg                |        N/A |    0.44 ms |       N/A |
-| Canvas    | history rows               |       3901 |        780 |       N/A |
-| Canvas    | final payload bytes        |         46 |         46 |       N/A |
-| Canvas    | position trace gzip bytes  |     78,526 |     78,526 |       N/A |
-| Canvas    | position trace JSON bytes  |    205,609 |    205,609 |       N/A |
-| Canvas    | bundle bytes               |    858,561 |    858,108 |       N/A |
-| Canvas    | block-native export        |        N/A |   32.56 ms |       N/A |
-| Canvas    | block-native import        |        N/A |  295.79 ms |       N/A |
-| Canvas    | block-native blocks        |        N/A |          1 |       N/A |
-| Canvas    | block-native payload bytes |        N/A |    173,244 |       N/A |
-| Canvas    | database bytes             |    659,456 |    847,872 |       N/A |
-| Canvas    | live database bytes        |        N/A |    401,408 |       N/A |
-| Canvas    | freelist bytes             |        N/A |    446,464 |       N/A |
-| Canvas    | total file bytes           |  4,828,760 |  4,849,264 |       N/A |
-| Canvas    | database / final payload   |        N/A |        N/A |       N/A |
-| Canvas    | total file / final payload |        N/A |        N/A |       N/A |
-| Canvas    | database / position gzip   |      8.40x |     10.80x |       N/A |
-| Canvas    | bundle / position gzip     |     10.93x |     10.93x |       N/A |
+### Append
+
+| Metric                     |      Base3 |      Block |   Block+S |
+| -------------------------- | ---------: | ---------: | --------: |
+| completed updates          |       2225 |       2225 |      2225 |
+| total loop                 |    7609 ms |    7733 ms |   8331 ms |
+| write only                 |     767 ms |     680 ms |   2934 ms |
+| avg loop/update            |    3.42 ms |    3.48 ms |   3.74 ms |
+| avg write/update           |    0.34 ms |    0.31 ms |   1.32 ms |
+| sampled receive            |    6839 ms |    7048 ms |   5395 ms |
+| live receive avg           |    1140 ms |    1175 ms |    899 ms |
+| live receive p50           |     969 ms |    1000 ms |    974 ms |
+| live receive p95           |    3369 ms |    3484 ms |   1762 ms |
+| cold load                  |    1961 ms |    2012 ms |   2589 ms |
+| current read               |    0.15 ms |    0.14 ms |   0.32 ms |
+| historical read avg        |        N/A |   41.79 ms |  49.98 ms |
+| tx info avg                |        N/A |    0.27 ms |   0.26 ms |
+| history rows               |       2226 |        445 |       446 |
+| final payload bytes        |     13,350 |     13,350 |    13,350 |
+| bundle bytes               | 15,235,071 | 15,235,071 |   567,966 |
+| block-native export        |        N/A |   21.72 ms |  18.35 ms |
+| block-native import        |        N/A |  302.87 ms |    137 ms |
+| block-native blocks        |        N/A |          1 |         1 |
+| block-native payload bytes |        N/A |     67,005 |    31,452 |
+| current-root sidecar bytes |        N/A |        N/A |    13,742 |
+| database bytes             | 18,657,280 | 18,722,816 |   503,808 |
+| live database bytes        |        N/A |  6,053,888 |   339,968 |
+| freelist bytes             |        N/A | 12,668,928 |   163,840 |
+| total file bytes           | 22,388,624 | 22,405,008 | 4,640,368 |
+| database / final payload   |   1397.55x |   1402.46x |    37.74x |
+| total file / final payload |   1677.05x |   1678.28x |   347.59x |
+| sidecar nodes              |        N/A |        N/A |      4456 |
+| sidecar leaves             |        N/A |        N/A |      2229 |
+| sidecar concat nodes       |        N/A |        N/A |      2227 |
+| sidecar segment bytes      |        N/A |        N/A |    26,700 |
+
+### Automerge
+
+| Metric                     |      Base3 |      Block |   Block+S |
+| -------------------------- | ---------: | ---------: | --------: |
+| completed updates          |       2900 |       2900 |      2900 |
+| total loop                 |    7999 ms |    8176 ms |  18423 ms |
+| write only                 |     969 ms |     764 ms |   6840 ms |
+| avg loop/update            |    2.76 ms |    2.82 ms |   6.35 ms |
+| avg write/update           |    0.33 ms |    0.26 ms |   2.36 ms |
+| sampled receive            |    7025 ms |    7303 ms |  11580 ms |
+| live receive avg           |    1171 ms |    1217 ms |   1930 ms |
+| live receive p50           |     938 ms |     980 ms |   1948 ms |
+| live receive p95           |    3532 ms |    3677 ms |   5017 ms |
+| cold load                  |    2031 ms |    2100 ms |   7055 ms |
+| current read               |    0.13 ms |    0.14 ms |   0.19 ms |
+| historical read avg        |        N/A |   61.47 ms |  72.89 ms |
+| tx info avg                |        N/A |    0.36 ms |   0.33 ms |
+| history rows               |       2901 |        580 |       581 |
+| final payload bytes        |       1750 |       1750 |      1750 |
+| source trace gzip bytes    |    904,360 |    904,360 |   904,360 |
+| bundle bytes               |  4,152,081 |  4,152,081 | 1,090,481 |
+| block-native export        |        N/A |   25.94 ms |  23.71 ms |
+| block-native import        |        N/A |  272.37 ms |    188 ms |
+| block-native blocks        |        N/A |          1 |         1 |
+| block-native payload bytes |        N/A |     87,526 |    41,677 |
+| current-root sidecar bytes |        N/A |        N/A |     1,806 |
+| database bytes             |  9,687,040 |  9,785,344 |   802,816 |
+| live database bytes        |        N/A |  2,965,504 |   585,728 |
+| freelist bytes             |        N/A |  6,819,840 |   217,088 |
+| total file bytes           | 13,778,664 | 13,807,408 | 4,931,184 |
+| database / final payload   |   5535.45x |   5591.63x |   458.75x |
+| total file / final payload |   7873.52x |   7889.95x |  2817.82x |
+| database / source gzip     |     10.71x |     10.83x |     0.89x |
+| bundle / source gzip       |      4.59x |      4.59x |     1.21x |
+| sidecar nodes              |        N/A |        N/A |    17,043 |
+| sidecar leaves             |        N/A |        N/A |      2326 |
+| sidecar concat nodes       |        N/A |        N/A |    14,717 |
+| sidecar segment bytes      |        N/A |        N/A |     4,075 |
+
+### Canvas
+
+| Metric                     |     Base3 |     Block | Block+S |
+| -------------------------- | --------: | --------: | ------: |
+| completed updates          |      3900 |      3900 |     N/A |
+| total loop                 |   8455 ms |   8513 ms |     N/A |
+| write only                 |    903 ms |    817 ms |     N/A |
+| avg loop/update            |   2.17 ms |   2.18 ms |     N/A |
+| avg write/update           |   0.23 ms |   0.21 ms |     N/A |
+| sampled receive            |   7548 ms |   7691 ms |     N/A |
+| live receive avg           |   1258 ms |   1282 ms |     N/A |
+| live receive p50           |   1263 ms |   1275 ms |     N/A |
+| live receive p95           |   3274 ms |   3345 ms |     N/A |
+| cold load                  |   2236 ms |   2269 ms |     N/A |
+| current read               |   0.13 ms |   0.13 ms |     N/A |
+| historical read avg        |       N/A |  98.89 ms |     N/A |
+| tx info avg                |       N/A |   0.44 ms |     N/A |
+| history rows               |      3901 |       780 |     N/A |
+| final payload bytes        |        46 |        46 |     N/A |
+| position trace gzip bytes  |    78,526 |    78,526 |     N/A |
+| position trace JSON bytes  |   205,609 |   205,609 |     N/A |
+| bundle bytes               |   858,561 |   858,108 |     N/A |
+| block-native export        |       N/A |  32.56 ms |     N/A |
+| block-native import        |       N/A | 295.79 ms |     N/A |
+| block-native blocks        |       N/A |         1 |     N/A |
+| block-native payload bytes |       N/A |   173,244 |     N/A |
+| database bytes             |   659,456 |   847,872 |     N/A |
+| live database bytes        |       N/A |   401,408 |     N/A |
+| freelist bytes             |       N/A |   446,464 |     N/A |
+| total file bytes           | 4,828,760 | 4,849,264 |     N/A |
+| database / final payload   |       N/A |       N/A |     N/A |
+| total file / final payload |       N/A |       N/A |     N/A |
+| database / position gzip   |     8.40x |    10.80x |     N/A |
+| bundle / position gzip     |    10.93x |    10.93x |     N/A |
 
 ## Notes
 
