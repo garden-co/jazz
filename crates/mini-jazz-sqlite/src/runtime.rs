@@ -19,7 +19,8 @@ use crate::{
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 pub struct Runtime {
     conn: Connection,
@@ -28,6 +29,44 @@ pub struct Runtime {
     auth: RuntimeAuth,
     node_num: i64,
     branch_num: i64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ProfileTimer {
+    started_at: Instant,
+}
+
+#[cfg(target_arch = "wasm32")]
+struct ProfileTimer {
+    started_at_ms: f64,
+}
+
+impl ProfileTimer {
+    fn start() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                started_at: Instant::now(),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self {
+                started_at_ms: js_sys::Date::now(),
+            }
+        }
+    }
+
+    fn elapsed_ms(&self) -> f64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.started_at.elapsed().as_secs_f64() * 1000.0
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            js_sys::Date::now() - self.started_at_ms
+        }
+    }
 }
 
 struct AwaitingDependencyTx {
@@ -486,8 +525,8 @@ impl Runtime {
         bundle: &Bundle,
         check_policy_fingerprint: bool,
     ) -> Result<ApplyBundleProfile> {
-        let total_started = Instant::now();
-        let validation_started = Instant::now();
+        let total_started = ProfileTimer::start();
+        let validation_started = ProfileTimer::start();
         if bundle.protocol_version != BUNDLE_PROTOCOL_VERSION {
             return Err(crate::Error::new(format!(
                 "unsupported bundle protocol version {}",
@@ -516,15 +555,15 @@ impl Runtime {
                 }
             }
         }
-        let validation_ms = duration_ms(validation_started.elapsed());
+        let validation_ms = validation_started.elapsed_ms();
         let schema = self.schema.clone();
         let repair_user = self.policy_user().to_owned();
         let repair_bypass_policy = self.bypasses_policy();
-        let begin_tx_started = Instant::now();
+        let begin_tx_started = ProfileTimer::start();
         let db = self.conn.transaction()?;
-        let begin_tx_ms = duration_ms(begin_tx_started.elapsed());
+        let begin_tx_ms = begin_tx_started.elapsed_ms();
 
-        let branches_started = Instant::now();
+        let branches_started = ProfileTimer::start();
         for branch_record in &bundle.branches {
             let branch_num = branch::ensure(
                 &db,
@@ -544,11 +583,11 @@ impl Runtime {
             let branch_num = branch::checkout(&db, &branch_record.branch_id)?;
             branch_nums_by_id.insert(branch_record.branch_id.clone(), branch_num);
         }
-        let branches_ms = duration_ms(branches_started.elapsed());
+        let branches_ms = branches_started.elapsed_ms();
 
         let table_nums_by_name = crate::schema::table_nums(&db)?;
 
-        let txs_started = Instant::now();
+        let txs_started = ProfileTimer::start();
         let mut tx_nums_by_id = BTreeMap::new();
         let mut tx_info_by_num = BTreeMap::new();
         for tx_record in &bundle.txs {
@@ -613,9 +652,9 @@ impl Runtime {
                 )?;
             }
         }
-        let txs_ms = duration_ms(txs_started.elapsed());
+        let txs_ms = txs_started.elapsed_ms();
 
-        let reads_started = Instant::now();
+        let reads_started = ProfileTimer::start();
         let mut row_nums_by_id = BTreeMap::new();
         let mut row_nums_created_in_apply = BTreeSet::new();
         let mut user_nums_by_id = BTreeMap::new();
@@ -658,9 +697,9 @@ impl Runtime {
             ])?;
         }
         drop(insert_read_stmt);
-        let reads_ms = duration_ms(reads_started.elapsed());
+        let reads_ms = reads_started.elapsed_ms();
 
-        let rejected_cleanup_started = Instant::now();
+        let rejected_cleanup_started = ProfileTimer::start();
         if bundle
             .txs
             .iter()
@@ -680,15 +719,15 @@ impl Runtime {
                 )?;
             }
         }
-        let rejected_cleanup_ms = duration_ms(rejected_cleanup_started.elapsed());
+        let rejected_cleanup_ms = rejected_cleanup_started.elapsed_ms();
 
-        let query_reads_started = Instant::now();
+        let query_reads_started = ProfileTimer::start();
         for query_read in &bundle.query_reads {
             Self::record_query_read(&db, query_read)?;
         }
-        let query_reads_ms = duration_ms(query_reads_started.elapsed());
+        let query_reads_ms = query_reads_started.elapsed_ms();
 
-        let history_started = Instant::now();
+        let history_started = ProfileTimer::start();
         let mut history_context = ApplyHistoryContext {
             schema: &schema,
             db: &db,
@@ -704,9 +743,9 @@ impl Runtime {
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
         }
-        let history_ms = duration_ms(history_started.elapsed());
+        let history_ms = history_started.elapsed_ms();
 
-        let query_scope_repair_started = Instant::now();
+        let query_scope_repair_started = ProfileTimer::start();
         for query_read in &bundle.query_reads {
             Self::apply_query_scope_repair(
                 &schema,
@@ -716,18 +755,18 @@ impl Runtime {
                 repair_bypass_policy,
             )?;
         }
-        let query_scope_repair_ms = duration_ms(query_scope_repair_started.elapsed());
+        let query_scope_repair_ms = query_scope_repair_started.elapsed_ms();
 
-        let commit_started = Instant::now();
+        let commit_started = ProfileTimer::start();
         db.commit()?;
-        let commit_ms = duration_ms(commit_started.elapsed());
+        let commit_ms = commit_started.elapsed_ms();
 
-        let revalidate_started = Instant::now();
+        let revalidate_started = ProfileTimer::start();
         self.revalidate_awaiting_dependencies()?;
-        let revalidate_awaiting_ms = duration_ms(revalidate_started.elapsed());
+        let revalidate_awaiting_ms = revalidate_started.elapsed_ms();
 
         Ok(ApplyBundleProfile {
-            total_ms: duration_ms(total_started.elapsed()),
+            total_ms: total_started.elapsed_ms(),
             validation_ms,
             begin_tx_ms,
             branches_ms,
@@ -3018,8 +3057,8 @@ impl Runtime {
         order_field_name: &str,
         limit: usize,
     ) -> Result<(Bundle, QueryExportProfile)> {
-        let total_started = Instant::now();
-        let read_started = Instant::now();
+        let total_started = ProfileTimer::start();
+        let read_started = ProfileTimer::start();
         let rows = self.read_rows_where_eq_top_field_desc(
             table_name,
             field_name,
@@ -3027,18 +3066,18 @@ impl Runtime {
             order_field_name,
             limit,
         )?;
-        let read_rows_ms = duration_ms(read_started.elapsed());
+        let read_rows_ms = read_started.elapsed_ms();
 
         let table = self.schema.table_def(table_name)?;
 
-        let resolve_started = Instant::now();
+        let resolve_started = ProfileTimer::start();
         let visible_row_nums = rows
             .iter()
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
-        let resolve_visible_row_nums_ms = duration_ms(resolve_started.elapsed());
+        let resolve_visible_row_nums_ms = resolve_started.elapsed_ms();
 
-        let repair_started = Instant::now();
+        let repair_started = ProfileTimer::start();
         let query_value = json!({
             "eq": value.clone(),
             "order_field": order_field_name,
@@ -3056,7 +3095,7 @@ impl Runtime {
         repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
         repair_row_nums.sort();
         repair_row_nums.dedup();
-        let repair_row_nums_ms = duration_ms(repair_started.elapsed());
+        let repair_row_nums_ms = repair_started.elapsed_ms();
 
         let mut row_nums = visible_row_nums.clone();
         row_nums.extend(repair_row_nums.iter());
@@ -3065,7 +3104,7 @@ impl Runtime {
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
         let visibility = self.read_visibility();
 
-        let visible_history_started = Instant::now();
+        let visible_history_started = ProfileTimer::start();
         let mut history = export_history_versions_for_rows_in_branches(
             &self.conn,
             &self.schema,
@@ -3074,9 +3113,9 @@ impl Runtime {
             None,
             &branch_nums,
         )?;
-        let visible_history_ms = duration_ms(visible_history_started.elapsed());
+        let visible_history_ms = visible_history_started.elapsed_ms();
 
-        let repair_visible_started = Instant::now();
+        let repair_visible_started = ProfileTimer::start();
         if !repair_row_nums.is_empty() {
             history.extend(export_visible_table_history(
                 &visibility,
@@ -3085,9 +3124,9 @@ impl Runtime {
                 Some(&repair_row_nums),
             )?);
         }
-        let repair_visible_history_ms = duration_ms(repair_visible_started.elapsed());
+        let repair_visible_history_ms = repair_visible_started.elapsed_ms();
 
-        let repair_all_started = Instant::now();
+        let repair_all_started = ProfileTimer::start();
         if !repair_row_nums.is_empty() {
             history.extend(export_history_versions_for_rows_in_branches(
                 &self.conn,
@@ -3098,9 +3137,9 @@ impl Runtime {
                 &branch_nums,
             )?);
         }
-        let repair_all_history_ms = duration_ms(repair_all_started.elapsed());
+        let repair_all_history_ms = repair_all_started.elapsed_ms();
 
-        let policy_started = Instant::now();
+        let policy_started = ProfileTimer::start();
         history.extend(export_policy_dependency_history(
             &visibility,
             PolicyDependencyExport {
@@ -3110,9 +3149,9 @@ impl Runtime {
                 child_row_nums: Some(&row_nums),
             },
         )?);
-        let policy_dependency_history_ms = duration_ms(policy_started.elapsed());
+        let policy_dependency_history_ms = policy_started.elapsed_ms();
 
-        let snapshot_started = Instant::now();
+        let snapshot_started = ProfileTimer::start();
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
                 history.extend(export_history_versions_for_rows_in_branches(
@@ -3131,17 +3170,17 @@ impl Runtime {
                 )?);
             }
         }
-        let branch_snapshot_history_ms = duration_ms(snapshot_started.elapsed());
+        let branch_snapshot_history_ms = snapshot_started.elapsed_ms();
 
-        let dedupe_started = Instant::now();
+        let dedupe_started = ProfileTimer::start();
         dedupe_history_records(&mut history);
-        let dedupe_history_ms = duration_ms(dedupe_started.elapsed());
+        let dedupe_history_ms = dedupe_started.elapsed_ms();
 
-        let reads_started = Instant::now();
+        let reads_started = ProfileTimer::start();
         let reads = export_reads_for_history(&self.conn, &history)?;
-        let reads_ms = duration_ms(reads_started.elapsed());
+        let reads_ms = reads_started.elapsed_ms();
 
-        let rejected_started = Instant::now();
+        let rejected_started = ProfileTimer::start();
         let rejected_tx_ids = query_scope_rejected_tx_ids(
             &self.conn,
             table,
@@ -3149,19 +3188,19 @@ impl Runtime {
             "eq_top_field_desc",
             &query_value,
         )?;
-        let rejected_tx_ids_ms = duration_ms(rejected_started.elapsed());
+        let rejected_tx_ids_ms = rejected_started.elapsed_ms();
 
-        let txs_started = Instant::now();
+        let txs_started = ProfileTimer::start();
         let txs =
             export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
-        let txs_ms = duration_ms(txs_started.elapsed());
+        let txs_ms = txs_started.elapsed_ms();
 
-        let branches_started = Instant::now();
+        let branches_started = ProfileTimer::start();
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
-        let branches_ms = duration_ms(branches_started.elapsed());
+        let branches_ms = branches_started.elapsed_ms();
 
-        let make_started = Instant::now();
+        let make_started = ProfileTimer::start();
         let query_reads = vec![QueryReadRecord {
             branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
             table: table_name.to_owned(),
@@ -3170,10 +3209,10 @@ impl Runtime {
             value: query_value,
         }];
         let bundle = make_bundle(&self.schema, branches, txs, reads, query_reads, history);
-        let make_bundle_ms = duration_ms(make_started.elapsed());
+        let make_bundle_ms = make_started.elapsed_ms();
 
         let profile = QueryExportProfile {
-            total_ms: duration_ms(total_started.elapsed()),
+            total_ms: total_started.elapsed_ms(),
             read_rows_ms,
             resolve_visible_row_nums_ms,
             repair_row_nums_ms,
@@ -6795,10 +6834,6 @@ fn integer_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
         rusqlite::types::Value::Integer(value) => Ok(*value),
         _ => Err(crate::Error::new(format!("expected integer {name}"))),
     }
-}
-
-fn duration_ms(duration: Duration) -> f64 {
-    duration.as_secs_f64() * 1000.0
 }
 
 fn observed_row_ids(rows: &[RowView]) -> Vec<String> {

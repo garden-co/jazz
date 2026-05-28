@@ -3,10 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>mini-jazz-sqlite WASM Todos</title>
+    <title>mini-sqlite-todo-yew</title>
+    <link data-trunk rel="rust" data-bin="mini-sqlite-todo-yew" />
+    <link data-trunk rel="rust" data-bin="worker" data-type="worker" data-loader-shim />
     <style>
       :root {
-        color: #18211f;
+        color: #1b211f;
         background: #f6f7f4;
         font-family:
           Inter,
@@ -28,19 +30,18 @@
       }
 
       button,
-      input,
-      select {
+      input {
         font: inherit;
       }
 
       button {
-        border: 1px solid #24352f;
-        background: #24352f;
-        color: #ffffff;
-        cursor: pointer;
         min-height: 2.5rem;
-        padding: 0 0.9rem;
+        border: 1px solid #25352f;
         border-radius: 6px;
+        background: #25352f;
+        color: #fff;
+        cursor: pointer;
+        padding: 0 0.9rem;
       }
 
       button:hover:not(:disabled) {
@@ -48,13 +49,12 @@
       }
 
       button:disabled,
-      input:disabled,
-      select:disabled {
+      input:disabled {
         cursor: wait;
         opacity: 0.6;
       }
 
-      #app {
+      .todo-app {
         width: min(720px, calc(100vw - 32px));
         margin: 48px auto;
       }
@@ -92,66 +92,19 @@
 
       .todo-form {
         display: grid;
-        grid-template-columns: minmax(0, 1.3fr) minmax(180px, 0.7fr) auto;
+        grid-template-columns: minmax(0, 1fr) auto;
         gap: 10px;
         margin-top: 22px;
       }
 
-      .todo-form input,
-      .controls input,
-      .controls select {
+      .todo-form input {
         width: 100%;
         min-height: 2.5rem;
         border: 1px solid #b7c1ba;
         border-radius: 6px;
-        background: #ffffff;
-        color: #18211f;
+        background: #fff;
+        color: #1b211f;
         padding: 0 0.85rem;
-      }
-
-      .controls {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) 142px 142px;
-        gap: 10px;
-        margin-top: 12px;
-      }
-
-      .controls label {
-        display: grid;
-        gap: 4px;
-        color: #596760;
-        font-size: 0.8rem;
-        font-weight: 700;
-        text-transform: uppercase;
-      }
-
-      .label-filters {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        min-height: 34px;
-        margin-top: 14px;
-      }
-
-      .chip {
-        border-radius: 999px;
-        font-size: 0.82rem;
-        line-height: 1;
-      }
-
-      .chip {
-        min-height: 2rem;
-        border-color: #b7c1ba;
-        background: #ffffff;
-        color: #24352f;
-        padding: 0 0.75rem;
-      }
-
-      .chip:hover:not(:disabled),
-      .chip.selected {
-        border-color: #2f66c3;
-        background: #e9f0ff;
-        color: #163d82;
       }
 
       .generate {
@@ -206,9 +159,9 @@
       }
 
       .todo-item button {
-        background: transparent;
         border-color: #b7c1ba;
-        color: #24352f;
+        background: transparent;
+        color: #25352f;
       }
 
       .todo-item button:hover {
@@ -221,31 +174,21 @@
       }
 
       @media (max-width: 560px) {
-        #app {
-          margin: 24px auto;
+        .todo-app {
+          margin-top: 24px;
         }
 
         .app-header,
-        .todo-form,
-        .controls,
-        .todo-item {
+        .todo-form {
           grid-template-columns: 1fr;
         }
 
         .app-header {
-          display: grid;
           align-items: start;
-          gap: 10px;
-        }
-
-        .todo-item button {
-          justify-self: start;
+          display: grid;
         }
       }
     </style>
   </head>
-  <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.js"></script>
-  </body>
+  <body></body>
 </html>

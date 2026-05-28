@@ -3,9 +3,10 @@ use crate::subscription::{RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::Bundle;
 use crate::types::{RowView, SubscriptionDelta};
 use crate::{Error, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuiltQuery {
     pub table: String,
     pub conditions: Vec<QueryCondition>,
@@ -14,14 +15,14 @@ pub struct BuiltQuery {
     pub offset: Option<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryCondition {
     pub column: String,
     pub op: QueryConditionOp,
     pub value: JsonValue,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryConditionOp {
     Eq,
     Ne,
@@ -29,13 +30,13 @@ pub enum QueryConditionOp {
     Contains,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryOrderBy {
     pub column: String,
     pub direction: QueryDirection,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryDirection {
     Asc,
     Desc,

@@ -1,0 +1,9 @@
+{
+  "name": "mini-sqlite-todo-yew",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "env -u NO_COLOR CC_wasm32_unknown_unknown=${CC_wasm32_unknown_unknown:-/opt/homebrew/opt/llvm@21/bin/clang} trunk serve --address 127.0.0.1",
+    "build": "env -u NO_COLOR CC_wasm32_unknown_unknown=${CC_wasm32_unknown_unknown:-/opt/homebrew/opt/llvm@21/bin/clang} trunk build"
+  }
+}
