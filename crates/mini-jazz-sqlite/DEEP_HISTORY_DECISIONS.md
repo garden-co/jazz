@@ -249,3 +249,9 @@ Scope impact: compacted-history sync no longer requires callers to manually nego
 Decision: Update the RFC to treat table/all-table block-native deltas as implemented prototype scope, while keeping query-scoped block planning as future work.
 
 Scope impact: the RFC now matches the current API boundary: receiver manifest inventory, open-history bundle, missing sealed block payloads, and no projection rebuild between block import and hot bundle apply.
+
+## Thu May 28 00:46:24 PDT 2026 - Columnar User Values
+
+Decision: Bump new sealed blocks to v3 `columnar-json-lz4` and store history user values as per-column arrays instead of a per-row map array.
+
+Scope impact: this is still JSON inside lz4, but it removes repeated user column keys from sealed row history and moves the format closer to the RFC columnar target. The spike still keeps v1 bundle-json decode support.

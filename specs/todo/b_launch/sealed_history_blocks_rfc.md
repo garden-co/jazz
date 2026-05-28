@@ -394,12 +394,13 @@ The first implementation can use a simpler binary format if needed, but the
 target is columnar enough that unchanged columns and repeated metadata become
 near-free.
 
-Prototype note: newly sealed blocks now use a v2 `columnar-json-lz4` payload.
-It stores tx, read, and history fields as parallel arrays and decodes back to
-the same logical `Bundle`. This is still a stepping stone rather than the final
-binary/delta-varint format, but it removes repeated per-record JSON object keys
-from the sealed block body. The decoder still accepts the earlier
-`bundle-json-lz4` v1 blocks for compatibility within the spike.
+Prototype note: newly sealed blocks now use a v3 `columnar-json-lz4` payload.
+It stores tx, read, history metadata, and user values as parallel arrays and
+decodes back to the same logical `Bundle`. This is still a stepping stone rather
+than the final binary/delta-varint format, but it removes repeated per-record
+JSON object keys and repeated per-row user value keys from the sealed block
+body. The decoder still accepts the earlier `bundle-json-lz4` v1 blocks for
+compatibility within the spike.
 
 For segment-tree-backed columns, a sealed block should not blindly store one
 full materialized value per version. Acceptable first encodings include:

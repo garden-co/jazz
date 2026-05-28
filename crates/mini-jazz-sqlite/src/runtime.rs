@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HISTORY_BLOCK_FORMAT_VERSION: i64 = 2;
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 3;
 const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
 const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
 const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
@@ -7254,7 +7254,8 @@ struct ColumnarHistoryRecords {
     branch_id: Vec<String>,
     tx_id: Vec<String>,
     op: Vec<i64>,
-    values: Vec<BTreeMap<String, JsonValue>>,
+    value_keys: Vec<String>,
+    value_columns: Vec<Vec<JsonValue>>,
     created_at: Vec<i64>,
     updated_at: Vec<i64>,
     created_by: Vec<String>,
@@ -7263,6 +7264,21 @@ struct ColumnarHistoryRecords {
 
 impl ColumnarHistoryRecords {
     fn from_records(records: &[HistoryRecord]) -> Self {
+        let value_keys = records
+            .iter()
+            .flat_map(|record| record.values.keys().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let value_columns = value_keys
+            .iter()
+            .map(|key| {
+                records
+                    .iter()
+                    .map(|record| record.values.get(key).cloned().unwrap_or(JsonValue::Null))
+                    .collect()
+            })
+            .collect();
         Self {
             table: records.iter().map(|record| record.table.clone()).collect(),
             row_id: records.iter().map(|record| record.row_id.clone()).collect(),
@@ -7272,7 +7288,8 @@ impl ColumnarHistoryRecords {
                 .collect(),
             tx_id: records.iter().map(|record| record.tx_id.clone()).collect(),
             op: records.iter().map(|record| record.op).collect(),
-            values: records.iter().map(|record| record.values.clone()).collect(),
+            value_keys,
+            value_columns,
             created_at: records.iter().map(|record| record.created_at).collect(),
             updated_at: records.iter().map(|record| record.updated_at).collect(),
             created_by: records
@@ -7296,7 +7313,14 @@ impl ColumnarHistoryRecords {
         ensure_column_len("history.row_id", self.row_id.len(), len)?;
         ensure_column_len("history.branch_id", self.branch_id.len(), len)?;
         ensure_column_len("history.op", self.op.len(), len)?;
-        ensure_column_len("history.values", self.values.len(), len)?;
+        ensure_column_len(
+            "history.value_columns",
+            self.value_columns.len(),
+            self.value_keys.len(),
+        )?;
+        for (idx, column) in self.value_columns.iter().enumerate() {
+            ensure_column_len(&format!("history.value_columns[{idx}]"), column.len(), len)?;
+        }
         ensure_column_len("history.created_at", self.created_at.len(), len)?;
         ensure_column_len("history.updated_at", self.updated_at.len(), len)?;
         ensure_column_len("history.created_by", self.created_by.len(), len)?;
@@ -7308,7 +7332,12 @@ impl ColumnarHistoryRecords {
                 branch_id: self.branch_id[idx].clone(),
                 tx_id: self.tx_id[idx].clone(),
                 op: self.op[idx],
-                values: self.values[idx].clone(),
+                values: self
+                    .value_keys
+                    .iter()
+                    .cloned()
+                    .zip(self.value_columns.iter().map(|column| column[idx].clone()))
+                    .collect(),
                 created_at: self.created_at[idx],
                 updated_at: self.updated_at[idx],
                 created_by: self.created_by[idx].clone(),
