@@ -326,6 +326,53 @@ fn point_read_at_global_epoch_can_decode_sealed_history_block() {
 }
 
 #[test]
+fn query_scope_export_includes_sealed_history_for_matching_rows() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    for idx in 2..=5 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+
+    let before = alice
+        .export_query_where_eq("notes", "id", json!("note-1"))
+        .unwrap();
+    alice
+        .compact_accepted_history("notes", "note-1", 1)
+        .unwrap();
+    let after = alice
+        .export_query_where_eq("notes", "id", json!("note-1"))
+        .unwrap();
+
+    assert_eq!(after.history, before.history);
+    assert_eq!(after.txs, before.txs);
+    assert_eq!(after.reads, before.reads);
+    bob.apply_bundle(&after).unwrap();
+    assert_eq!(
+        bob.read_rows("notes").unwrap()[0].values["body"],
+        json!("v5")
+    );
+}
+
+#[test]
 fn compaction_keeps_visible_head_rebuildable_with_zero_hot_tail() {
     let schema = support::notes_schema();
     let mut alice =

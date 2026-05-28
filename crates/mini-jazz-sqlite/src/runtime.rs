@@ -3520,12 +3520,22 @@ impl Runtime {
         }
         let branch_snapshot_history_ms = duration_ms(snapshot_started.elapsed());
 
+        let (sealed_history, sealed_reads) =
+            sealed_history_for_row_nums(&self.conn, table_name, &row_nums)?;
+        let has_sealed_history = !sealed_history.is_empty();
+        history.extend(sealed_history);
+
         let dedupe_started = Instant::now();
+        if has_sealed_history {
+            sort_history_records(&mut history);
+        }
         dedupe_history_records(&mut history);
         let dedupe_history_ms = duration_ms(dedupe_started.elapsed());
 
         let reads_started = Instant::now();
-        let reads = export_reads_for_history(&self.conn, &history)?;
+        let mut reads = export_reads_for_history(&self.conn, &history)?;
+        reads.extend(sealed_reads);
+        dedupe_reads(&mut reads);
         let reads_ms = duration_ms(reads_started.elapsed());
 
         let rejected_started = Instant::now();
@@ -3682,8 +3692,17 @@ impl Runtime {
                 )?);
             }
         }
+        let (sealed_history, sealed_reads) =
+            sealed_history_for_row_nums(&self.conn, table_name, &row_nums)?;
+        let has_sealed_history = !sealed_history.is_empty();
+        history.extend(sealed_history);
+        if has_sealed_history {
+            sort_history_records(&mut history);
+        }
         dedupe_history_records(&mut history);
-        let reads = export_reads_for_history(&self.conn, &history)?;
+        let mut reads = export_reads_for_history(&self.conn, &history)?;
+        reads.extend(sealed_reads);
+        dedupe_reads(&mut reads);
         let rejected_tx_ids =
             query_scope_rejected_tx_ids(&self.conn, table, field_name, op, &value)?;
         let txs =
@@ -3836,8 +3855,17 @@ impl Runtime {
                 )?);
             }
         }
+        let (sealed_history, sealed_reads) =
+            sealed_history_for_row_nums(&self.conn, table_name, &row_nums)?;
+        let has_sealed_history = !sealed_history.is_empty();
+        history.extend(sealed_history);
+        if has_sealed_history {
+            sort_history_records(&mut history);
+        }
         dedupe_history_records(&mut history);
-        let reads = export_reads_for_history(&self.conn, &history)?;
+        let mut reads = export_reads_for_history(&self.conn, &history)?;
+        reads.extend(sealed_reads);
+        dedupe_reads(&mut reads);
         let txs =
             export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
@@ -5858,9 +5886,23 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
             created_at: row.get(8)?,
         })
     })?;
-    records
+    let mut records = records
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+        .map_err(crate::Error::from)?;
+    let present = records
+        .iter()
+        .map(|record| record.tx_id.clone())
+        .collect::<BTreeSet<_>>();
+    for tx_id in tx_ids {
+        if present.contains(tx_id) {
+            continue;
+        }
+        if let Some(record) = sealed_transaction_record(conn, tx_id)? {
+            records.push(record);
+        }
+    }
+    records.sort_by(|left, right| tx_sort_key(&left.tx_id).cmp(&tx_sort_key(&right.tx_id)));
+    Ok(records)
 }
 
 fn dedupe_txs(records: &mut Vec<TxRecord>) {
@@ -6171,6 +6213,43 @@ fn decoded_history_blocks_for_table(conn: &Connection, table_name: &str) -> Resu
     Ok(bundles)
 }
 
+fn sealed_history_for_row_nums(
+    conn: &Connection,
+    table_name: &str,
+    row_nums: &[i64],
+) -> Result<(Vec<HistoryRecord>, Vec<ReadRecord>)> {
+    let table_num = crate::schema::table_num(conn, table_name)?;
+    let mut stmt = conn.prepare(
+        "SELECT codec, format_version, payload
+         FROM history_blocks
+         WHERE block_kind = ?
+           AND table_num = ?
+           AND row_num = ?
+         ORDER BY row_num, min_global_epoch, block_id",
+    )?;
+    let mut history = Vec::new();
+    let mut reads = Vec::new();
+    for row_num in row_nums {
+        let rows = stmt.query_map(
+            params![HISTORY_BLOCK_KIND_ACCEPTED, table_num, row_num],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (codec, format_version, payload) = row?;
+            let bundle = decode_history_block_payload(&codec, format_version, &payload)?;
+            history.extend(bundle.history);
+            reads.extend(bundle.reads);
+        }
+    }
+    Ok((history, reads))
+}
+
 fn open_history_records_for_row_at_epoch(
     conn: &Connection,
     schema: &SchemaDef,
@@ -6331,6 +6410,15 @@ fn sealed_transaction_info(conn: &Connection, tx_id: &str) -> Result<Transaction
         }
     }
     Err(crate::Error::new(format!("unknown transaction {tx_id}")))
+}
+
+fn sealed_transaction_record(conn: &Connection, tx_id: &str) -> Result<Option<TxRecord>> {
+    for bundle in decoded_history_blocks_for_tx(conn, tx_id)? {
+        if let Some(tx) = bundle.txs.into_iter().find(|tx| tx.tx_id == tx_id) {
+            return Ok(Some(tx));
+        }
+    }
+    Ok(None)
 }
 
 fn sealed_rejected_transactions(conn: &Connection) -> Result<Vec<RejectionInfo>> {

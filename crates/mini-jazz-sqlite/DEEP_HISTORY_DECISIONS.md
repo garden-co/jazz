@@ -74,3 +74,11 @@ Decision: archived transaction helper APIs should decode sealed block payloads b
 Why: `transaction_info` alone is not enough for sync/debug tooling. Read/write dependency helpers are part of the transaction metadata surface, and sealing tx rows should not create a split-brain API where some metadata works and adjacent metadata silently disappears.
 
 Scope impact: when ordinary `jazz_tx_*` views return no rows for a tx id, the helpers fall back to block-local `history` and `reads` records. This still preserves the fast open path for recent transactions.
+
+## Wed May 27 23:24:28 PDT 2026
+
+Decision: query-scoped sync exports should splice in sealed accepted history for only the row ids already selected or repaired by that query.
+
+Why: after compaction, a matching current row may have old versions and transaction records only in sealed blocks. Full-table export already decodes those blocks, but query-scoped export is the normal client path and should remain semantically equivalent without degrading into table replication.
+
+Scope impact: query export stays row-scoped. It decodes accepted blocks for the selected/repair row nums, merges their reads and tx metadata, and sorts only when sealed records were actually added so ordinary no-block export order remains unchanged.
