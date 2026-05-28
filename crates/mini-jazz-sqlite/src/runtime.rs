@@ -475,13 +475,13 @@ impl Runtime {
             bypass_policy,
             self.branch_num,
         )?;
-        let sealed = decoded_history_blocks_for_table(&self.conn, table_name)?;
+        let sealed = self.decoded_history_blocks_for_table(table_name)?;
         let mut sealed_reads = Vec::new();
         if !sealed.is_empty() {
             for block in sealed {
-                txs.extend(block.txs);
-                sealed_reads.extend(block.reads);
-                history.extend(block.history);
+                txs.extend(block.txs.iter().cloned());
+                sealed_reads.extend(block.reads.iter().cloned());
+                history.extend(block.history.iter().cloned());
             }
             sort_history_records(&mut history);
             dedupe_history_records(&mut history);
@@ -3985,6 +3985,70 @@ impl Runtime {
         order.push_back(block_id);
     }
 
+    fn decoded_history_blocks_for_table(&self, table_name: &str) -> Result<Vec<Arc<Bundle>>> {
+        let table_num = crate::schema::table_num(&self.conn, table_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT block_id, codec, format_version, payload
+             FROM history_blocks
+             WHERE block_kind = ?
+               AND table_num = ?
+             ORDER BY row_num, min_global_epoch, block_id",
+        )?;
+        let rows = stmt.query_map(params![HISTORY_BLOCK_KIND_ACCEPTED, table_num], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        let mut bundles = Vec::new();
+        for row in rows {
+            let (block_id, codec, format_version, payload) = row?;
+            bundles.push(self.cached_history_block(block_id, &codec, format_version, &payload)?);
+        }
+        Ok(bundles)
+    }
+
+    fn sealed_history_for_row_nums(
+        &self,
+        table_name: &str,
+        row_nums: &[i64],
+    ) -> Result<(Vec<HistoryRecord>, Vec<ReadRecord>)> {
+        let table_num = crate::schema::table_num(&self.conn, table_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT block_id, codec, format_version, payload
+             FROM history_blocks
+             WHERE block_kind = ?
+               AND table_num = ?
+               AND row_num = ?
+             ORDER BY row_num, min_global_epoch, block_id",
+        )?;
+        let mut history = Vec::new();
+        let mut reads = Vec::new();
+        for row_num in row_nums {
+            let rows = stmt.query_map(
+                params![HISTORY_BLOCK_KIND_ACCEPTED, table_num, row_num],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                },
+            )?;
+            for row in rows {
+                let (block_id, codec, format_version, payload) = row?;
+                let bundle =
+                    self.cached_history_block(block_id, &codec, format_version, &payload)?;
+                history.extend(bundle.history.iter().cloned());
+                reads.extend(bundle.reads.iter().cloned());
+            }
+        }
+        Ok((history, reads))
+    }
+
     pub fn read_rows_require_ref(
         &self,
         table_name: &str,
@@ -4805,7 +4869,7 @@ impl Runtime {
         let branch_snapshot_history_ms = duration_ms(snapshot_started.elapsed());
 
         let (sealed_history, sealed_reads) =
-            sealed_history_for_row_nums(&self.conn, table_name, &row_nums)?;
+            self.sealed_history_for_row_nums(table_name, &row_nums)?;
         let has_sealed_history = !sealed_history.is_empty();
         history.extend(sealed_history);
 
@@ -4977,7 +5041,7 @@ impl Runtime {
             }
         }
         let (sealed_history, sealed_reads) =
-            sealed_history_for_row_nums(&self.conn, table_name, &row_nums)?;
+            self.sealed_history_for_row_nums(table_name, &row_nums)?;
         let has_sealed_history = !sealed_history.is_empty();
         history.extend(sealed_history);
         if has_sealed_history {
@@ -5274,7 +5338,7 @@ impl Runtime {
             }
         }
         let (sealed_history, sealed_reads) =
-            sealed_history_for_row_nums(&self.conn, table_name, &row_nums)?;
+            self.sealed_history_for_row_nums(table_name, &row_nums)?;
         let has_sealed_history = !sealed_history.is_empty();
         history.extend(sealed_history);
         if has_sealed_history {
@@ -7950,71 +8014,6 @@ fn tx_can_leave_open_store(
     Ok(successor_tx_num
         .map(|successor| selected_tx_nums.contains(&successor))
         .unwrap_or(true))
-}
-
-fn decoded_history_blocks_for_table(conn: &Connection, table_name: &str) -> Result<Vec<Bundle>> {
-    let table_num = crate::schema::table_num(conn, table_name)?;
-    let mut stmt = conn.prepare(
-        "SELECT codec, format_version, payload
-         FROM history_blocks
-         WHERE block_kind = ?
-           AND table_num = ?
-         ORDER BY row_num, min_global_epoch, block_id",
-    )?;
-    let rows = stmt.query_map(params![HISTORY_BLOCK_KIND_ACCEPTED, table_num], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, Vec<u8>>(2)?,
-        ))
-    })?;
-    let mut bundles = Vec::new();
-    for row in rows {
-        let (codec, format_version, payload) = row?;
-        bundles.push(decode_history_block_payload(
-            &codec,
-            format_version,
-            &payload,
-        )?);
-    }
-    Ok(bundles)
-}
-
-fn sealed_history_for_row_nums(
-    conn: &Connection,
-    table_name: &str,
-    row_nums: &[i64],
-) -> Result<(Vec<HistoryRecord>, Vec<ReadRecord>)> {
-    let table_num = crate::schema::table_num(conn, table_name)?;
-    let mut stmt = conn.prepare(
-        "SELECT codec, format_version, payload
-         FROM history_blocks
-         WHERE block_kind = ?
-           AND table_num = ?
-           AND row_num = ?
-         ORDER BY row_num, min_global_epoch, block_id",
-    )?;
-    let mut history = Vec::new();
-    let mut reads = Vec::new();
-    for row_num in row_nums {
-        let rows = stmt.query_map(
-            params![HISTORY_BLOCK_KIND_ACCEPTED, table_num, row_num],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        )?;
-        for row in rows {
-            let (codec, format_version, payload) = row?;
-            let bundle = decode_history_block_payload(&codec, format_version, &payload)?;
-            history.extend(bundle.history);
-            reads.extend(bundle.reads);
-        }
-    }
-    Ok((history, reads))
 }
 
 fn open_history_records_for_row_at_epoch(

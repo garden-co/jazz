@@ -515,3 +515,11 @@ Decision: change the bounded decoded history block cache from "evict the smalles
 Why: historical reads often touch nearby points repeatedly before moving elsewhere. Local block ids are not a good proxy for usefulness, especially after sync import or block splitting. LRU keeps the recently touched decompressed blocks while preserving the fixed memory cap.
 
 Scope impact: add a small order queue beside the cache map and focused tests for both the bound and eviction policy. The cache remains an implementation detail of `Runtime`.
+
+## Thu May 28 03:05:23 PDT 2026 - Use The Cache For Export Block Decodes
+
+Decision: route table-history export and query-scope sealed-history stitching through the runtime decoded block cache.
+
+Why: repeated exports, observed refreshes, and query-scope repairs can touch the same sealed blocks repeatedly. If point reads and transaction lookups benefit from cached lz4/JSON decode, export paths should share that behavior too rather than quietly paying the cold decode cost on every call.
+
+Scope impact: move the accepted-block decode helpers onto `Runtime` so they can call `cached_history_block`. The exported logical bundle shape is unchanged.
