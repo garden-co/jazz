@@ -39,11 +39,13 @@ history_open
   large/deep text-like values may point at segment-tree-backed content
 
 history_blocks
-  sealed per-row accepted history ranges
+  sealed accepted history ranges
+  includes row history plus the accepted tx metadata needed to decode it
   columnar encoded and lz4-compressed inside ordinary SQLite BLOBs
 
 rejected_history_blocks
   sealed rejected history ranges
+  includes rejected row history plus rejected tx metadata
   stored separately from accepted blocks
   optimized for audit/debug reads rather than visible history queries
 ```
@@ -187,11 +189,16 @@ obsolete internal structure forever.
 
 `history_blocks` stores sealed accepted history only.
 
-Each block belongs to one logical row and covers a contiguous accepted-history
-range for that row. A block is the decompression unit. We intentionally do not
-add a chunk table or a second level of indirection inside a block: lz4
-decompression is fast, and historical reads can allocate the decompressed block
-temporarily and drop it after answering the query.
+Each block covers a contiguous accepted-history range. The first implementation
+may make blocks per-row, because the motivating deep-history cases are single
+rows with many versions. The format should not assume that row history is the
+only thing worth sealing: old accepted transaction metadata should be sealed
+with the row versions it describes.
+
+A block is the decompression unit. We intentionally do not add a chunk table or
+a second level of indirection inside a block: lz4 decompression is fast, and
+historical reads can allocate the decompressed block temporarily and drop it
+after answering the query.
 
 Sketch:
 
@@ -220,6 +227,91 @@ The exact key columns should follow the durable storage format rather than this
 sketch literally. The important property is that SQLite can quickly find the
 small set of blocks for a `(table, row, point-in-time)` lookup before any block
 is decompressed.
+
+## Transaction Metadata Compaction
+
+`jazz_tx` should also be compacted for old sealed history.
+
+Once accepted row history moves out of ordinary history rows, leaving one
+ordinary `jazz_tx` row per archived transaction becomes the next metadata floor.
+This is especially visible for append and presence workloads where every tiny
+row version has a matching tx record. The transaction row is smaller than the
+user history row, but it still repeats node, epoch, fate, timestamps, conflict
+mode, metadata, write set, and read set shape thousands of times.
+
+The storage split should therefore be:
+
+- recent/open transactions remain as ordinary `jazz_tx` rows
+- pending transactions remain ordinary operational state
+- accepted transactions whose row history has been sealed move into
+  `history_blocks`
+- rejected transactions whose rejected rows have aged out of the hot tail move
+  into `rejected_history_blocks`
+
+Open `jazz_tx` rows are the operational transaction index. Sealed transaction
+metadata is historical data. Compaction must preserve public transaction
+identity and replay semantics, but it does not need to preserve one SQLite row
+per old transaction.
+
+Inside an accepted block, transaction metadata should be encoded columnarly next
+to the row-history streams. A block-level tx section can include:
+
+```text
+tx section
+  block-local tx ordinals
+  node ids: dictionary encoded
+  local epochs: delta-varint per node
+  global epochs: delta-varint or monotonic run encoding
+  kind / conflict mode / outcome: dictionary or RLE
+  created_at: delta-varint
+  metadata/auth user: dictionary, nullable
+  writes: packed tuple stream or references to row-history entries
+  reads: packed tuple stream, with implicit previous-local-epoch defaults
+  receipts/fate details needed for replay and diagnostics
+```
+
+Row entries inside the same block should reference transactions by block-local
+ordinal rather than by global `tx_num`. `tx_num` remains an internal open-store
+identifier, not a durable archival requirement.
+
+The block manifest should expose just enough tx-range information for lookup
+and sync planning without expanding every tx into an SQLite index row. Useful
+manifest fields include:
+
+- participating node ids or a compact node-set summary
+- min/max local epoch by node, or a side manifest for node-local ranges
+- min/max global epoch for accepted point-in-time lookup
+- tx count
+- first/last public tx id if that can be represented compactly
+- content hash for block comparison
+
+Public tx id lookup after compaction needs an indexed path. A compact side index
+may be warranted for `(node_id, local_epoch) -> block_id` so
+`transaction_info(tx-id)` and sync dependency checks do not scan all blocks. The
+index should point to blocks, not duplicate full tx metadata:
+
+```sql
+create table history_block_tx_index (
+  node_id text not null,
+  min_local_epoch integer not null,
+  max_local_epoch integer not null,
+  block_id integer not null,
+  primary key (node_id, max_local_epoch, min_local_epoch, block_id)
+) without rowid;
+```
+
+The exact index can use interned node nums or compact node-set manifests instead
+of text ids. The principle is that SQLite finds the small block set, then the
+block decoder answers the exact tx query.
+
+Rejected transaction metadata should follow the same idea, but in the rejected
+block family. Rejections often carry diagnostic detail and should not pollute
+accepted point-in-time indexes. Recently rejected transactions remain ordinary
+rows so error messages, awaiting-dependency repair, and local UI diagnostics
+stay simple.
+
+Compaction must not move pending, awaiting, or otherwise unsettled transactions
+into sealed blocks. Those rows are live coordination state, not cold history.
 
 ## Accepted And Rejected History
 
@@ -324,11 +416,15 @@ One compaction transaction should:
 1. Select a row whose accepted open history exceeds a threshold.
 2. Choose an old contiguous accepted range, leaving a hot tail in
    `history_open`.
-3. Read the selected ordinary history rows.
-4. Encode one or more per-row blocks.
-5. Insert the block rows.
+3. Read the selected ordinary history rows and the accepted `jazz_tx` metadata
+   referenced by those rows.
+4. Encode one or more sealed blocks containing row-history streams and tx
+   metadata streams.
+5. Insert the block rows and any block-level tx lookup index entries.
 6. Delete or mark compacted the sealed `history_open` rows.
-7. Commit atomically.
+7. Delete or mark compacted `jazz_tx` rows whose accepted history is fully
+   represented by sealed blocks and no open/pending state still references them.
+8. Commit atomically.
 
 The hot tail is important. It gives recent listeners, reconnects, and near-now
 historical reads a simple ordinary-row path. It also gives compaction freedom to
@@ -337,10 +433,13 @@ operate in the background without touching the newest writes.
 Open questions:
 
 - whether compacted open rows are deleted or replaced with tombstone stubs
+- whether compacted tx rows are deleted or replaced with lookup stubs
 - whether block ids are content-addressed, auto-incremented, or both
 - how large a block should be before sealing a second block for the same row
 - whether compaction is triggered by row version count, byte size, age, or all
   three
+- how to coordinate tx compaction when one transaction writes multiple rows that
+  may seal at different times
 
 ## Reads
 
@@ -429,10 +528,13 @@ Required invariants:
 
 - current visible rows are unchanged by compaction
 - accepted historical point reads return the same row as before compaction
+- public transaction ids still resolve to equivalent transaction info after
+  their `jazz_tx` rows are sealed
 - sync export is semantically identical before and after compaction
 - replay/rebuild can recover current projection from open history plus blocks
 - accepted blocks do not contain pending, staging, rejected, or unresolved
   branch-local entries
+- accepted tx metadata blocks do not contain pending, awaiting, or rejected txs
 - rejected blocks do not participate in visible accepted-history lookup
 - compaction is atomic: a crash leaves either the old open rows or the new block
   visible to the storage layer, not half of each
@@ -445,8 +547,10 @@ Extend the deep-history benchmark with a sealed-block experiment:
 - run accepted and rejected compaction where applicable
 - measure compaction time
 - measure database size before and after compaction
+- measure open `jazz_tx` row count before and after compaction
 - measure current read
 - measure historical point reads at several depths
+- measure `transaction_info(tx-id)` for open and sealed transactions
 - measure cold load/rebuild from compacted storage
 - measure sync export, first by decoding blocks into existing row-batch format
 - measure segment storage bytes separately from ordinary SQLite row bytes for
