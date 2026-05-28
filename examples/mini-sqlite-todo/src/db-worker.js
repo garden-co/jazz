@@ -1,7 +1,8 @@
 import init, { MiniJazzRuntime } from "./generated/mini-jazz-sqlite-wasm/mini_jazz_sqlite_wasm.js";
 
 const PAGE_SIZE = 10;
-const GENERATED_PROJECT_COUNT = 240;
+const GENERATED_PROJECT_COUNT = 100;
+const SEEDED_TODOS_PER_PROJECT = 10000;
 const GENERATED_LABELS = ["work", "home", "urgent", "later", "bug", "idea", "docs", "release"];
 const SORT_COLUMNS = {
   date: "$createdAt",
@@ -100,7 +101,7 @@ self.onmessage = async ({ data }) => {
       nodeId = data.nodeId;
       activeUserId = data.user ?? activeUserId;
       await openDbAs(SEED_USER_ID, { trusted: true });
-      seedDirectory();
+      await seedDirectory();
       await openDbAs(activeUserId);
       refreshLabelCache();
     } else if (data.type === "setUser") {
@@ -173,7 +174,7 @@ async function openDbAs(userId, { trusted = false } = {}) {
     : await MiniJazzRuntime.openTodoOpfs(dbName, nodeId, userId);
 }
 
-function seedDirectory() {
+async function seedDirectory() {
   refreshLabelCache();
   const userIds = rowIds("users");
   for (const user of USERS) {
@@ -197,12 +198,14 @@ function seedDirectory() {
 
   const projectIds = rowIds("projects");
   const projectMemberIds = rowIds("project_members");
-  for (const project of [...BASE_PROJECTS, ...generatedProjects()]) {
+  const projects = [...BASE_PROJECTS, ...generatedProjects()];
+  for (const project of projects) {
     insertMissing("projects", project.id, { title: project.title }, projectIds);
     ensureProjectMembers(project, projectMemberIds);
   }
 
   ensureLabels(GENERATED_LABELS);
+  await seedProjectTodos(projects);
 }
 
 function ensureGeneratedProjects() {
@@ -237,6 +240,80 @@ function insertMissing(table, id, values, ids) {
   if (ids.has(id)) return;
   db.insertRow(table, id, values);
   ids.add(id);
+}
+
+async function seedProjectTodos(projects) {
+  const total = projects.length * SEEDED_TODOS_PER_PROJECT;
+  let seen = 0;
+
+  for (const project of projects) {
+    const finalTodoId = seededTodoId(project.id, SEEDED_TODOS_PER_PROJECT);
+    if (db.one({ table: "todos", conditions: [{ column: "id", op: "eq", value: finalTodoId }] })) {
+      seen += SEEDED_TODOS_PER_PROJECT;
+      postMessage({ type: "progress", generated: seen, total });
+      continue;
+    }
+
+    const authors = authorsForProject(project);
+    const rowsByAuthor = new Map();
+    for (let i = 1; i <= SEEDED_TODOS_PER_PROJECT; i++) {
+      const author = authors[(i - 1) % authors.length];
+      const rows = rowsByAuthor.get(author) ?? [];
+      rows.push({
+        id: seededTodoId(project.id, i),
+        values: {
+          title: seededTodoTitle(project, i),
+          done: false,
+          project: project.id,
+        },
+      });
+      rowsByAuthor.set(author, rows);
+    }
+
+    for (const [author, rows] of rowsByAuthor) {
+      db.upsertRowsAsUser(author, "todos", rows);
+      seen += rows.length;
+      postMessage({ type: "progress", generated: seen, total });
+      await new Promise((resolve) => setTimeout(resolve));
+    }
+  }
+
+  postMessage({ type: "progress", generated: total, total });
+}
+
+function authorsForProject(project) {
+  const authors = [];
+  const seen = new Set();
+  for (const member of project.members) {
+    for (const userId of userIdsForMember(member)) {
+      if (seen.has(userId)) continue;
+      seen.add(userId);
+      authors.push(userId);
+    }
+  }
+  return authors.length ? authors : [USERS[0].id];
+}
+
+function userIdsForMember(member, seenGroups = new Set()) {
+  if (member.startsWith("user:")) return [member.slice("user:".length)];
+  if (!member.startsWith("group:")) return [];
+
+  const groupId = member.slice("group:".length);
+  if (seenGroups.has(groupId)) return [];
+  const nextSeenGroups = new Set(seenGroups);
+  nextSeenGroups.add(groupId);
+
+  return GROUP_MEMBERS.filter((row) => row.group === groupId).flatMap((row) =>
+    userIdsForMember(row.member, nextSeenGroups),
+  );
+}
+
+function seededTodoId(projectId, index) {
+  return `todo-seeded-${projectId}-${String(index).padStart(5, "0")}`;
+}
+
+function seededTodoTitle(project, index) {
+  return `${project.title} task ${String(index).padStart(5, "0")}`;
 }
 
 function rowIds(table) {

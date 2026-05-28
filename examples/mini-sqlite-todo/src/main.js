@@ -207,7 +207,8 @@ function setFilters(patch) {
 }
 
 function render() {
-  app.querySelector("#status").textContent = state.ready ? statusText() : "Opening OPFS worker...";
+  app.querySelector("#status").textContent =
+    state.generating || state.ready ? statusText() : "Opening OPFS worker...";
 
   for (const control of [titleInput, labelsInput, searchInput, sortField, sortDir]) {
     control.disabled =

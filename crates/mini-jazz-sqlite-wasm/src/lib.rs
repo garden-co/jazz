@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, SchemaDef, Storage};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -36,6 +36,12 @@ struct PendingNotification {
 struct NotificationError {
     error: JsValue,
     failed_ids: Vec<u32>,
+}
+
+#[derive(Deserialize)]
+struct WasmRowMutation {
+    id: String,
+    values: BTreeMap<String, JsonValue>,
 }
 
 impl From<JsValue> for NotificationError {
@@ -139,6 +145,28 @@ impl MiniJazzRuntime {
         let tx_id = self
             .runtime
             .insert_row(table_name, id, parse_values(values)?)
+            .map_err(to_js_error)?;
+        self.notify_subscriptions()?;
+        Ok(tx_id)
+    }
+
+    #[wasm_bindgen(js_name = upsertRowsAsUser)]
+    pub fn upsert_rows_as_user(
+        &mut self,
+        user: &str,
+        table_name: &str,
+        rows: JsValue,
+    ) -> Result<String, JsValue> {
+        let rows = parse_row_mutations(rows)?;
+        let tx_id = self
+            .runtime
+            .run_attributing_to_user(user, |runtime| {
+                let mut tx = runtime.transaction();
+                for row in rows {
+                    tx = tx.upsert_row(table_name, &row.id, row.values);
+                }
+                tx.commit()
+            })
             .map_err(to_js_error)?;
         self.notify_subscriptions()?;
         Ok(tx_id)
@@ -370,6 +398,11 @@ fn log_sqlite_query(operation: &str, debug: Option<mini_jazz_sqlite::SqliteQuery
 fn parse_values(value: JsValue) -> Result<BTreeMap<String, JsonValue>, JsValue> {
     serde_wasm_bindgen::from_value(value)
         .map_err(|error| JsValue::from_str(&format!("invalid row values: {error}")))
+}
+
+fn parse_row_mutations(value: JsValue) -> Result<Vec<WasmRowMutation>, JsValue> {
+    serde_wasm_bindgen::from_value(value)
+        .map_err(|error| JsValue::from_str(&format!("invalid row mutations: {error}")))
 }
 
 fn parse_built_query(value: JsValue) -> Result<BuiltQuery, JsValue> {
