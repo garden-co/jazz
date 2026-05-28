@@ -369,3 +369,38 @@ for metadata-heavy pages.
 In release mode, lz4 page compression is cheap enough to be plausible in the
 hot path. The storage win is largest for naive append history, where repeated
 full-row prefixes dominate the SQLite pages.
+
+## Experiment: LZ4 VFS E2E
+
+Date: 2026-05-27
+
+Build: `cargo build --release -p mini-jazz-sqlite --example perf_scenarios`
+
+Shape:
+
+- Register an experimental SQLite VFS named `mini_jazz_lz4`.
+- Store the main database as lz4-compressed logical SQLite pages.
+- Leave WAL/SHM/temp files as passthrough files on SQLite's default VFS.
+- Keep an in-memory page index for this prototype.
+- Compact the compressed main DB on `xSync` so the file keeps only the latest
+  compressed record for each logical page.
+
+### Naive Full-Row History, LZ4 VFS
+
+| Scenario        | Updates | Logical DB bytes | Physical file bytes | Physical/logical | Total loop | Write only | Cold load | Current read |
+| --------------- | ------: | ---------------: | ------------------: | ---------------: | ---------: | ---------: | --------: | -----------: |
+| Append stream   |    2225 |       18,796,544 |             472,314 |            0.03x |  44,912 ms |  41,550 ms |    967 ms |      0.07 ms |
+| Automerge paper |    2900 |        9,859,072 |           2,266,243 |            0.23x |  42,293 ms |  39,683 ms |    729 ms |      0.07 ms |
+| Canvas          |    3900 |          884,736 |             446,234 |            0.50x |  33,678 ms |  31,426 ms |    649 ms |      0.07 ms |
+
+### Takeaway
+
+The e2e VFS confirms that page compression can make the physical SQLite store
+much smaller without changing Jazz row semantics. The append-stream case drops
+from `18.8 MB` logical SQLite bytes to `0.47 MB` physical bytes.
+
+The current VFS is not a good write-path design yet. Compacting the whole
+compressed page set on every sync makes write-only time much worse than the
+normal SQLite file path. The next version should replace append-and-compact
+with stable compressed page slots, a free list, or chunk groups that can update
+locally without rewriting every live page.

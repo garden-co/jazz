@@ -199,6 +199,9 @@ enum DeepHistoryReport {
     AppendStream(DeepHistoryCaseReport),
     AutomergePaper(DeepHistoryCaseReport),
     CanvasPositions(DeepHistoryCaseReport),
+    AppendStreamLz4Vfs(DeepHistoryCaseReport),
+    AutomergePaperLz4Vfs(DeepHistoryCaseReport),
+    CanvasPositionsLz4Vfs(DeepHistoryCaseReport),
     AppendStreamJazzRope(DeepHistoryCaseReport),
     AutomergePaperJazzRope(DeepHistoryCaseReport),
     CanvasPositionsJazzRope(DeepHistoryCaseReport),
@@ -4101,11 +4104,19 @@ fn timed_apply_bundles(runtime: &mut Runtime, bundles: Vec<Bundle>) -> Result<Du
 fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
     match kind {
         "append" | "append-stream" => Ok(DeepHistoryReport::AppendStream(run_append_stream_probe()?)),
+        "append-lz4-vfs" | "append-stream-lz4-vfs" => Ok(DeepHistoryReport::AppendStreamLz4Vfs(
+            run_append_stream_probe_with_storage(DeepHistoryStorage::Lz4Vfs)?,
+        )),
         "append-jazz-rope" | "append-stream-jazz-rope" => Ok(
             DeepHistoryReport::AppendStreamJazzRope(run_append_stream_jazz_rope_probe()?),
         ),
         "automerge" | "automerge-paper" => {
             Ok(DeepHistoryReport::AutomergePaper(run_automerge_paper_probe()?))
+        }
+        "automerge-lz4-vfs" | "automerge-paper-lz4-vfs" => {
+            Ok(DeepHistoryReport::AutomergePaperLz4Vfs(
+                run_automerge_paper_probe_with_storage(DeepHistoryStorage::Lz4Vfs)?,
+            ))
         }
         "automerge-jazz-rope" | "automerge-paper-jazz-rope" => Ok(
             DeepHistoryReport::AutomergePaperJazzRope(run_automerge_paper_jazz_rope_probe()?),
@@ -4113,6 +4124,11 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
         "canvas" | "canvas-positions" => {
             Ok(DeepHistoryReport::CanvasPositions(run_canvas_positions_probe()?))
         }
+        "canvas-lz4-vfs" | "canvas-positions-lz4-vfs" => Ok(
+            DeepHistoryReport::CanvasPositionsLz4Vfs(run_canvas_positions_probe_with_storage(
+                DeepHistoryStorage::Lz4Vfs,
+            )?),
+        ),
         "canvas-jazz-rope" | "canvas-positions-jazz-rope" => Ok(
             DeepHistoryReport::CanvasPositionsJazzRope(run_canvas_positions_jazz_rope_probe()?),
         ),
@@ -4124,6 +4140,12 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
 }
 
 fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
+    run_append_stream_probe_with_storage(DeepHistoryStorage::Sqlite)
+}
+
+fn run_append_stream_probe_with_storage(
+    storage: DeepHistoryStorage,
+) -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 100_000);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
@@ -4145,11 +4167,18 @@ fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
         }),
         final_reference_json: None,
         compare_to_final_payload: true,
+        storage,
         notes: vec!["Naive baseline: one full-row text update per token-like append.".to_owned()],
     })
 }
 
 fn run_automerge_paper_probe() -> BenchResult<DeepHistoryCaseReport> {
+    run_automerge_paper_probe_with_storage(DeepHistoryStorage::Sqlite)
+}
+
+fn run_automerge_paper_probe_with_storage(
+    storage: DeepHistoryStorage,
+) -> BenchResult<DeepHistoryCaseReport> {
     let trace_path = automerge_trace_path()?;
     let trace_bytes = std::fs::metadata(&trace_path)?.len() as usize;
     let trace_json = gzip_decode_to_string(&trace_path)?;
@@ -4178,6 +4207,7 @@ fn run_automerge_paper_probe() -> BenchResult<DeepHistoryCaseReport> {
         }),
         final_reference_json: None,
         compare_to_final_payload: true,
+        storage,
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
             "Naive baseline: apply trace patch locally, then write whole document body.".to_owned(),
@@ -4239,6 +4269,12 @@ fn run_automerge_paper_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
 }
 
 fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
+    run_canvas_positions_probe_with_storage(DeepHistoryStorage::Sqlite)
+}
+
+fn run_canvas_positions_probe_with_storage(
+    storage: DeepHistoryStorage,
+) -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES", 60 * 60 * 60);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
@@ -4261,6 +4297,7 @@ fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
         next_value: Box::new(move |index| Ok(all_positions[index].clone())),
         final_reference_json: Some(reference_json),
         compare_to_final_payload: false,
+        storage,
         notes: vec![
             "Naive baseline: one full-row position JSON text update per 60 FPS frame.".to_owned(),
             "Final-payload ratios are not meaningful for presence-like coordinates and are emitted as null.".to_owned(),
@@ -4308,7 +4345,14 @@ struct DeepHistoryCaseInput {
     next_value: Box<dyn FnMut(usize) -> BenchResult<String>>,
     final_reference_json: Option<String>,
     compare_to_final_payload: bool,
+    storage: DeepHistoryStorage,
     notes: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum DeepHistoryStorage {
+    Sqlite,
+    Lz4Vfs,
 }
 
 struct JazzRopePositionCaseInput {
@@ -4324,16 +4368,16 @@ struct JazzRopeTextCaseInput {
     target_updates: usize,
     sample_every: usize,
     reference_gzip_bytes: Option<usize>,
-    next_edit: Box<
-        dyn FnMut(
-            &Connection,
-            persisted_rope::RopeRoot,
-            usize,
-        ) -> BenchResult<(persisted_rope::RopeRoot, usize)>,
-    >,
+    next_edit: Box<JazzRopeTextEditFn>,
     final_reference_json: Option<String>,
     notes: Vec<String>,
 }
+
+type JazzRopeTextEditFn = dyn FnMut(
+    &Connection,
+    persisted_rope::RopeRoot,
+    usize,
+) -> BenchResult<(persisted_rope::RopeRoot, usize)>;
 
 fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<DeepHistoryCaseReport> {
     let tmp = tempdir()?;
@@ -5015,12 +5059,12 @@ fn run_naive_deep_history_case(
 ) -> BenchResult<DeepHistoryCaseReport> {
     let tmp = tempdir()?;
     let db_path = tmp.path().join("writer.sqlite");
-    let mut writer = Runtime::open_with_schema(
-        Storage::File(db_path.clone()),
-        "writer-node",
-        "alice",
-        input.schema.clone(),
-    )?;
+    let storage = match input.storage {
+        DeepHistoryStorage::Sqlite => Storage::File(db_path.clone()),
+        DeepHistoryStorage::Lz4Vfs => Storage::Lz4File(db_path.clone()),
+    };
+    let mut writer =
+        Runtime::open_with_schema(storage, "writer-node", "alice", input.schema.clone())?;
     let mut receiver = Runtime::open_with_schema(
         Storage::Memory,
         "receiver-node",
@@ -5076,7 +5120,10 @@ fn run_naive_deep_history_case(
     let total_loop_ms = ms(started.elapsed());
     let bundle = writer.export_table_history(input.table)?;
     let bundle_summary = BundleSummary::from(&bundle)?;
-    let page_compression = offline_page_compression_probe(&db_path)?;
+    let page_compression = match input.storage {
+        DeepHistoryStorage::Sqlite => Some(offline_page_compression_probe(&db_path)?),
+        DeepHistoryStorage::Lz4Vfs => None,
+    };
     let cold_schema = input.schema.clone();
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", cold_schema)?;
     let cold_started = Instant::now();
@@ -5123,6 +5170,11 @@ fn run_naive_deep_history_case(
         None
     };
     let mut notes = input.notes;
+    if matches!(input.storage, DeepHistoryStorage::Lz4Vfs) {
+        notes.push(
+            "Storage: main SQLite database file used the experimental lz4 VFS; WAL/SHM files were uncompressed passthrough files.".to_owned(),
+        );
+    }
     if let Some(reference_json) = input.final_reference_json {
         notes.push(format!(
             "Reference uncompressed JSON bytes: {}",
@@ -5187,16 +5239,25 @@ fn run_naive_deep_history_case(
             .and_then(|bytes| ratio_usize(bundle_summary.bytes, bytes)),
         extrapolated_write_ms_for_target,
         extrapolated_database_bytes_for_target,
-        page_count_for_compression: Some(page_compression.page_count),
-        lz4_page_compressed_bytes: Some(page_compression.lz4.compressed_bytes),
-        lz4_page_compressed_to_database_ratio: ratio_usize_i64(
-            page_compression.lz4.compressed_bytes,
-            stats.database_bytes,
-        ),
-        lz4_page_compress_ms: Some(page_compression.lz4.compress_ms),
-        lz4_page_decompress_ms: Some(page_compression.lz4.decompress_ms),
-        lz4_page_compress_us_per_page: Some(page_compression.lz4.compress_us_per_page),
-        lz4_page_decompress_us_per_page: Some(page_compression.lz4.decompress_us_per_page),
+        page_count_for_compression: page_compression.as_ref().map(|report| report.page_count),
+        lz4_page_compressed_bytes: page_compression
+            .as_ref()
+            .map(|report| report.lz4.compressed_bytes),
+        lz4_page_compressed_to_database_ratio: page_compression
+            .as_ref()
+            .and_then(|report| ratio_usize_i64(report.lz4.compressed_bytes, stats.database_bytes)),
+        lz4_page_compress_ms: page_compression
+            .as_ref()
+            .map(|report| report.lz4.compress_ms),
+        lz4_page_decompress_ms: page_compression
+            .as_ref()
+            .map(|report| report.lz4.decompress_ms),
+        lz4_page_compress_us_per_page: page_compression
+            .as_ref()
+            .map(|report| report.lz4.compress_us_per_page),
+        lz4_page_decompress_us_per_page: page_compression
+            .as_ref()
+            .map(|report| report.lz4.decompress_us_per_page),
         notes,
     })
 }

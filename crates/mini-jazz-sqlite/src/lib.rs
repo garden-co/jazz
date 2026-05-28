@@ -1,6 +1,7 @@
 mod branch;
 mod effective;
 mod error;
+mod lz4_vfs;
 pub mod persisted_rope;
 mod policy;
 mod projection;
