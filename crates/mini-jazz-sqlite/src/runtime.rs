@@ -7,8 +7,8 @@ use crate::sync::{
 };
 use crate::types::{
     ApplyBundleProfile, BranchInfo, HistoryBlockExport, HistoryBlockManifest, HistoryBlockTxRange,
-    HistoryCompactionStats, HistoryDelta, QueryExportProfile, RejectionInfo, RowView, StorageStats,
-    TransactionInfo,
+    HistoryCompactionPolicy, HistoryCompactionStats, HistoryDelta, QueryExportProfile,
+    RejectionInfo, RowView, StorageStats, TransactionInfo,
 };
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
@@ -1035,6 +1035,54 @@ impl Runtime {
             total.sealed_transactions += rejected.sealed_transactions;
             total.uncompressed_bytes += rejected.uncompressed_bytes;
             total.compressed_bytes += rejected.compressed_bytes;
+        }
+        Ok(total)
+    }
+
+    pub fn compact_history_with_policy(
+        &mut self,
+        policy: HistoryCompactionPolicy,
+    ) -> Result<HistoryCompactionStats> {
+        let table_names = self
+            .schema
+            .tables()
+            .map(|table| table.name.clone())
+            .collect::<Vec<_>>();
+        let mut total = empty_history_compaction_stats();
+        for table_name in table_names {
+            if policy.accepted {
+                let row_ids = compactable_row_ids_for_table(
+                    &self.conn,
+                    &table_name,
+                    policy.hot_tail,
+                    policy.min_versions,
+                )?;
+                for row_id in row_ids {
+                    if history_compaction_budget_reached(&total, policy.max_blocks) {
+                        return Ok(total);
+                    }
+                    let stats =
+                        self.compact_accepted_history(&table_name, &row_id, policy.hot_tail)?;
+                    add_history_compaction_stats(&mut total, stats);
+                }
+            }
+
+            if policy.rejected {
+                let row_ids = compactable_rejected_row_ids_for_table(
+                    &self.conn,
+                    &table_name,
+                    policy.hot_tail,
+                    policy.min_versions,
+                )?;
+                for row_id in row_ids {
+                    if history_compaction_budget_reached(&total, policy.max_blocks) {
+                        return Ok(total);
+                    }
+                    let stats =
+                        self.compact_rejected_history(&table_name, &row_id, policy.hot_tail)?;
+                    add_history_compaction_stats(&mut total, stats);
+                }
+            }
         }
         Ok(total)
     }
@@ -7474,6 +7522,33 @@ fn delete_rejected_compacted_tx_rows(
         deleted += 1;
     }
     Ok(deleted)
+}
+
+fn empty_history_compaction_stats() -> HistoryCompactionStats {
+    HistoryCompactionStats {
+        sealed_history_rows: 0,
+        history_blocks: 0,
+        sealed_transactions: 0,
+        uncompressed_bytes: 0,
+        compressed_bytes: 0,
+    }
+}
+
+fn add_history_compaction_stats(total: &mut HistoryCompactionStats, stats: HistoryCompactionStats) {
+    total.sealed_history_rows += stats.sealed_history_rows;
+    total.history_blocks += stats.history_blocks;
+    total.sealed_transactions += stats.sealed_transactions;
+    total.uncompressed_bytes += stats.uncompressed_bytes;
+    total.compressed_bytes += stats.compressed_bytes;
+}
+
+fn history_compaction_budget_reached(
+    total: &HistoryCompactionStats,
+    max_blocks: Option<usize>,
+) -> bool {
+    max_blocks
+        .map(|max_blocks| total.history_blocks as usize >= max_blocks)
+        .unwrap_or(false)
 }
 
 fn rejected_tx_can_leave_open_store(

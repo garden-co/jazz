@@ -97,6 +97,42 @@ pub struct HistoryCompactionStats {
     pub compressed_bytes: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryCompactionPolicy {
+    pub hot_tail: usize,
+    pub min_versions: usize,
+    pub accepted: bool,
+    pub rejected: bool,
+    pub max_blocks: Option<usize>,
+}
+
+impl HistoryCompactionPolicy {
+    pub fn all(hot_tail: usize, min_versions: usize) -> Self {
+        Self {
+            hot_tail,
+            min_versions,
+            accepted: true,
+            rejected: true,
+            max_blocks: None,
+        }
+    }
+
+    pub fn accepted_only(hot_tail: usize, min_versions: usize) -> Self {
+        Self {
+            hot_tail,
+            min_versions,
+            accepted: true,
+            rejected: false,
+            max_blocks: None,
+        }
+    }
+
+    pub fn with_max_blocks(mut self, max_blocks: usize) -> Self {
+        self.max_blocks = Some(max_blocks);
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HistoryBlockManifest {
     pub block_id: i64,

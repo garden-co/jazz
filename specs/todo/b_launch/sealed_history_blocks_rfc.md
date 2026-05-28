@@ -441,6 +441,12 @@ The hot tail is important. It gives recent listeners, reconnects, and near-now
 historical reads a simple ordinary-row path. It also gives compaction freedom to
 operate in the background without touching the newest writes.
 
+Compaction should be invokable by policy as well as by exact row id. The first
+policy shape is deliberately small: accepted/rejected toggles, hot-tail and
+minimum-version thresholds, and an optional maximum block budget. The block
+budget lets an embedder run maintenance in bounded chunks, leaving age, byte
+estimate, and wall-clock scheduling as higher-level policy decisions.
+
 Compaction only makes SQLite pages reusable. It should not automatically force
 the database file to shrink, because checkpoint/truncate/vacuum work can be a
 large latency spike. The runtime should expose explicit storage reclamation for

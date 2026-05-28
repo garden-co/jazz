@@ -323,3 +323,11 @@ Decision: Add observed-query refresh APIs that return `HistoryDelta` values inst
 Why: once peers remember observed queries, refresh is the normal sync path. It should be able to transfer missing sealed blocks directly for predicate and top-query reads, including previous-observed repair rows, rather than forcing all sealed history back through row-bundle inflation.
 
 Scope impact: simple predicates, top-created, and top-field observed refreshes now use block-native deltas. Query shapes without block-native support still fall back to ordinary bundle refreshes with no blocks, preserving behavior while making remaining gaps explicit.
+
+## Thu May 28 01:46:19 PDT 2026 - Bounded Compaction Policy
+
+Decision: Add a `HistoryCompactionPolicy` API with accepted/rejected toggles, hot-tail/min-version thresholds, and an optional maximum block budget.
+
+Why: production compaction should be triggerable as bounded maintenance work, not only as exact row-by-row calls. A block budget lets callers do useful background progress without accidentally spending an unbounded foreground latency slice.
+
+Scope impact: the prototype can now compact eligible rows across all user tables in chunks. Scheduling by age, byte estimate, or wall-clock budget remains future work.
