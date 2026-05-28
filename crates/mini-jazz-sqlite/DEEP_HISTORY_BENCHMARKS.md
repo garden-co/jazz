@@ -23,7 +23,11 @@ input size. A full result includes:
 - cold-load apply and read
 - storage stats
 
-Current canonical inputs:
+`MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all` runs append, Automerge, and canvas
+without running the broader perf suite. Use it for smoke checks or when all
+three scenarios intentionally share the same env caps.
+
+Current canonical inputs use scenario-specific sample intervals:
 
 ```bash
 MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=append \

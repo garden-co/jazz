@@ -21,6 +21,11 @@ type BenchResult<T> = std::result::Result<T, Box<dyn Error>>;
 fn main() -> BenchResult<()> {
     let config = Config::from_env();
     if let Ok(kind) = env::var("MINI_JAZZ_PERF_ONLY_DEEP_HISTORY") {
+        if matches!(kind.as_str(), "all" | "canonical") {
+            let report = run_all_deep_history_probes()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
         let report = run_deep_history_probe(&kind)?;
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -4135,10 +4140,18 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
             DeepHistoryReport::CanvasPositionsJazzRope(run_canvas_positions_jazz_rope_probe()?),
         ),
         other => Err(format!(
-            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected append, append-history-blocks, append-jazz-rope, automerge-paper, automerge-history-blocks, automerge-paper-jazz-rope, canvas, canvas-history-blocks, or canvas-jazz-rope"
+            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected all, append, append-history-blocks, append-jazz-rope, automerge-paper, automerge-history-blocks, automerge-paper-jazz-rope, canvas, canvas-history-blocks, or canvas-jazz-rope"
         )
         .into()),
     }
+}
+
+fn run_all_deep_history_probes() -> BenchResult<Vec<DeepHistoryReport>> {
+    Ok(vec![
+        DeepHistoryReport::AppendStream(run_append_stream_probe()?),
+        DeepHistoryReport::AutomergePaper(run_automerge_paper_probe()?),
+        DeepHistoryReport::CanvasPositions(run_canvas_positions_probe()?),
+    ])
 }
 
 fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {

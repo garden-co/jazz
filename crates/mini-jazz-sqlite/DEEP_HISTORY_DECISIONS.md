@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:43:48 PDT 2026
+
+Decision: add `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all` as a deep-history-only benchmark selector.
+
+Why: leaving the selector unset can run the broader perf suite, while tonight's smoke check needed only the three deep-history scenarios. The missing `all` alias caused a false start and made benchmark iteration easier to misuse.
+
+Scope impact: `all`/`canonical` now run append, Automerge, and canvas deep-history probes as a JSON array. The benchmark doc notes this is best for smoke checks or shared env caps; canonical table updates still use scenario-specific sample intervals.
+
 ## Thu May 28 03:42:52 PDT 2026
 
 Decision: smoke-test the deep-history benchmark write-batching path with a tiny append run instead of chasing fresh numbers tonight.
