@@ -355,3 +355,11 @@ Decision: Add a public options-object API for top-field block-native history del
 Why: top-field refresh has the same displaced-boundary-row problem as top-created refresh, but adding more positional arguments would make the API brittle. An options object gives us room for future page-boundary or cursor state.
 
 Scope impact: manual top-field history delta callers can now request repair history and missing sealed blocks for rows that were observed in the previous page. Observed-query refresh was already using equivalent internal behavior.
+
+## Thu May 28 02:03:39 PDT 2026 - Wall Clock Compaction Budget
+
+Decision: Extend `HistoryCompactionPolicy` with an optional wall-clock budget.
+
+Why: block-count budgets bound work coarsely, but foreground callers often need a latency-shaped budget. A zero-duration budget should be a valid way to ask the maintenance path to skip work when the caller's slice is already spent.
+
+Scope impact: policy compaction checks the wall-clock budget before starting each row block. Age and byte-estimate triggers remain higher-level scheduling work.

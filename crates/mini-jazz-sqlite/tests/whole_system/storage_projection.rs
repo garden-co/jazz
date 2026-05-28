@@ -1451,6 +1451,41 @@ fn compaction_policy_can_budget_maintenance_blocks() {
 }
 
 #[test]
+fn compaction_policy_can_skip_when_wall_clock_budget_is_spent() {
+    let schema = SchemaDef::new().table("docs", |table| {
+        table.text("title");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-1",
+            BTreeMap::from([("title".to_owned(), json!("v1"))]),
+        )
+        .unwrap();
+    for idx in 2..=4 {
+        alice
+            .update_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("title".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+
+    let skipped = alice
+        .compact_history_with_policy(
+            HistoryCompactionPolicy::accepted_only(1, 1)
+                .with_max_duration(std::time::Duration::from_millis(0)),
+        )
+        .unwrap();
+    assert_eq!(skipped.history_blocks, 0);
+    assert_eq!(alice.all_history_block_manifests().unwrap().len(), 0);
+}
+
+#[test]
 fn rejected_multi_row_tx_metadata_stays_open_until_all_rows_are_compacted() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

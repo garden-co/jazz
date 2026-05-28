@@ -1043,6 +1043,7 @@ impl Runtime {
         &mut self,
         policy: HistoryCompactionPolicy,
     ) -> Result<HistoryCompactionStats> {
+        let started = Instant::now();
         let table_names = self
             .schema
             .tables()
@@ -1058,7 +1059,12 @@ impl Runtime {
                     policy.min_versions,
                 )?;
                 for row_id in row_ids {
-                    if history_compaction_budget_reached(&total, policy.max_blocks) {
+                    if history_compaction_budget_reached(
+                        &total,
+                        policy.max_blocks,
+                        started,
+                        policy.max_duration,
+                    ) {
                         return Ok(total);
                     }
                     let stats =
@@ -1075,7 +1081,12 @@ impl Runtime {
                     policy.min_versions,
                 )?;
                 for row_id in row_ids {
-                    if history_compaction_budget_reached(&total, policy.max_blocks) {
+                    if history_compaction_budget_reached(
+                        &total,
+                        policy.max_blocks,
+                        started,
+                        policy.max_duration,
+                    ) {
                         return Ok(total);
                     }
                     let stats =
@@ -7682,10 +7693,16 @@ fn add_history_compaction_stats(total: &mut HistoryCompactionStats, stats: Histo
 fn history_compaction_budget_reached(
     total: &HistoryCompactionStats,
     max_blocks: Option<usize>,
+    started: Instant,
+    max_duration: Option<Duration>,
 ) -> bool {
-    max_blocks
+    let block_budget_reached = max_blocks
         .map(|max_blocks| total.history_blocks as usize >= max_blocks)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    let duration_budget_reached = max_duration
+        .map(|max_duration| started.elapsed() >= max_duration)
+        .unwrap_or(false);
+    block_budget_reached || duration_budget_reached
 }
 
 fn rejected_tx_can_leave_open_store(

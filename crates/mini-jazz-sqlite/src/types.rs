@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use crate::sync::Bundle;
 use serde::Serialize;
@@ -104,6 +105,7 @@ pub struct HistoryCompactionPolicy {
     pub accepted: bool,
     pub rejected: bool,
     pub max_blocks: Option<usize>,
+    pub max_duration: Option<Duration>,
 }
 
 impl HistoryCompactionPolicy {
@@ -114,6 +116,7 @@ impl HistoryCompactionPolicy {
             accepted: true,
             rejected: true,
             max_blocks: None,
+            max_duration: None,
         }
     }
 
@@ -124,11 +127,17 @@ impl HistoryCompactionPolicy {
             accepted: true,
             rejected: false,
             max_blocks: None,
+            max_duration: None,
         }
     }
 
     pub fn with_max_blocks(mut self, max_blocks: usize) -> Self {
         self.max_blocks = Some(max_blocks);
+        self
+    }
+
+    pub fn with_max_duration(mut self, max_duration: Duration) -> Self {
+        self.max_duration = Some(max_duration);
         self
     }
 }
