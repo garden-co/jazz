@@ -5961,7 +5961,11 @@ fn sealed_history_records_for_row_at_epoch(
     global_epoch: i64,
 ) -> Result<Vec<HistoryRecord>> {
     let mut records = Vec::new();
-    for bundle in decoded_history_blocks_for_table(conn, table_name)? {
+    let row_num = match row_num(conn, row_id) {
+        Ok(row_num) => row_num,
+        Err(_) => return Ok(Vec::new()),
+    };
+    for bundle in decoded_history_blocks_for_row_epoch(conn, table_name, row_num, global_epoch)? {
         let tx_epochs = bundle
             .txs
             .iter()
@@ -5991,7 +5995,7 @@ fn record_global_epoch_for_point_read(conn: &Connection, tx_id: &str) -> Option<
     if let Ok(epoch) = tx_global_epoch_for_id(conn, tx_id) {
         return Some(epoch);
     }
-    decoded_history_blocks(conn)
+    decoded_history_blocks_for_tx(conn, tx_id)
         .ok()?
         .into_iter()
         .flat_map(|bundle| bundle.txs)
@@ -5999,19 +6003,32 @@ fn record_global_epoch_for_point_read(conn: &Connection, tx_id: &str) -> Option<
         .and_then(|tx| tx.global_epoch)
 }
 
-fn decoded_history_blocks(conn: &Connection) -> Result<Vec<Bundle>> {
+fn decoded_history_blocks_for_row_epoch(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    global_epoch: i64,
+) -> Result<Vec<Bundle>> {
+    let table_num = crate::schema::table_num(conn, table_name)?;
     let mut stmt = conn.prepare(
         "SELECT codec, format_version, payload
          FROM history_blocks
-         ORDER BY table_num, row_num, min_global_epoch, block_id",
+         WHERE table_num = ?
+           AND row_num = ?
+           AND min_global_epoch <= ?
+           AND max_global_epoch >= ?
+         ORDER BY max_global_epoch DESC, min_global_epoch, block_id",
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, Vec<u8>>(2)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        params![table_num, row_num, global_epoch, global_epoch],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        },
+    )?;
     let mut bundles = Vec::new();
     for row in rows {
         let (codec, format_version, payload) = row?;
@@ -6046,7 +6063,7 @@ fn decode_history_block_payload(
 }
 
 fn sealed_transaction_info(conn: &Connection, tx_id: &str) -> Result<TransactionInfo> {
-    for bundle in decoded_history_blocks(conn)? {
+    for bundle in decoded_history_blocks_for_tx(conn, tx_id)? {
         if let Some(tx) = bundle.txs.into_iter().find(|tx| tx.tx_id == tx_id) {
             return Ok(TransactionInfo {
                 tx_id: tx.tx_id,
@@ -6064,6 +6081,59 @@ fn sealed_transaction_info(conn: &Connection, tx_id: &str) -> Result<Transaction
         }
     }
     Err(crate::Error::new(format!("unknown transaction {tx_id}")))
+}
+
+fn decoded_history_blocks_for_tx(conn: &Connection, tx_id: &str) -> Result<Vec<Bundle>> {
+    let (node_id, local_epoch) = parse_public_tx_id(tx_id)?;
+    let node_num = conn
+        .query_row(
+            "SELECT node_num FROM jazz_node WHERE node_id = ?",
+            params![node_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(node_num) = node_num else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = conn.prepare(
+        "SELECT block.codec, block.format_version, block.payload
+         FROM history_block_tx_index idx
+         JOIN history_blocks block ON block.block_id = idx.block_id
+         WHERE idx.node_num = ?
+           AND idx.min_local_epoch <= ?
+           AND idx.max_local_epoch >= ?
+         ORDER BY idx.max_local_epoch, idx.min_local_epoch, idx.block_id",
+    )?;
+    let rows = stmt.query_map(params![node_num, local_epoch, local_epoch], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut bundles = Vec::new();
+    for row in rows {
+        let (codec, format_version, payload) = row?;
+        bundles.push(decode_history_block_payload(
+            &codec,
+            format_version,
+            &payload,
+        )?);
+    }
+    Ok(bundles)
+}
+
+fn parse_public_tx_id(tx_id: &str) -> Result<(&str, i64)> {
+    let rest = tx_id
+        .strip_prefix("tx-")
+        .ok_or_else(|| crate::Error::new(format!("invalid transaction id {tx_id}")))?;
+    let Some((node_id, epoch)) = rest.rsplit_once('-') else {
+        return Err(crate::Error::new(format!("invalid transaction id {tx_id}")));
+    };
+    let local_epoch = epoch
+        .parse::<i64>()
+        .map_err(|_| crate::Error::new(format!("invalid transaction id {tx_id}")))?;
+    Ok((node_id, local_epoch))
 }
 
 fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {

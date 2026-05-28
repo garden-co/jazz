@@ -34,3 +34,11 @@ Decision: add freelist/live-byte visibility to storage stats rather than treatin
 Why: deleting thousands of ordinary history/tx rows moves pages to SQLite's freelist. That space is reusable by future writes but the database file does not shrink without VACUUM/auto-vacuum maintenance. The benchmark needs to distinguish allocated file bytes from live allocated pages.
 
 Scope impact: benchmark comparisons should include live database bytes or freelist bytes for compaction experiments. A later maintenance API can decide when to VACUUM durable files.
+
+## Wed May 27 23:10:31 PDT 2026
+
+Decision: keep the first public historical read API narrow: one row on main accepted history at a global epoch.
+
+Why: this proves the block lookup/decode path without prematurely claiming full branch/query snapshot support. Branch-local overlays, policy-filtered historical queries, and rejected diagnostic reads need separate semantics.
+
+Scope impact: `read_row_at_global_epoch` can use sealed accepted blocks plus open history. Broader snapshot APIs remain future work.
