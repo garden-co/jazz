@@ -555,3 +555,11 @@ Decision: refresh the benchmark table's Block column after the sealed-read/cache
 Why: the storage numbers stayed in the same range, but historical point-read averages moved materially: append is now about 41 ms, Automerge about 61 ms, and canvas about 99 ms in the canonical one-block runs. The table should reflect the current code before the next optimization cycle.
 
 Scope impact: update only the canonical Block column cells from fresh append, Automerge, and canvas runs. The Base/Base1/Base2/Base3/Incr columns are unchanged.
+
+## Thu May 28 03:18:55 PDT 2026 - Sealed Predicate Repair Ignores Unsupported Operators
+
+Decision: make the sealed branch-base predicate repair return no extra rows for unsupported operators instead of failing the export.
+
+Why: the repair path is an optimization/correctness bridge for ordinary predicate scopes. Top, recursive, or future operators should not fail merely because this sealed-base scan does not know how to evaluate them yet; they can continue through their existing open-history/export paths.
+
+Scope impact: equality, not-equal, contains, and in remain supported. Other operators simply get no sealed-base predicate repair from this helper.

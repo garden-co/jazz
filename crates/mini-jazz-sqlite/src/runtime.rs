@@ -8237,9 +8237,7 @@ fn json_predicate_matches(field_value: &JsonValue, op: &str, value: &JsonValue) 
                 .ok_or_else(|| crate::Error::new("in expects an array value"))?;
             Ok(values.iter().any(|candidate| candidate == field_value))
         }
-        other => Err(crate::Error::new(format!(
-            "unsupported sealed branch-base predicate {other}"
-        ))),
+        _ => Ok(false),
     }
 }
 
