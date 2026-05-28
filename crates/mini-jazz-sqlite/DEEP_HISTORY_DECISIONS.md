@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 04:03:26 PDT 2026
+
+Decision: validate imported `uncompressed_bytes` without double-decompressing blocks.
+
+Why: compressed byte count and payload hash are not enough to make manifest accounting trustworthy. `uncompressed_bytes` is used for stats and benchmark interpretation, so it should reflect the actual decoded payload size.
+
+Scope impact: history block decoding is split into "decompress bytes" and "parse bytes" helpers. Import validation checks `uncompressed_bytes` against the decompressed payload before parsing the bundle.
+
 ## Thu May 28 04:01:51 PDT 2026
 
 Decision: keep the RFC prototype-status checklist synchronized with the overnight implementation.

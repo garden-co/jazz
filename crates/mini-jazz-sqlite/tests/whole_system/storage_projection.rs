@@ -347,6 +347,12 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
     wrong_row_count[0].manifest.row_count += 1;
     let err = bob.import_history_blocks(&wrong_row_count).unwrap_err();
     assert!(err.to_string().contains("row count mismatch"));
+    let mut wrong_uncompressed_count = blocks.clone();
+    wrong_uncompressed_count[0].manifest.uncompressed_bytes += 1;
+    let err = bob
+        .import_history_blocks(&wrong_uncompressed_count)
+        .unwrap_err();
+    assert!(err.to_string().contains("uncompressed byte count mismatch"));
     let mut invalid_range = blocks.clone();
     invalid_range[0].tx_ranges[0].min_local_epoch =
         invalid_range[0].tx_ranges[0].max_local_epoch + 1;

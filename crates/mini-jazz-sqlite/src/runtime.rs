@@ -7762,10 +7762,20 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
     if block.manifest.payload_sha256 != actual_hash {
         return Err(crate::Error::new("history block payload hash mismatch"));
     }
-    let bundle = decode_history_block_payload(
+    let decoded_payload = decode_history_block_payload_bytes(
         &block.manifest.codec,
         block.manifest.format_version,
         &block.payload,
+    )?;
+    if block.manifest.uncompressed_bytes != decoded_payload.len() as i64 {
+        return Err(crate::Error::new(
+            "history block uncompressed byte count mismatch",
+        ));
+    }
+    let bundle = decode_history_block_payload_from_bytes(
+        &block.manifest.codec,
+        block.manifest.format_version,
+        &decoded_payload,
     )?;
     if block.manifest.row_count != bundle.history.len() as i64 {
         return Err(crate::Error::new("history block row count mismatch"));
@@ -8561,12 +8571,19 @@ fn decode_history_block_payload(
     format_version: i64,
     payload: &[u8],
 ) -> Result<Bundle> {
+    let decoded = decode_history_block_payload_bytes(codec, format_version, payload)?;
+    decode_history_block_payload_from_bytes(codec, format_version, &decoded)
+}
+
+fn decode_history_block_payload_bytes(
+    codec: &str,
+    format_version: i64,
+    payload: &[u8],
+) -> Result<Vec<u8>> {
     if codec == LEGACY_HISTORY_BLOCK_CODEC && format_version == LEGACY_HISTORY_BLOCK_FORMAT_VERSION
     {
-        let decoded = lz4_flex::decompress_size_prepended(payload)
-            .map_err(|err| crate::Error::new(format!("decode history block: {err}")))?;
-        return serde_json::from_slice::<Bundle>(&decoded)
-            .map_err(|err| crate::Error::new(format!("decode history block bundle: {err}")));
+        return lz4_flex::decompress_size_prepended(payload)
+            .map_err(|err| crate::Error::new(format!("decode history block: {err}")));
     }
     if codec != HISTORY_BLOCK_CODEC {
         return Err(crate::Error::new(format!(
@@ -8578,9 +8595,21 @@ fn decode_history_block_payload(
             "unsupported history block format version {format_version}"
         )));
     }
-    let decoded = lz4_flex::decompress_size_prepended(payload)
-        .map_err(|err| crate::Error::new(format!("decode history block: {err}")))?;
-    serde_json::from_slice::<ColumnarHistoryBlockPayload>(&decoded)
+    lz4_flex::decompress_size_prepended(payload)
+        .map_err(|err| crate::Error::new(format!("decode history block: {err}")))
+}
+
+fn decode_history_block_payload_from_bytes(
+    codec: &str,
+    format_version: i64,
+    decoded: &[u8],
+) -> Result<Bundle> {
+    if codec == LEGACY_HISTORY_BLOCK_CODEC && format_version == LEGACY_HISTORY_BLOCK_FORMAT_VERSION
+    {
+        return serde_json::from_slice::<Bundle>(decoded)
+            .map_err(|err| crate::Error::new(format!("decode history block bundle: {err}")));
+    }
+    serde_json::from_slice::<ColumnarHistoryBlockPayload>(decoded)
         .map_err(|err| crate::Error::new(format!("decode history block payload: {err}")))
         .and_then(ColumnarHistoryBlockPayload::into_bundle)
 }
