@@ -261,3 +261,9 @@ Scope impact: this is still JSON inside lz4, but it removes repeated user column
 Decision: Add local node-epoch point reads for unglobalized local history and include them in the deep-history benchmark report. The benchmark now samples early, middle, and latest local epochs so sealed blocks are exercised even when transactions have not been assigned global epochs.
 
 Scope impact: this exposed and fixed an accidental slow path where newest-record selection could re-decode sealed blocks per candidate. The remaining Block historical-read numbers still decode and scan an entire selected block per sampled point read, which is the next obvious target for block-local indexing or lighter decoding.
+
+## Thu May 28 01:07:35 PDT 2026 - Decode Cache For Point Reads
+
+Decision: Cache decoded sealed history blocks inside a Runtime and skip sealed blocks whose local-epoch range cannot beat an already-found hot/open candidate.
+
+Scope impact: repeated historical reads against the same cold block no longer repeatedly pay lz4 and JSON decode. This is still an in-memory optimization, not a storage-format answer; early/midpoint reads continue to decode and scan the selected block at least once.

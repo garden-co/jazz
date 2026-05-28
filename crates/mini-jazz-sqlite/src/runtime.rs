@@ -18,7 +18,9 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HISTORY_BLOCK_FORMAT_VERSION: i64 = 3;
@@ -35,6 +37,7 @@ pub struct Runtime {
     auth: RuntimeAuth,
     node_num: i64,
     branch_num: i64,
+    history_block_cache: RefCell<BTreeMap<i64, Arc<Bundle>>>,
 }
 
 struct AwaitingDependencyTx {
@@ -200,6 +203,7 @@ impl Runtime {
             auth,
             node_num,
             branch_num: 1,
+            history_block_cache: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -3269,12 +3273,17 @@ impl Runtime {
             node_id,
             local_epoch,
         )?;
-        candidates.extend(sealed_history_records_for_row_at_node_epoch(
-            &self.conn,
+        let newest_open_epoch = candidates
+            .iter()
+            .filter_map(|record| record_local_epoch_for_point_read(&self.conn, &record.tx_id))
+            .max()
+            .unwrap_or(0);
+        candidates.extend(self.sealed_history_records_for_row_at_node_epoch(
             table_name,
             row_id,
             node_id,
             local_epoch,
+            newest_open_epoch,
         )?);
         let Some(record) = candidates.into_iter().max_by_key(|record| {
             record_local_epoch_for_point_read(&self.conn, &record.tx_id).unwrap_or(0)
@@ -3292,6 +3301,130 @@ impl Runtime {
             tx_id: record.tx_id,
             conflict_count: 0,
         }))
+    }
+
+    fn sealed_history_records_for_row_at_node_epoch(
+        &self,
+        table_name: &str,
+        row_id: &str,
+        node_id: &str,
+        local_epoch: i64,
+        min_candidate_epoch: i64,
+    ) -> Result<Vec<HistoryRecord>> {
+        let mut records = Vec::new();
+        let row_num = match row_num(&self.conn, row_id) {
+            Ok(row_num) => row_num,
+            Err(_) => return Ok(Vec::new()),
+        };
+        for bundle in self.decoded_history_blocks_for_row_node_epoch(
+            table_name,
+            row_num,
+            node_id,
+            local_epoch,
+            min_candidate_epoch,
+        )? {
+            let tx_epochs = bundle
+                .txs
+                .iter()
+                .map(|tx| (tx.tx_id.as_str(), (tx.node_id.as_str(), tx.local_epoch)))
+                .collect::<BTreeMap<_, _>>();
+            let mut best = None::<(i64, &HistoryRecord)>;
+            for record in bundle
+                .history
+                .iter()
+                .filter(|record| record.row_id == row_id)
+            {
+                let Some((record_node_id, record_local_epoch)) =
+                    tx_epochs.get(record.tx_id.as_str())
+                else {
+                    continue;
+                };
+                if *record_node_id != node_id || *record_local_epoch > local_epoch {
+                    continue;
+                }
+                if best
+                    .as_ref()
+                    .map(|(best_epoch, _)| record_local_epoch > best_epoch)
+                    .unwrap_or(true)
+                {
+                    best = Some((*record_local_epoch, record));
+                }
+            }
+            if let Some((_epoch, record)) = best {
+                records.push(record.clone());
+            }
+        }
+        Ok(records)
+    }
+
+    fn decoded_history_blocks_for_row_node_epoch(
+        &self,
+        table_name: &str,
+        row_num: i64,
+        node_id: &str,
+        local_epoch: i64,
+        min_candidate_epoch: i64,
+    ) -> Result<Vec<Arc<Bundle>>> {
+        let table_num = crate::schema::table_num(&self.conn, table_name)?;
+        let node_num = self
+            .conn
+            .query_row(
+                "SELECT node_num FROM jazz_node WHERE node_id = ?",
+                params![node_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(node_num) = node_num else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT block.block_id, block.codec, block.format_version, block.payload
+             FROM history_block_tx_index idx
+             JOIN history_blocks block ON block.block_id = idx.block_id
+             WHERE block.block_kind = ?
+               AND block.table_num = ?
+               AND block.row_num = ?
+               AND idx.node_num = ?
+               AND idx.min_local_epoch <= ?
+               AND idx.max_local_epoch > ?
+             ORDER BY idx.max_local_epoch DESC, idx.min_local_epoch, idx.block_id",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                HISTORY_BLOCK_KIND_ACCEPTED,
+                table_num,
+                row_num,
+                node_num,
+                local_epoch,
+                min_candidate_epoch
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )?;
+        let mut bundles = Vec::new();
+        for row in rows {
+            let (block_id, codec, format_version, payload) = row?;
+            if let Some(cached) = self.history_block_cache.borrow().get(&block_id).cloned() {
+                bundles.push(cached);
+                continue;
+            }
+            let bundle = Arc::new(decode_history_block_payload(
+                &codec,
+                format_version,
+                &payload,
+            )?);
+            self.history_block_cache
+                .borrow_mut()
+                .insert(block_id, Arc::clone(&bundle));
+            bundles.push(bundle);
+        }
+        Ok(bundles)
     }
 
     pub fn read_rows_require_ref(
@@ -7045,39 +7178,6 @@ fn sealed_history_records_for_row_at_epoch(
     Ok(records)
 }
 
-fn sealed_history_records_for_row_at_node_epoch(
-    conn: &Connection,
-    table_name: &str,
-    row_id: &str,
-    node_id: &str,
-    local_epoch: i64,
-) -> Result<Vec<HistoryRecord>> {
-    let mut records = Vec::new();
-    let row_num = match row_num(conn, row_id) {
-        Ok(row_num) => row_num,
-        Err(_) => return Ok(Vec::new()),
-    };
-    for bundle in
-        decoded_history_blocks_for_row_node_epoch(conn, table_name, row_num, node_id, local_epoch)?
-    {
-        let tx_epochs = bundle
-            .txs
-            .iter()
-            .map(|tx| (tx.tx_id.as_str(), (tx.node_id.as_str(), tx.local_epoch)))
-            .collect::<BTreeMap<_, _>>();
-        records.extend(bundle.history.into_iter().filter(|record| {
-            record.row_id == row_id
-                && tx_epochs
-                    .get(record.tx_id.as_str())
-                    .map(|(record_node_id, record_local_epoch)| {
-                        *record_node_id == node_id && *record_local_epoch <= local_epoch
-                    })
-                    .unwrap_or(false)
-        }));
-    }
-    Ok(records)
-}
-
 fn tx_global_epoch_for_id(conn: &Connection, tx_id: &str) -> Result<i64> {
     conn.query_row(
         "SELECT global_epoch FROM jazz_tx_public WHERE tx_id = ?",
@@ -7150,63 +7250,6 @@ fn decoded_history_blocks_for_row_epoch(
             row_num,
             global_epoch,
             global_epoch
-        ],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-            ))
-        },
-    )?;
-    let mut bundles = Vec::new();
-    for row in rows {
-        let (codec, format_version, payload) = row?;
-        bundles.push(decode_history_block_payload(
-            &codec,
-            format_version,
-            &payload,
-        )?);
-    }
-    Ok(bundles)
-}
-
-fn decoded_history_blocks_for_row_node_epoch(
-    conn: &Connection,
-    table_name: &str,
-    row_num: i64,
-    node_id: &str,
-    local_epoch: i64,
-) -> Result<Vec<Bundle>> {
-    let table_num = crate::schema::table_num(conn, table_name)?;
-    let node_num = conn
-        .query_row(
-            "SELECT node_num FROM jazz_node WHERE node_id = ?",
-            params![node_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    let Some(node_num) = node_num else {
-        return Ok(Vec::new());
-    };
-    let mut stmt = conn.prepare(
-        "SELECT block.codec, block.format_version, block.payload
-         FROM history_block_tx_index idx
-         JOIN history_blocks block ON block.block_id = idx.block_id
-         WHERE block.block_kind = ?
-           AND block.table_num = ?
-           AND block.row_num = ?
-           AND idx.node_num = ?
-           AND idx.min_local_epoch <= ?
-         ORDER BY idx.max_local_epoch DESC, idx.min_local_epoch, idx.block_id",
-    )?;
-    let rows = stmt.query_map(
-        params![
-            HISTORY_BLOCK_KIND_ACCEPTED,
-            table_num,
-            row_num,
-            node_num,
-            local_epoch
         ],
         |row| {
             Ok((
