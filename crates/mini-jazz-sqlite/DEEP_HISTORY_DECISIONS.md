@@ -466,4 +466,4 @@ Decision: limit node-local sealed point reads to the newest candidate block rang
 
 Why: after block splitting, the old lookup defeated the point-read benefit by returning all sealed blocks whose max epoch was newer than the open-history candidate. A point lookup only needs the newest sealed block that can contain or precede the requested local epoch.
 
-Scope impact: split-block historical reads decode fewer blocks. The append cap-100 probe improved from roughly 57 ms to roughly 43 ms average historical read time with the same logical results.
+Scope impact: split-block historical reads decode fewer blocks. The append cap-100 probe improved from roughly 57 ms to roughly 43 ms average historical read time with the same logical results. Global-epoch point reads use the same one-candidate-block limit for non-overlapping block ranges.

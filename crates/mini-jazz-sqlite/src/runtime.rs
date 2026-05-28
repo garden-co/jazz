@@ -8064,7 +8064,8 @@ fn decoded_history_blocks_for_row_epoch(
            AND row_num = ?
            AND min_global_epoch <= ?
            AND max_global_epoch >= ?
-         ORDER BY max_global_epoch DESC, min_global_epoch, block_id",
+         ORDER BY max_global_epoch DESC, min_global_epoch, block_id
+         LIMIT 1",
     )?;
     let rows = stmt.query_map(
         params![
