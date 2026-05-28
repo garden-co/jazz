@@ -20,6 +20,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
 const HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
+const HISTORY_BLOCK_KIND_ACCEPTED: i64 = 1;
+const HISTORY_BLOCK_KIND_REJECTED: i64 = 2;
 
 pub struct Runtime {
     conn: Connection,
@@ -497,9 +499,10 @@ impl Runtime {
         let db = self.conn.transaction()?;
         db.execute(
             "INSERT INTO history_blocks
-             (table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (block_kind, table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
+                HISTORY_BLOCK_KIND_ACCEPTED,
                 table_num,
                 row_num,
                 min_epoch,
@@ -553,6 +556,108 @@ impl Runtime {
             total.compressed_bytes += stats.compressed_bytes;
         }
         Ok(total)
+    }
+
+    pub fn compact_rejected_history(
+        &mut self,
+        table_name: &str,
+        row_id: &str,
+        hot_tail: usize,
+    ) -> Result<HistoryCompactionStats> {
+        self.schema.table_def(table_name)?;
+        let table_num = crate::schema::table_num(&self.conn, table_name)?;
+        let row_num = row_num(&self.conn, row_id)?;
+        let selected =
+            compactable_rejected_history_tx_nums(&self.conn, table_name, row_num, hot_tail)?;
+        if selected.is_empty() {
+            return Ok(HistoryCompactionStats {
+                sealed_history_rows: 0,
+                history_blocks: 0,
+                sealed_transactions: 0,
+                uncompressed_bytes: 0,
+                compressed_bytes: 0,
+            });
+        }
+
+        let mut history = export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            table_name,
+            Some(&[row_num]),
+            None,
+        )?;
+        let selected_set = selected.iter().copied().collect::<BTreeSet<_>>();
+        history.retain(|record| {
+            tx::tx_num(&self.conn, &record.tx_id)
+                .map(|tx_num| selected_set.contains(&tx_num))
+                .unwrap_or(false)
+        });
+        let tx_ids = history
+            .iter()
+            .map(|record| record.tx_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let txs = export_txs_by_ids(&self.conn, tx_ids)?;
+        let branches = export_branch_records_for_history(&self.conn, &history)?;
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let payload_bundle = make_bundle(
+            &self.schema,
+            branches,
+            txs.clone(),
+            reads,
+            Vec::new(),
+            history.clone(),
+        );
+        let uncompressed = serde_json::to_vec(&payload_bundle)
+            .map_err(|err| crate::Error::new(format!("encode rejected history block: {err}")))?;
+        let compressed = lz4_flex::compress_prepend_size(&uncompressed);
+        let min_epoch = selected
+            .iter()
+            .map(|tx_num| tx_epoch_for_block(&self.conn, *tx_num))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .min()
+            .unwrap_or(0);
+        let max_epoch = selected
+            .iter()
+            .map(|tx_num| tx_epoch_for_block(&self.conn, *tx_num))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+
+        let db = self.conn.transaction()?;
+        db.execute(
+            "INSERT INTO history_blocks
+             (block_kind, table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                HISTORY_BLOCK_KIND_REJECTED,
+                table_num,
+                row_num,
+                min_epoch,
+                max_epoch,
+                history.len() as i64,
+                txs.len() as i64,
+                HISTORY_BLOCK_CODEC,
+                HISTORY_BLOCK_FORMAT_VERSION,
+                uncompressed.len() as i64,
+                compressed.len() as i64,
+                compressed,
+            ],
+        )?;
+        let block_id = db.last_insert_rowid();
+        insert_history_block_tx_index(&db, block_id, &selected)?;
+        delete_history_rows_for_tx_nums(&db, table_name, row_num, &selected)?;
+        let sealed_transactions = delete_rejected_compacted_tx_rows(&db, &selected)?;
+        db.commit()?;
+
+        Ok(HistoryCompactionStats {
+            sealed_history_rows: history.len() as i64,
+            history_blocks: 1,
+            sealed_transactions,
+            uncompressed_bytes: uncompressed.len() as i64,
+            compressed_bytes: compressed.len() as i64,
+        })
     }
 
     pub fn export_exclusive_transaction_forwarding(
@@ -2281,8 +2386,13 @@ impl Runtime {
                 detail: parse_rejection_detail_for_sqlite(&detail_json, 2)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let mut rejections = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(crate::Error::from)?;
+        rejections.extend(sealed_rejected_transactions(&self.conn)?);
+        rejections.sort_by(|left, right| tx_sort_key(&left.tx_id).cmp(&tx_sort_key(&right.tx_id)));
+        rejections.dedup_by(|left, right| left.tx_id == right.tx_id);
+        Ok(rejections)
     }
 
     pub fn transaction_physical_num_for(&self, tx_id: &str) -> Result<i64> {
@@ -5807,6 +5917,32 @@ fn compactable_history_tx_nums(
         .collect())
 }
 
+fn compactable_rejected_history_tx_nums(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    hot_tail: usize,
+) -> Result<Vec<i64>> {
+    let sql = format!(
+        "SELECT h.tx_num
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.row_num = ?
+           AND h.j_branch_num = 1
+           AND tx.outcome = ?
+         ORDER BY COALESCE(tx.global_epoch, tx.local_epoch), h.tx_num",
+        crate::schema::history_table(table_name),
+    );
+    let tx_nums = conn
+        .prepare(&sql)?
+        .query_map(params![row_num, tx::OUTCOME_REJECTED], |row| {
+            row.get::<_, i64>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let compact_len = tx_nums.len().saturating_sub(hot_tail);
+    Ok(tx_nums.into_iter().take(compact_len).collect())
+}
+
 fn compactable_row_ids_for_table(
     conn: &Connection,
     table_name: &str,
@@ -5916,6 +6052,23 @@ fn delete_compacted_tx_rows(conn: &Connection, schema: &SchemaDef, tx_nums: &[i6
     Ok(deleted)
 }
 
+fn delete_rejected_compacted_tx_rows(conn: &Connection, tx_nums: &[i64]) -> Result<i64> {
+    let mut deleted = 0;
+    for tx_num in tx_nums {
+        conn.execute(
+            "DELETE FROM jazz_tx_receipt WHERE tx_num = ?",
+            params![tx_num],
+        )?;
+        conn.execute(
+            "DELETE FROM jazz_tx_rejection WHERE tx_num = ?",
+            params![tx_num],
+        )?;
+        conn.execute("DELETE FROM jazz_tx WHERE tx_num = ?", params![tx_num])?;
+        deleted += 1;
+    }
+    Ok(deleted)
+}
+
 fn tx_can_leave_open_store(
     conn: &Connection,
     schema: &SchemaDef,
@@ -5977,10 +6130,11 @@ fn decoded_history_blocks_for_table(conn: &Connection, table_name: &str) -> Resu
     let mut stmt = conn.prepare(
         "SELECT codec, format_version, payload
          FROM history_blocks
-         WHERE table_num = ?
+         WHERE block_kind = ?
+           AND table_num = ?
          ORDER BY row_num, min_global_epoch, block_id",
     )?;
-    let rows = stmt.query_map(params![table_num], |row| {
+    let rows = stmt.query_map(params![HISTORY_BLOCK_KIND_ACCEPTED, table_num], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
@@ -6084,14 +6238,21 @@ fn decoded_history_blocks_for_row_epoch(
     let mut stmt = conn.prepare(
         "SELECT codec, format_version, payload
          FROM history_blocks
-         WHERE table_num = ?
+         WHERE block_kind = ?
+           AND table_num = ?
            AND row_num = ?
            AND min_global_epoch <= ?
            AND max_global_epoch >= ?
          ORDER BY max_global_epoch DESC, min_global_epoch, block_id",
     )?;
     let rows = stmt.query_map(
-        params![table_num, row_num, global_epoch, global_epoch],
+        params![
+            HISTORY_BLOCK_KIND_ACCEPTED,
+            table_num,
+            row_num,
+            global_epoch,
+            global_epoch
+        ],
         |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -6152,6 +6313,39 @@ fn sealed_transaction_info(conn: &Connection, tx_id: &str) -> Result<Transaction
         }
     }
     Err(crate::Error::new(format!("unknown transaction {tx_id}")))
+}
+
+fn sealed_rejected_transactions(conn: &Connection) -> Result<Vec<RejectionInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT codec, format_version, payload
+         FROM history_blocks
+         WHERE block_kind = ?
+         ORDER BY min_global_epoch, block_id",
+    )?;
+    let rows = stmt.query_map(params![HISTORY_BLOCK_KIND_REJECTED], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut rejections = Vec::new();
+    for row in rows {
+        let (codec, format_version, payload) = row?;
+        let bundle = decode_history_block_payload(&codec, format_version, &payload)?;
+        rejections.extend(
+            bundle
+                .txs
+                .into_iter()
+                .filter(|tx| tx.outcome == tx::OUTCOME_REJECTED)
+                .map(|tx| RejectionInfo {
+                    tx_id: tx.tx_id,
+                    code: tx.rejection_code.unwrap_or_else(|| "rejected".to_owned()),
+                    detail: tx.rejection_detail,
+                }),
+        );
+    }
+    Ok(rejections)
 }
 
 fn decoded_history_blocks_for_tx(conn: &Connection, tx_id: &str) -> Result<Vec<Bundle>> {

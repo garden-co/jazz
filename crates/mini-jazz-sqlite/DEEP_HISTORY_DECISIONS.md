@@ -50,3 +50,19 @@ Decision: accepted compaction must always retain the current visible history row
 Why: current reads use the current projection, but rebuild/replay still needs an ordinary open head until projection rebuild is block-aware. Deleting the visible head would make compaction appear correct until a rebuild or restart path needed history as the source of truth.
 
 Scope impact: the first compactor can seal old history aggressively but treats the current visible tx as operational state.
+
+## Wed May 27 23:16:38 PDT 2026
+
+Decision: represent accepted and rejected sealed history as different block kinds in one physical `history_blocks` table, rather than creating parallel accepted/rejected block tables.
+
+Why: the block payload, lz4 codec, tx-range index, and point lookup mechanics are identical. A `block_kind` keeps accepted and rejected history logically separate while letting us reuse the same storage and decoder paths. If rejected history later needs a substantially different payload, the kind boundary is still enough to route it.
+
+Scope impact: accepted export and point-read paths must filter to accepted blocks. Rejected diagnostics can decode only rejected blocks, and old rejected rows can leave `history_open` without polluting accepted snapshots.
+
+## Wed May 27 23:18:18 PDT 2026
+
+Decision: add batched SQLite commit policy as a stretch goal in the sealed-history RFC, separate from block compaction.
+
+Why: compaction reduces the steady-state byte cost of deep history, but the write workloads also pay a large per-logical-write SQLite transaction cost. Grouping multiple logical Jazz transactions into one SQLite commit should improve import and high-frequency write throughput while preserving per-logical-tx ids and listener events.
+
+Scope impact: this remains design-only for now. The block work should not hide whether wins come from fewer bytes or fewer durable commit boundaries, so future benchmarks should keep those dimensions separate.

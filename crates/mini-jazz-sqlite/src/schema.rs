@@ -415,6 +415,7 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS history_blocks (
           block_id INTEGER PRIMARY KEY,
+          block_kind INTEGER NOT NULL,
           table_num INTEGER NOT NULL,
           row_num INTEGER NOT NULL,
           min_global_epoch INTEGER NOT NULL,
@@ -429,7 +430,7 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS history_blocks_row_epoch
-          ON history_blocks(table_num, row_num, max_global_epoch DESC, min_global_epoch);
+          ON history_blocks(block_kind, table_num, row_num, max_global_epoch DESC, min_global_epoch);
 
         CREATE TABLE IF NOT EXISTS history_block_tx_index (
           node_num INTEGER NOT NULL,

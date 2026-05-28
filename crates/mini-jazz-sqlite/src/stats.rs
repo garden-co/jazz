@@ -20,11 +20,17 @@ pub(crate) fn collect(conn: &Connection, schema: &SchemaDef) -> Result<StorageSt
         [],
         |row| row.get(0),
     )?;
-    let rejected_transactions: i64 = conn.query_row(
+    let open_rejected_transactions: i64 = conn.query_row(
         "SELECT COUNT(*) FROM jazz_tx WHERE outcome = ?",
         params![tx::OUTCOME_REJECTED],
         |row| row.get(0),
     )?;
+    let sealed_rejected_transactions: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(tx_count), 0) FROM history_blocks WHERE block_kind = 2",
+        [],
+        |row| row.get(0),
+    )?;
+    let rejected_transactions = open_rejected_transactions + sealed_rejected_transactions;
     let mut stmt = conn.prepare("SELECT tx_id, tx_num FROM jazz_tx_public")?;
     let tx_nums = stmt
         .query_map([], |row| {

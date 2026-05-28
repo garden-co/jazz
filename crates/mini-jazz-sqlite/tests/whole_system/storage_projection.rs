@@ -4,7 +4,7 @@ use super::*;
 fn memory_runtime_writes_through_sqlite_current_projection() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
-    assert_eq!(alice.storage_format_version().unwrap(), 10);
+    assert_eq!(alice.storage_format_version().unwrap(), 11);
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -40,7 +40,7 @@ fn durable_storage_is_tagged_with_format_version() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn future_storage_format_versions_fail_before_opening_runtime() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("future.sqlite");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 11).unwrap();
+    conn.pragma_update(None, "user_version", 12).unwrap();
     drop(conn);
 
     let err = match Runtime::open(Storage::File(path), "worker", "alice") {
@@ -58,7 +58,7 @@ fn future_storage_format_versions_fail_before_opening_runtime() {
 
     assert!(err
         .to_string()
-        .contains("unsupported storage format version 11"));
+        .contains("unsupported storage format version 12"));
 }
 
 #[test]
@@ -385,6 +385,70 @@ fn table_compaction_seals_each_deep_row_independently() {
     assert_eq!(stats.sealed_history_rows, 6);
     assert_eq!(alice.storage_stats().unwrap().history_rows, 2);
     assert_eq!(alice.read_rows("notes").unwrap().len(), 2);
+}
+
+#[test]
+fn rejected_history_compaction_keeps_diagnostics_but_not_accepted_exports() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-1",
+            BTreeMap::from([("title".to_owned(), json!("Private doc"))]),
+        )
+        .unwrap();
+    bob.apply_bundle(&alice.export_table_history("docs").unwrap())
+        .unwrap();
+    let rejected_tx = bob
+        .insert_row(
+            "comments",
+            "comment-denied",
+            BTreeMap::from([
+                ("body".to_owned(), json!("not allowed")),
+                ("doc".to_owned(), json!("doc-1")),
+            ]),
+        )
+        .unwrap();
+
+    let stats = bob
+        .compact_rejected_history("comments", "comment-denied", 0)
+        .unwrap();
+
+    assert_eq!(stats.history_blocks, 1);
+    assert_eq!(stats.sealed_history_rows, 1);
+    assert_eq!(bob.storage_stats().unwrap().history_rows, 1);
+    assert_eq!(bob.storage_stats().unwrap().rejected_transactions, 1);
+    assert_eq!(
+        bob.transaction_info(&rejected_tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+    assert_eq!(
+        bob.rejected_transactions().unwrap(),
+        vec![RejectionInfo {
+            tx_id: rejected_tx.clone(),
+            code: "policy_denied".to_owned(),
+            detail: None,
+        }]
+    );
+    assert!(!bob
+        .export_table_history("comments")
+        .unwrap()
+        .history
+        .iter()
+        .any(|record| record.tx_id == rejected_tx));
 }
 
 #[test]

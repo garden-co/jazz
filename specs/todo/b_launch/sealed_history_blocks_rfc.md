@@ -566,6 +566,38 @@ The initial success criterion is not sub-1s everything. The first success
 criterion is a clear storage reduction without breaking current reads or making
 historical point reads obviously pathological.
 
+## Stretch Goal: Batched SQLite Commit Policy
+
+History blocks reduce stored bytes after compaction, but they do not directly
+fix the cost of doing many tiny write transactions. Import, LLM streaming, and
+high-frequency presence/canvas updates can all be much faster if the runtime can
+group multiple logical Jazz transactions into one SQLite transaction.
+
+This should be an explicit write policy, not a semantic change:
+
+- each logical Jazz transaction keeps its own public tx id, read set, write set,
+  outcome, and subscription event
+- the SQLite commit boundary may contain many logical Jazz transactions
+- readers outside the writer observe the batch atomically at the SQLite level
+- in-process listeners can still receive per-logical-transaction events after
+  the grouped commit, preserving application semantics while accepting a small
+  latency tradeoff
+- the policy should be configurable by count, byte estimate, and max wall-clock
+  delay
+- explicit user transactions should still commit immediately unless the caller
+  opts into import/stream batching
+
+Open questions:
+
+- whether to expose this as an import API, a runtime option, or an adaptive
+  scheduler mode
+- how to bound listener latency for realtime streams
+- how to report partial progress if a large grouped import fails validation
+- whether compaction should run opportunistically at grouped-commit boundaries
+
+Benchmarks should add a write-batch dimension beside storage compaction so we
+can distinguish "fewer durable commits" wins from "fewer stored bytes" wins.
+
 ## Non-Goals For The First Version
 
 - custom SQLite VFS
