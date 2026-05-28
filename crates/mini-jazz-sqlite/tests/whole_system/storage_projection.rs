@@ -1063,6 +1063,18 @@ fn point_read_at_global_epoch_can_decode_sealed_history_block() {
             .values["body"],
         json!("v6")
     );
+
+    alice
+        .compact_accepted_history("notes", "note-1", 0)
+        .unwrap();
+    assert_eq!(
+        alice
+            .read_row_at_global_epoch("notes", "note-1", 99)
+            .unwrap()
+            .unwrap()
+            .values["body"],
+        json!("v6")
+    );
 }
 
 #[test]
