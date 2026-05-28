@@ -1,6 +1,6 @@
 use crate::schema::{current_table, history_table, SchemaDef};
 use crate::tx;
-use crate::types::{StorageFileBytes, StoragePageBytes, StorageStats};
+use crate::types::{StorageFileBytes, StorageHistoryCounts, StoragePageBytes, StorageStats};
 use crate::Result;
 use rusqlite::{params, Connection};
 use std::collections::BTreeMap;
@@ -14,6 +14,12 @@ pub(crate) fn collect(conn: &Connection, schema: &SchemaDef) -> Result<StorageSt
         history_rows += count_rows(conn, &history_table(&table.name))?;
         current_rows += count_rows(conn, &current_table(&table.name))?;
     }
+    let history_blocks = count_rows(conn, "history_blocks")?;
+    let sealed_history_rows: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(row_count), 0) FROM history_blocks",
+        [],
+        |row| row.get(0),
+    )?;
     let rejected_transactions: i64 = conn.query_row(
         "SELECT COUNT(*) FROM jazz_tx WHERE outcome = ?",
         params![tx::OUTCOME_REJECTED],
@@ -32,7 +38,11 @@ pub(crate) fn collect(conn: &Connection, schema: &SchemaDef) -> Result<StorageSt
     };
     let file_sizes = sqlite_file_sizes(conn)?;
     Ok(StorageStats::new(
-        history_rows,
+        StorageHistoryCounts {
+            open_rows: history_rows,
+            sealed_rows: sealed_history_rows,
+            blocks: history_blocks,
+        },
         current_rows,
         rejected_transactions,
         page_bytes,

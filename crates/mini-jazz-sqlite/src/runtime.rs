@@ -6,8 +6,8 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::types::{
-    ApplyBundleProfile, BranchInfo, QueryExportProfile, RejectionInfo, RowView, StorageStats,
-    TransactionInfo,
+    ApplyBundleProfile, BranchInfo, HistoryCompactionStats, QueryExportProfile, RejectionInfo,
+    RowView, StorageStats, TransactionInfo,
 };
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
@@ -17,6 +17,9 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
+const HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
 
 pub struct Runtime {
     conn: Connection,
@@ -390,8 +393,8 @@ impl Runtime {
         self.schema.table_def(table_name)?;
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
-        let txs = export_txs(&self.conn)?;
-        let history = export_table_history(
+        let mut txs = export_txs(&self.conn)?;
+        let mut history = export_table_history(
             &self.conn,
             &self.schema,
             table_name,
@@ -399,6 +402,16 @@ impl Runtime {
             bypass_policy,
             self.branch_num,
         )?;
+        let sealed = decoded_history_blocks_for_table(&self.conn, table_name)?;
+        if !sealed.is_empty() {
+            for block in sealed {
+                txs.extend(block.txs);
+                history.extend(block.history);
+            }
+            sort_history_records(&mut history);
+            dedupe_history_records(&mut history);
+            dedupe_txs(&mut txs);
+        }
         let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
@@ -410,6 +423,104 @@ impl Runtime {
             Vec::new(),
             history,
         ))
+    }
+
+    pub fn compact_accepted_history(
+        &mut self,
+        table_name: &str,
+        row_id: &str,
+        hot_tail: usize,
+    ) -> Result<HistoryCompactionStats> {
+        self.schema.table_def(table_name)?;
+        let row_num = row_num(&self.conn, row_id)?;
+        let table_num = crate::schema::table_num(&self.conn, table_name)?;
+        let selected = compactable_history_tx_nums(&self.conn, table_name, row_num, hot_tail)?;
+        if selected.is_empty() {
+            return Ok(HistoryCompactionStats {
+                sealed_history_rows: 0,
+                history_blocks: 0,
+                sealed_transactions: 0,
+                uncompressed_bytes: 0,
+                compressed_bytes: 0,
+            });
+        }
+        let mut history = export_history_versions_for_rows(
+            &self.conn,
+            &self.schema,
+            table_name,
+            Some(&[row_num]),
+            None,
+        )?;
+        let selected_set = selected.iter().copied().collect::<BTreeSet<_>>();
+        history.retain(|record| {
+            tx::tx_num(&self.conn, &record.tx_id)
+                .map(|tx_num| selected_set.contains(&tx_num))
+                .unwrap_or(false)
+        });
+        let tx_ids = history
+            .iter()
+            .map(|record| record.tx_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let txs = export_txs_by_ids(&self.conn, tx_ids)?;
+        let branches = export_branch_records_for_history(&self.conn, &history)?;
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let payload_bundle = make_bundle(
+            &self.schema,
+            branches,
+            txs.clone(),
+            reads,
+            Vec::new(),
+            history.clone(),
+        );
+        let uncompressed = serde_json::to_vec(&payload_bundle)
+            .map_err(|err| crate::Error::new(format!("encode history block: {err}")))?;
+        let compressed = lz4_flex::compress_prepend_size(&uncompressed);
+        let min_epoch = selected
+            .iter()
+            .map(|tx_num| tx_epoch_for_block(&self.conn, *tx_num))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .min()
+            .unwrap_or(0);
+        let max_epoch = selected
+            .iter()
+            .map(|tx_num| tx_epoch_for_block(&self.conn, *tx_num))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+
+        let db = self.conn.transaction()?;
+        db.execute(
+            "INSERT INTO history_blocks
+             (table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                table_num,
+                row_num,
+                min_epoch,
+                max_epoch,
+                history.len() as i64,
+                txs.len() as i64,
+                HISTORY_BLOCK_CODEC,
+                HISTORY_BLOCK_FORMAT_VERSION,
+                uncompressed.len() as i64,
+                compressed.len() as i64,
+                compressed,
+            ],
+        )?;
+        let block_id = db.last_insert_rowid();
+        insert_history_block_tx_index(&db, block_id, &selected)?;
+        delete_history_rows_for_tx_nums(&db, table_name, row_num, &selected)?;
+        db.commit()?;
+
+        Ok(HistoryCompactionStats {
+            sealed_history_rows: history.len() as i64,
+            history_blocks: 1,
+            sealed_transactions: 0,
+            uncompressed_bytes: uncompressed.len() as i64,
+            compressed_bytes: compressed.len() as i64,
+        })
     }
 
     pub fn export_exclusive_transaction_forwarding(
@@ -5548,6 +5659,143 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
         .map_err(Into::into)
 }
 
+fn dedupe_txs(records: &mut Vec<TxRecord>) {
+    let mut by_id = BTreeMap::new();
+    for record in records.drain(..) {
+        by_id.insert(record.tx_id.clone(), record);
+    }
+    records.extend(by_id.into_values());
+    records.sort_by(|left, right| tx_sort_key(&left.tx_id).cmp(&tx_sort_key(&right.tx_id)));
+}
+
+fn compactable_history_tx_nums(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    hot_tail: usize,
+) -> Result<Vec<i64>> {
+    let sql = format!(
+        "SELECT h.tx_num
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.row_num = ?
+           AND h.j_branch_num = 1
+           AND tx.outcome != ?
+         ORDER BY COALESCE(tx.global_epoch, tx.local_epoch), h.tx_num",
+        crate::schema::history_table(table_name),
+    );
+    let tx_nums = conn
+        .prepare(&sql)?
+        .query_map(params![row_num, tx::OUTCOME_REJECTED], |row| {
+            row.get::<_, i64>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let compact_len = tx_nums.len().saturating_sub(hot_tail);
+    Ok(tx_nums.into_iter().take(compact_len).collect())
+}
+
+fn tx_epoch_for_block(conn: &Connection, tx_num: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(global_epoch, local_epoch) FROM jazz_tx WHERE tx_num = ?",
+        params![tx_num],
+        |row| row.get(0),
+    )?)
+}
+
+fn insert_history_block_tx_index(conn: &Connection, block_id: i64, tx_nums: &[i64]) -> Result<()> {
+    let mut by_node = BTreeMap::<i64, (i64, i64)>::new();
+    for tx_num in tx_nums {
+        let (node_num, local_epoch) = conn.query_row(
+            "SELECT node_num, local_epoch FROM jazz_tx WHERE tx_num = ?",
+            params![tx_num],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        by_node
+            .entry(node_num)
+            .and_modify(|range| {
+                range.0 = range.0.min(local_epoch);
+                range.1 = range.1.max(local_epoch);
+            })
+            .or_insert((local_epoch, local_epoch));
+    }
+    for (node_num, (min_local_epoch, max_local_epoch)) in by_node {
+        conn.execute(
+            "INSERT INTO history_block_tx_index
+             (node_num, min_local_epoch, max_local_epoch, block_id)
+             VALUES (?, ?, ?, ?)",
+            params![node_num, min_local_epoch, max_local_epoch, block_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn delete_history_rows_for_tx_nums(
+    conn: &Connection,
+    table_name: &str,
+    row_num: i64,
+    tx_nums: &[i64],
+) -> Result<()> {
+    if tx_nums.is_empty() {
+        return Ok(());
+    }
+    let placeholders = (0..tx_nums.len())
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "DELETE FROM {}
+         WHERE row_num = ?
+           AND tx_num IN ({placeholders})",
+        crate::schema::history_table(table_name),
+    );
+    let mut params = Vec::<rusqlite::types::Value>::with_capacity(tx_nums.len() + 1);
+    params.push(rusqlite::types::Value::Integer(row_num));
+    params.extend(
+        tx_nums
+            .iter()
+            .map(|tx_num| rusqlite::types::Value::Integer(*tx_num)),
+    );
+    conn.execute(&sql, params_from_iter(params.iter()))?;
+    Ok(())
+}
+
+fn decoded_history_blocks_for_table(conn: &Connection, table_name: &str) -> Result<Vec<Bundle>> {
+    let table_num = crate::schema::table_num(conn, table_name)?;
+    let mut stmt = conn.prepare(
+        "SELECT codec, format_version, payload
+         FROM history_blocks
+         WHERE table_num = ?
+         ORDER BY row_num, min_global_epoch, block_id",
+    )?;
+    let rows = stmt.query_map(params![table_num], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut bundles = Vec::new();
+    for row in rows {
+        let (codec, format_version, payload) = row?;
+        if codec != HISTORY_BLOCK_CODEC {
+            return Err(crate::Error::new(format!(
+                "unsupported history block codec {codec}"
+            )));
+        }
+        if format_version != HISTORY_BLOCK_FORMAT_VERSION {
+            return Err(crate::Error::new(format!(
+                "unsupported history block format version {format_version}"
+            )));
+        }
+        let decoded = lz4_flex::decompress_size_prepended(&payload)
+            .map_err(|err| crate::Error::new(format!("decode history block: {err}")))?;
+        let bundle = serde_json::from_slice::<Bundle>(&decoded)
+            .map_err(|err| crate::Error::new(format!("decode history block bundle: {err}")))?;
+        bundles.push(bundle);
+    }
+    Ok(bundles)
+}
+
 fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
     let detail = serde_json::from_str::<JsonValue>(detail_json)
         .map_err(|err| crate::Error::new(format!("invalid rejection detail JSON: {err}")))?;
@@ -6662,6 +6910,36 @@ fn dedupe_history_records(records: &mut Vec<HistoryRecord>) {
             record.op,
         ))
     });
+}
+
+fn sort_history_records(records: &mut [HistoryRecord]) {
+    records.sort_by(|left, right| {
+        (
+            left.table.as_str(),
+            left.row_id.as_str(),
+            tx_sort_key(&left.tx_id),
+            left.branch_id.as_str(),
+            left.op,
+        )
+            .cmp(&(
+                right.table.as_str(),
+                right.row_id.as_str(),
+                tx_sort_key(&right.tx_id),
+                right.branch_id.as_str(),
+                right.op,
+            ))
+    });
+}
+
+fn tx_sort_key(tx_id: &str) -> (&str, i64) {
+    let Some(rest) = tx_id.strip_prefix("tx-") else {
+        return (tx_id, 0);
+    };
+    let Some((node, epoch)) = rest.rsplit_once('-') else {
+        return (tx_id, 0);
+    };
+    let epoch = epoch.parse::<i64>().unwrap_or(0);
+    (node, epoch)
 }
 
 fn export_visible_table_history(

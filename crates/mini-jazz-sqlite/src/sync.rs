@@ -472,7 +472,7 @@ fn legacy_policy_fingerprint() -> String {
     "legacy".to_owned()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchRecord {
     pub branch_id: String,
     pub base_global_epoch: Option<i64>,
@@ -481,7 +481,7 @@ pub struct BranchRecord {
     pub source_version: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxRecord {
     pub tx_id: String,
     pub node_id: String,
@@ -498,7 +498,7 @@ pub struct TxRecord {
     pub created_at: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadRecord {
     pub tx_id: String,
     pub table: String,
@@ -541,7 +541,7 @@ fn default_query_predicate_op() -> String {
     "eq".to_owned()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryRecord {
     pub table: String,
     pub row_id: String,

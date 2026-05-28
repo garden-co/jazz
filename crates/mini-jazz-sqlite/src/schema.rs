@@ -413,6 +413,32 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           PRIMARY KEY (branch_id, table_name, field_name, op, value_json)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS history_blocks (
+          block_id INTEGER PRIMARY KEY,
+          table_num INTEGER NOT NULL,
+          row_num INTEGER NOT NULL,
+          min_global_epoch INTEGER NOT NULL,
+          max_global_epoch INTEGER NOT NULL,
+          row_count INTEGER NOT NULL,
+          tx_count INTEGER NOT NULL,
+          codec TEXT NOT NULL,
+          format_version INTEGER NOT NULL,
+          uncompressed_bytes INTEGER NOT NULL,
+          compressed_bytes INTEGER NOT NULL,
+          payload BLOB NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS history_blocks_row_epoch
+          ON history_blocks(table_num, row_num, max_global_epoch DESC, min_global_epoch);
+
+        CREATE TABLE IF NOT EXISTS history_block_tx_index (
+          node_num INTEGER NOT NULL,
+          min_local_epoch INTEGER NOT NULL,
+          max_local_epoch INTEGER NOT NULL,
+          block_id INTEGER NOT NULL,
+          PRIMARY KEY (node_num, max_local_epoch, min_local_epoch, block_id)
+        ) WITHOUT ROWID;
+
         CREATE TABLE IF NOT EXISTS jazz_row_id (
           row_num INTEGER PRIMARY KEY,
           row_id TEXT NOT NULL UNIQUE

@@ -4,7 +4,7 @@ use super::*;
 fn memory_runtime_writes_through_sqlite_current_projection() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
-    assert_eq!(alice.storage_format_version().unwrap(), 9);
+    assert_eq!(alice.storage_format_version().unwrap(), 10);
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -20,6 +20,8 @@ fn memory_runtime_writes_through_sqlite_current_projection() {
 
     let stats = alice.storage_stats().unwrap();
     assert_eq!(stats.history_rows, 2);
+    assert_eq!(stats.sealed_history_rows, 0);
+    assert_eq!(stats.history_blocks, 0);
     assert_eq!(stats.current_rows, 2);
     assert!(stats.page_count > 0);
     assert!(stats.page_size > 0);
@@ -38,7 +40,7 @@ fn durable_storage_is_tagged_with_format_version() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
 }
 
 #[test]
@@ -46,7 +48,7 @@ fn future_storage_format_versions_fail_before_opening_runtime() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("future.sqlite");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 10).unwrap();
+    conn.pragma_update(None, "user_version", 11).unwrap();
     drop(conn);
 
     let err = match Runtime::open(Storage::File(path), "worker", "alice") {
@@ -56,7 +58,7 @@ fn future_storage_format_versions_fail_before_opening_runtime() {
 
     assert!(err
         .to_string()
-        .contains("unsupported storage format version 10"));
+        .contains("unsupported storage format version 11"));
 }
 
 #[test]
@@ -190,6 +192,58 @@ fn rebuild_current_projection_from_history_matches_current_reads() {
 
     alice.rebuild_current_projection().unwrap();
     assert_eq!(alice.open_todos().unwrap(), before);
+}
+
+#[test]
+fn accepted_history_compaction_seals_old_versions_without_changing_exports() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    for idx in 2..=6 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+
+    let before_rows = alice.read_rows("notes").unwrap();
+    let before_bundle = alice.export_table_history("notes").unwrap();
+    assert_eq!(before_bundle.history.len(), 6);
+
+    let compacted = alice
+        .compact_accepted_history("notes", "note-1", 2)
+        .unwrap();
+    assert_eq!(compacted.sealed_history_rows, 4);
+    assert_eq!(compacted.history_blocks, 1);
+
+    let stats = alice.storage_stats().unwrap();
+    assert_eq!(stats.history_rows, 2);
+    assert_eq!(stats.sealed_history_rows, 4);
+    assert_eq!(stats.history_blocks, 1);
+    assert_eq!(alice.read_rows("notes").unwrap(), before_rows);
+
+    let after_bundle = alice.export_table_history("notes").unwrap();
+    assert_eq!(after_bundle.history, before_bundle.history);
+    assert_eq!(after_bundle.txs, before_bundle.txs);
+    assert_eq!(after_bundle.reads, before_bundle.reads);
+
+    bob.apply_bundle(&after_bundle).unwrap();
+    assert_eq!(bob.read_rows("notes").unwrap(), before_rows);
 }
 
 #[test]

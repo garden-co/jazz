@@ -38,6 +38,8 @@ pub struct BranchInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StorageStats {
     pub history_rows: i64,
+    pub sealed_history_rows: i64,
+    pub history_blocks: i64,
     pub current_rows: i64,
     pub rejected_transactions: i64,
     pub page_count: i64,
@@ -64,6 +66,12 @@ pub(crate) struct StoragePageBytes {
     pub object_bytes: BTreeMap<String, i64>,
 }
 
+pub(crate) struct StorageHistoryCounts {
+    pub open_rows: i64,
+    pub sealed_rows: i64,
+    pub blocks: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionInfo {
     pub tx_id: String,
@@ -73,6 +81,15 @@ pub struct TransactionInfo {
     pub awaiting_dependency: Option<JsonValue>,
     pub rejection_code: Option<String>,
     pub rejection_detail: Option<JsonValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HistoryCompactionStats {
+    pub sealed_history_rows: i64,
+    pub history_blocks: i64,
+    pub sealed_transactions: i64,
+    pub uncompressed_bytes: i64,
+    pub compressed_bytes: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,7 +145,7 @@ pub struct ApplyBundleProfile {
 
 impl StorageStats {
     pub(crate) fn new(
-        history_rows: i64,
+        history_counts: StorageHistoryCounts,
         current_rows: i64,
         rejected_transactions: i64,
         page_bytes: StoragePageBytes,
@@ -137,7 +154,9 @@ impl StorageStats {
     ) -> Self {
         let total_file_bytes = file_bytes.main + file_bytes.wal + file_bytes.shm;
         Self {
-            history_rows,
+            history_rows: history_counts.open_rows,
+            sealed_history_rows: history_counts.sealed_rows,
+            history_blocks: history_counts.blocks,
             current_rows,
             rejected_transactions,
             page_count: page_bytes.count,
