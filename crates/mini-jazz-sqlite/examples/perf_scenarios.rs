@@ -4163,7 +4163,7 @@ fn run_append_stream_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 2_225);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 445).max(1);
-    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every).max(1);
+    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
     let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
     let mut state = String::new();
     run_naive_deep_history_case(DeepHistoryCaseInput {
@@ -4239,7 +4239,7 @@ fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseRepo
         .min(trace.txns.len());
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 580).max(1);
-    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every).max(1);
+    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
     let mut state = trace.start_content;
     let txns = trace.txns;
     let available_txns = txns.len();
@@ -4358,7 +4358,7 @@ fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseRep
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES", 3_900);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 780).max(1);
-    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every).max(1);
+    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
     let mut all_positions = Vec::with_capacity(target_updates);
     for frame in 0..target_updates {
         all_positions.push(canvas_position_json(frame));
