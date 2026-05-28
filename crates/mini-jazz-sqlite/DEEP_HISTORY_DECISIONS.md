@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:48:16 PDT 2026
+
+Decision: add grouped deep-history selectors for Block and Incr probes too.
+
+Why: the comparison table is organized by experiment column, so benchmark smoke runs should be able to run all three scenarios for the baseline, Block, or Incr/rope shapes without invoking unrelated perf probes.
+
+Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-history-blocks` runs the three Block probes and `all-jazz-rope`/`all-incr` runs the three sidecar probes. Tiny smoke runs verified both selectors.
+
 ## Thu May 28 03:47:01 PDT 2026
 
 Decision: add scenario-specific deep-history sample interval env vars.

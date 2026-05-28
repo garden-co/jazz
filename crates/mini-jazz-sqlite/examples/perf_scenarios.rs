@@ -21,8 +21,7 @@ type BenchResult<T> = std::result::Result<T, Box<dyn Error>>;
 fn main() -> BenchResult<()> {
     let config = Config::from_env();
     if let Ok(kind) = env::var("MINI_JAZZ_PERF_ONLY_DEEP_HISTORY") {
-        if matches!(kind.as_str(), "all" | "canonical") {
-            let report = run_all_deep_history_probes()?;
+        if let Some(report) = run_deep_history_group_probe(&kind)? {
             println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());
         }
@@ -4140,7 +4139,7 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
             DeepHistoryReport::CanvasPositionsJazzRope(run_canvas_positions_jazz_rope_probe()?),
         ),
         other => Err(format!(
-            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected all, append, append-history-blocks, append-jazz-rope, automerge-paper, automerge-history-blocks, automerge-paper-jazz-rope, canvas, canvas-history-blocks, or canvas-jazz-rope"
+            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected all, all-history-blocks, all-jazz-rope, append, append-history-blocks, append-jazz-rope, automerge-paper, automerge-history-blocks, automerge-paper-jazz-rope, canvas, canvas-history-blocks, or canvas-jazz-rope"
         )
         .into()),
     }
@@ -4152,6 +4151,37 @@ fn run_all_deep_history_probes() -> BenchResult<Vec<DeepHistoryReport>> {
         DeepHistoryReport::AutomergePaper(run_automerge_paper_probe()?),
         DeepHistoryReport::CanvasPositions(run_canvas_positions_probe()?),
     ])
+}
+
+fn run_all_deep_history_block_probes() -> BenchResult<Vec<DeepHistoryReport>> {
+    Ok(vec![
+        DeepHistoryReport::AppendStreamHistoryBlocks(run_append_stream_history_blocks_probe()?),
+        DeepHistoryReport::AutomergePaperHistoryBlocks(run_automerge_paper_history_blocks_probe()?),
+        DeepHistoryReport::CanvasPositionsHistoryBlocks(
+            run_canvas_positions_history_blocks_probe()?
+        ),
+    ])
+}
+
+fn run_all_deep_history_rope_probes() -> BenchResult<Vec<DeepHistoryReport>> {
+    Ok(vec![
+        DeepHistoryReport::AppendStreamJazzRope(run_append_stream_jazz_rope_probe()?),
+        DeepHistoryReport::AutomergePaperJazzRope(run_automerge_paper_jazz_rope_probe()?),
+        DeepHistoryReport::CanvasPositionsJazzRope(run_canvas_positions_jazz_rope_probe()?),
+    ])
+}
+
+fn run_deep_history_group_probe(kind: &str) -> BenchResult<Option<Vec<DeepHistoryReport>>> {
+    match kind {
+        "all" | "canonical" | "all-baseline" | "all-base" => {
+            Ok(Some(run_all_deep_history_probes()?))
+        }
+        "all-history-blocks" | "all-blocks" | "all-block" => {
+            Ok(Some(run_all_deep_history_block_probes()?))
+        }
+        "all-jazz-rope" | "all-rope" | "all-incr" => Ok(Some(run_all_deep_history_rope_probes()?)),
+        _ => Ok(None),
+    }
 }
 
 fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {

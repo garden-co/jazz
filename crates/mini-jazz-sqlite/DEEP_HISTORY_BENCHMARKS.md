@@ -24,9 +24,11 @@ input size. A full result includes:
 - storage stats
 
 `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all` runs append, Automerge, and canvas
-without running the broader perf suite. Use it for smoke checks or when all
-three scenarios should run together. Scenario-specific sample intervals override
-the shared `MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY`.
+baseline probes without running the broader perf suite. `all-history-blocks`
+runs the Block probes, and `all-jazz-rope` runs the Incr sidecar probes. Use
+these for smoke checks or when all three scenarios should run together.
+Scenario-specific sample intervals override the shared
+`MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY`.
 
 Current canonical inputs use scenario-specific sample intervals:
 
