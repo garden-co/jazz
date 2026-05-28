@@ -259,6 +259,24 @@ Each outer row in an `include()` / array subquery gets its own compiled sub-grap
 rows, that is 1,000 sub-graphs. Any change to the inner table re-settles all instances. This is
 correct and simple, but worth remembering when including across very large result sets.
 
+### Orchestrator cache and key contract
+
+Client framework bindings (React/Vue/Svelte) don't talk to `Db.subscribeAll` directly. A `SubscriptionsOrchestrator` sits in between, deduplicating identical subscriptions and exposing a cache that survives unmount→remount cycles. Hooks like `useAll(query, options)` go through it.
+
+Each cache entry is keyed by a string built from three deterministic inputs:
+
+```text
+${appId}:${canonicalStringify(options)}:${query._build()}
+```
+
+- `appId` comes from `DbConfig`.
+- `options` is canonicalised — keys sorted recursively — so `{tier:"edge", localUpdates:"deferred"}` and `{localUpdates:"deferred", tier:"edge"}` collide.
+- `query._build()` is a stable JSON serialisation of the `QueryBuilder` (table, conditions, includes, select, order, limit, hops, gather, …).
+
+This contract is what makes server-rendered hydration possible: the server computes the same key with the public `computeQueryKey(appId, query, options)` helper, the orchestrator's `seedSnapshot(key, snapshot)` writes a fulfilled entry under that key, and the matching client-side `useAll(query, options)` call finds it on first render. See the [Hydrate from server-rendered queries](/docs/recipes/server-rendering/hydrate-prerendered-queries) recipe.
+
+The backend `ClientBackedDb` returned by `JazzContext.forSession()` / `asBackend()` does not run through an orchestrator — server-side reads are one-shot, no subscription dedup needed. The SSR `prefetch` helper is the thin bridge: it runs the one-shot query through the backend `Db` and computes an orchestrator-shaped key for the result, so the client orchestrator can consume it later.
+
 ## Sync protocol
 
 ### Transport

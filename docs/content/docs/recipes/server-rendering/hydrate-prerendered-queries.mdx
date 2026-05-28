@@ -1,0 +1,188 @@
+---
+title: "Hydrate from server-rendered queries"
+description: Prefetch Jazz queries on the server, embed the results in the rendered HTML, and seed the client orchestrator so the first paint after hydration shows resolved data without a loading flash or a client-side fetch.
+reviewedAt: ""
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+Server-render a page that already contains your Jazz data, then let the client take over without refetching it on mount. The server runs the query through its backend `Db`, the result is dehydrated into a small JSON envelope, the envelope crosses the RSC boundary, and `<JazzProvider>` seeds its cache before the first child renders.
+
+## What this is for
+
+- Eliminating the empty-state flash on initial page load.
+- Skipping the round-trip a client otherwise pays before sync delivers data.
+- Keeping the rest of Jazz's local-first behaviour unchanged — once mounted, the client subscribes to the same query and sync corrects the snapshot to live state.
+
+## What this is _not_ for
+
+Read these before you reach for the API:
+
+- **Catching the client up to the latest CRDT state at hydrate time.** The snapshot is a point-in-time read of resolved values; sync delivers fresher state after mount.
+- **Server mutations.** This path is read-only — write through normal client APIs.
+- **Streaming Suspense snapshots.** One envelope per render, captured before the response is sent.
+- **Multi-principal pages.** One authenticated principal per snapshot.
+- **Failed queries.** If a prefetch throws on the server, the snapshot just doesn't include that entry; the client refetches on mount.
+
+## The flow
+
+```
+Server                                    Client
+──────                                    ──────
+forSession(s)        ──►  Db
+  │
+prefetch(db, query)  ──►  result
+  │
+dehydrate()          ──►  envelope  ──►  <JazzProvider snapshot={envelope}>
+                                              │
+                                          orchestrator.seedSnapshot(key, result)
+                                              │
+                                          useAll(query) → hits a fulfilled
+                                                          entry on first render
+```
+
+## Server: prefetch a query
+
+```ts title="lib/jazz-server.ts"
+import { createJazzContext, createSnapshotBuilder } from "jazz-tools/backend";
+import { app } from "../schema";
+import permissions from "../permissions";
+
+const context = createJazzContext({
+  appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+  app,
+  permissions,
+  driver: { type: "memory" },
+  serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
+  backendSecret: process.env.BACKEND_SECRET!,
+});
+
+// Build a fresh snapshot builder for every server render so prefetches
+// don't bleed between requests.
+export function createServerSnapshot() {
+  return createSnapshotBuilder({
+    appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+    schema: app.wasmSchema,
+  });
+}
+
+export { context };
+```
+
+In a Server Component, resolve a `Db` scoped to the right principal, run the queries the page renders, and dehydrate:
+
+```tsx title="app/Todos.tsx"
+import { app } from "@/schema";
+import { context, createServerSnapshot } from "@/lib/jazz-server";
+import TodosClient from "./TodosClient";
+
+export default async function Todos() {
+  // For per-user pages, swap this for a session-scoped Db so permissions
+  // and per-principal visibility apply to the prefetch:
+  //   const db = context.forSession(await readSession(...));
+  const db = context.asBackend();
+
+  const builder = createServerSnapshot();
+  await builder.prefetch(db, app.todos);
+  const snapshot = builder.dehydrate();
+
+  return <TodosClient snapshot={snapshot} />;
+}
+```
+
+## Client: seed JazzProvider
+
+```tsx title="app/TodosClient.tsx"
+"use client";
+
+import { JazzProvider, useAll, type DehydratedSnapshot } from "jazz-tools/react";
+import { app } from "@/schema";
+
+export default function TodosClient({ snapshot }: { snapshot: DehydratedSnapshot }) {
+  // `secret` is resolved client-side via BrowserAuthSecretStore — see
+  // `examples/nextjs-csr-ssr/app/HydratedTodoClient.tsx` for the auth wiring.
+  return (
+    <JazzProvider
+      config={{
+        appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+        serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
+        secret,
+      }}
+      snapshot={snapshot}
+    >
+      <List />
+    </JazzProvider>
+  );
+}
+
+function List() {
+  // Hits the seeded entry synchronously on first render — no loading state.
+  const todos = useAll(app.todos) ?? [];
+  return (
+    <ul>
+      {todos.map((t) => (
+        <li key={t.id}>{t.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+The matching client-side `useAll(app.todos)` derives the same orchestrator key as the server's `prefetch(db, app.todos)`, finds the seeded entry, and returns the data synchronously. Sync still runs in the background and replaces the seeded data with live state once it arrives.
+
+## Session delegation: who runs the query
+
+The hardest part of server-rendering with a sync engine is "as whom does the server read?". Jazz exposes three options on `JazzContext`:
+
+- **`context.asBackend()`** — reads as the backend principal. Use for shared data with public-ish visibility (marketing pages, leaderboards). Writes are attributed to `jazz:system`.
+- **`await context.forRequest(req)`** — reads as the authenticated user behind the request, taking bearer tokens straight from HTTP headers. Permission policies apply as if the user themselves were reading. Use for per-user app shells.
+- **`context.forSession(session)`** — same as `forRequest`, but for when you already hold a resolved `Session` (e.g. after running your own JWT middleware).
+
+The snapshot the client hydrates from is only as well-scoped as the `Db` the server prefetched against. Pick the one whose visibility matches what the client will see post-hydration, otherwise the hydrated render and the post-sync render disagree, which the user reads as a flicker.
+
+## The envelope
+
+`dehydrate()` returns a plain JSON value. The shape mirrors the `DehydratedSnapshot` exported from `jazz-tools/backend` (re-exported by `jazz-tools/react`) — import that type directly rather than redeclaring it locally:
+
+```ts
+import type { DehydratedSnapshot } from "jazz-tools/backend";
+
+// DehydratedSnapshot = {
+//   appId: string;             // must match the client config's appId
+//   principalId: string | null; // must match the client's authenticated user
+//   schemaFingerprint: string;  // must match the client's schema (when `schema` is set)
+//   entries: { key: string; result: unknown }[];
+// };
+```
+
+`<JazzProvider>` validates the envelope and **silently discards it (with a dev-mode console warning) if any of `appId`, `principalId`, or `schemaFingerprint` mismatch**. On discard the client falls back to a normal fetch — nothing breaks, the optimisation just doesn't kick in.
+
+Pass your `schema` prop too if you want the fingerprint check to run:
+
+```tsx
+import { app } from "@/schema";
+
+<JazzProvider config={...} snapshot={snapshot} schema={app.wasmSchema}>
+```
+
+Without `schema`, the fingerprint check is skipped — you take responsibility for keeping server and client schemas in sync.
+
+## Constraint: matching `QueryBuilder` expressions
+
+The cache key the server computes is derived from `query._build()` + the serialised query options + your `appId`. Identical expressions on both sides produce identical keys. **The expressions must match.** A server-side `app.todos.where({done: true})` and a client-side `app.todos` are different keys; the seeded entry won't be found.
+
+If you find yourself wanting "any matching subset" semantics — return the seeded data even when keys don't exactly align — that's not what this gives you. Use the same query expression both places, or accept the cache miss.
+
+## ISR and long-lived caching
+
+If the page is statically rendered or sits behind a long CDN TTL, the snapshot embedded in the HTML is older than what sync will deliver. The client will briefly render the stale snapshot, then sync corrects it. Acceptable for most pages; not acceptable for pages that display adversarially-stale state (live scores, stock prices). For those, render dynamically or skip the snapshot entirely.
+
+<Callout type="info">
+  The snapshot is JSON crossing the RSC boundary. Session secrets, backend secrets, and other
+  server-only state never appear in it — only resolved query results and the envelope metadata
+  above.
+</Callout>
+
+## Worked example
+
+See `examples/nextjs-csr-ssr` in the Jazz monorepo for a runnable Next.js App Router app showing the three patterns side-by-side: client-only, RSC-only, and server-prefetch + client-hydrate.

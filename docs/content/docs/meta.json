@@ -16,6 +16,7 @@
     "---Recipes---",
     "recipes/access-control",
     "recipes/data-patterns",
+    "recipes/server-rendering",
     "recipes/auth",
     "---Reference---",
     "reference",
