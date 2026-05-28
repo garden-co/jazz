@@ -268,6 +268,8 @@ make sidecar sync incremental across text and position codecs.
 
 Date: 2026-05-27
 
+Build: `cargo build --release -p mini-jazz-sqlite --example perf_scenarios`
+
 Shape:
 
 - Sampled live receive copies only new sidecar nodes and new or still-active
@@ -324,3 +326,46 @@ but the remaining cost is still large because every sampled receive also exports
 and applies full Jazz row history. The next likely target is incremental Jazz
 history export for root-ref rows, or a sequence-aware subscription path that can
 avoid re-sending every historical root ref.
+
+## Experiment: Offline Page Compression Upper Bound
+
+Date: 2026-05-27
+
+Shape:
+
+- Checkpoint and truncate WAL before measuring.
+- Read the main SQLite file page-by-page using the current SQLite page size.
+- Compress each page independently with lz4.
+- Sum compressed page bytes and measure page encode/decode CPU time.
+- This is not a VFS yet; it is an upper-bound probe for whether page-level
+  compression is worth implementing.
+
+### Naive Full-Row History
+
+| Scenario        | Pages |   DB bytes | LZ4 bytes | Ratio | Compress | Compress/page | Decompress | Decompress/page |
+| --------------- | ----: | ---------: | --------: | ----: | -------: | ------------: | ---------: | --------------: |
+| Append stream   |  4589 | 18,796,544 |   390,623 | 0.02x |   2.6 ms |       0.57 us |     8.2 ms |         1.80 us |
+| Automerge paper |  2407 |  9,859,072 | 2,214,659 | 0.22x |   4.2 ms |       1.73 us |     7.1 ms |         2.94 us |
+| Canvas          |   216 |    884,736 |   422,311 | 0.48x |   1.4 ms |       6.39 us |     0.4 ms |         1.69 us |
+
+### Jazz + Persisted Sequence Sidecar
+
+These numbers sum independent page-compression probes for the Jazz SQLite file
+and the sidecar SQLite file.
+
+| Scenario        | Pages | DB bytes | LZ4 bytes | Ratio | Compress | Compress/page | Decompress | Decompress/page |
+| --------------- | ----: | -------: | --------: | ----: | -------: | ------------: | ---------: | --------------: |
+| Append stream   |   140 |  573,440 |   224,296 | 0.39x |   0.5 ms |       3.38 us |     0.2 ms |         1.30 us |
+| Automerge paper |   218 |  892,928 |   442,180 | 0.50x |   0.9 ms |       4.03 us |     0.3 ms |         1.19 us |
+| Canvas          |   223 |  913,408 |   428,859 | 0.47x |   0.8 ms |       3.54 us |     0.3 ms |         1.15 us |
+
+### Takeaway
+
+Page compression is extremely promising for naive append history because the
+full-row SQLite pages contain huge repeated prefixes. It is less dramatic after
+the persisted sequence sidecar removes content redundancy, but still meaningful
+for metadata-heavy pages.
+
+In release mode, lz4 page compression is cheap enough to be plausible in the
+hot path. The storage win is largest for naive append history, where repeated
+full-row prefixes dominate the SQLite pages.

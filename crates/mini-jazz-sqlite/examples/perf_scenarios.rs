@@ -9,7 +9,8 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufReader, Read, Write};
 use std::process::Command;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -239,6 +240,13 @@ struct DeepHistoryCaseReport {
     bundle_to_reference_gzip_ratio: Option<f64>,
     extrapolated_write_ms_for_target: Option<f64>,
     extrapolated_database_bytes_for_target: Option<i64>,
+    page_count_for_compression: Option<usize>,
+    lz4_page_compressed_bytes: Option<usize>,
+    lz4_page_compressed_to_database_ratio: Option<f64>,
+    lz4_page_compress_ms: Option<f64>,
+    lz4_page_decompress_ms: Option<f64>,
+    lz4_page_compress_us_per_page: Option<f64>,
+    lz4_page_decompress_us_per_page: Option<f64>,
     notes: Vec<String>,
 }
 
@@ -4420,6 +4428,9 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     let final_bundle = writer.export_table_history("documents")?;
     let final_bundle_summary = BundleSummary::from(&final_bundle)?;
     let sidecar_bundle_bytes = rope_sidecar_bundle_bytes(&writer_rope)?;
+    let writer_page_compression = offline_page_compression_probe(&writer_db_path)?;
+    let rope_page_compression =
+        offline_sqlite_page_compression_probe(&writer_rope, &writer_rope_path)?;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
     let cold_rope = Connection::open(&cold_rope_path)?;
     persisted_rope::install(&cold_rope)?;
@@ -4505,6 +4516,32 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         }),
         extrapolated_write_ms_for_target: None,
         extrapolated_database_bytes_for_target: None,
+        page_count_for_compression: Some(
+            writer_page_compression.page_count + rope_page_compression.page_count,
+        ),
+        lz4_page_compressed_bytes: Some(
+            writer_page_compression.lz4.compressed_bytes
+                + rope_page_compression.lz4.compressed_bytes,
+        ),
+        lz4_page_compressed_to_database_ratio: ratio_usize_i64(
+            writer_page_compression.lz4.compressed_bytes
+                + rope_page_compression.lz4.compressed_bytes,
+            database_bytes,
+        ),
+        lz4_page_compress_ms: Some(
+            writer_page_compression.lz4.compress_ms + rope_page_compression.lz4.compress_ms,
+        ),
+        lz4_page_decompress_ms: Some(
+            writer_page_compression.lz4.decompress_ms + rope_page_compression.lz4.decompress_ms,
+        ),
+        lz4_page_compress_us_per_page: weighted_us_per_page([
+            &writer_page_compression.lz4,
+            &rope_page_compression.lz4,
+        ]),
+        lz4_page_decompress_us_per_page: weighted_decompress_us_per_page([
+            &writer_page_compression.lz4,
+            &rope_page_compression.lz4,
+        ]),
         notes,
     })
 }
@@ -4605,6 +4642,9 @@ fn run_jazz_rope_position_case(
     let final_bundle = writer.export_table_history("canvas_objects")?;
     let final_bundle_summary = BundleSummary::from(&final_bundle)?;
     let sidecar_bundle_bytes = rope_sidecar_bundle_bytes(&writer_rope)?;
+    let writer_page_compression = offline_page_compression_probe(&writer_db_path)?;
+    let rope_page_compression =
+        offline_sqlite_page_compression_probe(&writer_rope, &writer_rope_path)?;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
     let cold_rope = Connection::open(&cold_rope_path)?;
     persisted_rope::install(&cold_rope)?;
@@ -4684,6 +4724,32 @@ fn run_jazz_rope_position_case(
         }),
         extrapolated_write_ms_for_target: None,
         extrapolated_database_bytes_for_target: None,
+        page_count_for_compression: Some(
+            writer_page_compression.page_count + rope_page_compression.page_count,
+        ),
+        lz4_page_compressed_bytes: Some(
+            writer_page_compression.lz4.compressed_bytes
+                + rope_page_compression.lz4.compressed_bytes,
+        ),
+        lz4_page_compressed_to_database_ratio: ratio_usize_i64(
+            writer_page_compression.lz4.compressed_bytes
+                + rope_page_compression.lz4.compressed_bytes,
+            database_bytes,
+        ),
+        lz4_page_compress_ms: Some(
+            writer_page_compression.lz4.compress_ms + rope_page_compression.lz4.compress_ms,
+        ),
+        lz4_page_decompress_ms: Some(
+            writer_page_compression.lz4.decompress_ms + rope_page_compression.lz4.decompress_ms,
+        ),
+        lz4_page_compress_us_per_page: weighted_us_per_page([
+            &writer_page_compression.lz4,
+            &rope_page_compression.lz4,
+        ]),
+        lz4_page_decompress_us_per_page: weighted_decompress_us_per_page([
+            &writer_page_compression.lz4,
+            &rope_page_compression.lz4,
+        ]),
         notes,
     })
 }
@@ -4950,7 +5016,7 @@ fn run_naive_deep_history_case(
     let tmp = tempdir()?;
     let db_path = tmp.path().join("writer.sqlite");
     let mut writer = Runtime::open_with_schema(
-        Storage::File(db_path),
+        Storage::File(db_path.clone()),
         "writer-node",
         "alice",
         input.schema.clone(),
@@ -5010,6 +5076,7 @@ fn run_naive_deep_history_case(
     let total_loop_ms = ms(started.elapsed());
     let bundle = writer.export_table_history(input.table)?;
     let bundle_summary = BundleSummary::from(&bundle)?;
+    let page_compression = offline_page_compression_probe(&db_path)?;
     let cold_schema = input.schema.clone();
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", cold_schema)?;
     let cold_started = Instant::now();
@@ -5120,6 +5187,16 @@ fn run_naive_deep_history_case(
             .and_then(|bytes| ratio_usize(bundle_summary.bytes, bytes)),
         extrapolated_write_ms_for_target,
         extrapolated_database_bytes_for_target,
+        page_count_for_compression: Some(page_compression.page_count),
+        lz4_page_compressed_bytes: Some(page_compression.lz4.compressed_bytes),
+        lz4_page_compressed_to_database_ratio: ratio_usize_i64(
+            page_compression.lz4.compressed_bytes,
+            stats.database_bytes,
+        ),
+        lz4_page_compress_ms: Some(page_compression.lz4.compress_ms),
+        lz4_page_decompress_ms: Some(page_compression.lz4.decompress_ms),
+        lz4_page_compress_us_per_page: Some(page_compression.lz4.compress_us_per_page),
+        lz4_page_decompress_us_per_page: Some(page_compression.lz4.decompress_us_per_page),
         notes,
     })
 }
@@ -5205,6 +5282,134 @@ fn gzip_bytes(input: &[u8]) -> BenchResult<usize> {
     Ok(output.stdout.len())
 }
 
+struct PageCompressionCodecReport {
+    page_count: usize,
+    compressed_bytes: usize,
+    compress_ms: f64,
+    decompress_ms: f64,
+    compress_us_per_page: f64,
+    decompress_us_per_page: f64,
+}
+
+struct PageCompressionReport {
+    page_count: usize,
+    lz4: PageCompressionCodecReport,
+}
+
+fn offline_page_compression_probe(path: &std::path::Path) -> BenchResult<PageCompressionReport> {
+    let conn = Connection::open(path)?;
+    offline_sqlite_page_compression_probe(&conn, path)
+}
+
+fn offline_sqlite_page_compression_probe(
+    conn: &Connection,
+    path: &std::path::Path,
+) -> BenchResult<PageCompressionReport> {
+    conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+    let page_size: usize = conn.pragma_query_value(None, "page_size", |row| row.get(0))?;
+    let pages = read_sqlite_pages(path, page_size)?;
+    let page_count = pages.len();
+    Ok(PageCompressionReport {
+        page_count,
+        lz4: compress_pages_with(
+            &pages,
+            |page| Ok(lz4_flex::compress_prepend_size(page)),
+            |page| lz4_flex::decompress_size_prepended(page).map_err(Into::into),
+        )?,
+    })
+}
+
+fn read_sqlite_pages(path: &std::path::Path, page_size: usize) -> BenchResult<Vec<Vec<u8>>> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut pages = Vec::new();
+    loop {
+        let mut page = vec![0; page_size];
+        let mut read = 0;
+        while read < page_size {
+            let n = reader.read(&mut page[read..])?;
+            if n == 0 {
+                break;
+            }
+            read += n;
+        }
+        if read == 0 {
+            break;
+        }
+        page.truncate(read);
+        pages.push(page);
+        if read < page_size {
+            break;
+        }
+    }
+    Ok(pages)
+}
+
+fn compress_pages_with(
+    pages: &[Vec<u8>],
+    mut compress: impl FnMut(&[u8]) -> BenchResult<Vec<u8>>,
+    mut decompress: impl FnMut(&[u8]) -> BenchResult<Vec<u8>>,
+) -> BenchResult<PageCompressionCodecReport> {
+    let started = Instant::now();
+    let mut compressed_pages = Vec::with_capacity(pages.len());
+    for page in pages {
+        compressed_pages.push(compress(page)?);
+    }
+    let compress_ms = ms(started.elapsed());
+    let compressed_bytes = compressed_pages.iter().map(Vec::len).sum();
+    let decompress_started = Instant::now();
+    for compressed_page in &compressed_pages {
+        let decoded = decompress(compressed_page)?;
+        std::hint::black_box(&decoded);
+    }
+    let decompress_ms = ms(decompress_started.elapsed());
+    let page_count = pages.len();
+    let page_count_for_rate = page_count.max(1) as f64;
+    Ok(PageCompressionCodecReport {
+        page_count,
+        compressed_bytes,
+        compress_ms,
+        decompress_ms,
+        compress_us_per_page: compress_ms * 1000.0 / page_count_for_rate,
+        decompress_us_per_page: decompress_ms * 1000.0 / page_count_for_rate,
+    })
+}
+
+fn weighted_us_per_page<'a>(
+    reports: impl IntoIterator<Item = &'a PageCompressionCodecReport>,
+) -> Option<f64> {
+    let reports = reports.into_iter().collect::<Vec<_>>();
+    let total_ms = reports.iter().map(|report| report.compress_ms).sum::<f64>();
+    let total_pages = reports
+        .iter()
+        .map(|report| report.page_count)
+        .sum::<usize>();
+    if total_pages == 0 {
+        None
+    } else {
+        Some(total_ms * 1000.0 / total_pages as f64)
+    }
+}
+
+fn weighted_decompress_us_per_page<'a>(
+    reports: impl IntoIterator<Item = &'a PageCompressionCodecReport>,
+) -> Option<f64> {
+    let reports = reports.into_iter().collect::<Vec<_>>();
+    let total_ms = reports
+        .iter()
+        .map(|report| report.decompress_ms)
+        .sum::<f64>();
+    let total_pages = reports
+        .iter()
+        .map(|report| report.page_count)
+        .sum::<usize>();
+    if total_pages == 0 {
+        None
+    } else {
+        Some(total_ms * 1000.0 / total_pages as f64)
+    }
+}
+
 fn canvas_position_json(frame: usize) -> String {
     let position = canvas_position(frame);
     serde_json::json!({ "x": position.x, "y": position.y }).to_string()
@@ -5260,6 +5465,14 @@ fn ratio_i64_usize(numerator: i64, denominator: usize) -> Option<f64> {
 
 fn ratio_usize(numerator: usize, denominator: usize) -> Option<f64> {
     if denominator == 0 {
+        None
+    } else {
+        Some(numerator as f64 / denominator as f64)
+    }
+}
+
+fn ratio_usize_i64(numerator: usize, denominator: i64) -> Option<f64> {
+    if denominator <= 0 {
         None
     } else {
         Some(numerator as f64 / denominator as f64)
