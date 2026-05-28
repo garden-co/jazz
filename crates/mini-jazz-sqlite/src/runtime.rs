@@ -8,7 +8,7 @@ use crate::sync::{
 use crate::types::{
     ApplyBundleProfile, BranchInfo, HistoryBlockExport, HistoryBlockManifest, HistoryBlockTxRange,
     HistoryCompactionPolicy, HistoryCompactionStats, HistoryDelta, QueryExportProfile,
-    RejectionInfo, RowView, StorageStats, TransactionInfo,
+    RejectionInfo, RowView, StorageStats, TopFieldHistoryDeltaOptions, TransactionInfo,
 };
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
@@ -4057,12 +4057,28 @@ impl Runtime {
         limit: usize,
         remote_block_manifests: &[HistoryBlockManifest],
     ) -> Result<HistoryDelta> {
+        self.export_query_where_eq_top_field_desc_history_delta_with_options(
+            table_name,
+            field_name,
+            value,
+            TopFieldHistoryDeltaOptions::new(order_field_name, limit)
+                .with_remote_block_manifests(remote_block_manifests.to_vec()),
+        )
+    }
+
+    pub fn export_query_where_eq_top_field_desc_history_delta_with_options(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        options: TopFieldHistoryDeltaOptions,
+    ) -> Result<HistoryDelta> {
         let rows = self.read_rows_where_eq_top_field_desc(
             table_name,
             field_name,
             value.clone(),
-            order_field_name,
-            limit,
+            &options.order_field_name,
+            options.limit,
         )?;
         self.export_query_scope_history_delta(
             table_name,
@@ -4070,12 +4086,16 @@ impl Runtime {
             "eq_top_field_desc",
             json!({
                 "eq": value,
-                "order_field": order_field_name,
-                "limit": limit,
+                "order_field": options.order_field_name,
+                "limit": options.limit,
                 "observed_ids": observed_row_ids(&rows),
             }),
             rows,
-            QueryScopeDeltaOptions::remote(remote_block_manifests),
+            QueryScopeDeltaOptions {
+                ref_include_fields: &[],
+                extra_row_ids: &options.previous_observed_ids,
+                remote_block_manifests: &options.remote_block_manifests,
+            },
         )
     }
 

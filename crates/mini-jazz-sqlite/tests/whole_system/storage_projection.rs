@@ -619,6 +619,97 @@ fn top_created_query_history_delta_syncs_matching_blocks() {
 }
 
 #[test]
+fn top_field_query_history_delta_repairs_previous_observed_rows() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.text("rank");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old top")),
+                ("rank".to_owned(), json!("z")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("new top")),
+                ("rank".to_owned(), json!("a")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let initial = alice
+        .export_query_where_eq_top_field_desc_history_delta(
+            "notes",
+            "pinned",
+            json!(true),
+            "rank",
+            1,
+            &[],
+        )
+        .unwrap();
+    bob.apply_history_delta(&initial.bundle, &initial.blocks)
+        .unwrap();
+    assert_eq!(
+        bob.read_rows_where_eq_top_field_desc("notes", "pinned", json!(true), "rank", 1)
+            .unwrap()[0]
+            .id,
+        "note-1"
+    );
+
+    alice
+        .update_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([("rank".to_owned(), json!("zz"))]),
+        )
+        .unwrap();
+    for idx in 0..4 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("old-v{idx}")))]),
+            )
+            .unwrap();
+    }
+    alice
+        .compact_accepted_history("notes", "note-1", 1)
+        .unwrap();
+
+    let refresh = alice
+        .export_query_where_eq_top_field_desc_history_delta_with_options(
+            "notes",
+            "pinned",
+            json!(true),
+            TopFieldHistoryDeltaOptions::new("rank", 1)
+                .with_previous_observed_ids(vec!["note-1".to_owned()])
+                .with_remote_block_manifests(bob.all_history_block_manifests().unwrap()),
+        )
+        .unwrap();
+    assert_eq!(refresh.blocks.len(), 1);
+    assert!(refresh
+        .bundle
+        .history
+        .iter()
+        .any(|record| record.row_id == "note-1"));
+}
+
+#[test]
 fn observed_query_refresh_history_delta_includes_sealed_blocks() {
     let schema = SchemaDef::new().table("notes", |table| {
         table.text("body");

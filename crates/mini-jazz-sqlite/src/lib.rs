@@ -26,5 +26,5 @@ pub use subscription::RowsSubscription;
 pub use types::{
     ApplyBundleProfile, HistoryBlockExport, HistoryBlockManifest, HistoryBlockTxRange,
     HistoryCompactionPolicy, HistoryCompactionStats, HistoryDelta, QueryExportProfile,
-    RejectionInfo, RowDiff, RowView, StorageStats, TransactionInfo,
+    RejectionInfo, RowDiff, RowView, StorageStats, TopFieldHistoryDeltaOptions, TransactionInfo,
 };

@@ -1,5 +1,6 @@
 use mini_jazz_sqlite::{
     HistoryCompactionPolicy, RejectionInfo, RowDiff, Runtime, SchemaDef, Storage,
+    TopFieldHistoryDeltaOptions,
 };
 use serde_json::json;
 use std::collections::BTreeMap;

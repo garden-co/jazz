@@ -164,6 +164,35 @@ pub struct HistoryDelta {
     pub blocks: Vec<HistoryBlockExport>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TopFieldHistoryDeltaOptions {
+    pub order_field_name: String,
+    pub limit: usize,
+    pub previous_observed_ids: Vec<String>,
+    pub remote_block_manifests: Vec<HistoryBlockManifest>,
+}
+
+impl TopFieldHistoryDeltaOptions {
+    pub fn new(order_field_name: &str, limit: usize) -> Self {
+        Self {
+            order_field_name: order_field_name.to_owned(),
+            limit,
+            previous_observed_ids: Vec::new(),
+            remote_block_manifests: Vec::new(),
+        }
+    }
+
+    pub fn with_previous_observed_ids(mut self, row_ids: Vec<String>) -> Self {
+        self.previous_observed_ids = row_ids;
+        self
+    }
+
+    pub fn with_remote_block_manifests(mut self, manifests: Vec<HistoryBlockManifest>) -> Self {
+        self.remote_block_manifests = manifests;
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HistoryBlockTxRange {
     pub node_id: String,

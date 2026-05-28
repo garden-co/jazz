@@ -546,11 +546,10 @@ bundle. The open bundle contains full row values, so the receiver does not need
 an intermediate projection rebuild to preserve omitted fields in the hot tail.
 Simple predicate history deltas (`eq`, `contains`, `in`, and `ne`) apply the
 same block-native shape by filtering the sealed block set to the query's
-visible/repair row ids. Top-created and top-field deltas cover the initial
-top-query bootstrap shape, and top-created has a previous-observed repair
-variant. Top-field previous-observed repair remains future work because its
-public API should use an options type rather than another long positional
-signature.
+visible/repair row ids. Top-created and top-field deltas cover the top-query
+bootstrap shape and both have previous-observed repair variants. The top-field
+variant uses an options object so adding future page-boundary state does not
+create another long positional API.
 These APIs return a named `HistoryDelta { bundle, blocks }`. Receivers can apply
 any delta through `apply_history_delta(bundle, blocks)`, which imports missing
 blocks before applying the hot/open bundle.

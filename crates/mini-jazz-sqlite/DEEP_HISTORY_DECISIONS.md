@@ -347,3 +347,11 @@ Decision: Bump newly sealed columnar blocks to v5 and dictionary-code repeated s
 Why: table names, row ids, branch ids, node ids, and user ids are highly repetitive inside per-row history blocks. LZ4 can find some of this, but explicit string dictionaries reduce the JSON payload before compression and keep decoding straightforward.
 
 Scope impact: the decoder accepts v3/v4 columnar blocks and v1 legacy bundle blocks. New v5 blocks keep the v4 JSON `{x,y}` value codec and add dictionary/raw dual decoding for string columns.
+
+## Thu May 28 02:00:12 PDT 2026 - Top Field Repair Delta Options
+
+Decision: Add a public options-object API for top-field block-native history deltas with previous-observed repair rows.
+
+Why: top-field refresh has the same displaced-boundary-row problem as top-created refresh, but adding more positional arguments would make the API brittle. An options object gives us room for future page-boundary or cursor state.
+
+Scope impact: manual top-field history delta callers can now request repair history and missing sealed blocks for rows that were observed in the previous page. Observed-query refresh was already using equivalent internal behavior.
