@@ -2688,7 +2688,7 @@ impl Runtime {
             )
             .optional()?;
         let Some((tx_id, global_epoch, conflict_mode)) = open else {
-            return sealed_transaction_info(&self.conn, tx_id);
+            return self.sealed_transaction_info(tx_id);
         };
         let mut stmt = self.conn.prepare(
             "SELECT tier FROM jazz_tx_receipt receipt
@@ -2740,6 +2740,77 @@ impl Runtime {
             rejection_code,
             rejection_detail,
         })
+    }
+
+    fn sealed_transaction_info(&self, tx_id: &str) -> Result<TransactionInfo> {
+        for bundle in self.decoded_history_blocks_for_tx(tx_id)? {
+            if let Some(tx) = bundle.txs.iter().find(|tx| tx.tx_id == tx_id) {
+                return Ok(TransactionInfo {
+                    tx_id: tx.tx_id.clone(),
+                    global_epoch: tx.global_epoch,
+                    conflict_mode: conflict_mode_name(tx.conflict_mode),
+                    receipt_tiers: tx
+                        .receipt_tiers
+                        .iter()
+                        .map(|tier| tier_name(*tier).map_err(Into::into))
+                        .collect::<Result<Vec<_>>>()?,
+                    awaiting_dependency: None,
+                    rejection_code: tx.rejection_code.clone(),
+                    rejection_detail: tx.rejection_detail.clone(),
+                });
+            }
+        }
+        Err(crate::Error::new(format!("unknown transaction {tx_id}")))
+    }
+
+    fn decoded_history_blocks_for_tx(&self, tx_id: &str) -> Result<Vec<Arc<Bundle>>> {
+        let (node_id, local_epoch) = parse_public_tx_id(tx_id)?;
+        let node_num = self
+            .conn
+            .query_row(
+                "SELECT node_num FROM jazz_node WHERE node_id = ?",
+                params![node_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(node_num) = node_num else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT block.block_id, block.codec, block.format_version, block.payload
+             FROM history_block_tx_index idx
+             JOIN history_blocks block ON block.block_id = idx.block_id
+             WHERE idx.node_num = ?
+               AND idx.min_local_epoch <= ?
+               AND idx.max_local_epoch >= ?
+             ORDER BY idx.max_local_epoch, idx.min_local_epoch, idx.block_id",
+        )?;
+        let rows = stmt.query_map(params![node_num, local_epoch, local_epoch], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        let mut bundles = Vec::new();
+        for row in rows {
+            let (block_id, codec, format_version, payload) = row?;
+            if let Some(cached) = self.history_block_cache.borrow().get(&block_id).cloned() {
+                bundles.push(cached);
+                continue;
+            }
+            let bundle = Arc::new(decode_history_block_payload(
+                &codec,
+                format_version,
+                &payload,
+            )?);
+            self.history_block_cache
+                .borrow_mut()
+                .insert(block_id, Arc::clone(&bundle));
+            bundles.push(bundle);
+        }
+        Ok(bundles)
     }
 
     pub fn rejected_transactions(&self) -> Result<Vec<RejectionInfo>> {
@@ -7740,27 +7811,6 @@ fn apply_sealed_current_candidate(
         &columns,
         &values,
     )
-}
-
-fn sealed_transaction_info(conn: &Connection, tx_id: &str) -> Result<TransactionInfo> {
-    for bundle in decoded_history_blocks_for_tx(conn, tx_id)? {
-        if let Some(tx) = bundle.txs.into_iter().find(|tx| tx.tx_id == tx_id) {
-            return Ok(TransactionInfo {
-                tx_id: tx.tx_id,
-                global_epoch: tx.global_epoch,
-                conflict_mode: conflict_mode_name(tx.conflict_mode),
-                receipt_tiers: tx
-                    .receipt_tiers
-                    .into_iter()
-                    .map(|tier| tier_name(tier).map_err(Into::into))
-                    .collect::<Result<Vec<_>>>()?,
-                awaiting_dependency: None,
-                rejection_code: tx.rejection_code,
-                rejection_detail: tx.rejection_detail,
-            });
-        }
-    }
-    Err(crate::Error::new(format!("unknown transaction {tx_id}")))
 }
 
 fn sealed_transaction_record(conn: &Connection, tx_id: &str) -> Result<Option<TxRecord>> {

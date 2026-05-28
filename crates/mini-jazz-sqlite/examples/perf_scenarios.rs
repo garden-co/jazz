@@ -229,6 +229,9 @@ struct DeepHistoryCaseReport {
     historical_read_total_ms: f64,
     historical_read_count: usize,
     historical_read_average_ms: Option<f64>,
+    transaction_info_total_ms: f64,
+    transaction_info_count: usize,
+    transaction_info_average_ms: Option<f64>,
     final_payload_bytes: usize,
     extrapolated_final_payload_bytes_for_target: Option<usize>,
     reference_gzip_bytes: Option<usize>,
@@ -4630,6 +4633,9 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         historical_read_total_ms: 0.0,
         historical_read_count: 0,
         historical_read_average_ms: None,
+        transaction_info_total_ms: 0.0,
+        transaction_info_count: 0,
+        transaction_info_average_ms: None,
         final_payload_bytes,
         extrapolated_final_payload_bytes_for_target: Some(final_payload_bytes),
         reference_gzip_bytes: input.reference_gzip_bytes,
@@ -4825,6 +4831,9 @@ fn run_jazz_rope_position_case(
         historical_read_total_ms: 0.0,
         historical_read_count: 0,
         historical_read_average_ms: None,
+        transaction_info_total_ms: 0.0,
+        transaction_info_count: 0,
+        transaction_info_average_ms: None,
         final_payload_bytes: canvas_position_json(input.target_updates - 1).len(),
         extrapolated_final_payload_bytes_for_target: None,
         reference_gzip_bytes: input.reference_gzip_bytes,
@@ -5128,11 +5137,12 @@ fn run_naive_deep_history_case(
         "bob",
         input.schema.clone(),
     )?;
-    writer.insert_row(
+    let initial_tx = writer.insert_row(
         input.table,
         input.row_id,
         map1(input.field, json!(input.initial_value)),
     )?;
+    let mut written_tx_ids = vec![initial_tx];
     receiver.apply_bundle(&writer.export_table_history(input.table)?)?;
     let mut subscription = receiver.subscribe_rows(input.table)?;
 
@@ -5158,8 +5168,10 @@ fn run_naive_deep_history_case(
         if Instant::now() >= deadline {
             if !pending_updates.is_empty() {
                 let write_started = Instant::now();
-                writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+                let tx_ids = writer
+                    .update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
                 write_only_ms += ms(write_started.elapsed());
+                written_tx_ids.extend(tx_ids);
             }
             stopped_early = true;
             stop_reason = Some(format!("stopped after {} seconds", input.max_seconds));
@@ -5170,8 +5182,10 @@ fn run_naive_deep_history_case(
         completed_updates += 1;
         if write_batch_size == 1 {
             let write_started = Instant::now();
-            writer.update_row(input.table, input.row_id, map1(input.field, json!(value)))?;
+            let tx_id =
+                writer.update_row(input.table, input.row_id, map1(input.field, json!(value)))?;
             write_only_ms += ms(write_started.elapsed());
+            written_tx_ids.push(tx_id);
         } else {
             pending_updates.push((input.row_id.to_owned(), map1(input.field, json!(value))));
             let should_flush = pending_updates.len() >= write_batch_size
@@ -5180,8 +5194,10 @@ fn run_naive_deep_history_case(
                 || index + 1 == input.target_updates;
             if should_flush {
                 let write_started = Instant::now();
-                writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+                let tx_ids = writer
+                    .update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
                 write_only_ms += ms(write_started.elapsed());
+                written_tx_ids.extend(tx_ids);
             }
         }
 
@@ -5189,8 +5205,10 @@ fn run_naive_deep_history_case(
         {
             if !pending_updates.is_empty() {
                 let write_started = Instant::now();
-                writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+                let tx_ids = writer
+                    .update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
                 write_only_ms += ms(write_started.elapsed());
+                written_tx_ids.extend(tx_ids);
             }
             let receive_started = Instant::now();
             let bundle = writer.export_table_history(input.table)?;
@@ -5206,8 +5224,10 @@ fn run_naive_deep_history_case(
     }
     if !pending_updates.is_empty() {
         let write_started = Instant::now();
-        writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+        let tx_ids =
+            writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
         write_only_ms += ms(write_started.elapsed());
+        written_tx_ids.extend(tx_ids);
     }
 
     let total_loop_ms = ms(started.elapsed());
@@ -5310,6 +5330,13 @@ fn run_naive_deep_history_case(
         }
     }
     let historical_read_total_ms = ms(historical_started.elapsed());
+    let tx_info_ids = sampled_tx_ids(&written_tx_ids);
+    let tx_info_started = Instant::now();
+    for tx_id in &tx_info_ids {
+        writer.transaction_info(tx_id)?;
+    }
+    let transaction_info_total_ms = ms(tx_info_started.elapsed());
+    let transaction_info_count = tx_info_ids.len();
     let stats = writer.storage_stats()?;
     drop(writer);
     let total_file_bytes = stats.total_file_bytes;
@@ -5377,6 +5404,13 @@ fn run_naive_deep_history_case(
             None
         } else {
             Some(historical_read_total_ms / historical_read_count as f64)
+        },
+        transaction_info_total_ms,
+        transaction_info_count,
+        transaction_info_average_ms: if transaction_info_count == 0 {
+            None
+        } else {
+            Some(transaction_info_total_ms / transaction_info_count as f64)
         },
         final_payload_bytes,
         extrapolated_final_payload_bytes_for_target,
@@ -5567,6 +5601,19 @@ fn historical_read_epochs_for_case(
     epochs.sort_unstable();
     epochs.dedup();
     epochs
+}
+
+fn sampled_tx_ids(tx_ids: &[String]) -> Vec<String> {
+    if tx_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut indexes = vec![0, tx_ids.len() / 2, tx_ids.len() - 1];
+    indexes.sort_unstable();
+    indexes.dedup();
+    indexes
+        .into_iter()
+        .filter_map(|index| tx_ids.get(index).cloned())
+        .collect()
 }
 
 fn percentile(mut values: Vec<f64>, percentile: f64) -> Option<f64> {
