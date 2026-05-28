@@ -1,17 +1,18 @@
 use crate::browser_worker::{
-    BrowserRuntimeWorker, BrowserStorageStats, RuntimeRequestId, RuntimeWorkerInput,
-    RuntimeWorkerOutput, WorkerSyncProfile,
+    BrowserStorageStats, RuntimeRequestId, RuntimeWorkerInput, RuntimeWorkerOutput,
+    WorkerSyncProfile,
 };
-use crate::worker_codec::JsonCodec;
-use gloo_worker::{Spawnable, WorkerBridge};
-use js_sys::Date;
+use crate::worker_bridge::WorkerClient;
+use js_sys::{Date, Function, Promise};
 use mini_jazz_sqlite::{
-    sync::Bundle, BuiltQuery, RowView, RowsSubscription, Runtime, Storage, StorageStats,
+    sync::Bundle, BuiltQuery, RowView, RowsSubscription, Runtime, SchemaDef, Storage, StorageStats,
     SubscriptionDelta,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
+use wasm_bindgen::{closure::Closure, prelude::*, JsCast};
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use yew::Callback;
 
 pub type SubscriptionId = u64;
@@ -22,6 +23,7 @@ pub struct BrowserRuntimeConfig {
     pub main_node_id: String,
     pub worker_node_id: String,
     pub user: String,
+    pub schema: SchemaDef,
     pub hydrate_queries: Vec<BuiltQuery>,
 }
 
@@ -51,11 +53,12 @@ pub struct BrowserRuntime {
 
 struct Inner {
     main: Runtime,
-    worker: WorkerBridge<BrowserRuntimeWorker>,
+    worker: WorkerClient<RuntimeWorkerInput, RuntimeWorkerOutput>,
     subscriptions: BTreeMap<SubscriptionId, BrowserRowsSubscription>,
     next_subscription_id: SubscriptionId,
     next_request_id: RuntimeRequestId,
     pending_syncs: BTreeMap<RuntimeRequestId, PendingSync>,
+    pending_hydrates: BTreeMap<RuntimeRequestId, PendingHydrate>,
     status: BrowserRuntimeStatus,
     on_status: Callback<BrowserRuntimeStatus>,
 }
@@ -71,6 +74,10 @@ struct PendingSync {
     main_export_ms: f64,
 }
 
+struct PendingHydrate {
+    started_at_ms: f64,
+}
+
 type PendingSubscriptionNotification = (Callback<SubscriptionDelta>, SubscriptionDelta);
 
 impl BrowserRuntime {
@@ -78,20 +85,22 @@ impl BrowserRuntime {
         config: BrowserRuntimeConfig,
         on_status: Callback<BrowserRuntimeStatus>,
     ) -> Result<Self, String> {
-        let main = Runtime::open(Storage::Memory, &config.main_node_id, &config.user)
-            .map_err(error_message)?;
+        let main = Runtime::open_with_schema(
+            Storage::Memory,
+            &config.main_node_id,
+            &config.user,
+            config.schema.clone(),
+        )
+        .map_err(error_message)?;
         let runtime_slot = Rc::new(RefCell::new(None::<BrowserRuntime>));
-        let mut spawner = BrowserRuntimeWorker::spawner().encoding::<JsonCodec>();
-        let worker = spawner
-            .callback({
-                let runtime_slot = runtime_slot.clone();
-                move |output| {
-                    if let Some(runtime) = runtime_slot.borrow().as_ref() {
-                        runtime.handle_worker_output(output);
-                    }
+        let worker = WorkerClient::spawn("./worker_loader.js?v=generic-runtime", {
+            let runtime_slot = runtime_slot.clone();
+            move |output| {
+                if let Some(runtime) = runtime_slot.borrow().as_ref() {
+                    runtime.handle_worker_output(output);
                 }
-            })
-            .spawn_with_loader("./worker_loader.js?v=generic-runtime");
+            }
+        })?;
 
         let runtime = Self {
             inner: Rc::new(RefCell::new(Inner {
@@ -101,6 +110,7 @@ impl BrowserRuntime {
                 next_subscription_id: 0,
                 next_request_id: 0,
                 pending_syncs: BTreeMap::new(),
+                pending_hydrates: BTreeMap::new(),
                 status: BrowserRuntimeStatus::default(),
                 on_status,
             })),
@@ -112,8 +122,9 @@ impl BrowserRuntime {
                 db_name: config.db_name,
                 node_id: config.worker_node_id,
                 user: config.user,
+                schema: config.schema,
                 hydrate_queries: config.hydrate_queries,
-            });
+            })?;
             Ok(())
         })?;
 
@@ -203,6 +214,59 @@ impl BrowserRuntime {
         result
     }
 
+    pub fn sync_queries_after_render(&self, queries: Vec<BuiltQuery>) {
+        let runtime = self.clone();
+        spawn_local(async move {
+            let _ = JsFuture::from(next_tick()).await;
+            let _ = runtime.sync_queries(queries);
+        });
+    }
+
+    pub fn hydrate_query(&self, query: BuiltQuery) -> Result<(), String> {
+        self.hydrate_queries(vec![query])
+    }
+
+    pub fn hydrate_queries(&self, queries: Vec<BuiltQuery>) -> Result<(), String> {
+        let result = self.with_inner(|inner| inner.hydrate_queries(queries));
+        if let Err(error) = &result {
+            self.set_error(error.clone());
+        } else {
+            self.emit_status();
+        }
+        result
+    }
+
+    pub fn hydrate_query_after_render(&self, query: BuiltQuery) {
+        self.hydrate_queries_after_render(vec![query]);
+    }
+
+    pub fn hydrate_queries_after_render(&self, queries: Vec<BuiltQuery>) {
+        let runtime = self.clone();
+        spawn_local(async move {
+            let _ = JsFuture::from(next_tick()).await;
+            let _ = runtime.hydrate_queries(queries);
+        });
+    }
+
+    pub fn refresh_subscriptions(&self) -> Result<(), String> {
+        let result = self.with_inner(|inner| {
+            let (notifications, main_subscription_ms) = inner.refresh_subscriptions()?;
+            inner.status.last_sync.main_subscription_ms = main_subscription_ms;
+            Ok(notifications)
+        });
+        match result {
+            Ok(notifications) => {
+                self.emit_notifications(notifications);
+                self.emit_status();
+                Ok(())
+            }
+            Err(error) => {
+                self.set_error(error.clone());
+                Err(error)
+            }
+        }
+    }
+
     pub fn storage_stats(&self) -> Result<StorageStats, String> {
         self.with_inner(|inner| inner.main.storage_stats().map_err(error_message))
     }
@@ -223,20 +287,31 @@ impl BrowserRuntime {
                 profile,
                 storage_stats,
             } => self.apply_synced(request_id, bundles, profile, storage_stats),
+            RuntimeWorkerOutput::Exported { request_id, bundle } => {
+                self.apply_hydrated(request_id, vec![bundle])
+            }
+            RuntimeWorkerOutput::ExportedQueries {
+                request_id,
+                bundles,
+            } => self.apply_hydrated(request_id, bundles),
             RuntimeWorkerOutput::Error { message, .. } => Err(message),
-            RuntimeWorkerOutput::Exported { .. }
-            | RuntimeWorkerOutput::QueryResult { .. }
-            | RuntimeWorkerOutput::StorageStats { .. } => Ok(Vec::new()),
+            RuntimeWorkerOutput::QueryResult { .. } | RuntimeWorkerOutput::StorageStats { .. } => {
+                Ok(Vec::new())
+            }
         };
 
         match result {
             Ok(notifications) => {
-                for (callback, delta) in notifications {
-                    callback.emit(delta);
-                }
+                self.emit_notifications(notifications);
                 self.emit_status();
             }
             Err(error) => self.set_error(error),
+        }
+    }
+
+    fn emit_notifications(&self, notifications: Vec<PendingSubscriptionNotification>) {
+        for (callback, delta) in notifications {
+            callback.emit(delta);
         }
     }
 
@@ -251,7 +326,7 @@ impl BrowserRuntime {
             }
             let (notifications, main_subscription_ms) = inner.refresh_subscriptions()?;
             inner.status.ready = true;
-            inner.status.syncing = !inner.pending_syncs.is_empty();
+            inner.status.syncing = inner.has_pending_work();
             inner.status.error.clear();
             inner.status.worker_storage_stats = storage_stats;
             inner.status.last_sync.main_subscription_ms = main_subscription_ms;
@@ -281,7 +356,29 @@ impl BrowserRuntime {
             inner.status.last_sync.worker_query_ms = worker_profile.refresh_query_ms;
             inner.status.last_sync.worker_export_ms = worker_profile.refresh_export_ms;
             inner.status.worker_storage_stats = storage_stats;
-            inner.status.syncing = !inner.pending_syncs.is_empty();
+            inner.status.syncing = inner.has_pending_work();
+            inner.status.error.clear();
+            Ok(notifications)
+        })
+    }
+
+    fn apply_hydrated(
+        &self,
+        request_id: RuntimeRequestId,
+        bundles: Vec<Bundle>,
+    ) -> Result<Vec<PendingSubscriptionNotification>, String> {
+        self.with_inner(|inner| {
+            let pending = inner.pending_hydrates.remove(&request_id);
+            let Some(pending) = pending else {
+                return Ok(Vec::new());
+            };
+            for bundle in bundles {
+                inner.main.apply_bundle(&bundle).map_err(error_message)?;
+            }
+            let (notifications, main_subscription_ms) = inner.refresh_subscriptions()?;
+            inner.status.last_sync.round_trip_ms = Date::now() - pending.started_at_ms;
+            inner.status.last_sync.main_subscription_ms = main_subscription_ms;
+            inner.status.syncing = inner.has_pending_work();
             inner.status.error.clear();
             Ok(notifications)
         })
@@ -305,6 +402,7 @@ impl BrowserRuntime {
             inner.status.syncing = false;
             inner.status.error = error;
             inner.pending_syncs.clear();
+            inner.pending_hydrates.clear();
         }
         self.emit_status();
     }
@@ -338,7 +436,34 @@ impl Inner {
             request_id,
             bundles,
             refresh_queries,
-        });
+        })?;
+        Ok(())
+    }
+
+    fn hydrate_queries(&mut self, queries: Vec<BuiltQuery>) -> Result<(), String> {
+        if queries.is_empty() {
+            return Ok(());
+        }
+
+        let request_id = self.next_request_id()?;
+        self.pending_hydrates.insert(
+            request_id,
+            PendingHydrate {
+                started_at_ms: Date::now(),
+            },
+        );
+        self.status.syncing = true;
+        if queries.len() == 1 {
+            let mut queries = queries;
+            let query = queries.pop().expect("query exists");
+            self.worker
+                .send(RuntimeWorkerInput::ExportQuery { request_id, query })?;
+        } else {
+            self.worker.send(RuntimeWorkerInput::ExportQueries {
+                request_id,
+                queries,
+            })?;
+        }
         Ok(())
     }
 
@@ -356,6 +481,10 @@ impl Inner {
             .values()
             .map(|entry| entry.query.clone())
             .collect()
+    }
+
+    fn has_pending_work(&self) -> bool {
+        !self.pending_syncs.is_empty() || !self.pending_hydrates.is_empty()
     }
 
     fn refresh_subscriptions(
@@ -392,4 +521,21 @@ impl Inner {
 
 fn error_message(error: mini_jazz_sqlite::Error) -> String {
     error.to_string()
+}
+
+fn next_tick() -> Promise {
+    Promise::new(&mut |resolve: Function, _reject: Function| {
+        let timeout_resolve = resolve.clone();
+        let callback = Closure::once(move || {
+            let _ = timeout_resolve.call0(&JsValue::UNDEFINED);
+        });
+        web_sys::window()
+            .expect("window is available")
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                0,
+            )
+            .expect("schedule next tick");
+        callback.forget();
+    })
 }

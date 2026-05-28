@@ -55,6 +55,21 @@ impl ReadVisibility<'_> {
         if matches!(row_nums, Some([])) {
             return Ok(Vec::new());
         }
+        if let Some(row_nums) = row_nums {
+            if row_nums.len() > crate::SQL_VARIABLE_CHUNK_SIZE {
+                let mut visible_row_nums = Vec::new();
+                for chunk in row_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
+                    visible_row_nums.extend(self.base_snapshot_row_nums_visible_in_branch(
+                        table_name,
+                        base_epoch,
+                        Some(chunk),
+                    )?);
+                }
+                visible_row_nums.sort();
+                visible_row_nums.dedup();
+                return Ok(visible_row_nums);
+            }
+        }
         let table = self.schema.table_def(table_name)?;
         let snapshot_policy_sql = self.snapshot_policy_sql(table, "h", base_epoch)?;
         let effective_branch_policy_sql =

@@ -1,10 +1,17 @@
-use gloo_worker::{HandlerId, Worker, WorkerScope};
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
+#[cfg(target_arch = "wasm32")]
+use crate::worker_bridge::WorkerResponder;
 #[cfg(target_arch = "wasm32")]
 use mini_jazz_sqlite::Storage;
-use mini_jazz_sqlite::{sync::Bundle, BuiltQuery, RowView, Runtime, StorageStats};
+use mini_jazz_sqlite::{sync::Bundle, BuiltQuery, RowView, Runtime, SchemaDef, StorageStats};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+#[cfg(target_arch = "wasm32")]
+use std::{cell::RefCell, rc::Rc};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::spawn_local;
 
 pub type RuntimeRequestId = u64;
 
@@ -14,6 +21,7 @@ pub enum RuntimeWorkerInput {
         db_name: String,
         node_id: String,
         user: String,
+        schema: SchemaDef,
         hydrate_queries: Vec<BuiltQuery>,
     },
     ApplyBundles {
@@ -24,6 +32,10 @@ pub enum RuntimeWorkerInput {
     ExportQuery {
         request_id: RuntimeRequestId,
         query: BuiltQuery,
+    },
+    ExportQueries {
+        request_id: RuntimeRequestId,
+        queries: Vec<BuiltQuery>,
     },
     Query {
         request_id: RuntimeRequestId,
@@ -49,6 +61,10 @@ pub enum RuntimeWorkerOutput {
     Exported {
         request_id: RuntimeRequestId,
         bundle: Bundle,
+    },
+    ExportedQueries {
+        request_id: RuntimeRequestId,
+        bundles: Vec<Bundle>,
     },
     QueryResult {
         request_id: RuntimeRequestId,
@@ -109,6 +125,7 @@ pub struct BrowserRowView {
     pub table: String,
     pub id: String,
     pub values: BTreeMap<String, Value>,
+    pub created_at: i64,
     pub created_by: String,
     pub tx_id: String,
     pub conflict_count: usize,
@@ -120,6 +137,7 @@ impl From<RowView> for BrowserRowView {
             table: row.table,
             id: row.id,
             values: row.values,
+            created_at: row.created_at,
             created_by: row.created_by,
             tx_id: row.tx_id,
             conflict_count: row.conflict_count,
@@ -131,121 +149,106 @@ pub struct BrowserRuntimeWorker {
     runtime: Option<Runtime>,
 }
 
-pub enum BrowserRuntimeWorkerMessage {
-    Opened {
-        id: HandlerId,
-        result: Result<(Runtime, Vec<Bundle>, BrowserStorageStats), String>,
-    },
-}
-
-impl Worker for BrowserRuntimeWorker {
-    type Message = BrowserRuntimeWorkerMessage;
-    type Input = RuntimeWorkerInput;
-    type Output = RuntimeWorkerOutput;
-
-    fn create(_scope: &WorkerScope<Self>) -> Self {
+impl BrowserRuntimeWorker {
+    pub fn new() -> Self {
         Self { runtime: None }
     }
 
-    fn update(&mut self, scope: &WorkerScope<Self>, msg: Self::Message) {
-        match msg {
-            BrowserRuntimeWorkerMessage::Opened { id, result } => match result {
-                Ok((runtime, bundles, storage_stats)) => {
-                    self.runtime = Some(runtime);
-                    scope.respond(
-                        id,
-                        RuntimeWorkerOutput::Opened {
-                            bundles,
-                            storage_stats,
-                        },
-                    );
-                }
-                Err(message) => scope.respond(
-                    id,
-                    RuntimeWorkerOutput::Error {
-                        request_id: None,
-                        message,
-                    },
-                ),
-            },
-        }
-    }
-
-    fn received(&mut self, scope: &WorkerScope<Self>, msg: Self::Input, id: HandlerId) {
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_shared(
+        worker: Rc<RefCell<Self>>,
+        msg: RuntimeWorkerInput,
+        responder: WorkerResponder<RuntimeWorkerOutput>,
+    ) {
         match msg {
             RuntimeWorkerInput::Open {
                 db_name,
                 node_id,
                 user,
+                schema,
                 hydrate_queries,
             } => {
-                scope.send_future(async move {
-                    BrowserRuntimeWorkerMessage::Opened {
-                        id,
-                        result: open_and_hydrate(db_name, node_id, user, hydrate_queries).await,
-                    }
+                spawn_local(async move {
+                    let output =
+                        match open_and_hydrate(db_name, node_id, user, schema, hydrate_queries)
+                            .await
+                        {
+                            Ok((runtime, bundles, storage_stats)) => {
+                                worker.borrow_mut().runtime = Some(runtime);
+                                RuntimeWorkerOutput::Opened {
+                                    bundles,
+                                    storage_stats,
+                                }
+                            }
+                            Err(message) => RuntimeWorkerOutput::Error {
+                                request_id: None,
+                                message,
+                            },
+                        };
+                    responder.send(output);
                 });
             }
+            msg => responder.send(worker.borrow_mut().handle_sync(msg)),
+        }
+    }
+
+    fn handle_sync(&mut self, msg: RuntimeWorkerInput) -> RuntimeWorkerOutput {
+        match msg {
+            RuntimeWorkerInput::Open { .. } => RuntimeWorkerOutput::Error {
+                request_id: None,
+                message: "open must be handled asynchronously".to_owned(),
+            },
             RuntimeWorkerInput::ApplyBundles {
                 request_id,
                 bundles,
                 refresh_queries,
             } => {
                 let Some(runtime) = self.runtime.as_mut() else {
-                    scope.respond(
-                        id,
-                        RuntimeWorkerOutput::Error {
-                            request_id: Some(request_id),
-                            message: "worker runtime is not ready".to_owned(),
-                        },
-                    );
-                    return;
+                    return runtime_not_ready(request_id);
                 };
-                scope.respond(
-                    id,
-                    apply_bundles(runtime, request_id, bundles, refresh_queries),
-                );
+                apply_bundles(runtime, request_id, bundles, refresh_queries)
             }
             RuntimeWorkerInput::ExportQuery { request_id, query } => {
                 let Some(runtime) = self.runtime.as_ref() else {
-                    scope.respond(
-                        id,
-                        RuntimeWorkerOutput::Error {
-                            request_id: Some(request_id),
-                            message: "worker runtime is not ready".to_owned(),
-                        },
-                    );
-                    return;
+                    return runtime_not_ready(request_id);
                 };
-                scope.respond(id, export_query(runtime, request_id, query));
+                export_query(runtime, request_id, query)
+            }
+            RuntimeWorkerInput::ExportQueries {
+                request_id,
+                queries,
+            } => {
+                let Some(runtime) = self.runtime.as_ref() else {
+                    return runtime_not_ready(request_id);
+                };
+                export_queries(runtime, request_id, queries)
             }
             RuntimeWorkerInput::Query { request_id, query } => {
                 let Some(runtime) = self.runtime.as_ref() else {
-                    scope.respond(
-                        id,
-                        RuntimeWorkerOutput::Error {
-                            request_id: Some(request_id),
-                            message: "worker runtime is not ready".to_owned(),
-                        },
-                    );
-                    return;
+                    return runtime_not_ready(request_id);
                 };
-                scope.respond(id, run_query(runtime, request_id, query));
+                run_query(runtime, request_id, query)
             }
             RuntimeWorkerInput::StorageStats { request_id } => {
                 let Some(runtime) = self.runtime.as_ref() else {
-                    scope.respond(
-                        id,
-                        RuntimeWorkerOutput::Error {
-                            request_id: Some(request_id),
-                            message: "worker runtime is not ready".to_owned(),
-                        },
-                    );
-                    return;
+                    return runtime_not_ready(request_id);
                 };
-                scope.respond(id, storage_stats(runtime, request_id));
+                storage_stats(runtime, request_id)
             }
         }
+    }
+}
+
+impl Default for BrowserRuntimeWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn runtime_not_ready(request_id: RuntimeRequestId) -> RuntimeWorkerOutput {
+    RuntimeWorkerOutput::Error {
+        request_id: Some(request_id),
+        message: "worker runtime is not ready".to_owned(),
     }
 }
 
@@ -253,9 +256,10 @@ async fn open_and_hydrate(
     db_name: String,
     node_id: String,
     user: String,
+    schema: SchemaDef,
     hydrate_queries: Vec<BuiltQuery>,
 ) -> Result<(Runtime, Vec<Bundle>, BrowserStorageStats), String> {
-    let runtime = open_opfs_runtime(&db_name, &node_id, &user).await?;
+    let runtime = open_opfs_runtime(&db_name, &node_id, &user, schema).await?;
     let bundles = hydrate_queries
         .into_iter()
         .map(|query| runtime.export_query(query).map_err(error_message))
@@ -334,6 +338,27 @@ fn export_query(
     }
 }
 
+fn export_queries(
+    runtime: &Runtime,
+    request_id: RuntimeRequestId,
+    queries: Vec<BuiltQuery>,
+) -> RuntimeWorkerOutput {
+    match queries
+        .into_iter()
+        .map(|query| runtime.export_query(query).map_err(error_message))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(bundles) => RuntimeWorkerOutput::ExportedQueries {
+            request_id,
+            bundles,
+        },
+        Err(message) => RuntimeWorkerOutput::Error {
+            request_id: Some(request_id),
+            message,
+        },
+    }
+}
+
 fn run_query(
     runtime: &Runtime,
     request_id: RuntimeRequestId,
@@ -365,7 +390,12 @@ fn storage_stats(runtime: &Runtime, request_id: RuntimeRequestId) -> RuntimeWork
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn open_opfs_runtime(db_name: &str, node_id: &str, user: &str) -> Result<Runtime, String> {
+async fn open_opfs_runtime(
+    db_name: &str,
+    node_id: &str,
+    user: &str,
+    schema: SchemaDef,
+) -> Result<Runtime, String> {
     let pool_name = opfs_pool_name(db_name);
     let pool_directory = format!(".{pool_name}");
     let config = sqlite_wasm_vfs::sahpool::OpfsSAHPoolCfgBuilder::new()
@@ -376,11 +406,17 @@ async fn open_opfs_runtime(db_name: &str, node_id: &str, user: &str) -> Result<R
         .await
         .map_err(|error| format!("install OPFS SQLite VFS: {error}"))?;
 
-    Runtime::open(Storage::File(db_name.into()), node_id, user).map_err(error_message)
+    Runtime::open_with_schema(Storage::File(db_name.into()), node_id, user, schema)
+        .map_err(error_message)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn open_opfs_runtime(_db_name: &str, _node_id: &str, _user: &str) -> Result<Runtime, String> {
+async fn open_opfs_runtime(
+    _db_name: &str,
+    _node_id: &str,
+    _user: &str,
+    _schema: SchemaDef,
+) -> Result<Runtime, String> {
     Err("OPFS SQLite is only available in wasm".to_owned())
 }
 
@@ -409,4 +445,150 @@ fn opfs_pool_name(db_name: &str) -> String {
 
 fn error_message(error: mini_jazz_sqlite::Error) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::todo_schema::todo_schema;
+    use mini_jazz_sqlite::{BuiltQuery, QueryCondition, QueryConditionOp, Runtime, Storage};
+    use serde::de::DeserializeOwned;
+    use serde_json::json;
+
+    #[test]
+    fn worker_open_message_round_trips_through_serde_json() {
+        let message = RuntimeWorkerInput::Open {
+            db_name: "todo.sqlite3".to_owned(),
+            node_id: "worker".to_owned(),
+            user: "alice".to_owned(),
+            schema: todo_schema(),
+            hydrate_queries: vec![BuiltQuery {
+                table: "todos".to_owned(),
+                conditions: vec![QueryCondition {
+                    column: "title".to_owned(),
+                    op: QueryConditionOp::Contains,
+                    value: json!("bridge"),
+                }],
+                order_by: Vec::new(),
+                limit: Some(10),
+                offset: None,
+            }],
+        };
+
+        let decoded: RuntimeWorkerInput = serde_round_trip(&message);
+
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(message).unwrap()
+        );
+    }
+
+    #[test]
+    fn worker_apply_message_round_trips_query_and_bundle_values_through_serde_json() {
+        let runtime =
+            Runtime::open_with_schema(Storage::Memory, "main", "alice", todo_schema()).unwrap();
+        let bundle = runtime
+            .export_query(BuiltQuery {
+                table: "todos".to_owned(),
+                conditions: vec![QueryCondition {
+                    column: "done".to_owned(),
+                    op: QueryConditionOp::Eq,
+                    value: json!(false),
+                }],
+                order_by: Vec::new(),
+                limit: Some(10),
+                offset: None,
+            })
+            .unwrap();
+        let message = RuntimeWorkerInput::ApplyBundles {
+            request_id: 42,
+            bundles: vec![bundle],
+            refresh_queries: vec![BuiltQuery {
+                table: "todos".to_owned(),
+                conditions: vec![QueryCondition {
+                    column: "labels".to_owned(),
+                    op: QueryConditionOp::In,
+                    value: json!(["work", {"nested": true}]),
+                }],
+                order_by: Vec::new(),
+                limit: Some(10),
+                offset: None,
+            }],
+        };
+
+        let decoded: RuntimeWorkerInput = serde_round_trip(&message);
+
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(message).unwrap()
+        );
+    }
+
+    #[test]
+    fn worker_export_queries_message_round_trips_multiple_queries_through_serde_json() {
+        let message = RuntimeWorkerInput::ExportQueries {
+            request_id: 11,
+            queries: vec![
+                BuiltQuery {
+                    table: "todos".to_owned(),
+                    conditions: vec![QueryCondition {
+                        column: "done".to_owned(),
+                        op: QueryConditionOp::Eq,
+                        value: json!(false),
+                    }],
+                    order_by: Vec::new(),
+                    limit: Some(10),
+                    offset: Some(0),
+                },
+                BuiltQuery {
+                    table: "todos".to_owned(),
+                    conditions: Vec::new(),
+                    order_by: Vec::new(),
+                    limit: Some(1),
+                    offset: Some(10),
+                },
+            ],
+        };
+
+        let decoded: RuntimeWorkerInput = serde_round_trip(&message);
+
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(message).unwrap()
+        );
+    }
+
+    #[test]
+    fn worker_query_result_round_trips_rows_through_serde_json() {
+        let message = RuntimeWorkerOutput::QueryResult {
+            request_id: 7,
+            rows: vec![BrowserRowView {
+                table: "todos".to_owned(),
+                id: "todo-1".to_owned(),
+                values: BTreeMap::from([
+                    ("title".to_owned(), json!("Write bridge")),
+                    ("done".to_owned(), json!(false)),
+                    ("labels".to_owned(), json!(["work", "rust"])),
+                ]),
+                created_at: 123,
+                created_by: "alice".to_owned(),
+                tx_id: "tx-1".to_owned(),
+                conflict_count: 0,
+            }],
+        };
+
+        let decoded: RuntimeWorkerOutput = serde_round_trip(&message);
+
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(message).unwrap()
+        );
+    }
+
+    fn serde_round_trip<T>(value: &T) -> T
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        serde_json::from_str(&serde_json::to_string(value).unwrap()).unwrap()
+    }
 }

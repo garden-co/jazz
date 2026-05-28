@@ -1,9 +1,13 @@
 use js_sys::{Date, Function, Promise};
 use mini_jazz_sqlite::{BuiltQuery, RowView, SubscriptionDelta};
 use mini_sqlite_todo_yew::browser_runtime::{
-    BrowserRuntime, BrowserRuntimeConfig, BrowserRuntimeStatus,
+    BrowserRuntime, BrowserRuntimeConfig, BrowserRuntimeStatus, SubscriptionId,
 };
 use mini_sqlite_todo_yew::query_builder::QueryBuilder;
+use mini_sqlite_todo_yew::todo_query::{
+    TodoDoneFilter, TodoQueryState, TodoSortDirection, TodoSortField,
+};
+use mini_sqlite_todo_yew::todo_schema::todo_schema;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::{cell::RefCell, rc::Rc};
@@ -12,7 +16,7 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use yew::Callback;
 
 const PROJECT_ID: &str = "todo-list";
-const SYNC_BATCH_SIZE: u64 = 500;
+const SYNC_BATCH_SIZE: u64 = 100;
 const TOTAL_TO_GENERATE: u64 = 100_000;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +24,7 @@ pub struct Todo {
     pub id: String,
     pub title: String,
     pub done: bool,
+    pub created_at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,7 +32,9 @@ pub struct TodoState {
     pub ready: bool,
     pub generating: bool,
     pub syncing: bool,
+    pub query: TodoQueryState,
     pub todos: Vec<Todo>,
+    pub has_next_page: bool,
     pub error: String,
     pub generated: u64,
     pub total_to_generate: u64,
@@ -46,7 +53,9 @@ impl Default for TodoState {
             ready: false,
             generating: false,
             syncing: false,
+            query: TodoQueryState::default(),
             todos: Vec::new(),
+            has_next_page: false,
             error: String::new(),
             generated: 0,
             total_to_generate: TOTAL_TO_GENERATE,
@@ -80,6 +89,8 @@ struct Inner {
     state: TodoState,
     set_state: Callback<TodoState>,
     project_ensured: bool,
+    page_subscription: Option<SubscriptionId>,
+    next_page_subscription: Option<SubscriptionId>,
 }
 
 impl TodoRuntime {
@@ -87,11 +98,15 @@ impl TodoRuntime {
         let runtime_slot = Rc::new(RefCell::new(None::<TodoRuntime>));
         let browser = BrowserRuntime::open(
             BrowserRuntimeConfig {
-                db_name: "mini-jazz-sqlite-yew-rust-worker.sqlite3".to_owned(),
+                db_name: "mini-jazz-sqlite-yew-serde-worker.sqlite3".to_owned(),
                 main_node_id: "browser-yew-main".to_owned(),
                 worker_node_id: "browser-yew-worker".to_owned(),
                 user: "alice".to_owned(),
-                hydrate_queries: vec![project_query(), page_query()],
+                schema: todo_schema(),
+                hydrate_queries: vec![
+                    project_query(),
+                    TodoQueryState::default().page_hydration_query(),
+                ],
             },
             Callback::from({
                 let runtime_slot = runtime_slot.clone();
@@ -109,22 +124,19 @@ impl TodoRuntime {
                 state: TodoState::default(),
                 set_state,
                 project_ensured: false,
+                page_subscription: None,
+                next_page_subscription: None,
             })),
         };
         *runtime_slot.borrow_mut() = Some(runtime.clone());
 
-        let browser = runtime.inner.borrow().browser.clone();
-        browser.subscribe(
-            page_query(),
-            Callback::from({
-                let runtime_slot = runtime_slot.clone();
-                move |delta| {
-                    if let Some(runtime) = runtime_slot.borrow().as_ref() {
-                        runtime.handle_todo_delta(delta);
-                    }
-                }
-            }),
-        )?;
+        let (page_subscription_id, next_page_subscription_id) =
+            runtime.subscribe_current_queries()?;
+        runtime.with_inner(|inner| {
+            inner.page_subscription = Some(page_subscription_id);
+            inner.next_page_subscription = Some(next_page_subscription_id);
+            Ok(())
+        })?;
 
         Ok(runtime)
     }
@@ -142,7 +154,9 @@ impl TodoRuntime {
                     ("project", json!(PROJECT_ID)),
                 ]),
             )?;
-            browser.sync_queries(vec![todo_ids_query(vec![id])])
+            browser.refresh_subscriptions()?;
+            browser.sync_queries_after_render(vec![todo_ids_query(vec![id])]);
+            Ok(())
         })() {
             self.set_error(error);
         }
@@ -152,7 +166,9 @@ impl TodoRuntime {
         let browser = self.browser();
         if let Err(error) = (|| {
             browser.update_row("todos", &id, row_values([("done", json!(done))]))?;
-            browser.sync_queries(vec![todo_ids_query(vec![id])])
+            browser.refresh_subscriptions()?;
+            browser.sync_queries_after_render(vec![todo_ids_query(vec![id])]);
+            Ok(())
         })() {
             self.set_error(error);
         }
@@ -162,7 +178,9 @@ impl TodoRuntime {
         let browser = self.browser();
         if let Err(error) = (|| {
             browser.delete_row("todos", &id)?;
-            browser.sync_queries(vec![todo_ids_query(vec![id])])
+            browser.refresh_subscriptions()?;
+            browser.sync_queries_after_render(vec![todo_ids_query(vec![id])]);
+            Ok(())
         })() {
             self.set_error(error);
         }
@@ -188,6 +206,52 @@ impl TodoRuntime {
             if let Err(error) = runtime.generate_100k_inner().await {
                 runtime.set_error(error);
             }
+        });
+    }
+
+    pub fn set_title_search(&self, title_search: String) {
+        self.update_query(|query| {
+            query.title_search = title_search;
+            query.page = 0;
+        });
+    }
+
+    pub fn set_done_filter(&self, done_filter: TodoDoneFilter) {
+        self.update_query(|query| {
+            query.done_filter = done_filter;
+            query.page = 0;
+        });
+    }
+
+    pub fn set_sort_field(&self, sort_field: TodoSortField) {
+        self.update_query(|query| {
+            query.sort_field = sort_field;
+            query.page = 0;
+        });
+    }
+
+    pub fn set_sort_direction(&self, sort_direction: TodoSortDirection) {
+        self.update_query(|query| {
+            query.sort_direction = sort_direction;
+            query.page = 0;
+        });
+    }
+
+    pub fn previous_page(&self) {
+        self.update_query(|query| {
+            query.page = query.page.saturating_sub(1);
+        });
+    }
+
+    pub fn next_page(&self) {
+        if !self
+            .with_inner(|inner| Ok(inner.state.has_next_page))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.update_query(|query| {
+            query.page = query.page.saturating_add(1);
         });
     }
 
@@ -226,6 +290,7 @@ impl TodoRuntime {
         if !batch_ids.is_empty() {
             browser.sync_queries(vec![todo_ids_query(batch_ids)])?;
         }
+        browser.refresh_subscriptions()?;
 
         self.with_inner(|inner| {
             inner.state.generate_ms = Date::now() - started_at;
@@ -264,6 +329,15 @@ impl TodoRuntime {
     fn handle_todo_delta(&self, delta: SubscriptionDelta) {
         self.run_mut(|inner| {
             inner.state.todos = todos_from_rows(delta.all);
+            inner.state.has_next_page = inner.has_next_page()?;
+            inner.emit();
+            Ok(())
+        });
+    }
+
+    fn handle_next_page_delta(&self, delta: SubscriptionDelta) {
+        self.run_mut(|inner| {
+            inner.state.has_next_page = !delta.all.is_empty();
             inner.emit();
             Ok(())
         });
@@ -282,7 +356,7 @@ impl TodoRuntime {
                     PROJECT_ID,
                     row_values([("title", json!("Todo list"))]),
                 )?;
-                browser.sync_queries(vec![project_query()])?;
+                browser.sync_queries_after_render(vec![project_query()]);
             }
             Ok(())
         })() {
@@ -316,6 +390,87 @@ impl TodoRuntime {
         inner.state.error = error;
         inner.emit();
     }
+
+    fn update_query(&self, update: impl FnOnce(&mut TodoQueryState)) {
+        if let Err(error) = self.replace_page_subscription(update) {
+            self.set_error(error);
+        }
+    }
+
+    fn replace_page_subscription(
+        &self,
+        update: impl FnOnce(&mut TodoQueryState),
+    ) -> Result<(), String> {
+        let (
+            browser,
+            old_page_subscription,
+            old_next_page_subscription,
+            query,
+            next_query,
+            hydrate_query,
+        ) = self.with_inner(|inner| {
+            update(&mut inner.state.query);
+            inner.state.has_next_page = false;
+            let old_page_subscription = inner.page_subscription.take();
+            let old_next_page_subscription = inner.next_page_subscription.take();
+            let query = inner.state.query.page_query();
+            let next_query = inner.state.query.next_page_probe_query();
+            let hydrate_query = inner.state.query.page_hydration_query();
+            inner.emit();
+            Ok((
+                inner.browser.clone(),
+                old_page_subscription,
+                old_next_page_subscription,
+                query,
+                next_query,
+                hydrate_query,
+            ))
+        })?;
+        if let Some(id) = old_page_subscription {
+            browser.unsubscribe(id);
+        }
+        if let Some(id) = old_next_page_subscription {
+            browser.unsubscribe(id);
+        }
+        let subscription_id = self.subscribe_page(query.clone())?;
+        let next_subscription_id = self.subscribe_next_page(next_query.clone())?;
+        self.with_inner(|inner| {
+            inner.page_subscription = Some(subscription_id);
+            inner.next_page_subscription = Some(next_subscription_id);
+            Ok(())
+        })?;
+        browser.hydrate_query_after_render(hydrate_query);
+        Ok(())
+    }
+
+    fn subscribe_current_queries(&self) -> Result<(SubscriptionId, SubscriptionId), String> {
+        let query = self.with_inner(|inner| Ok(inner.state.query.page_query()))?;
+        let next_query = self.with_inner(|inner| Ok(inner.state.query.next_page_probe_query()))?;
+        Ok((
+            self.subscribe_page(query)?,
+            self.subscribe_next_page(next_query)?,
+        ))
+    }
+
+    fn subscribe_page(&self, query: BuiltQuery) -> Result<SubscriptionId, String> {
+        let runtime = self.clone();
+        self.browser().subscribe(
+            query,
+            Callback::from(move |delta| {
+                runtime.handle_todo_delta(delta);
+            }),
+        )
+    }
+
+    fn subscribe_next_page(&self, query: BuiltQuery) -> Result<SubscriptionId, String> {
+        let runtime = self.clone();
+        self.browser().subscribe(
+            query,
+            Callback::from(move |delta| {
+                runtime.handle_next_page_delta(delta);
+            }),
+        )
+    }
 }
 
 impl Inner {
@@ -324,16 +479,15 @@ impl Inner {
     }
 
     fn controls_locked(&self) -> bool {
-        !self.state.ready || self.state.generating || self.state.syncing
+        !self.state.ready || self.state.generating
     }
-}
 
-fn page_query() -> BuiltQuery {
-    QueryBuilder::table("todos")
-        .eq("done", json!(false))
-        .order_by_desc("$createdAt")
-        .limit(10)
-        .build()
+    fn has_next_page(&self) -> Result<bool, String> {
+        Ok(!self
+            .browser
+            .query(self.state.query.next_page_probe_query())?
+            .is_empty())
+    }
 }
 
 fn project_query() -> BuiltQuery {
@@ -357,6 +511,7 @@ fn todos_from_rows(rows: Vec<RowView>) -> Vec<Todo> {
     rows.into_iter()
         .map(|row| Todo {
             id: row.id,
+            created_at: row.created_at,
             title: row
                 .values
                 .get("title")

@@ -20,6 +20,8 @@ mod tx;
 mod types;
 mod users;
 
+pub(crate) const SQL_VARIABLE_CHUNK_SIZE: usize = 100;
+
 pub use error::{Error, Result};
 pub use query_api::{BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection, QueryOrderBy};
 pub use runtime::Runtime;

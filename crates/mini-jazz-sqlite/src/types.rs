@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 
 use serde::ser::SerializeStruct;
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value as JsonValue;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowView {
     pub table: String,
     pub id: String,
     pub values: BTreeMap<String, JsonValue>,
+    pub created_at: i64,
     pub created_by: String,
     pub tx_id: String,
     pub conflict_count: usize,

@@ -4,7 +4,11 @@ mod todo_runtime;
 #[cfg(target_arch = "wasm32")]
 mod app {
     use super::todo_runtime::{Todo, TodoRuntime, TodoState};
-    use web_sys::{Event, HtmlInputElement, SubmitEvent};
+    use js_sys::Date;
+    use mini_sqlite_todo_yew::todo_display::{self, TodoDisplayState};
+    use mini_sqlite_todo_yew::todo_query::{TodoDoneFilter, TodoSortDirection, TodoSortField};
+    use wasm_bindgen::JsValue;
+    use web_sys::{Event, HtmlInputElement, HtmlSelectElement, InputEvent, SubmitEvent};
     use yew::prelude::*;
 
     #[function_component(App)]
@@ -67,6 +71,60 @@ mod app {
                 }
             })
         };
+        let on_search = {
+            let runtime = runtime.clone();
+            Callback::from(move |event: InputEvent| {
+                if let Some(runtime) = runtime.borrow().as_ref() {
+                    let input: HtmlInputElement = event.target_unchecked_into();
+                    runtime.set_title_search(input.value());
+                }
+            })
+        };
+        let on_done_filter = {
+            let runtime = runtime.clone();
+            Callback::from(move |event: Event| {
+                if let Some(runtime) = runtime.borrow().as_ref() {
+                    let select: HtmlSelectElement = event.target_unchecked_into();
+                    runtime.set_done_filter(TodoDoneFilter::from_value(&select.value()));
+                }
+            })
+        };
+        let on_sort_field = {
+            let runtime = runtime.clone();
+            Callback::from(move |event: Event| {
+                if let Some(runtime) = runtime.borrow().as_ref() {
+                    let select: HtmlSelectElement = event.target_unchecked_into();
+                    runtime.set_sort_field(TodoSortField::from_value(&select.value()));
+                }
+            })
+        };
+        let on_sort_direction = {
+            let runtime = runtime.clone();
+            Callback::from(move |event: Event| {
+                if let Some(runtime) = runtime.borrow().as_ref() {
+                    let select: HtmlSelectElement = event.target_unchecked_into();
+                    runtime.set_sort_direction(TodoSortDirection::from_value(&select.value()));
+                }
+            })
+        };
+        let on_previous_page = {
+            let runtime = runtime.clone();
+            Callback::from(move |_| {
+                if let Some(runtime) = runtime.borrow().as_ref() {
+                    runtime.previous_page();
+                }
+            })
+        };
+        let on_next_page = {
+            let runtime = runtime.clone();
+            Callback::from(move |_| {
+                if let Some(runtime) = runtime.borrow().as_ref() {
+                    runtime.next_page();
+                }
+            })
+        };
+        let previous_disabled = disabled || state.query.page == 0;
+        let next_disabled = disabled || !state.has_next_page;
 
         html! {
             <section class="todo-app">
@@ -75,13 +133,39 @@ mod app {
                         <p class="eyebrow">{ "mini-jazz-sqlite Yew" }</p>
                         <h1>{ "Todos" }</h1>
                     </div>
-                    <p class="status" role="status">{ status_text(&state) }</p>
+                    <div class="header-actions">
+                        <button class="generate" type="button" onclick={on_generate} disabled={disabled}>{ "Generate 100k todos" }</button>
+                        <p class="status" role="status">{ status_text(&state) }</p>
+                    </div>
                 </header>
                 <form class="todo-form" {onsubmit}>
                     <input ref={title_ref} type="text" autocomplete="off" placeholder="Add a task" required=true disabled={disabled} />
                     <button type="submit" disabled={disabled}>{ "Add" }</button>
                 </form>
-                <button class="generate" type="button" onclick={on_generate} disabled={disabled}>{ "Generate 100k todos" }</button>
+                <div class="filter-bar">
+                    <input
+                        class="search-input"
+                        type="search"
+                        autocomplete="off"
+                        placeholder="Search title"
+                        value={state.query.title_search.clone()}
+                        oninput={on_search}
+                        disabled={disabled}
+                    />
+                    <select class="done-filter" onchange={on_done_filter} disabled={disabled} aria-label="Done filter">
+                        <option value="all" selected={state.query.done_filter == TodoDoneFilter::All}>{ "All" }</option>
+                        <option value="open" selected={state.query.done_filter == TodoDoneFilter::Open}>{ "Open" }</option>
+                        <option value="done" selected={state.query.done_filter == TodoDoneFilter::Done}>{ "Done" }</option>
+                    </select>
+                    <select class="sort-field" onchange={on_sort_field} disabled={disabled} aria-label="Sort field">
+                        <option value="date" selected={state.query.sort_field == TodoSortField::Date}>{ "Date" }</option>
+                        <option value="title" selected={state.query.sort_field == TodoSortField::Title}>{ "Title" }</option>
+                    </select>
+                    <select class="sort-direction" onchange={on_sort_direction} disabled={disabled} aria-label="Sort direction">
+                        <option value="desc" selected={state.query.sort_direction == TodoSortDirection::Desc}>{ "Desc" }</option>
+                        <option value="asc" selected={state.query.sort_direction == TodoSortDirection::Asc}>{ "Asc" }</option>
+                    </select>
+                </div>
                 if !state.error.is_empty() {
                     <p class="error-message" role="alert">{ &state.error }</p>
                 }
@@ -91,6 +175,11 @@ mod app {
                 if state.todos.is_empty() {
                     <p class="empty-state">{ "No todos in the synced page." }</p>
                 }
+                <nav class="pagination" aria-label="Todo pages">
+                    <button type="button" onclick={on_previous_page} disabled={previous_disabled}>{ "Previous" }</button>
+                    <span>{ format!("Page {}", state.query.page + 1) }</span>
+                    <button type="button" onclick={on_next_page} disabled={next_disabled}>{ "Next" }</button>
+                </nav>
                 <p class="summary">{ summary_text(&state) }</p>
             </section>
         }
@@ -123,38 +212,54 @@ mod app {
             <li class={classes!("todo-item", todo.done.then_some("done"))}>
                 <label class="todo-label">
                     <input type="checkbox" data-role="toggle" checked={checked} disabled={disabled} {onchange} />
-                    <span>{ &todo.title }</span>
+                    <span class="todo-text">
+                        <span class="todo-title">{ &todo.title }</span>
+                        <time class="todo-created">{ format_created_at(todo.created_at) }</time>
+                    </span>
                 </label>
                 <button type="button" disabled={disabled} {onclick}>{ "Delete" }</button>
             </li>
         }
     }
 
+    fn format_created_at(created_at: i64) -> String {
+        if created_at <= 0 {
+            return "Created --".to_owned();
+        }
+        let date = Date::new(&JsValue::from_f64(created_at as f64));
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            date.get_full_year(),
+            date.get_month() + 1,
+            date.get_date(),
+            date.get_hours(),
+            date.get_minutes()
+        )
+    }
+
     fn controls_locked(state: &TodoState) -> bool {
-        !state.ready || state.generating || state.syncing
+        todo_display::controls_locked(&display_state(state))
     }
 
     fn status_text(state: &TodoState) -> String {
-        if !state.error.is_empty() {
-            "Error".to_owned()
-        } else if state.generating {
-            format!(
-                "Generating {} / {} in main memory...",
-                format_count(state.generated),
-                format_count(state.total_to_generate)
-            )
-        } else if state.syncing {
-            "Syncing main memory to OPFS worker...".to_owned()
-        } else if state.ready {
-            "Main memory runtime synced with OPFS worker".to_owned()
-        } else {
-            "Opening runtimes...".to_owned()
+        todo_display::status_text(&display_state(state))
+    }
+
+    fn display_state(state: &TodoState) -> TodoDisplayState {
+        TodoDisplayState {
+            ready: state.ready,
+            generating: state.generating,
+            syncing: state.syncing,
+            error: state.error.clone(),
+            generated: state.generated,
+            total_to_generate: state.total_to_generate,
         }
     }
 
     fn summary_text(state: &TodoState) -> String {
         let mut parts = vec![
             format!("{} OPFS current rows", format_count(state.current_rows)),
+            format!("page {}", state.query.page + 1),
             format!("main query {:.2} ms", state.main_query_ms),
             format!("export {:.2} ms", state.export_ms),
             format!("OPFS apply {:.2} ms", state.worker_apply_ms),
