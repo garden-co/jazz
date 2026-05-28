@@ -213,3 +213,9 @@ Scope impact: add APIs for computing missing remote block manifests and exportin
 Decision: Store `payload_sha256` in `history_blocks` and bump the prototype storage format to 12. Hashing remains mandatory at import boundaries, but local inventory reads should not deserialize or hash compressed payload blobs.
 
 Scope impact: manifest listing and block existence checks can use metadata columns and an inventory index. This keeps the block-native sync path shaped like a real delta protocol rather than an O(payload bytes) scan.
+
+## Thu May 28 00:27:05 PDT 2026 - Exact Block Export
+
+Decision: Make manifest-selected export query exact block identities instead of exporting all local blocks and filtering in memory. Duplicate requested manifests are deduped before querying.
+
+Scope impact: this keeps block sync scalable with the number of requested missing blocks, not total local cold history, and preserves `block_id` as a receiver-local detail.

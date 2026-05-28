@@ -787,14 +787,14 @@ impl Runtime {
         &self,
         remote_manifests: &[HistoryBlockManifest],
     ) -> Result<Vec<HistoryBlockManifest>> {
-        let local_manifests = self.all_history_block_manifests()?;
+        let local_manifest_keys = self
+            .all_history_block_manifests()?
+            .into_iter()
+            .map(|manifest| history_block_manifest_key(&manifest))
+            .collect::<BTreeSet<_>>();
         Ok(remote_manifests
             .iter()
-            .filter(|remote| {
-                !local_manifests
-                    .iter()
-                    .any(|local| history_block_manifest_matches(local, remote))
-            })
+            .filter(|remote| !local_manifest_keys.contains(&history_block_manifest_key(remote)))
             .cloned()
             .collect())
     }
@@ -854,15 +854,17 @@ impl Runtime {
         &self,
         requested_manifests: &[HistoryBlockManifest],
     ) -> Result<Vec<HistoryBlockExport>> {
-        let local_blocks = self.export_all_history_blocks()?;
-        Ok(local_blocks
-            .into_iter()
-            .filter(|block| {
-                requested_manifests
-                    .iter()
-                    .any(|requested| history_block_manifest_matches(&block.manifest, requested))
-            })
-            .collect())
+        let mut seen = BTreeSet::new();
+        let mut blocks = Vec::new();
+        for requested in requested_manifests {
+            if !seen.insert(history_block_manifest_key(requested)) {
+                continue;
+            }
+            if let Some(block) = history_block_export_for_manifest(&self.conn, requested)? {
+                blocks.push(block);
+            }
+        }
+        Ok(blocks)
     }
 
     pub fn import_history_blocks(&mut self, blocks: &[HistoryBlockExport]) -> Result<usize> {
@@ -6316,22 +6318,93 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
     Ok(())
 }
 
-fn history_block_manifest_matches(
-    local: &HistoryBlockManifest,
-    remote: &HistoryBlockManifest,
-) -> bool {
-    local.kind == remote.kind
-        && local.table == remote.table
-        && local.row_id == remote.row_id
-        && local.min_global_epoch == remote.min_global_epoch
-        && local.max_global_epoch == remote.max_global_epoch
-        && local.row_count == remote.row_count
-        && local.tx_count == remote.tx_count
-        && local.codec == remote.codec
-        && local.format_version == remote.format_version
-        && local.uncompressed_bytes == remote.uncompressed_bytes
-        && local.compressed_bytes == remote.compressed_bytes
-        && local.payload_sha256 == remote.payload_sha256
+fn history_block_manifest_key(
+    manifest: &HistoryBlockManifest,
+) -> (
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    String,
+    i64,
+    i64,
+    i64,
+    String,
+) {
+    (
+        manifest.kind.clone(),
+        manifest.table.clone(),
+        manifest.row_id.clone(),
+        manifest.min_global_epoch,
+        manifest.max_global_epoch,
+        manifest.row_count,
+        manifest.tx_count,
+        manifest.codec.clone(),
+        manifest.format_version,
+        manifest.uncompressed_bytes,
+        manifest.compressed_bytes,
+        manifest.payload_sha256.clone(),
+    )
+}
+
+fn history_block_export_for_manifest(
+    conn: &Connection,
+    requested: &HistoryBlockManifest,
+) -> Result<Option<HistoryBlockExport>> {
+    let table_num = crate::schema::table_num(conn, &requested.table)?;
+    let row_num = match row_num(conn, &requested.row_id) {
+        Ok(row_num) => row_num,
+        Err(_) => return Ok(None),
+    };
+    let block_kind = history_block_kind_value(&requested.kind)?;
+    let row = conn
+        .query_row(
+            "SELECT block_id, payload
+             FROM history_blocks
+             WHERE block_kind = ?
+               AND table_num = ?
+               AND row_num = ?
+               AND min_global_epoch = ?
+               AND max_global_epoch = ?
+               AND row_count = ?
+               AND tx_count = ?
+               AND codec = ?
+               AND format_version = ?
+               AND uncompressed_bytes = ?
+               AND compressed_bytes = ?
+               AND payload_sha256 = ?
+             ORDER BY block_id
+             LIMIT 1",
+            params![
+                block_kind,
+                table_num,
+                row_num,
+                requested.min_global_epoch,
+                requested.max_global_epoch,
+                requested.row_count,
+                requested.tx_count,
+                requested.codec,
+                requested.format_version,
+                requested.uncompressed_bytes,
+                requested.compressed_bytes,
+                requested.payload_sha256,
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()?;
+    let Some((block_id, payload)) = row else {
+        return Ok(None);
+    };
+    let mut manifest = requested.clone();
+    manifest.block_id = block_id;
+    Ok(Some(HistoryBlockExport {
+        manifest,
+        tx_ranges: history_block_tx_ranges(conn, block_id)?,
+        payload,
+    }))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

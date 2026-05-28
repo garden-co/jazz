@@ -316,6 +316,14 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
         alice.export_history_blocks_matching(&missing).unwrap(),
         blocks
     );
+    let mut duplicate_missing = missing.clone();
+    duplicate_missing.extend(missing.clone());
+    assert_eq!(
+        alice
+            .export_history_blocks_matching(&duplicate_missing)
+            .unwrap(),
+        blocks
+    );
 
     let mut tampered = blocks.clone();
     tampered[0].payload[0] ^= 1;
