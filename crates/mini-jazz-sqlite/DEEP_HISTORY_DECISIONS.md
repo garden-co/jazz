@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 04:06:08 PDT 2026
+
+Decision: refresh the Block benchmark column after import validation.
+
+Why: block-native import now decodes compressed payloads to validate manifest and tx-index summaries before insertion. That is a real semantic cost and should be visible in the canonical comparison table.
+
+Scope impact: reran `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-history-blocks` with canonical inputs. The JSON output is saved at `/tmp/deep_history_all_canonical_blocks_post_validation.json`, and the Block column now reflects the slower validated import path.
+
 ## Thu May 28 04:03:26 PDT 2026
 
 Decision: validate imported `uncompressed_bytes` without double-decompressing blocks.
