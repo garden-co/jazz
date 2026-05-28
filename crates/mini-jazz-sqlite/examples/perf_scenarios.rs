@@ -208,6 +208,8 @@ enum DeepHistoryReport {
     AppendStreamJazzRope(DeepHistoryCaseReport),
     AutomergePaperJazzRope(DeepHistoryCaseReport),
     CanvasPositionsJazzRope(DeepHistoryCaseReport),
+    AppendStreamHistoryBlocksJazzRope(DeepHistoryCaseReport),
+    AutomergePaperHistoryBlocksJazzRope(DeepHistoryCaseReport),
 }
 
 #[derive(Serialize)]
@@ -4118,6 +4120,11 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
         "append-jazz-rope" | "append-stream-jazz-rope" => Ok(
             DeepHistoryReport::AppendStreamJazzRope(run_append_stream_jazz_rope_probe()?),
         ),
+        "append-history-blocks-jazz-rope" | "append-block-incr" | "append-blocks-incr" => {
+            Ok(DeepHistoryReport::AppendStreamHistoryBlocksJazzRope(
+                run_append_stream_history_blocks_jazz_rope_probe()?,
+            ))
+        }
         "automerge" | "automerge-paper" => {
             Ok(DeepHistoryReport::AutomergePaper(run_automerge_paper_probe()?))
         }
@@ -4129,6 +4136,11 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
         "automerge-jazz-rope" | "automerge-paper-jazz-rope" => Ok(
             DeepHistoryReport::AutomergePaperJazzRope(run_automerge_paper_jazz_rope_probe()?),
         ),
+        "automerge-history-blocks-jazz-rope" | "automerge-block-incr" | "automerge-blocks-incr" => {
+            Ok(DeepHistoryReport::AutomergePaperHistoryBlocksJazzRope(
+                run_automerge_paper_history_blocks_jazz_rope_probe()?,
+            ))
+        }
         "canvas" | "canvas-positions" => {
             Ok(DeepHistoryReport::CanvasPositions(run_canvas_positions_probe()?))
         }
@@ -4139,7 +4151,7 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
             DeepHistoryReport::CanvasPositionsJazzRope(run_canvas_positions_jazz_rope_probe()?),
         ),
         other => Err(format!(
-            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected all, all-history-blocks, all-jazz-rope, append, append-history-blocks, append-jazz-rope, automerge-paper, automerge-history-blocks, automerge-paper-jazz-rope, canvas, canvas-history-blocks, or canvas-jazz-rope"
+            "unknown MINI_JAZZ_PERF_ONLY_DEEP_HISTORY={other}; expected all, all-history-blocks, all-jazz-rope, all-block-incr, append, append-history-blocks, append-jazz-rope, append-block-incr, automerge-paper, automerge-history-blocks, automerge-paper-jazz-rope, automerge-block-incr, canvas, canvas-history-blocks, or canvas-jazz-rope"
         )
         .into()),
     }
@@ -4171,6 +4183,17 @@ fn run_all_deep_history_rope_probes() -> BenchResult<Vec<DeepHistoryReport>> {
     ])
 }
 
+fn run_all_deep_history_block_rope_probes() -> BenchResult<Vec<DeepHistoryReport>> {
+    Ok(vec![
+        DeepHistoryReport::AppendStreamHistoryBlocksJazzRope(
+            run_append_stream_history_blocks_jazz_rope_probe()?,
+        ),
+        DeepHistoryReport::AutomergePaperHistoryBlocksJazzRope(
+            run_automerge_paper_history_blocks_jazz_rope_probe()?,
+        ),
+    ])
+}
+
 fn run_deep_history_group_probe(kind: &str) -> BenchResult<Option<Vec<DeepHistoryReport>>> {
     match kind {
         "all" | "all-baseline" | "all-base" => Ok(Some(run_all_deep_history_probes()?)),
@@ -4178,6 +4201,9 @@ fn run_deep_history_group_probe(kind: &str) -> BenchResult<Option<Vec<DeepHistor
             Ok(Some(run_all_deep_history_block_probes()?))
         }
         "all-jazz-rope" | "all-rope" | "all-incr" => Ok(Some(run_all_deep_history_rope_probes()?)),
+        "all-history-blocks-jazz-rope" | "all-block-incr" | "all-blocks-incr" => {
+            Ok(Some(run_all_deep_history_block_rope_probes()?))
+        }
         _ => Ok(None),
     }
 }
@@ -4343,6 +4369,8 @@ fn run_append_stream_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
     run_jazz_rope_text_case(JazzRopeTextCaseInput {
         target_updates,
         sample_every,
+        compact_hot_tail: None,
+        compact_max_rows_per_block: None,
         reference_gzip_bytes: None,
         next_edit: Box::new(move |conn, root, _index| {
             state_len += token.len();
@@ -4351,6 +4379,29 @@ fn run_append_stream_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: None,
         notes: vec![
             "Incremental sequence sidecar: Jazz row history stores sequence root refs; appended text lives in shared UTF-8 sidecar segments.".to_owned(),
+        ],
+    })
+}
+
+fn run_append_stream_history_blocks_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
+    let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 2_225);
+    let sample_every = deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY", 445);
+    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
+    let mut state_len = 0usize;
+    run_jazz_rope_text_case(JazzRopeTextCaseInput {
+        target_updates,
+        sample_every,
+        compact_hot_tail: Some(hot_tail),
+        compact_max_rows_per_block: deep_history_max_rows_per_block(),
+        reference_gzip_bytes: None,
+        next_edit: Box::new(move |conn, root, _index| {
+            state_len += token.len();
+            Ok((persisted_rope::append(conn, root, &token)?, state_len))
+        }),
+        final_reference_json: None,
+        notes: vec![
+            "Block+Incr: Jazz row history stores sequence root refs and seals cold root history into lz4 blocks; appended text lives in shared UTF-8 sidecar segments.".to_owned(),
         ],
     })
 }
@@ -4371,6 +4422,8 @@ fn run_automerge_paper_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
     run_jazz_rope_text_case(JazzRopeTextCaseInput {
         target_updates,
         sample_every,
+        compact_hot_tail: None,
+        compact_max_rows_per_block: None,
         reference_gzip_bytes: Some(trace_bytes),
         next_edit: Box::new(move |conn, mut root, index| {
             for (pos, del, ins) in &txns[index].patches {
@@ -4385,6 +4438,43 @@ fn run_automerge_paper_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
             "Incremental sequence sidecar: Jazz row history stores sequence root refs; document text lives in shared UTF-8 sidecar segments.".to_owned(),
+        ],
+    })
+}
+
+fn run_automerge_paper_history_blocks_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
+    let trace_path = automerge_trace_path()?;
+    let trace_bytes = std::fs::metadata(&trace_path)?.len() as usize;
+    let trace_json = gzip_decode_to_string(&trace_path)?;
+    let trace: AutomergeTrace = serde_json::from_str(&trace_json)?;
+    let target_updates = env_optional_usize("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_UPDATES")
+        .unwrap_or(2_900)
+        .min(trace.txns.len());
+    let sample_every =
+        deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY", 580);
+    let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
+    let mut materialized = trace.start_content;
+    let txns = trace.txns;
+    let available_txns = txns.len();
+    run_jazz_rope_text_case(JazzRopeTextCaseInput {
+        target_updates,
+        sample_every,
+        compact_hot_tail: Some(hot_tail),
+        compact_max_rows_per_block: deep_history_max_rows_per_block(),
+        reference_gzip_bytes: Some(trace_bytes),
+        next_edit: Box::new(move |conn, mut root, index| {
+            for (pos, del, ins) in &txns[index].patches {
+                let start = byte_index_for_char(&materialized, *pos)?;
+                let end = byte_index_for_char(&materialized, pos + del)?;
+                root = persisted_rope::replace_range(conn, root, start, end - start, ins)?;
+                materialized.replace_range(start..end, ins);
+            }
+            Ok((root, materialized.len()))
+        }),
+        final_reference_json: None,
+        notes: vec![
+            format!("Source trace transactions available: {available_txns}"),
+            "Block+Incr: Jazz row history stores sequence root refs and seals cold root history into lz4 blocks; document text lives in shared UTF-8 sidecar segments.".to_owned(),
         ],
     })
 }
@@ -4521,6 +4611,8 @@ struct JazzRopePositionCaseInput {
 struct JazzRopeTextCaseInput {
     target_updates: usize,
     sample_every: usize,
+    compact_hot_tail: Option<usize>,
+    compact_max_rows_per_block: Option<usize>,
     reference_gzip_bytes: Option<usize>,
     next_edit: Box<JazzRopeTextEditFn>,
     final_reference_json: Option<String>,
@@ -4623,6 +4715,71 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         return Err("jazz rope text current read materialized unexpected length".into());
     }
 
+    let mut block_native_export_ms = None;
+    let mut block_native_import_ms = None;
+    let mut block_native_blocks = None;
+    let mut block_native_payload_bytes = None;
+    if let Some(hot_tail) = input.compact_hot_tail {
+        let compaction_started = Instant::now();
+        let compaction = if let Some(max_rows_per_block) = input.compact_max_rows_per_block {
+            writer.compact_history_with_policy(
+                HistoryCompactionPolicy::accepted_only(hot_tail, hot_tail)
+                    .with_max_rows_per_block(max_rows_per_block),
+            )?
+        } else {
+            writer.compact_table_accepted_history("documents", hot_tail, hot_tail)?
+        };
+        let compaction_ms = ms(compaction_started.elapsed());
+        if let Some(max_rows_per_block) = input.compact_max_rows_per_block {
+            input.notes.push(format!(
+                "History block row cap: at most {max_rows_per_block} sealed root-history rows per block."
+            ));
+        }
+        input.notes.push(format!(
+            "Root history block compaction: hot tail {}, sealed rows {}, blocks {}, sealed tx rows {}, uncompressed bytes {}, compressed bytes {}, compaction {:.2} ms.",
+            hot_tail,
+            compaction.sealed_history_rows,
+            compaction.history_blocks,
+            compaction.sealed_transactions,
+            compaction.uncompressed_bytes,
+            compaction.compressed_bytes,
+            compaction_ms
+        ));
+
+        let block_export_started = Instant::now();
+        let delta = writer.export_table_history_delta("documents", &[])?;
+        block_native_export_ms = Some(ms(block_export_started.elapsed()));
+        let delta_bundle_summary = BundleSummary::from(&delta.bundle)?;
+        block_native_blocks = Some(delta.blocks.len());
+        block_native_payload_bytes = Some(
+            delta
+                .blocks
+                .iter()
+                .map(|block| block.payload.len())
+                .sum::<usize>(),
+        );
+        input.notes.push(format!(
+            "Block-native root delta: open bundle bytes {}, block payload bytes {}.",
+            delta_bundle_summary.bytes,
+            block_native_payload_bytes.unwrap_or(0)
+        ));
+        let mut block_peer =
+            Runtime::open_with_schema(Storage::Memory, "block-peer-node", "bob", schema.clone())?;
+        let block_peer_rope_path = tmp.path().join("block-peer-rope.sqlite");
+        let block_peer_rope = Connection::open(&block_peer_rope_path)?;
+        persisted_rope::install(&block_peer_rope)?;
+        let block_import_started = Instant::now();
+        block_peer.apply_history_delta(&delta.bundle, &delta.blocks)?;
+        copy_rope_sidecar(&writer_rope, &block_peer_rope)?;
+        let block_rows = block_peer.read_rows("documents")?;
+        let block_root = row_root_id(&block_rows, "body_root")?;
+        let block_text = persisted_rope::materialize(&block_peer_rope, Some(block_root))?;
+        if block_text.len() != final_payload_bytes {
+            return Err("block+incr import materialized unexpected length".into());
+        }
+        block_native_import_ms = Some(ms(block_import_started.elapsed()));
+    }
+
     let final_bundle = writer.export_table_history("documents")?;
     let final_bundle_summary = BundleSummary::from(&final_bundle)?;
     let sidecar_bundle_bytes = rope_sidecar_bundle_bytes(&writer_rope)?;
@@ -4640,6 +4797,37 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         return Err("jazz rope text cold load materialized unexpected length".into());
     }
 
+    let historical_epochs = historical_read_epochs_for_case(
+        &final_bundle,
+        &writer.history_block_manifests("documents")?,
+        "doc",
+    );
+    let historical_started = Instant::now();
+    let mut historical_read_count = 0;
+    for epoch in &historical_epochs {
+        if let Some(row) =
+            writer.read_row_at_node_epoch("documents", "doc", "writer-node", *epoch)?
+        {
+            let historical_root = row
+                .values
+                .get("body_root")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("historical rope row missing body_root")?;
+            let historical_text =
+                persisted_rope::materialize(&writer_rope, Some(historical_root.parse::<i64>()?))?;
+            if historical_text.len() <= final_payload_bytes {
+                historical_read_count += 1;
+            }
+        }
+    }
+    let historical_read_total_ms = ms(historical_started.elapsed());
+    let tx_info_ids = sampled_tx_ids_from_bundle(&final_bundle);
+    let tx_info_started = Instant::now();
+    for tx_id in &tx_info_ids {
+        writer.transaction_info(tx_id)?;
+    }
+    let transaction_info_total_ms = ms(tx_info_started.elapsed());
+    let transaction_info_count = tx_info_ids.len();
     let rope_stats = persisted_rope::stats(&writer_rope)?;
     let writer_stats = writer.storage_stats()?;
     let rope_database_bytes = sqlite_database_bytes(&writer_rope)?;
@@ -4686,20 +4874,28 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         live_receive_last_ms: receive_samples.last().copied(),
         cold_load_ms,
         current_read_ms,
-        historical_read_total_ms: 0.0,
-        historical_read_count: 0,
-        historical_read_average_ms: None,
-        transaction_info_total_ms: 0.0,
-        transaction_info_count: 0,
-        transaction_info_average_ms: None,
+        historical_read_total_ms,
+        historical_read_count,
+        historical_read_average_ms: if historical_read_count == 0 {
+            None
+        } else {
+            Some(historical_read_total_ms / historical_read_count as f64)
+        },
+        transaction_info_total_ms,
+        transaction_info_count,
+        transaction_info_average_ms: if transaction_info_count == 0 {
+            None
+        } else {
+            Some(transaction_info_total_ms / transaction_info_count as f64)
+        },
         final_payload_bytes,
         extrapolated_final_payload_bytes_for_target: Some(final_payload_bytes),
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
-        block_native_export_ms: None,
-        block_native_import_ms: None,
-        block_native_blocks: None,
-        block_native_payload_bytes: None,
+        block_native_export_ms,
+        block_native_import_ms,
+        block_native_blocks,
+        block_native_payload_bytes,
         database_bytes,
         live_database_bytes,
         freelist_bytes: writer_stats.freelist_bytes,
@@ -5682,6 +5878,15 @@ fn sampled_tx_ids(tx_ids: &[String]) -> Vec<String> {
         .into_iter()
         .filter_map(|index| tx_ids.get(index).cloned())
         .collect()
+}
+
+fn sampled_tx_ids_from_bundle(bundle: &Bundle) -> Vec<String> {
+    let tx_ids = bundle
+        .txs
+        .iter()
+        .map(|tx| tx.tx_id.clone())
+        .collect::<Vec<_>>();
+    sampled_tx_ids(&tx_ids)
 }
 
 fn percentile(mut values: Vec<f64>, percentile: f64) -> Option<f64> {

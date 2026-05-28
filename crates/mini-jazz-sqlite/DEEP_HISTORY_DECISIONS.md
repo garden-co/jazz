@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 07:44:02 PDT 2026
+
+Decision: add a combined Block+Incr benchmark for append and Automerge text rows.
+
+Why: the separate Block and Incr columns answer different questions: sealed blocks reduce Jazz root-history overhead, while the sidecar avoids rewriting full text values. Combining them shows whether those wins stack for text workloads before designing a production integration.
+
+Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-block-incr` runs append and Automerge with rope sidecar content plus sealed lz4 blocks for cold Jazz root history. The first canonical run is saved at `/tmp/deep_history_block_incr_append_automerge.json`.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.

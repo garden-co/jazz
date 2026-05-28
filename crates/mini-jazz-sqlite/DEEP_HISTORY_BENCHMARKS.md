@@ -266,6 +266,37 @@ large remaining time is still history export/apply/cold load. This argues for
 tracking batched writes as an orthogonal benchmark dimension, not as a
 replacement for history blocks.
 
+## Block + Incr Probe
+
+Canonical append and Automerge run combining the incremental rope sidecar with
+history blocks. Jazz row history stores only rope root refs, then cold root
+history is sealed into lz4 blocks. The sidecar is still copied as a snapshot for
+cold load and block-native import in this prototype.
+
+Run:
+
+```bash
+MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-block-incr \
+MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS=2225 \
+MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY=445 \
+MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_UPDATES=2900 \
+MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY=580 \
+target/debug/examples/perf_scenarios
+```
+
+Output: `/tmp/deep_history_block_incr_append_automerge.json`.
+
+| Scenario  | total loop | write only | sampled receive | cold load | current read | historical read avg | tx info avg | block import | block payload bytes | database bytes | live database bytes | bundle bytes |
+| --------- | ---------: | ---------: | --------------: | --------: | -----------: | ------------------: | ----------: | -----------: | ------------------: | -------------: | ------------------: | -----------: |
+| Append    |    7309 ms |    2576 ms |         4731 ms |   2207 ms |     53.30 ms |            62.50 ms |     0.27 ms |      1727 ms |              31,085 |        479,232 |             315,392 |      533,420 |
+| Automerge |   23284 ms |    9150 ms |        14130 ms |   6334 ms |     41.36 ms |            83.57 ms |     0.31 ms |      4865 ms |              41,993 |        778,240 |             561,152 |    1,066,270 |
+
+Interpretation: the storage wins stack nicely, especially for append
+(`35.90x` database/final payload, better than Incr alone at `42.95x` and far
+better than Block at `1402.46x`). The time story does not stack yet:
+Automerge's sidecar write/materialization cost dominates, and block-native
+import is currently paying for full sidecar snapshot copy plus block validation.
+
 ## Block Size Probe
 
 Quick non-canonical append Block sweep after adding
