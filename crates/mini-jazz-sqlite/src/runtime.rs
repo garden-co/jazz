@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -39,6 +39,7 @@ pub struct Runtime {
     node_num: i64,
     branch_num: i64,
     history_block_cache: RefCell<BTreeMap<i64, Arc<Bundle>>>,
+    history_block_cache_order: RefCell<VecDeque<i64>>,
 }
 
 struct AwaitingDependencyTx {
@@ -221,6 +222,7 @@ impl Runtime {
             node_num,
             branch_num: 1,
             history_block_cache: RefCell::new(BTreeMap::new()),
+            history_block_cache_order: RefCell::new(VecDeque::new()),
         })
     }
 
@@ -3951,6 +3953,7 @@ impl Runtime {
         payload: &[u8],
     ) -> Result<Arc<Bundle>> {
         if let Some(cached) = self.history_block_cache.borrow().get(&block_id).cloned() {
+            self.note_history_block_cache_use(block_id);
             return Ok(cached);
         }
         let bundle = Arc::new(decode_history_block_payload(
@@ -3959,13 +3962,27 @@ impl Runtime {
             payload,
         )?);
         let mut cache = self.history_block_cache.borrow_mut();
-        if cache.len() >= HISTORY_BLOCK_CACHE_CAPACITY {
-            if let Some(evicted) = cache.keys().next().copied() {
+        let mut order = self.history_block_cache_order.borrow_mut();
+        while cache.len() >= HISTORY_BLOCK_CACHE_CAPACITY {
+            if let Some(evicted) = order.pop_front() {
                 cache.remove(&evicted);
+            } else if let Some(evicted) = cache.keys().next().copied() {
+                cache.remove(&evicted);
+            } else {
+                break;
             }
         }
         cache.insert(block_id, Arc::clone(&bundle));
+        order.push_back(block_id);
         Ok(bundle)
+    }
+
+    fn note_history_block_cache_use(&self, block_id: i64) {
+        let mut order = self.history_block_cache_order.borrow_mut();
+        if let Some(index) = order.iter().position(|cached| *cached == block_id) {
+            order.remove(index);
+        }
+        order.push_back(block_id);
     }
 
     pub fn read_rows_require_ref(
@@ -11293,6 +11310,50 @@ mod tests {
         let cache = runtime.history_block_cache.borrow();
         assert_eq!(cache.len(), HISTORY_BLOCK_CACHE_CAPACITY);
         assert!(!cache.contains_key(&1));
+    }
+
+    #[test]
+    fn decoded_history_block_cache_evicts_least_recently_used_block() {
+        let schema = SchemaDef::new().table("notes", |table| {
+            table.text("body");
+        });
+        let runtime =
+            Runtime::open_with_schema(Storage::Memory, "cache-node", "alice", schema).unwrap();
+        let bundle = sample_block_bundle();
+        let encoded = encode_history_block_payload(&bundle).unwrap();
+        let compressed = lz4_flex::compress_prepend_size(&encoded);
+
+        for block_id in 1..=HISTORY_BLOCK_CACHE_CAPACITY as i64 {
+            runtime
+                .cached_history_block(
+                    block_id,
+                    HISTORY_BLOCK_CODEC,
+                    HISTORY_BLOCK_FORMAT_VERSION,
+                    &compressed,
+                )
+                .unwrap();
+        }
+        runtime
+            .cached_history_block(
+                1,
+                HISTORY_BLOCK_CODEC,
+                HISTORY_BLOCK_FORMAT_VERSION,
+                &compressed,
+            )
+            .unwrap();
+        runtime
+            .cached_history_block(
+                HISTORY_BLOCK_CACHE_CAPACITY as i64 + 1,
+                HISTORY_BLOCK_CODEC,
+                HISTORY_BLOCK_FORMAT_VERSION,
+                &compressed,
+            )
+            .unwrap();
+
+        let cache = runtime.history_block_cache.borrow();
+        assert_eq!(cache.len(), HISTORY_BLOCK_CACHE_CAPACITY);
+        assert!(cache.contains_key(&1));
+        assert!(!cache.contains_key(&2));
     }
 
     #[test]

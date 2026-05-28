@@ -499,3 +499,19 @@ Decision: cap the per-runtime decoded history block cache at 64 blocks.
 Why: the cache improves repeated historical reads and transaction lookups, but an unbounded cache undermines the memory part of the RFC goal. Decoded blocks should be temporary accelerators, not a way for point reads to pin all cold history in RAM.
 
 Scope impact: all runtime block-cache users now share one bounded insertion path. The eviction policy is intentionally simple for the spike; a later version can make it true LRU if measured.
+
+## Thu May 28 03:02:14 PDT 2026 - Full Suite Checkpoint After Cache Bound
+
+Decision: treat the v9 columnar block encoder, one-candidate point reads, runtime block cache, and 64-block cache bound as a stable checkpoint before starting another feature slice.
+
+Why: the full `cargo test -p mini-jazz-sqlite` suite passes with 12 unit tests and 377 whole-system tests. That gives us a clean base for the remaining timebox instead of stacking new work on top of an unverified cache change.
+
+Scope impact: keep subsequent edits small and RFC-shaped unless a measured benchmark gap justifies a larger change.
+
+## Thu May 28 03:03:16 PDT 2026 - Make The Block Cache LRU
+
+Decision: change the bounded decoded history block cache from "evict the smallest local block id" to least-recently-used eviction.
+
+Why: historical reads often touch nearby points repeatedly before moving elsewhere. Local block ids are not a good proxy for usefulness, especially after sync import or block splitting. LRU keeps the recently touched decompressed blocks while preserving the fixed memory cap.
+
+Scope impact: add a small order queue beside the cache map and focused tests for both the bound and eviction policy. The cache remains an implementation detail of `Runtime`.
