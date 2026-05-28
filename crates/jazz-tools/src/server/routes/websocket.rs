@@ -21,6 +21,18 @@ use super::utils::connection_schema_diagnostics_from_handshake;
 
 const MAX_WS_SYNC_UPDATES_PER_FRAME: usize = 256;
 
+/// Generous ceiling on the decompressed size of the pre-auth handshake frame.
+/// An `AuthHandshake` is a few KB of JSON, so this only rejects an obvious LZ4
+/// decompression bomb sent by an unauthenticated peer before any auth runs.
+const MAX_HANDSHAKE_DECOMPRESSED_BYTES: usize = 1024 * 1024;
+
+/// Maximum size of an inbound WebSocket message (the compressed bytes on the
+/// wire). This is axum's existing default, set explicitly so the limit is
+/// visible and can later be made configurable. It is *not* a bound on the
+/// decompressed payload — see `MAX_HANDSHAKE_DECOMPRESSED_BYTES` and the
+/// follow-up on bounded framing for that.
+const MAX_WS_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
 pub(super) async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
@@ -36,7 +48,8 @@ pub(super) async fn ws_handler(
             .into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
+    ws.max_message_size(MAX_WS_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
 }
 
 /// Outcome of authenticating a WS handshake.
@@ -326,7 +339,10 @@ async fn handle_ws_connection(
             return;
         }
     };
-    let payload = match crate::transport_manager::frame_decode(&first) {
+    let payload = match crate::transport_manager::frame_decode_capped(
+        &first,
+        MAX_HANDSHAKE_DECOMPRESSED_BYTES,
+    ) {
         Some(payload) => payload,
         None => {
             let _ = socket.close().await;
