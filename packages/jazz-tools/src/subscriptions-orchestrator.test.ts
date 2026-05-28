@@ -206,9 +206,9 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
-          tier: "edge",
           localUpdates: "deferred",
           propagation: "local-only",
+          tier: "edge",
         })}:${query._build()}`,
       );
     } finally {
@@ -228,6 +228,34 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(deferredKey).not.toBe(defaultKey);
       expect(localOnlyKey).not.toBe(defaultKey);
       expect(localOnlyKey).not.toBe(deferredKey);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U07d makeQueryKey is invariant under options property order", async () => {
+    const harness = createUnitHarness("app-so-u07d");
+    const query = makeQuery();
+
+    try {
+      const keyA = harness.manager.makeQueryKey(query, {
+        tier: "edge",
+        localUpdates: "deferred",
+        propagation: "local-only",
+      });
+      const keyB = harness.manager.makeQueryKey(query, {
+        propagation: "local-only",
+        tier: "edge",
+        localUpdates: "deferred",
+      });
+      const keyC = harness.manager.makeQueryKey(query, {
+        localUpdates: "deferred",
+        propagation: "local-only",
+        tier: "edge",
+      });
+
+      expect(keyA).toBe(keyB);
+      expect(keyA).toBe(keyC);
     } finally {
       await harness.manager.shutdown();
     }

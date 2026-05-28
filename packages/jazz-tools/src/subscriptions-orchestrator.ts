@@ -383,5 +383,22 @@ function serializeQueryOptions(options?: QueryOptions): string {
     return "{}";
   }
 
-  return JSON.stringify(options);
+  return canonicalStringify(options);
+}
+
+function canonicalStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalStringify(item)).join(",")}]`;
+  }
+  const entries = Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map((key) => {
+      const serialized = canonicalStringify((value as Record<string, unknown>)[key]);
+      return serialized === undefined ? undefined : `${JSON.stringify(key)}:${serialized}`;
+    })
+    .filter((entry): entry is string => entry !== undefined);
+  return `{${entries.join(",")}}`;
 }
