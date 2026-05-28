@@ -1137,6 +1137,106 @@ fn branch_query_history_delta_with_compaction_stays_pinned_to_base_epoch() {
 }
 
 #[test]
+fn branch_table_history_delta_with_compaction_omits_future_main_blocks() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+
+    let update_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main after branch")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&update_tx, 2).unwrap();
+    alice
+        .compact_accepted_history("tasks", "task-1", 0)
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let delta = alice.export_table_history_delta("tasks", &[]).unwrap();
+    assert!(delta.blocks.is_empty());
+
+    bob.apply_history_delta(&delta.bundle, &delta.blocks)
+        .unwrap();
+    bob.checkout_branch("draft").unwrap();
+    let rows = bob.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Base title"));
+}
+
+#[test]
+fn branch_all_history_delta_with_compaction_omits_future_main_blocks() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+
+    let update_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main after branch")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&update_tx, 2).unwrap();
+    alice
+        .compact_accepted_history("tasks", "task-1", 0)
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let delta = alice.export_all_history_delta(&[]).unwrap();
+    assert!(delta.blocks.is_empty());
+
+    bob.apply_history_delta(&delta.bundle, &delta.blocks)
+        .unwrap();
+    bob.checkout_branch("draft").unwrap();
+    let rows = bob.read_rows("tasks").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["title"], json!("Base title"));
+}
+
+#[test]
 fn branch_base_snapshot_respects_deletes_and_excludes_pending_main() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

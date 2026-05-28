@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:30:21 PDT 2026
+
+Decision: cover branch-scoped block filtering through table and all-table history deltas, not only query deltas.
+
+Why: table/all sync paths attach raw sealed blocks through separate code paths. The same atomic-block leak risk applies there when the sender is checked out on a branch with a pinned main base.
+
+Scope impact: regressions now assert that compacted future-main accepted blocks are omitted from branch table/all deltas and that receivers still reconstruct the pinned base row from the preserved open anchor.
+
 ## Thu May 28 03:28:36 PDT 2026
 
 Decision: branch-scoped history deltas filter accepted sealed block manifests by branch base epoch before attaching raw blocks.
