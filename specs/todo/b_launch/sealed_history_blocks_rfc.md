@@ -630,6 +630,8 @@ Implemented in the current spike:
 - columnar JSON payloads compressed with lz4, currently format v9
 - dictionary/run/delta column encodings selected only when smaller than raw JSON
 - payload hashes, byte accounting, block manifests, and tx-range indexes
+- block import validation for payload hashes, manifest summaries, row identity,
+  epoch envelopes, and canonical tx-range indexes
 - accepted/rejected compaction by row, table, all tables, and bounded policy
 - optional rows-per-block splitting for point-read/storage tradeoff tuning
 - explicit storage reclamation separate from compaction
@@ -643,6 +645,7 @@ Implemented in the current spike:
 - branch-base anchor preservation in `history_open`
 - branch export and branch-scoped history-delta guards for sealed main history
 - canonical benchmark metrics for Base/Base1/Base2/Base3/Block/Incr
+- grouped deep-history benchmark selectors for baseline, Block, and Incr
 - narrow batched insert/update/upsert APIs and benchmark switch for grouped
   SQLite commits
 

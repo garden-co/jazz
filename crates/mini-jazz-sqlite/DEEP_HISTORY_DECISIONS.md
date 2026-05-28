@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 04:01:51 PDT 2026
+
+Decision: keep the RFC prototype-status checklist synchronized with the overnight implementation.
+
+Why: the decision log captures chronological detail, but the RFC should remain the compact agreement surface. Import-boundary validation and grouped benchmark selectors are now real enough to be listed as implemented.
+
+Scope impact: the RFC status section now names block import validation and grouped deep-history benchmark selectors explicitly.
+
 ## Thu May 28 04:01:03 PDT 2026
 
 Decision: reject duplicate imported tx-range entries for the same node.
