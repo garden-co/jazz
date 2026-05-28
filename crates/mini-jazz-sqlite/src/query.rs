@@ -102,21 +102,133 @@ impl QueryContext<'_> {
     }
 
     pub(crate) fn repair_row_nums_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<i64>> {
+        if query.limit.is_some() || query.offset.is_some() {
+            let support_query = repair_support_query(query)?;
+            return self
+                .read_rows_for_built_query(&support_query)?
+                .into_iter()
+                .map(|row| row_num(self.conn, &row.id))
+                .collect();
+        }
+
         let table = self.schema.table_def(&query.table)?;
-        let (condition_sql, mut params) =
+        let branch_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let mut row_nums =
+            self.repair_current_row_nums_for_built_query(query, table, &branch_nums)?;
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? {
+                row_nums.extend(
+                    self.repair_main_snapshot_row_nums_for_built_query(query, table, base_epoch)?,
+                );
+            }
+        }
+        row_nums.sort();
+        row_nums.dedup();
+        Ok(row_nums)
+    }
+
+    fn repair_current_row_nums_for_built_query(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+        branch_nums: &[i64],
+    ) -> Result<Vec<i64>> {
+        let (condition_sql, condition_params) =
             self.lower_query_conditions(table, &query.conditions, "h", "ids")?;
-        let mut query_params = vec![SqlValue::Integer(tx::OUTCOME_REJECTED)];
-        query_params.append(&mut params);
+        let policy_sql = if self.bypass_policy {
+            "1 = 1".to_owned()
+        } else {
+            policy::branch_read_policy_sql_for_alias(
+                self.schema,
+                table,
+                "h",
+                self.user,
+                self.branch_num,
+            )?
+        };
+        let branch_placeholders = placeholders(branch_nums.len());
         let sql = format!(
             "SELECT DISTINCT h.row_num
              FROM {} h
              JOIN jazz_row_id ids ON ids.row_num = h.row_num
              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-             WHERE tx.outcome != ?
+             WHERE h.j_branch_num IN ({branch_placeholders})
+               AND tx.outcome != ?
                AND {condition_sql}
+               AND {policy_sql}
              ORDER BY h.row_num",
             crate::schema::history_table(&query.table),
         );
+        let mut query_params = branch_nums
+            .iter()
+            .copied()
+            .map(SqlValue::Integer)
+            .collect::<Vec<_>>();
+        query_params.push(SqlValue::Integer(tx::OUTCOME_REJECTED));
+        query_params.extend(condition_params);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn repair_main_snapshot_row_nums_for_built_query(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+        base_epoch: i64,
+    ) -> Result<Vec<i64>> {
+        let (condition_sql, condition_params) =
+            self.lower_query_conditions(table, &query.conditions, "h", "ids")?;
+        let policy_sql = if self.bypass_policy {
+            "1 = 1".to_owned()
+        } else {
+            policy::snapshot_read_policy_sql_for_alias(
+                self.schema,
+                table,
+                "h",
+                self.user,
+                base_epoch,
+            )?
+        };
+        let sql = format!(
+            "SELECT DISTINCT h.row_num
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_branch_num = 1
+               AND tx.outcome != ?
+               AND tx.global_epoch IS NOT NULL
+               AND tx.global_epoch <= ?
+               AND h.op != 3
+               AND {condition_sql}
+               AND {policy_sql}
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} newer
+                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 WHERE newer.row_num = h.row_num
+                   AND newer.j_branch_num = 1
+                   AND newer_tx.outcome != ?
+                   AND newer_tx.global_epoch IS NOT NULL
+                   AND newer_tx.global_epoch <= ?
+                   AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
+               )
+             ORDER BY h.row_num",
+            crate::schema::history_table(&query.table),
+            history_table = crate::schema::history_table(&query.table),
+        );
+        let mut query_params = vec![
+            SqlValue::Integer(tx::OUTCOME_REJECTED),
+            SqlValue::Integer(base_epoch),
+        ];
+        query_params.extend(condition_params);
+        query_params.extend([
+            SqlValue::Integer(tx::OUTCOME_REJECTED),
+            SqlValue::Integer(base_epoch),
+        ]);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
             row.get::<_, i64>(0)
@@ -2151,6 +2263,25 @@ fn apply_query_window(
         rows.truncate(limit);
     }
     rows
+}
+
+fn repair_support_query(query: &BuiltQuery) -> Result<BuiltQuery> {
+    let offset = query.offset.unwrap_or(0);
+    if offset == 0 {
+        return Ok(query.clone());
+    }
+
+    let mut support_query = query.clone();
+    support_query.offset = None;
+    support_query.limit = query
+        .limit
+        .map(|limit| {
+            offset
+                .checked_add(limit)
+                .ok_or_else(|| crate::Error::new("query limit plus offset is too large"))
+        })
+        .transpose()?;
+    Ok(support_query)
 }
 
 fn row_to_view(

@@ -157,6 +157,15 @@ fn built_query_lowers_predicates_ordering_and_window_to_sqlite() {
         "offset": 1
     }))
     .unwrap();
+    let all_synced_matching = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [
+            {"column": "pinned", "op": "eq", "value": true},
+            {"column": "body", "op": "contains", "value": "keep"}
+        ],
+        "orderBy": [["$createdAt", "desc"]]
+    }))
+    .unwrap();
 
     let rows = alice.query(query.clone()).unwrap();
     assert_eq!(
@@ -200,6 +209,14 @@ fn built_query_lowers_predicates_ordering_and_window_to_sqlite() {
             .map(|row| row.id.as_str())
             .collect::<Vec<_>>(),
         vec!["note-new", "note-middle"]
+    );
+    assert_eq!(
+        peer.query(all_synced_matching)
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-newest", "note-new", "note-middle"]
     );
 }
 
@@ -1078,6 +1095,71 @@ fn ordered_field_page_subscription_replaces_displaced_boundary_row() {
     assert!(diffs
         .iter()
         .any(|diff| matches!(diff, RowDiff::Removed(row) if row.id == "doc-old")));
+}
+
+#[test]
+fn ordered_field_page_subscription_delta_replaces_displaced_boundary_row() {
+    let schema = SchemaDef::new().table("documents", |table| {
+        table.text("owner_id");
+        table.text("updated_at");
+        table.text("title");
+        table.index("owner_updated", ["owner_id", "updated_at"]);
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    for (id, updated_at) in [("doc-old", "0001"), ("doc-middle", "0002")] {
+        alice
+            .insert_row(
+                "documents",
+                id,
+                BTreeMap::from([
+                    ("owner_id".to_owned(), json!("alice")),
+                    ("updated_at".to_owned(), json!(updated_at)),
+                    ("title".to_owned(), json!(id)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let mut subscription = alice
+        .subscribe_rows_where_eq_top_field_desc(
+            "documents",
+            "owner_id",
+            json!("alice"),
+            "updated_at",
+            2,
+        )
+        .unwrap();
+
+    alice
+        .insert_row(
+            "documents",
+            "doc-new",
+            BTreeMap::from([
+                ("owner_id".to_owned(), json!("alice")),
+                ("updated_at".to_owned(), json!("0003")),
+                ("title".to_owned(), json!("newest")),
+            ]),
+        )
+        .unwrap();
+    let delta = alice.subscription_delta(&mut subscription).unwrap();
+
+    assert_eq!(
+        delta
+            .all
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["doc-new", "doc-middle"]
+    );
+    assert!(delta
+        .delta
+        .iter()
+        .any(|change| matches!(change, SubscriptionRowDelta::Added { id, .. } if id == "doc-new")));
+    assert!(delta.delta.iter().any(
+        |change| matches!(change, SubscriptionRowDelta::Removed { id, .. } if id == "doc-old")
+    ));
 }
 
 #[test]

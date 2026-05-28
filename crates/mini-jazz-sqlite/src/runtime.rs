@@ -1,6 +1,4 @@
-use crate::query_api::{
-    predicate_query, BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection,
-};
+use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
@@ -1555,9 +1553,9 @@ impl Runtime {
         //   jazz_query_read
         //   field="$query", op="query", value=<BuiltQuery JSON>
         //
-        // Repair keeps the old narrow fast paths for simple predicates and the
-        // original createdAt page shape, then falls back to a generic
-        // SQL-lowered pass for the wider built-query language:
+        // Repair keeps the old narrow fast path for simple predicates, then
+        // falls back to a generic SQL-lowered pass for the wider built-query
+        // language:
         //
         //   +-----------------------------+
         //   | BuiltQuery descriptor       |
@@ -1568,21 +1566,12 @@ impl Runtime {
         //   | QueryReadRecord predicate   | ---> | apply_query_scope_repair |
         //   +-----------------------------+      +--------------------------+
         //
-        //        | eq predicate + $createdAt DESC + limit
-        //        v
-        //   +-----------------------------+
-        //   | page-boundary repair        |
-        //   +-----------------------------+
-        //
         //        | every other SQL-lowered shape
         //        v
         //   +-----------------------------+
         //   | generic SQL-lowered repair  |
         //   +-----------------------------+
         match built_query_repair_scope(built_query)? {
-            BuiltQueryRepairScope::CreatedAtDescPage { condition, limit } => {
-                Self::apply_created_at_desc_page_repair(schema, db, query_read, condition, limit)
-            }
             BuiltQueryRepairScope::Predicate(condition) => {
                 let predicate_read = QueryReadRecord {
                     branch_id: query_read.branch_id.clone(),
@@ -1649,70 +1638,6 @@ impl Runtime {
             &scope_row_nums,
             &keep_row_nums,
         )
-    }
-
-    fn apply_created_at_desc_page_repair(
-        schema: &SchemaDef,
-        db: &Connection,
-        query_read: &QueryReadRecord,
-        condition: &QueryCondition,
-        limit: usize,
-    ) -> Result<()> {
-        // Ordered-page repair handles the sync case where a row is still in the
-        // predicate set but has fallen out of the materialized page.
-        //
-        // Example: top 2 open todos ordered by createdAt desc
-        //
-        //   before refresh: [C, B]        after refresh: [D, C]
-        //                         stale boundary row: B
-        //
-        // The DELETE below says:
-        //
-        //   delete local current rows that:
-        //     1. are in the observed branch
-        //     2. still match the page predicate
-        //     3. are not in SQLite's current top-N result for that predicate
-        //
-        // This is page-boundary contraction, not authorization. The refreshed
-        // top-N rows themselves arrive through normal history application.
-        let table = schema.table_def(&query_read.table)?;
-        let branch_num = branch::checkout(db, &query_read.branch_id)?;
-        let predicate = ordered_page_eq_predicate(table, condition, db)?;
-        let limit = i64::try_from(limit)
-            .map_err(|_| crate::Error::new("ordered query limit is too large"))?;
-        db.execute(
-            &format!(
-                "DELETE FROM {}
-                 WHERE j_branch_num = ?
-                   AND is_deleted = 0
-                   AND {predicate_sql}
-                   AND row_num NOT IN (
-                     SELECT current.row_num
-                     FROM {current_table} current
-                     JOIN jazz_row_id current_ids ON current_ids.row_num = current.row_num
-                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
-                     WHERE current.j_branch_num = ?
-                       AND current.is_deleted = 0
-                       AND tx.outcome != ?
-                       AND {current_predicate_sql}
-                     ORDER BY current.j_created_at DESC, current.row_num
-                     LIMIT ?
-                   )",
-                crate::schema::current_table(&query_read.table),
-                current_table = crate::schema::current_table(&query_read.table),
-                predicate_sql = &predicate.outer_sql,
-                current_predicate_sql = &predicate.inner_sql,
-            ),
-            params![
-                branch_num,
-                predicate.value.clone(),
-                branch_num,
-                tx::OUTCOME_REJECTED,
-                predicate.value,
-                limit,
-            ],
-        )?;
-        Ok(())
     }
 
     fn apply_history_record(
@@ -2841,12 +2766,13 @@ impl Runtime {
         rejected_tx_ids.sort();
         rejected_tx_ids.dedup();
 
-        let mut history = export_history_versions_for_rows(
+        let mut history = export_history_versions_for_rows_in_branches(
             &self.conn,
             &self.schema,
             table_name,
             Some(&visible_row_nums),
             None,
+            &branch_nums,
         )?;
         if !repair_row_nums.is_empty() {
             history.extend(export_visible_table_history(
@@ -2858,12 +2784,13 @@ impl Runtime {
                 &branch_nums,
                 Some(&repair_row_nums),
             )?);
-            history.extend(export_history_versions_for_rows(
+            history.extend(export_history_versions_for_rows_in_branches(
                 &self.conn,
                 &self.schema,
                 table_name,
                 Some(&repair_row_nums),
                 None,
+                &branch_nums,
             )?);
         }
         history.extend(export_policy_dependency_history(
@@ -2970,6 +2897,9 @@ impl Runtime {
             &self.schema,
             table,
             &query_read,
+            self.branch_num,
+            user,
+            bypass_policy,
         )?);
         let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
         repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
@@ -2980,12 +2910,13 @@ impl Runtime {
         row_nums.sort();
         row_nums.dedup();
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let mut history = export_history_versions_for_rows(
+        let mut history = export_history_versions_for_rows_in_branches(
             &self.conn,
             &self.schema,
             table_name,
             Some(&visible_row_nums),
             None,
+            &branch_nums,
         )?;
         if !repair_row_nums.is_empty() {
             history.extend(export_visible_table_history(
@@ -2997,12 +2928,13 @@ impl Runtime {
                 &branch_nums,
                 Some(&repair_row_nums),
             )?);
-            history.extend(export_history_versions_for_rows(
+            history.extend(export_history_versions_for_rows_in_branches(
                 &self.conn,
                 &self.schema,
                 table_name,
                 Some(&repair_row_nums),
                 None,
+                &branch_nums,
             )?);
         }
         history.extend(export_policy_dependency_history(
@@ -3027,12 +2959,13 @@ impl Runtime {
         }
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
-                history.extend(export_history_versions_for_rows(
+                history.extend(export_history_versions_for_rows_in_branches(
                     &self.conn,
                     &self.schema,
                     table_name,
                     Some(&row_nums),
                     Some(base_epoch),
+                    &[1],
                 )?);
                 history.extend(export_snapshot_policy_dependency_history(
                     &self.conn,
@@ -3047,8 +2980,15 @@ impl Runtime {
         }
         dedupe_history_records(&mut history);
         let reads = export_reads_for_history(&self.conn, &history)?;
-        let rejected_tx_ids =
-            query_scope_rejected_tx_ids_for_read(&self.conn, &self.schema, table, &query_read)?;
+        let rejected_tx_ids = query_scope_rejected_tx_ids_for_read(
+            &self.conn,
+            &self.schema,
+            table,
+            &query_read,
+            self.branch_num,
+            user,
+            bypass_policy,
+        )?;
         let txs =
             export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
@@ -3155,12 +3095,13 @@ impl Runtime {
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
 
         let visible_history_started = Instant::now();
-        let mut history = export_history_versions_for_rows(
+        let mut history = export_history_versions_for_rows_in_branches(
             &self.conn,
             &self.schema,
             table_name,
             Some(&visible_row_nums),
             None,
+            &branch_nums,
         )?;
         let visible_history_ms = duration_ms(visible_history_started.elapsed());
 
@@ -3180,12 +3121,13 @@ impl Runtime {
 
         let repair_all_started = Instant::now();
         if !repair_row_nums.is_empty() {
-            history.extend(export_history_versions_for_rows(
+            history.extend(export_history_versions_for_rows_in_branches(
                 &self.conn,
                 &self.schema,
                 table_name,
                 Some(&repair_row_nums),
                 None,
+                &branch_nums,
             )?);
         }
         let repair_all_history_ms = duration_ms(repair_all_started.elapsed());
@@ -3208,12 +3150,13 @@ impl Runtime {
         let snapshot_started = Instant::now();
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
-                history.extend(export_history_versions_for_rows(
+                history.extend(export_history_versions_for_rows_in_branches(
                     &self.conn,
                     &self.schema,
                     table_name,
                     Some(&row_nums),
                     Some(base_epoch),
+                    &[1],
                 )?);
                 history.extend(export_snapshot_policy_dependency_history(
                     &self.conn,
@@ -3352,12 +3295,13 @@ impl Runtime {
             branch_nums,
             Some(&ref_row_nums),
         )?;
-        history.extend(export_history_versions_for_rows(
+        history.extend(export_history_versions_for_rows_in_branches(
             &self.conn,
             &self.schema,
             ref_table_name,
             Some(&ref_row_nums),
             None,
+            branch_nums,
         )?);
         history.extend(export_policy_dependency_history(
             &self.conn,
@@ -6010,56 +5954,6 @@ fn export_recursive_scope_repair_history(
     export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), None)
 }
 
-struct OrderedPageEqPredicate {
-    outer_sql: String,
-    inner_sql: String,
-    value: rusqlite::types::Value,
-}
-
-fn ordered_page_eq_predicate(
-    table: &crate::schema::TableDef,
-    condition: &QueryCondition,
-    db: &Connection,
-) -> Result<OrderedPageEqPredicate> {
-    if condition.column == "id" {
-        let row_id = condition
-            .value
-            .as_str()
-            .ok_or_else(|| crate::Error::new("id equality expects a string value"))?;
-        return Ok(OrderedPageEqPredicate {
-            outer_sql: "row_num IN (SELECT ids.row_num FROM jazz_row_id ids WHERE ids.row_id = ?)"
-                .to_owned(),
-            inner_sql: "current_ids.row_id = ?".to_owned(),
-            value: rusqlite::types::Value::Text(row_id.to_owned()),
-        });
-    }
-
-    if condition.column == "$createdBy" {
-        let created_by = condition
-            .value
-            .as_str()
-            .ok_or_else(|| crate::Error::new("$createdBy equality expects a string value"))?;
-        let created_by_num = users::user_num(db, created_by).unwrap_or(-1);
-        return Ok(OrderedPageEqPredicate {
-            outer_sql: "j_created_by = ?".to_owned(),
-            inner_sql: "current.j_created_by = ?".to_owned(),
-            value: rusqlite::types::Value::Integer(created_by_num),
-        });
-    }
-
-    let field = table
-        .fields
-        .iter()
-        .find(|candidate| candidate.name == condition.column)
-        .ok_or_else(|| crate::Error::new(format!("unknown query field {}", condition.column)))?;
-    let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    Ok(OrderedPageEqPredicate {
-        outer_sql: query_predicate::sql(field, &predicate_column, "eq")?,
-        inner_sql: query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
-        value: query_predicate::value(field, "eq", &condition.value, db)?,
-    })
-}
-
 fn query_scope_repair_row_nums(
     conn: &Connection,
     table: &crate::schema::TableDef,
@@ -6348,13 +6242,24 @@ fn query_scope_repair_row_nums_for_read(
     schema: &SchemaDef,
     table: &crate::schema::TableDef,
     query_read: &QueryReadRecord,
+    branch_num: i64,
+    user: &str,
+    bypass_policy: bool,
 ) -> Result<Vec<i64>> {
     // Dispatch from the serialized query-read shape used in bundles to the row
     // collection shape used by export. Built queries are stored opaquely, so
     // they need a small adapter before repair candidates can be collected.
     if query_read.op == "query" {
         let query = built_query_from_read(query_read)?;
-        return query_scope_repair_row_nums_for_built_query(conn, schema, table, &query);
+        return query_scope_repair_row_nums_for_built_query(
+            conn,
+            schema,
+            table,
+            &query,
+            branch_num,
+            user,
+            bypass_policy,
+        );
     }
     query_scope_repair_row_nums(
         conn,
@@ -6370,6 +6275,9 @@ fn query_scope_repair_row_nums_for_built_query(
     schema: &SchemaDef,
     table: &crate::schema::TableDef,
     built_query: &BuiltQuery,
+    branch_num: i64,
+    user: &str,
+    bypass_policy: bool,
 ) -> Result<Vec<i64>> {
     // Built-query repair row collection mirrors `apply_built_query_scope_repair`:
     //
@@ -6389,30 +6297,14 @@ fn query_scope_repair_row_nums_for_built_query(
             "query read table does not match descriptor",
         ));
     }
-    let condition = match built_query_repair_scope(built_query)? {
-        BuiltQueryRepairScope::CreatedAtDescPage {
-            condition,
-            limit: _,
-        }
-        | BuiltQueryRepairScope::Predicate(condition) => condition,
-        BuiltQueryRepairScope::Generic => {
-            let context = query::QueryContext {
-                conn,
-                schema,
-                branch_num: 1,
-                user: ADMIN_SYSTEM_USER,
-                bypass_policy: true,
-            };
-            return context.repair_row_nums_for_built_query(built_query);
-        }
-    };
-    query_scope_repair_row_nums(
+    let context = query::QueryContext {
         conn,
-        table,
-        &condition.column,
-        condition.op.as_str(),
-        &condition.value,
-    )
+        schema,
+        branch_num,
+        user,
+        bypass_policy,
+    };
+    context.repair_row_nums_for_built_query(built_query)
 }
 
 fn query_scope_rejected_tx_ids_for_read(
@@ -6420,10 +6312,21 @@ fn query_scope_rejected_tx_ids_for_read(
     schema: &SchemaDef,
     table: &crate::schema::TableDef,
     query_read: &QueryReadRecord,
+    branch_num: i64,
+    user: &str,
+    bypass_policy: bool,
 ) -> Result<Vec<String>> {
     if query_read.op == "query" {
         let query = built_query_from_read(query_read)?;
-        return query_scope_rejected_tx_ids_for_built_query(conn, schema, table, &query);
+        return query_scope_rejected_tx_ids_for_built_query(
+            conn,
+            schema,
+            table,
+            &query,
+            branch_num,
+            user,
+            bypass_policy,
+        );
     }
     query_scope_rejected_tx_ids(
         conn,
@@ -6439,45 +6342,28 @@ fn query_scope_rejected_tx_ids_for_built_query(
     schema: &SchemaDef,
     table: &crate::schema::TableDef,
     built_query: &BuiltQuery,
+    branch_num: i64,
+    user: &str,
+    bypass_policy: bool,
 ) -> Result<Vec<String>> {
     if built_query.table != table.name {
         return Err(crate::Error::new(
             "query read table does not match descriptor",
         ));
     }
-    let condition = match built_query_repair_scope(built_query)? {
-        BuiltQueryRepairScope::CreatedAtDescPage {
-            condition,
-            limit: _,
-        }
-        | BuiltQueryRepairScope::Predicate(condition) => condition,
-        BuiltQueryRepairScope::Generic => {
-            let context = query::QueryContext {
-                conn,
-                schema,
-                branch_num: 1,
-                user: ADMIN_SYSTEM_USER,
-                bypass_policy: true,
-            };
-            let row_nums = context.repair_row_nums_for_built_query(built_query)?;
-            return rejected_tx_ids_for_row_nums(conn, &built_query.table, &row_nums);
-        }
-    };
-    query_scope_rejected_tx_ids(
+    let context = query::QueryContext {
         conn,
-        table,
-        &condition.column,
-        condition.op.as_str(),
-        &condition.value,
-    )
+        schema,
+        branch_num,
+        user,
+        bypass_policy,
+    };
+    let row_nums = context.repair_row_nums_for_built_query(built_query)?;
+    rejected_tx_ids_for_row_nums(conn, &built_query.table, &row_nums)
 }
 
 enum BuiltQueryRepairScope<'a> {
     Predicate(&'a QueryCondition),
-    CreatedAtDescPage {
-        condition: &'a QueryCondition,
-        limit: usize,
-    },
     Generic,
 }
 
@@ -6487,14 +6373,6 @@ fn built_query_repair_scope(query: &BuiltQuery) -> Result<BuiltQueryRepairScope<
         match (query.order_by.as_slice(), query.limit) {
             ([], None) if legacy_predicate_repair_supports(condition) => {
                 return Ok(BuiltQueryRepairScope::Predicate(condition));
-            }
-            ([order], Some(limit))
-                if condition.op == QueryConditionOp::Eq
-                    && legacy_predicate_repair_supports(condition)
-                    && order.column == "$createdAt"
-                    && order.direction == QueryDirection::Desc =>
-            {
-                return Ok(BuiltQueryRepairScope::CreatedAtDescPage { condition, limit });
             }
             _ => {}
         }
@@ -6746,6 +6624,42 @@ fn export_history_versions_for_rows(
     row_nums: Option<&[i64]>,
     max_global_epoch: Option<i64>,
 ) -> Result<Vec<HistoryRecord>> {
+    export_history_versions_for_rows_with_branch_filter(
+        conn,
+        schema,
+        table_name,
+        row_nums,
+        max_global_epoch,
+        None,
+    )
+}
+
+fn export_history_versions_for_rows_in_branches(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    row_nums: Option<&[i64]>,
+    max_global_epoch: Option<i64>,
+    branch_nums: &[i64],
+) -> Result<Vec<HistoryRecord>> {
+    export_history_versions_for_rows_with_branch_filter(
+        conn,
+        schema,
+        table_name,
+        row_nums,
+        max_global_epoch,
+        Some(branch_nums),
+    )
+}
+
+fn export_history_versions_for_rows_with_branch_filter(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    row_nums: Option<&[i64]>,
+    max_global_epoch: Option<i64>,
+    branch_nums: Option<&[i64]>,
+) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
     let field_columns = table
         .fields
@@ -6778,11 +6692,13 @@ fn export_history_versions_for_rows(
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
          JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
          WHERE {row_filter}
+           AND {branch_filter}
            AND {epoch_filter}
          ORDER BY h.row_num, h.tx_num",
         select_columns.join(", "),
         crate::schema::history_table(table_name),
         row_filter = row_filter_sql(row_nums),
+        branch_filter = history_branch_filter_sql("h", branch_nums),
         epoch_filter = history_epoch_filter_sql(max_global_epoch),
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -6842,6 +6758,21 @@ fn history_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
         Some(row_nums) => format!(
             "{alias}.row_num IN ({})",
             row_nums
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => "1 = 1".to_owned(),
+    }
+}
+
+fn history_branch_filter_sql(alias: &str, branch_nums: Option<&[i64]>) -> String {
+    match branch_nums {
+        Some([]) => "0 = 1".to_owned(),
+        Some(branch_nums) => format!(
+            "{alias}.j_branch_num IN ({})",
+            branch_nums
                 .iter()
                 .map(i64::to_string)
                 .collect::<Vec<_>>()

@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 #[derive(Clone)]
 struct MatrixRow {
@@ -206,12 +207,186 @@ fn policy_filtered_query_refresh_replaces_ordered_page_boundary_after_incrementa
 }
 
 #[test]
+fn policy_filtered_created_at_page_refresh_keeps_visible_rows_ahead_of_hidden_storage() {
+    let schema = policy_query_schema();
+    let mut upstream =
+        Runtime::open_trusted_with_schema(Storage::Memory, "upstream", schema.clone()).unwrap();
+    let mut peer = Runtime::open_with_schema(Storage::Memory, "peer", "alice", schema).unwrap();
+
+    support::run_attributing_to_user(&mut upstream, "alice", |runtime| {
+        runtime
+            .insert_row(
+                "projects",
+                "project-alice",
+                BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+            )
+            .unwrap();
+        runtime
+            .insert_row(
+                "tasks",
+                "task-visible-old",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Visible old")),
+                    ("active".to_owned(), json!(true)),
+                    ("project".to_owned(), json!("project-alice")),
+                ]),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        runtime
+            .insert_row(
+                "tasks",
+                "task-visible-new",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Visible new")),
+                    ("active".to_owned(), json!(true)),
+                    ("project".to_owned(), json!("project-alice")),
+                ]),
+            )
+            .unwrap();
+    });
+    support::run_attributing_to_user(&mut upstream, "bob", |runtime| {
+        runtime
+            .insert_row(
+                "projects",
+                "project-bob",
+                BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        runtime
+            .insert_row(
+                "tasks",
+                "task-hidden-newer",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Hidden newer")),
+                    ("active".to_owned(), json!(true)),
+                    ("project".to_owned(), json!("project-bob")),
+                ]),
+            )
+            .unwrap();
+    });
+
+    peer.apply_bundle(&upstream.export_table_history("projects").unwrap())
+        .unwrap();
+    peer.apply_bundle(&upstream.export_table_history("tasks").unwrap())
+        .unwrap();
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "conditions": [{"column": "active", "op": "eq", "value": true}],
+        "orderBy": [["$createdAt", "desc"]],
+        "limit": 2,
+    }))
+    .unwrap();
+    let initial = support::run_as_user(&mut upstream, "alice", |runtime| {
+        runtime.export_query(query.clone()).unwrap()
+    });
+    peer.apply_bundle(&initial).unwrap();
+    assert_eq!(
+        query_ids(&peer, query.clone()),
+        vec!["task-visible-new", "task-visible-old"]
+    );
+
+    support::run_attributing_to_user(&mut upstream, "alice", |runtime| {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        runtime
+            .insert_row(
+                "tasks",
+                "task-visible-newest",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Visible newest")),
+                    ("active".to_owned(), json!(true)),
+                    ("project".to_owned(), json!("project-alice")),
+                ]),
+            )
+            .unwrap();
+    });
+    let observed = peer.observed_query_reads().unwrap();
+    let refreshes = support::run_as_user(&mut upstream, "alice", |runtime| {
+        runtime.export_query_read_refreshes(&observed).unwrap()
+    });
+    for refresh in refreshes {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    assert_eq!(
+        query_ids(&peer, query),
+        vec!["task-visible-newest", "task-visible-new"]
+    );
+}
+
+#[test]
+fn built_query_page_export_does_not_collect_every_matching_row_as_repair_data() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "upstream", "alice", schema).unwrap();
+
+    for (id, title) in [
+        ("task-alpha", "Alpha"),
+        ("task-beta", "Beta"),
+        ("task-gamma", "Gamma"),
+    ] {
+        upstream
+            .insert_row(
+                "tasks",
+                id,
+                BTreeMap::from([
+                    ("title".to_owned(), json!(title)),
+                    ("done".to_owned(), json!(false)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "conditions": [{"column": "done", "op": "eq", "value": false}],
+        "orderBy": [["title", "asc"]],
+        "limit": 2,
+    }))
+    .unwrap();
+    let task_ids = upstream
+        .export_query(query)
+        .unwrap()
+        .history
+        .into_iter()
+        .filter(|record| record.table == "tasks")
+        .map(|record| record.row_id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(task_ids, vec!["task-alpha", "task-beta"]);
+}
+
+#[test]
+fn policy_filtered_built_query_export_does_not_include_hidden_repair_rows() {
+    let schema = policy_query_schema();
+    let mut upstream =
+        Runtime::open_trusted_with_schema(Storage::Memory, "upstream", schema).unwrap();
+    seed_policy_query_rows(&mut upstream);
+
+    let bundle = support::run_as_user(&mut upstream, "alice", |runtime| {
+        runtime
+            .export_query(active_tasks_by_title_query(2))
+            .unwrap()
+    });
+    let task_ids = bundle
+        .history
+        .iter()
+        .filter(|record| record.table == "tasks")
+        .map(|record| record.row_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(task_ids, BTreeSet::from(["task-beta", "task-delta"]));
+}
+
+#[test]
 fn built_query_scope_export_refreshes_system_timestamp_and_system_text_conditions() {
     let schema = support::notes_schema();
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
-    let mut peer =
-        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
 
     alice
         .insert_row(
@@ -261,6 +436,10 @@ fn built_query_scope_export_refreshes_system_timestamp_and_system_text_condition
             None,
         ),
     ] {
+        let mut peer =
+            Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema.clone())
+                .unwrap();
+
         peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
             .unwrap();
         assert_eq!(query_ids(&peer, query), vec!["note-visible"]);

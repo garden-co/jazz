@@ -78,8 +78,7 @@ impl SubscriptionRowDelta {
         match self {
             Self::Added { .. } => 0,
             Self::Removed { .. } => 1,
-            Self::Updated { .. } => 2,
-            Self::Moved { .. } => 3,
+            Self::Updated { .. } | Self::Moved { .. } => 2,
         }
     }
 
@@ -136,13 +135,12 @@ impl Serialize for SubscriptionRowDelta {
             }
             SubscriptionRowDelta::Moved {
                 id,
-                previous_index,
                 index,
+                previous_index: _,
             } => {
-                let mut state = serializer.serialize_struct("SubscriptionRowDelta", 4)?;
-                state.serialize_field("kind", &3_u8)?;
+                let mut state = serializer.serialize_struct("SubscriptionRowDelta", 3)?;
+                state.serialize_field("kind", &2_u8)?;
                 state.serialize_field("id", id)?;
-                state.serialize_field("previousIndex", previous_index)?;
                 state.serialize_field("index", index)?;
                 state.end()
             }

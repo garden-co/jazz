@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_delta_serializes_order_only_changes_as_moved() {
+    fn subscription_delta_serializes_order_only_changes_as_update_without_row() {
         let first = row("first");
         let second = row("second");
         let mut subscription = RowsSubscription::new("items", vec![first, second]);
@@ -372,11 +372,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(delta["delta"][0]["kind"], json!(3));
+        assert_eq!(delta["delta"][0]["kind"], json!(2));
         assert_eq!(delta["delta"][0]["id"], json!("second"));
         assert_eq!(delta["delta"][0]["index"], json!(0));
-        assert_eq!(delta["delta"][0]["previousIndex"], json!(1));
         assert!(delta["delta"][0].get("row").is_none());
+        assert!(delta["delta"][0].get("previousIndex").is_none());
     }
 
     fn row(id: &str) -> RowView {

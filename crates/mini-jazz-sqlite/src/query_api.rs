@@ -212,6 +212,29 @@ impl Runtime {
                 };
                 self.read_recursive_refs(&query.table, root_id, &query.field)?
             }
+            RowsSubscriptionQuery::Predicate(query) if query.op == "eq_top_field_desc" => {
+                let value = query
+                    .value
+                    .get("eq")
+                    .ok_or_else(|| Error::new("top field query expects eq value"))?;
+                let order_field = query
+                    .value
+                    .get("order_field")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| Error::new("top field query expects order_field"))?;
+                let limit = query
+                    .value
+                    .get("limit")
+                    .and_then(JsonValue::as_u64)
+                    .ok_or_else(|| Error::new("top field query expects numeric limit"))?;
+                self.read_rows_where_eq_top_field_desc(
+                    &query.table,
+                    &query.field,
+                    value.clone(),
+                    order_field,
+                    limit as usize,
+                )?
+            }
             RowsSubscriptionQuery::Predicate(query) => {
                 return Err(Error::new(format!(
                     "unsupported subscription query {}",

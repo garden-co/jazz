@@ -126,10 +126,12 @@ not only the set of rows.
 Row diffs identify the semantic row by public id, describe the change kind, and
 carry the row's deterministic position in the newly delivered result for added,
 updated, and moved rows, or in the previous delivered result for removed rows.
-Moved diffs also carry the previous result position. Added and updated diffs
-carry the new semantic row. Moved diffs do not carry a row payload because the
-semantic row is unchanged. Removed diffs do not need to carry the old row unless
-a higher-level binding chooses to retain it for ergonomics.
+Added and updated diffs carry the new semantic row. Moved diffs do not carry a
+row payload because the semantic row is unchanged. At the JavaScript wire
+boundary, moved diffs use the existing `updated` row-change kind without a row
+payload (`kind: 2`, `id`, `index`) so existing subscription managers can reorder
+without learning a fourth wire kind. Removed diffs do not need to carry the old
+row unless a higher-level binding chooses to retain it for ergonomics.
 
 Tiered delivery:
 

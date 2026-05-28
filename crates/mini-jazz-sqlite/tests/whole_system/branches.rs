@@ -460,6 +460,131 @@ fn branch_scoped_export_excludes_unrelated_branch_rows() {
 }
 
 #[test]
+fn branch_scoped_built_query_export_excludes_unrelated_branch_repair_rows() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-draft",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("other", None).unwrap();
+    alice.checkout_branch("other").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-other",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Other")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "conditions": [{"column": "done", "op": "eq", "value": false}],
+        "orderBy": [["title", "asc"]],
+        "limit": 10,
+    }))
+    .unwrap();
+    let rows = alice
+        .export_query(query)
+        .unwrap()
+        .history
+        .into_iter()
+        .filter(|record| record.table == "tasks")
+        .map(|record| record.row_id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows, vec!["task-draft"]);
+}
+
+#[test]
+fn branch_scoped_built_query_export_excludes_unrelated_versions_of_same_row() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "tasks",
+            "task-shared",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Main")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("draft", &["main"])
+        .unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .update_row(
+            "tasks",
+            "task-shared",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Draft")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("other", &["main"])
+        .unwrap();
+    alice.checkout_branch("other").unwrap();
+    alice
+        .update_row(
+            "tasks",
+            "task-shared",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Other")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "conditions": [{"column": "done", "op": "eq", "value": false}],
+        "orderBy": [["title", "asc"]],
+        "limit": 10,
+    }))
+    .unwrap();
+    let titles = alice
+        .export_query(query)
+        .unwrap()
+        .history
+        .into_iter()
+        .filter(|record| record.table == "tasks" && record.row_id == "task-shared")
+        .map(|record| record.values["title"].clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(titles, vec![json!("Main"), json!("Draft")]);
+}
+
+#[test]
 fn branch_scoped_export_excludes_unrelated_deleted_rows() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
@@ -2007,6 +2132,76 @@ fn branch_observed_query_refresh_includes_later_source_branch_rows() {
 }
 
 #[test]
+fn branch_created_at_page_refresh_contracts_against_source_branch_window() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut upstream =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "alice-peer-node", "alice", schema).unwrap();
+
+    upstream.create_branch("left", None).unwrap();
+    upstream.create_branch("merge", None).unwrap();
+    upstream.checkout_branch("merge").unwrap();
+    upstream
+        .insert_row(
+            "tasks",
+            "task-merge-old",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Merge old")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let page_query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "conditions": [{"column": "done", "op": "eq", "value": false}],
+        "orderBy": [["$createdAt", "desc"]],
+        "limit": 1,
+    }))
+    .unwrap();
+    let all_matching = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "conditions": [{"column": "done", "op": "eq", "value": false}],
+        "orderBy": [["$createdAt", "desc"]]
+    }))
+    .unwrap();
+
+    peer.apply_bundle(&upstream.export_query(page_query.clone()).unwrap())
+        .unwrap();
+    peer.checkout_branch("merge").unwrap();
+    assert_eq!(query_ids(&peer, page_query.clone()), vec!["task-merge-old"]);
+
+    upstream.checkout_branch("left").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    upstream
+        .insert_row(
+            "tasks",
+            "task-left-new",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left new")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    upstream.add_branch_source("merge", "left").unwrap();
+    upstream.checkout_branch("merge").unwrap();
+
+    for refresh in upstream
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    assert_eq!(query_ids(&peer, page_query), vec!["task-left-new"]);
+    assert_eq!(query_ids(&peer, all_matching), vec!["task-left-new"]);
+}
+
+#[test]
 fn branch_observed_query_refresh_includes_newly_added_source_branch() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
@@ -3010,4 +3205,13 @@ fn durable_reopen_preserves_branch_sync_and_dedupes_replay() {
     reopened.checkout_branch("draft").unwrap();
     assert_eq!(reopened.read_rows("tasks").unwrap()[0].id, "task-draft");
     assert_eq!(reopened.storage_stats().unwrap().history_rows, 1);
+}
+
+fn query_ids(runtime: &Runtime, query: BuiltQuery) -> Vec<String> {
+    runtime
+        .query(query)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect()
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, Storage};
 use serde::Serialize;
@@ -30,6 +30,20 @@ struct PendingNotification {
     next_subscription: RowsSubscription,
     callback: js_sys::Function,
     value: JsValue,
+}
+
+struct NotificationError {
+    error: JsValue,
+    failed_ids: Vec<u32>,
+}
+
+impl From<JsValue> for NotificationError {
+    fn from(error: JsValue) -> Self {
+        Self {
+            error,
+            failed_ids: Vec::new(),
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -132,8 +146,7 @@ impl MiniJazzRuntime {
             .subscribe_query(parse_built_query(query)?)
             .map_err(to_js_error)?;
         let initial = subscription.initial_delta();
-        callback.call1(&JsValue::UNDEFINED, &to_js_value(initial)?)?;
-
+        let initial = to_js_value(initial)?;
         let id = self.next_subscription_id;
         self.next_subscription_id = self
             .next_subscription_id
@@ -146,6 +159,15 @@ impl MiniJazzRuntime {
                 callback,
             },
         );
+        let initial_callback = self
+            .subscriptions
+            .get(&id)
+            .map(|entry| entry.callback.clone())
+            .ok_or_else(|| JsValue::from_str("subscription disappeared before initial callback"))?;
+        if let Err(error) = initial_callback.call1(&JsValue::UNDEFINED, &initial) {
+            self.subscriptions.remove(&id);
+            return Err(error);
+        }
         Ok(id)
     }
 
@@ -188,27 +210,39 @@ impl MiniJazzRuntime {
         }
 
         self.notifying_subscriptions = true;
+        let mut first_error = None;
+        let mut skip_retry_ids = BTreeSet::new();
         loop {
             self.notify_subscriptions_again = false;
-            if let Err(error) = self.notify_subscriptions_once() {
-                self.notifying_subscriptions = false;
-                self.notify_subscriptions_again = false;
-                return Err(error);
+            if let Err(error) = self.notify_subscriptions_once(&skip_retry_ids) {
+                skip_retry_ids.extend(error.failed_ids);
+                if first_error.is_none() {
+                    first_error = Some(error.error);
+                }
             }
             if !self.notify_subscriptions_again {
                 break;
             }
         }
         self.notifying_subscriptions = false;
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
-    fn notify_subscriptions_once(&mut self) -> Result<(), JsValue> {
+    fn notify_subscriptions_once(
+        &mut self,
+        skip_retry_ids: &BTreeSet<u32>,
+    ) -> Result<(), NotificationError> {
         let runtime = &self.runtime;
         let ids = self.subscriptions.keys().copied().collect::<Vec<_>>();
         let mut pending = Vec::new();
 
         for id in ids {
+            if skip_retry_ids.contains(&id) {
+                continue;
+            }
             let Some(entry) = self.subscriptions.get(&id) else {
                 continue;
             };
@@ -231,6 +265,7 @@ impl MiniJazzRuntime {
         }
 
         let mut first_error = None;
+        let mut failed_ids = Vec::new();
         for notification in pending {
             if let Some(entry) = self.subscriptions.get_mut(&notification.id) {
                 entry.subscription = notification.next_subscription.clone();
@@ -245,6 +280,7 @@ impl MiniJazzRuntime {
                 if let Some(entry) = self.subscriptions.get_mut(&notification.id) {
                     entry.subscription = notification.previous_subscription;
                 }
+                failed_ids.push(notification.id);
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -252,7 +288,7 @@ impl MiniJazzRuntime {
         }
 
         match first_error {
-            Some(error) => Err(error),
+            Some(error) => Err(NotificationError { error, failed_ids }),
             None => Ok(()),
         }
     }
@@ -306,6 +342,12 @@ mod tests {
         js_sys::Reflect::set(
             &global,
             &JsValue::from_str("__miniJazzThrowNext"),
+            &JsValue::FALSE,
+        )
+        .unwrap();
+        js_sys::Reflect::set(
+            &global,
+            &JsValue::from_str("__miniJazzSeenInitial"),
             &JsValue::FALSE,
         )
         .unwrap();
@@ -434,6 +476,107 @@ mod tests {
             .dyn_into()
             .unwrap();
         assert_eq!(all.get(0).as_string().as_deref(), Some("project-1"));
+    }
+
+    #[wasm_bindgen_test]
+    fn subscription_initial_callback_write_is_reported_to_new_subscription() {
+        reset_test_globals();
+        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let runtime_ptr = &mut runtime as *mut MiniJazzRuntime;
+        let write_closure = Closure::<dyn FnMut()>::new(move || unsafe {
+            (*runtime_ptr)
+                .insert_row("projects", "project-1", project_values("Initial write"))
+                .unwrap();
+        });
+        js_sys::Reflect::set(
+            &js_sys::global(),
+            &JsValue::from_str("__miniJazzInitialWrite"),
+            write_closure.as_ref(),
+        )
+        .unwrap();
+        let callback = js_sys::Function::new_with_args(
+            "delta",
+            r#"
+            globalThis.__miniJazzDeltas.push({
+                allLength: delta.all.length,
+            });
+            if (!globalThis.__miniJazzSeenInitial) {
+                globalThis.__miniJazzSeenInitial = true;
+                globalThis.__miniJazzInitialWrite();
+            }
+            "#,
+        );
+
+        runtime
+            .subscribe(JsValue::from_str(r#"{"table":"projects"}"#), callback)
+            .unwrap();
+
+        let deltas = observed_deltas();
+        assert_eq!(deltas.length(), 2);
+        let refreshed = deltas.get(1);
+        assert_eq!(
+            js_sys::Reflect::get(&refreshed, &JsValue::from_str("allLength"))
+                .unwrap()
+                .as_f64(),
+            Some(1.0)
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn subscription_nested_write_still_notifies_when_later_callback_throws() {
+        reset_test_globals();
+        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let seen_initial = Rc::new(Cell::new(false));
+        let wrote_nested_row = Rc::new(Cell::new(false));
+        let writer_callback_count = Rc::new(Cell::new(0));
+        let runtime_ptr = &mut runtime as *mut MiniJazzRuntime;
+        let writer_closure = Closure::<dyn FnMut(JsValue)>::new({
+            let seen_initial = Rc::clone(&seen_initial);
+            let wrote_nested_row = Rc::clone(&wrote_nested_row);
+            let writer_callback_count = Rc::clone(&writer_callback_count);
+            move |_| {
+                writer_callback_count.set(writer_callback_count.get() + 1);
+                if seen_initial.replace(true) && !wrote_nested_row.replace(true) {
+                    unsafe {
+                        (*runtime_ptr)
+                            .insert_row("projects", "project-2", project_values("Nested"))
+                            .unwrap();
+                    }
+                }
+            }
+        });
+        let writer = writer_closure
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone();
+        let throwing = js_sys::Function::new_with_args(
+            "delta",
+            r#"
+            if (globalThis.__miniJazzThrowNext) {
+                globalThis.__miniJazzThrowNext = false;
+                throw new Error("callback failed");
+            }
+            "#,
+        );
+
+        runtime
+            .subscribe(JsValue::from_str(r#"{"table":"projects"}"#), writer)
+            .unwrap();
+        runtime
+            .subscribe(JsValue::from_str(r#"{"table":"projects"}"#), throwing)
+            .unwrap();
+        assert_eq!(writer_callback_count.get(), 1);
+
+        set_throw_next();
+        let err = runtime
+            .insert_row("projects", "project-1", project_values("First"))
+            .unwrap_err();
+        let message = js_sys::Reflect::get(&err, &JsValue::from_str("message"))
+            .unwrap()
+            .as_string()
+            .unwrap();
+        assert_eq!(message, "callback failed");
+        assert_eq!(writer_callback_count.get(), 3);
     }
 
     #[wasm_bindgen_test]
