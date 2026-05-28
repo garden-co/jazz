@@ -16,6 +16,7 @@ use crate::{
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -739,7 +740,7 @@ impl Runtime {
                     block.min_global_epoch, block.max_global_epoch,
                     block.row_count, block.tx_count, block.codec,
                     block.format_version, block.uncompressed_bytes,
-                    block.compressed_bytes
+                    block.compressed_bytes, block.payload
              FROM history_blocks block
              JOIN jazz_row_id ids ON ids.row_num = block.row_num
              WHERE block.table_num = ?
@@ -760,6 +761,7 @@ impl Runtime {
                 format_version: row.get(8)?,
                 uncompressed_bytes: row.get(9)?,
                 compressed_bytes: row.get(10)?,
+                payload_sha256: sha256_hex(&row.get::<_, Vec<u8>>(11)?),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -795,6 +797,7 @@ impl Runtime {
                 format_version: row.get(8)?,
                 uncompressed_bytes: row.get(9)?,
                 compressed_bytes: row.get(10)?,
+                payload_sha256: sha256_hex(&row.get::<_, Vec<u8>>(11)?),
             };
             Ok(HistoryBlockExport {
                 manifest,
@@ -6246,10 +6249,24 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
             "history block compressed byte count mismatch",
         ));
     }
+    let actual_hash = sha256_hex(&block.payload);
+    if block.manifest.payload_sha256 != actual_hash {
+        return Err(crate::Error::new("history block payload hash mismatch"));
+    }
     if block.manifest.tx_count > 0 && block.tx_ranges.is_empty() {
         return Err(crate::Error::new("history block missing tx ranges"));
     }
     Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing to string");
+    }
+    out
 }
 
 fn ensure_tx_record_for_history_block(conn: &Connection, tx_record: &TxRecord) -> Result<i64> {

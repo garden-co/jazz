@@ -180,3 +180,10 @@ Thu May 28 00:03:12 PDT 2026
 Decision: include node-local tx ranges in exported history block records and use those ranges to build `history_block_tx_index` on import without decoding the full block payload. Payload decoding remains the on-demand path for exact transaction info and historical rows.
 
 Scope impact: block import becomes a manifest operation plus one payload insert; trusted/local block exchange gets faster, while future untrusted block exchange will need a separate integrity/hash validation layer.
+Thu May 28 00:07:20 PDT 2026
+
+## Payload Hashes For Block Comparison
+
+Decision: include SHA-256 payload hashes in block manifests/exports. Fast block import can validate the payload bytes against the manifest hash without decoding the block, and future sync can compare manifests by range plus hash.
+
+Scope impact: this adds a small dependency and a cheap per-block hash calculation, but avoids making block comparison depend on decoding the lz4 payload.

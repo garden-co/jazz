@@ -110,6 +110,7 @@ pub struct HistoryBlockManifest {
     pub format_version: i64,
     pub uncompressed_bytes: i64,
     pub compressed_bytes: i64,
+    pub payload_sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

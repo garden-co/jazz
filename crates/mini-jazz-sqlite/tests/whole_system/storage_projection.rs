@@ -247,6 +247,7 @@ fn accepted_history_compaction_seals_old_versions_without_changing_exports() {
     assert_eq!(manifests[0].row_id, "note-1");
     assert_eq!(manifests[0].row_count, 4);
     assert!(manifests[0].compressed_bytes > 0);
+    assert_eq!(manifests[0].payload_sha256.len(), 64);
     assert_eq!(alice.read_rows("notes").unwrap(), before_rows);
     assert_eq!(
         alice.transaction_info("tx-alice-node-2").unwrap(),
@@ -305,6 +306,11 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
 
     let blocks = alice.export_history_blocks("notes").unwrap();
     assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].manifest.payload_sha256.len(), 64);
+    let mut tampered = blocks.clone();
+    tampered[0].payload[0] ^= 1;
+    let err = bob.import_history_blocks(&tampered).unwrap_err();
+    assert!(err.to_string().contains("payload hash mismatch"));
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 0);
 

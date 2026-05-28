@@ -506,6 +506,10 @@ recreating ordinary user history rows. It also avoids recreating ordinary
 `jazz_tx` rows for cold archived txs; tx helpers resolve those through the block
 index and decode the block on demand.
 
+Prototype note: block manifests include a SHA-256 hash of the compressed payload.
+Import verifies this hash before inserting the block, so manifest-only import
+can stay fast without blindly accepting corrupted payload bytes.
+
 That optimization is deliberately separate from the first storage change. The
 first goal is to prove that sealed blocks reduce local storage and historical
 load costs without changing Jazz semantics.
