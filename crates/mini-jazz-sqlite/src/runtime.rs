@@ -3696,8 +3696,7 @@ impl Runtime {
             row_id,
             global_epoch,
         )?;
-        candidates.extend(sealed_history_records_for_row_at_epoch(
-            &self.conn,
+        candidates.extend(self.sealed_history_records_for_row_at_epoch(
             table_name,
             row_id,
             global_epoch,
@@ -3718,6 +3717,94 @@ impl Runtime {
             tx_id: record.tx_id,
             conflict_count: 0,
         }))
+    }
+
+    fn sealed_history_records_for_row_at_epoch(
+        &self,
+        table_name: &str,
+        row_id: &str,
+        global_epoch: i64,
+    ) -> Result<Vec<HistoryRecord>> {
+        let mut records = Vec::new();
+        let row_num = match row_num(&self.conn, row_id) {
+            Ok(row_num) => row_num,
+            Err(_) => return Ok(Vec::new()),
+        };
+        for bundle in
+            self.decoded_history_blocks_for_row_epoch(table_name, row_num, global_epoch)?
+        {
+            let tx_epochs = bundle
+                .txs
+                .iter()
+                .filter_map(|tx| tx.global_epoch.map(|epoch| (tx.tx_id.as_str(), epoch)))
+                .collect::<BTreeMap<_, _>>();
+            records.extend(bundle.history.iter().filter_map(|record| {
+                if record.row_id == row_id
+                    && tx_epochs
+                        .get(record.tx_id.as_str())
+                        .map(|epoch| *epoch <= global_epoch)
+                        .unwrap_or(false)
+                {
+                    Some(record.clone())
+                } else {
+                    None
+                }
+            }));
+        }
+        Ok(records)
+    }
+
+    fn decoded_history_blocks_for_row_epoch(
+        &self,
+        table_name: &str,
+        row_num: i64,
+        global_epoch: i64,
+    ) -> Result<Vec<Arc<Bundle>>> {
+        let table_num = crate::schema::table_num(&self.conn, table_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT block_id, codec, format_version, payload
+             FROM history_blocks
+             WHERE block_kind = ?
+               AND table_num = ?
+               AND row_num = ?
+               AND min_global_epoch <= ?
+             ORDER BY max_global_epoch DESC, min_global_epoch, block_id
+             LIMIT 1",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                HISTORY_BLOCK_KIND_ACCEPTED,
+                table_num,
+                row_num,
+                global_epoch
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )?;
+        let mut bundles = Vec::new();
+        for row in rows {
+            let (block_id, codec, format_version, payload) = row?;
+            if let Some(cached) = self.history_block_cache.borrow().get(&block_id).cloned() {
+                bundles.push(cached);
+                continue;
+            }
+            let bundle = Arc::new(decode_history_block_payload(
+                &codec,
+                format_version,
+                &payload,
+            )?);
+            self.history_block_cache
+                .borrow_mut()
+                .insert(block_id, Arc::clone(&bundle));
+            bundles.push(bundle);
+        }
+        Ok(bundles)
     }
 
     pub fn read_row_at_node_epoch(
@@ -7973,34 +8060,6 @@ fn open_history_records_for_row_at_node_epoch(
     Ok(records)
 }
 
-fn sealed_history_records_for_row_at_epoch(
-    conn: &Connection,
-    table_name: &str,
-    row_id: &str,
-    global_epoch: i64,
-) -> Result<Vec<HistoryRecord>> {
-    let mut records = Vec::new();
-    let row_num = match row_num(conn, row_id) {
-        Ok(row_num) => row_num,
-        Err(_) => return Ok(Vec::new()),
-    };
-    for bundle in decoded_history_blocks_for_row_epoch(conn, table_name, row_num, global_epoch)? {
-        let tx_epochs = bundle
-            .txs
-            .iter()
-            .filter_map(|tx| tx.global_epoch.map(|epoch| (tx.tx_id.as_str(), epoch)))
-            .collect::<BTreeMap<_, _>>();
-        records.extend(bundle.history.into_iter().filter(|record| {
-            record.row_id == row_id
-                && tx_epochs
-                    .get(record.tx_id.as_str())
-                    .map(|epoch| *epoch <= global_epoch)
-                    .unwrap_or(false)
-        }));
-    }
-    Ok(records)
-}
-
 fn tx_global_epoch_for_id(conn: &Connection, tx_id: &str) -> Result<i64> {
     conn.query_row(
         "SELECT global_epoch FROM jazz_tx_public WHERE tx_id = ?",
@@ -8047,50 +8106,6 @@ fn record_local_epoch_for_point_read(conn: &Connection, tx_id: &str) -> Option<i
         .flat_map(|bundle| bundle.txs)
         .find(|tx| tx.tx_id == tx_id)
         .map(|tx| tx.local_epoch)
-}
-
-fn decoded_history_blocks_for_row_epoch(
-    conn: &Connection,
-    table_name: &str,
-    row_num: i64,
-    global_epoch: i64,
-) -> Result<Vec<Bundle>> {
-    let table_num = crate::schema::table_num(conn, table_name)?;
-    let mut stmt = conn.prepare(
-        "SELECT codec, format_version, payload
-         FROM history_blocks
-         WHERE block_kind = ?
-           AND table_num = ?
-           AND row_num = ?
-           AND min_global_epoch <= ?
-         ORDER BY max_global_epoch DESC, min_global_epoch, block_id
-         LIMIT 1",
-    )?;
-    let rows = stmt.query_map(
-        params![
-            HISTORY_BLOCK_KIND_ACCEPTED,
-            table_num,
-            row_num,
-            global_epoch
-        ],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-            ))
-        },
-    )?;
-    let mut bundles = Vec::new();
-    for row in rows {
-        let (codec, format_version, payload) = row?;
-        bundles.push(decode_history_block_payload(
-            &codec,
-            format_version,
-            &payload,
-        )?);
-    }
-    Ok(bundles)
 }
 
 fn encode_history_block_payload(bundle: &Bundle) -> serde_json::Result<Vec<u8>> {

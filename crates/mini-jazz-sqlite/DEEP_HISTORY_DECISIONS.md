@@ -475,3 +475,11 @@ Decision: make sealed global-epoch point reads choose the newest sealed block at
 Why: open-history point reads are "as of" reads. If compaction seals the visible head and a caller asks for a later global epoch, the sealed path should still return the latest prior row version instead of pretending no history exists.
 
 Scope impact: `read_row_at_global_epoch` now works after `hot_tail = 0` compaction even when the requested epoch is later than the last sealed transaction.
+
+## Thu May 28 02:51:31 PDT 2026 - Cache Global Point Read Blocks
+
+Decision: route global sealed point reads through the runtime history block cache.
+
+Why: node-local point reads and transaction lookup already avoid repeated lz4/JSON decode inside one `Runtime`. Global point reads should share that behavior instead of using an uncached free function path.
+
+Scope impact: repeated global historical reads against the same sealed block can reuse the decoded block in memory. The logical API is unchanged.
