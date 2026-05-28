@@ -11269,6 +11269,33 @@ mod tests {
     }
 
     #[test]
+    fn decoded_history_block_cache_is_bounded() {
+        let schema = SchemaDef::new().table("notes", |table| {
+            table.text("body");
+        });
+        let runtime =
+            Runtime::open_with_schema(Storage::Memory, "cache-node", "alice", schema).unwrap();
+        let bundle = sample_block_bundle();
+        let encoded = encode_history_block_payload(&bundle).unwrap();
+        let compressed = lz4_flex::compress_prepend_size(&encoded);
+
+        for block_id in 1..=(HISTORY_BLOCK_CACHE_CAPACITY as i64 + 3) {
+            runtime
+                .cached_history_block(
+                    block_id,
+                    HISTORY_BLOCK_CODEC,
+                    HISTORY_BLOCK_FORMAT_VERSION,
+                    &compressed,
+                )
+                .unwrap();
+        }
+
+        let cache = runtime.history_block_cache.borrow();
+        assert_eq!(cache.len(), HISTORY_BLOCK_CACHE_CAPACITY);
+        assert!(!cache.contains_key(&1));
+    }
+
+    #[test]
     fn legacy_bundle_history_block_payload_still_decodes() {
         let bundle = sample_block_bundle();
         let legacy = serde_json::to_vec(&bundle).unwrap();
