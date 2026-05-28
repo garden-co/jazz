@@ -805,6 +805,66 @@ fn observed_query_refresh_history_delta_includes_sealed_blocks() {
 }
 
 #[test]
+fn observed_query_refresh_history_deltas_dedupe_shared_blocks() {
+    let schema = SchemaDef::new().table("notes", |table| {
+        table.text("body");
+        table.bool("pinned");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("shared block")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    bob.apply_bundle(
+        &alice
+            .export_query_where_eq("notes", "pinned", json!(true))
+            .unwrap(),
+    )
+    .unwrap();
+    bob.apply_bundle(
+        &alice
+            .export_query_where_contains("notes", "body", "shared")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bob.observed_query_reads().unwrap().len(), 2);
+
+    for idx in 0..4 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("shared block {idx}")))]),
+            )
+            .unwrap();
+    }
+    alice
+        .compact_accepted_history("notes", "note-1", 1)
+        .unwrap();
+
+    let deltas = alice
+        .export_query_read_refresh_deltas(
+            &bob.observed_query_reads().unwrap(),
+            &bob.all_history_block_manifests().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(deltas.len(), 2);
+    assert_eq!(
+        deltas.iter().map(|delta| delta.blocks.len()).sum::<usize>(),
+        1
+    );
+}
+
+#[test]
 fn recursive_observed_query_refresh_history_delta_includes_sealed_blocks() {
     let schema = support::folders_schema();
     let mut alice =

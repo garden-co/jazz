@@ -1819,9 +1819,22 @@ impl Runtime {
         reads: &[QueryReadRecord],
         remote_block_manifests: &[HistoryBlockManifest],
     ) -> Result<Vec<HistoryDelta>> {
+        let mut known_block_keys = remote_block_manifests
+            .iter()
+            .map(history_block_manifest_key)
+            .collect::<BTreeSet<_>>();
         let mut deltas = Vec::new();
         for read in reads {
-            deltas.push(self.export_query_read_refresh_delta(read, remote_block_manifests)?);
+            let mut delta = self.export_query_read_refresh_delta(read, remote_block_manifests)?;
+            delta.blocks.retain(|block| {
+                let key = history_block_manifest_key(&block.manifest);
+                if known_block_keys.contains(&key) {
+                    return false;
+                }
+                known_block_keys.insert(key);
+                true
+            });
+            deltas.push(delta);
         }
         Ok(deltas)
     }
