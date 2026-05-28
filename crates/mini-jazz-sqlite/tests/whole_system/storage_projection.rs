@@ -1891,6 +1891,39 @@ fn batched_inserts_keep_distinct_jazz_transactions_but_commit_together() {
 }
 
 #[test]
+fn batched_writes_roll_back_atomically_on_validation_error() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let err = alice
+        .insert_rows_batched(
+            "notes",
+            vec![
+                (
+                    "note-1".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("first")),
+                        ("pinned".to_owned(), json!(false)),
+                    ]),
+                ),
+                (
+                    "note-2".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("second")),
+                        ("unknown".to_owned(), json!(true)),
+                    ]),
+                ),
+            ],
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unknown field unknown"));
+    assert!(alice.read_rows("notes").unwrap().is_empty());
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 0);
+}
+
+#[test]
 fn batched_upserts_can_mix_creates_and_updates() {
     let schema = support::notes_schema();
     let mut alice =

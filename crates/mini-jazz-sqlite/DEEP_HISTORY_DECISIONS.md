@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:44:57 PDT 2026
+
+Decision: pin batched-write rollback semantics with an integration test.
+
+Why: grouped commits intentionally move multiple logical Jazz transactions under one SQLite transaction. If validation fails partway through, earlier logical writes in that group must not leak into history/current state.
+
+Scope impact: batched inserts now have a regression where the second write has an unknown field; the API returns an error and the first write is rolled back with zero history rows.
+
 ## Thu May 28 03:43:48 PDT 2026
 
 Decision: add `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all` as a deep-history-only benchmark selector.
