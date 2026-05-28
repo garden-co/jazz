@@ -504,15 +504,7 @@ export function TableDataGrid() {
   const queryBuilder = useMemo(() => {
     let builder = new GenericQueryBuilder(table, schema);
     for (const filter of filters) {
-      if (filter.operator === "eq") {
-        builder = builder.where({ [filter.column]: filter.value });
-      } else {
-        builder = builder.where({
-          [filter.column]: {
-            [filter.operator]: filter.value,
-          },
-        });
-      }
+      builder = builder.whereColumn(filter.column, filter.operator, filter.value);
     }
     return builder.orderBy(sortColumn, sortDirection).limit(queryLimit).offset(queryOffset);
   }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);

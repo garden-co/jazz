@@ -263,6 +263,42 @@ describe("App", () => {
     expect(stored.activeConnectionId).toBe("local");
   });
 
+  it("resets table routes when switching schema", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "local",
+        connections: [
+          {
+            id: "local",
+            name: "Local dev",
+            serverUrl: "http://localhost:19879",
+            appId: "local-app-id",
+            adminSecret: "local-admin-secret",
+            env: "dev",
+            branch: "main",
+            schemaHash: "hash-a",
+          },
+        ],
+      }),
+    );
+    window.history.pushState(
+      null,
+      "",
+      "/conn/local/main/hash-a/data-explorer/todos/data?sort=title&dir=DESC&page=2",
+    );
+
+    render(<App />);
+
+    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "hash-b" } });
+
+    await waitFor(() => {
+      expect(window.location.pathname).toBe("/conn/local/main/hash-b/data-explorer");
+      expect(window.location.search).toBe("");
+    });
+  });
+
   it("adds a named connection from the connection manager", async () => {
     localStorage.setItem(
       STORAGE_KEY,
