@@ -66,3 +66,11 @@ Decision: add batched SQLite commit policy as a stretch goal in the sealed-histo
 Why: compaction reduces the steady-state byte cost of deep history, but the write workloads also pay a large per-logical-write SQLite transaction cost. Grouping multiple logical Jazz transactions into one SQLite commit should improve import and high-frequency write throughput while preserving per-logical-tx ids and listener events.
 
 Scope impact: this remains design-only for now. The block work should not hide whether wins come from fewer bytes or fewer durable commit boundaries, so future benchmarks should keep those dimensions separate.
+
+## Wed May 27 23:21:17 PDT 2026
+
+Decision: archived transaction helper APIs should decode sealed block payloads before callers need to know whether a tx is still open.
+
+Why: `transaction_info` alone is not enough for sync/debug tooling. Read/write dependency helpers are part of the transaction metadata surface, and sealing tx rows should not create a split-brain API where some metadata works and adjacent metadata silently disappears.
+
+Scope impact: when ordinary `jazz_tx_*` views return no rows for a tx id, the helpers fall back to block-local `history` and `reads` records. This still preserves the fast open path for recent transactions.

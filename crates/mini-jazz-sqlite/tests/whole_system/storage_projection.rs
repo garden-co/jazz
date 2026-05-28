@@ -225,6 +225,10 @@ fn accepted_history_compaction_seals_old_versions_without_changing_exports() {
     let before_bundle = alice.export_table_history("notes").unwrap();
     assert_eq!(before_bundle.history.len(), 6);
     let archived_tx_info = alice.transaction_info("tx-alice-node-2").unwrap();
+    let archived_tx_writes = alice.transaction_write_rows("tx-alice-node-2").unwrap();
+    let archived_tx_previous_reads = alice
+        .transaction_previous_read_rows("tx-alice-node-2")
+        .unwrap();
 
     let compacted = alice
         .compact_accepted_history("notes", "note-1", 2)
@@ -241,6 +245,16 @@ fn accepted_history_compaction_seals_old_versions_without_changing_exports() {
     assert_eq!(
         alice.transaction_info("tx-alice-node-2").unwrap(),
         archived_tx_info
+    );
+    assert_eq!(
+        alice.transaction_write_rows("tx-alice-node-2").unwrap(),
+        archived_tx_writes
+    );
+    assert_eq!(
+        alice
+            .transaction_previous_read_rows("tx-alice-node-2")
+            .unwrap(),
+        archived_tx_previous_reads
     );
 
     let after_bundle = alice.export_table_history("notes").unwrap();

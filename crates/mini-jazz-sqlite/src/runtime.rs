@@ -2412,8 +2412,14 @@ impl Runtime {
         let rows = stmt.query_map(params![tx_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let rows = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(crate::Error::from)?;
+        if rows.is_empty() {
+            sealed_transaction_write_rows(&self.conn, tx_id)
+        } else {
+            Ok(rows)
+        }
     }
 
     pub fn transaction_policy_read_rows(&self, tx_id: &str) -> Result<Vec<(String, String)>> {
@@ -2445,8 +2451,14 @@ impl Runtime {
                 row.get::<_, Option<String>>(2)?,
             ))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let rows = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(crate::Error::from)?;
+        if rows.is_empty() {
+            sealed_transaction_observed_read_rows(&self.conn, tx_id)
+        } else {
+            Ok(rows)
+        }
     }
 
     fn transaction_read_rows_for_reason(
@@ -2467,8 +2479,14 @@ impl Runtime {
         let rows = stmt.query_map(params![tx_id, reason], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let rows = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(crate::Error::from)?;
+        if rows.is_empty() {
+            sealed_transaction_read_rows_for_reason(&self.conn, tx_id, reason)
+        } else {
+            Ok(rows)
+        }
     }
 
     pub fn create_branch(&mut self, branch_id: &str, base_global_epoch: Option<i64>) -> Result<()> {
@@ -6346,6 +6364,61 @@ fn sealed_rejected_transactions(conn: &Connection) -> Result<Vec<RejectionInfo>>
         );
     }
     Ok(rejections)
+}
+
+fn sealed_transaction_write_rows(conn: &Connection, tx_id: &str) -> Result<Vec<(String, String)>> {
+    let mut rows = Vec::new();
+    for bundle in decoded_history_blocks_for_tx(conn, tx_id)? {
+        rows.extend(
+            bundle
+                .history
+                .into_iter()
+                .filter(|record| record.tx_id == tx_id)
+                .map(|record| (record.table, record.row_id)),
+        );
+    }
+    rows.sort();
+    rows.dedup();
+    Ok(rows)
+}
+
+fn sealed_transaction_read_rows_for_reason(
+    conn: &Connection,
+    tx_id: &str,
+    reason: i64,
+) -> Result<Vec<(String, String)>> {
+    let mut rows = Vec::new();
+    for bundle in decoded_history_blocks_for_tx(conn, tx_id)? {
+        rows.extend(
+            bundle
+                .reads
+                .into_iter()
+                .filter(|record| record.tx_id == tx_id && record.reason == reason)
+                .map(|record| (record.table, record.row_id)),
+        );
+    }
+    rows.sort();
+    rows.dedup();
+    Ok(rows)
+}
+
+fn sealed_transaction_observed_read_rows(
+    conn: &Connection,
+    tx_id: &str,
+) -> Result<Vec<(String, String, Option<String>)>> {
+    let mut rows = Vec::new();
+    for bundle in decoded_history_blocks_for_tx(conn, tx_id)? {
+        rows.extend(
+            bundle
+                .reads
+                .into_iter()
+                .filter(|record| record.tx_id == tx_id)
+                .map(|record| (record.table, record.row_id, record.observed_tx_id)),
+        );
+    }
+    rows.sort();
+    rows.dedup();
+    Ok(rows)
 }
 
 fn decoded_history_blocks_for_tx(conn: &Connection, tx_id: &str) -> Result<Vec<Bundle>> {
