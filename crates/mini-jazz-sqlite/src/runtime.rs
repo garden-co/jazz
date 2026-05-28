@@ -5249,87 +5249,9 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
     if tx_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let tx_ids = tx_ids.into_iter().collect::<Vec<_>>();
-    if tx_ids.len() > crate::SQL_VARIABLE_CHUNK_SIZE {
-        return export_txs_by_ids_with_temp_scope(conn, &tx_ids);
-    }
-    let mut receipt_stmt = conn.prepare(&format!(
-        "SELECT tx.tx_id, receipt.tier
-         FROM jazz_tx tx
-         JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
-         WHERE tx.tx_id IN ({placeholders})
-         ORDER BY tx.tx_num, receipt.tier",
-        placeholders = (0..tx_ids.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(", "),
-    ))?;
-    let receipt_rows = receipt_stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    let mut receipt_tiers_by_tx = BTreeMap::<String, Vec<i64>>::new();
-    for receipt_row in receipt_rows {
-        let (tx_id, tier) = receipt_row?;
-        receipt_tiers_by_tx.entry(tx_id).or_default().push(tier);
-    }
-
-    let mut stmt = conn.prepare(&format!(
-        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
-         FROM jazz_tx tx
-         JOIN jazz_node node ON node.node_num = tx.node_num
-         LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
-         WHERE tx.tx_id IN ({placeholders})
-         ORDER BY tx.tx_num",
-        placeholders = (0..tx_ids.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(", "),
-    ))?;
-    let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
-        let tx_id = row.get::<_, String>(0)?;
-        let receipt_tiers = receipt_tiers_by_tx.get(&tx_id).cloned().unwrap_or_default();
-        Ok(TxRecord {
-            tx_id,
-            node_id: row.get(1)?,
-            local_epoch: row.get(2)?,
-            global_epoch: row.get(3)?,
-            conflict_mode: row.get(4)?,
-            outcome: row.get(5)?,
-            auth_user: parse_tx_auth_user_for_sqlite(&row.get::<_, String>(9)?, 9)?,
-            rejection_code: row.get(6)?,
-            rejection_detail: row
-                .get::<_, Option<String>>(7)?
-                .map(|detail_json| parse_rejection_detail_for_sqlite(&detail_json, 7))
-                .transpose()?
-                .flatten(),
-            receipt_tiers,
-            created_at: row.get(8)?,
-        })
-    })?;
-    records
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn export_txs_by_ids_with_temp_scope(conn: &Connection, tx_ids: &[&str]) -> Result<Vec<TxRecord>> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS jazz_export_tx_record_scope (
-           tx_id TEXT PRIMARY KEY
-         ) WITHOUT ROWID;
-         DELETE FROM jazz_export_tx_record_scope;",
-    )?;
-    {
-        let mut stmt =
-            conn.prepare("INSERT OR IGNORE INTO jazz_export_tx_record_scope (tx_id) VALUES (?)")?;
-        for tx_id in tx_ids {
-            stmt.execute(params![tx_id])?;
-        }
-    }
-
     let mut receipt_stmt = conn.prepare(
         "SELECT tx.tx_id, receipt.tier
-         FROM jazz_export_tx_record_scope tx_scope
-         JOIN jazz_tx tx ON tx.tx_id = tx_scope.tx_id
+         FROM jazz_tx tx
          JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
          ORDER BY tx.tx_num, receipt.tier",
     )?;
@@ -5339,13 +5261,14 @@ fn export_txs_by_ids_with_temp_scope(conn: &Connection, tx_ids: &[&str]) -> Resu
     let mut receipt_tiers_by_tx = BTreeMap::<String, Vec<i64>>::new();
     for receipt_row in receipt_rows {
         let (tx_id, tier) = receipt_row?;
-        receipt_tiers_by_tx.entry(tx_id).or_default().push(tier);
+        if tx_ids.contains(tx_id.as_str()) {
+            receipt_tiers_by_tx.entry(tx_id).or_default().push(tier);
+        }
     }
 
     let mut stmt = conn.prepare(
         "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
-         FROM jazz_export_tx_record_scope tx_scope
-         JOIN jazz_tx tx ON tx.tx_id = tx_scope.tx_id
+         FROM jazz_tx tx
          JOIN jazz_node node ON node.node_num = tx.node_num
          LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
          ORDER BY tx.tx_num",
@@ -5371,9 +5294,14 @@ fn export_txs_by_ids_with_temp_scope(conn: &Connection, tx_ids: &[&str]) -> Resu
             created_at: row.get(8)?,
         })
     })?;
-    records
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    let mut tx_records = Vec::new();
+    for record in records {
+        let record = record?;
+        if tx_ids.contains(record.tx_id.as_str()) {
+            tx_records.push(record);
+        }
+    }
+    Ok(tx_records)
 }
 
 fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
@@ -5441,30 +5369,13 @@ fn export_reads_for_history(
     conn: &Connection,
     history: &[HistoryRecord],
 ) -> Result<Vec<ReadRecord>> {
-    let mut tx_ids = history
+    let tx_ids = history
         .iter()
-        .map(|record| record.tx_id.clone())
-        .collect::<Vec<_>>();
-    tx_ids.sort();
-    tx_ids.dedup();
+        .map(|record| record.tx_id.as_str())
+        .collect::<BTreeSet<_>>();
     if tx_ids.is_empty() {
         return Ok(Vec::new());
     }
-    if tx_ids.len() > crate::SQL_VARIABLE_CHUNK_SIZE {
-        return export_reads_for_history_with_temp_scope(conn, history);
-    }
-    let candidate_read_count = count_read_rows_for_tx_ids(conn, &tx_ids)?;
-    if candidate_read_count <= (history.len() * 4).max(256) {
-        return export_reads_for_history_simple(conn, history, &tx_ids);
-    }
-    export_reads_for_history_with_temp_scope(conn, history)
-}
-
-fn export_reads_for_history_simple(
-    conn: &Connection,
-    history: &[HistoryRecord],
-    tx_ids: &[String],
-) -> Result<Vec<ReadRecord>> {
     let history_keys = history
         .iter()
         .map(|record| {
@@ -5475,21 +5386,16 @@ fn export_reads_for_history_simple(
             )
         })
         .collect::<BTreeSet<_>>();
-    let mut stmt = conn.prepare(&format!(
+    let mut stmt = conn.prepare(
         "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
          FROM jazz_tx_read reads
          JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
          JOIN jazz_table tables ON tables.table_num = reads.table_num
          LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
-         WHERE tx.tx_id IN ({placeholders})
          ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
-        placeholders = (0..tx_ids.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(", "),
-    ))?;
-    let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
+    )?;
+    let records = stmt.query_map([], |row| {
         Ok(ReadRecord {
             tx_id: row.get(0)?,
             table: row.get(1)?,
@@ -5502,95 +5408,16 @@ fn export_reads_for_history_simple(
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|record| {
-            record.reason != read_set::REASON_ABSENT
-                || history_keys.contains(&(
-                    record.tx_id.as_str(),
-                    record.table.as_str(),
-                    record.row_id.as_str(),
-                ))
+            tx_ids.contains(record.tx_id.as_str())
+                && (record.reason != read_set::REASON_ABSENT
+                    || history_keys.contains(&(
+                        record.tx_id.as_str(),
+                        record.table.as_str(),
+                        record.row_id.as_str(),
+                    )))
         })
         .collect();
     Ok(records)
-}
-
-fn count_read_rows_for_tx_ids(conn: &Connection, tx_ids: &[String]) -> Result<usize> {
-    let count: i64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*)
-             FROM jazz_tx_read reads
-             JOIN jazz_tx tx ON tx.tx_num = reads.tx_num
-             WHERE tx.tx_id IN ({placeholders})",
-            placeholders = (0..tx_ids.len())
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
-        params_from_iter(tx_ids.iter()),
-        |row| row.get(0),
-    )?;
-    Ok(count as usize)
-}
-
-fn export_reads_for_history_with_temp_scope(
-    conn: &Connection,
-    history: &[HistoryRecord],
-) -> Result<Vec<ReadRecord>> {
-    if history.is_empty() {
-        return Ok(Vec::new());
-    }
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS jazz_export_tx_scope (
-           tx_id TEXT PRIMARY KEY
-         ) WITHOUT ROWID;
-         CREATE TEMP TABLE IF NOT EXISTS jazz_export_history_scope (
-           tx_id TEXT NOT NULL,
-           table_name TEXT NOT NULL,
-           row_id TEXT NOT NULL,
-           PRIMARY KEY (tx_id, table_name, row_id)
-         ) WITHOUT ROWID;
-         DELETE FROM jazz_export_tx_scope;
-         DELETE FROM jazz_export_history_scope;",
-    )?;
-    {
-        let mut tx_stmt =
-            conn.prepare("INSERT OR IGNORE INTO jazz_export_tx_scope (tx_id) VALUES (?)")?;
-        let mut scope_stmt = conn.prepare(
-            "INSERT OR IGNORE INTO jazz_export_history_scope (tx_id, table_name, row_id)
-             VALUES (?, ?, ?)",
-        )?;
-        for record in history {
-            tx_stmt.execute(params![record.tx_id])?;
-            scope_stmt.execute(params![record.tx_id, record.table, record.row_id])?;
-        }
-    }
-    let mut stmt = conn.prepare(
-        "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
-         FROM jazz_export_tx_scope tx_scope
-         JOIN jazz_tx tx ON tx.tx_id = tx_scope.tx_id
-         JOIN jazz_tx_read reads ON reads.tx_num = tx.tx_num
-         JOIN jazz_table tables ON tables.table_num = reads.table_num
-         LEFT JOIN jazz_tx observed ON observed.tx_num = reads.observed_tx_num
-         JOIN jazz_row_id ids ON ids.row_num = reads.row_num
-         LEFT JOIN jazz_export_history_scope history_scope
-           ON history_scope.tx_id = tx.tx_id
-          AND history_scope.table_name = tables.table_name
-          AND history_scope.row_id = ids.row_id
-         WHERE reads.reason != ?
-            OR history_scope.tx_id IS NOT NULL
-         ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
-    )?;
-    let records = stmt.query_map(params![read_set::REASON_ABSENT], |row| {
-        Ok(ReadRecord {
-            tx_id: row.get(0)?,
-            table: row.get(1)?,
-            row_id: row.get(2)?,
-            reason: row.get(3)?,
-            observed_tx_id: row.get(4)?,
-        })
-    })?;
-    records
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
 }
 
 fn export_branch_records_for_history(
@@ -6118,29 +5945,22 @@ fn scoped_policy_parent_row_nums(
     }
     let mut parent_row_nums = BTreeSet::new();
     let child_row_nums = sorted_unique_row_nums(child_row_nums);
-    for child_chunk in child_row_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
-        let child_placeholders = sql_placeholders(child_chunk.len());
-        let mut stmt = conn.prepare(&format!(
-            "SELECT current.{ref_column}
-             FROM {} current
-             JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
-             WHERE current.row_num IN ({child_placeholders})
-               AND current.is_deleted = 0
-               AND {}
-               AND current_tx.outcome != ?",
-            crate::schema::current_table(table_name),
-            branch_filter_sql("current", branch_nums),
-        ))?;
-        let mut params = child_chunk
-            .iter()
-            .copied()
-            .map(rusqlite::types::Value::Integer)
-            .collect::<Vec<_>>();
-        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
-        let rows = stmt.query_map(params_from_iter(params.iter()), |row| row.get::<_, i64>(0))?;
-        for row in rows {
-            parent_row_nums.insert(row?);
-        }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT current.{ref_column}
+         FROM {} current
+         JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+         WHERE current.row_num IN ({child_row_nums})
+           AND current.is_deleted = 0
+           AND {}
+           AND current_tx.outcome != {}",
+        crate::schema::current_table(table_name),
+        branch_filter_sql("current", branch_nums),
+        tx::OUTCOME_REJECTED,
+        child_row_nums = integer_list_sql(&child_row_nums),
+    ))?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    for row in rows {
+        parent_row_nums.insert(row?);
     }
     Ok(parent_row_nums.into_iter().collect())
 }
@@ -6200,57 +6020,53 @@ fn export_deleted_recursive_descendant_history(
         .ok_or_else(|| crate::Error::new(format!("unknown ref field {parent_field}")))?;
     let parent_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let mut row_nums = BTreeSet::new();
-    for parent_chunk in parent_row_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
-        let sql = format!(
-            "WITH RECURSIVE deleted_tree(row_num) AS (
-               SELECT h.row_num
-               FROM {history_table} h
-               JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-               WHERE h.op = 3
-                 AND {branch_filter}
-                 AND h.{parent_column} IN ({parent_placeholders})
-                 AND tx.outcome != {rejected}
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM {history_table} newer
-                   JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
-                   WHERE newer.row_num = h.row_num
-                     AND newer.j_branch_num = h.j_branch_num
-                     AND newer_tx.outcome != {rejected}
-                     AND newer.tx_num > h.tx_num
-                 )
-               UNION
-               SELECT child.row_num
-               FROM {history_table} child
-               JOIN jazz_tx child_tx ON child_tx.tx_num = child.tx_num
-               JOIN deleted_tree parent ON child.{parent_column} = parent.row_num
-               WHERE child.op = 3
-                 AND {child_branch_filter}
-                 AND child_tx.outcome != {rejected}
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM {history_table} newer
-                   JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
-                   WHERE newer.row_num = child.row_num
-                     AND newer.j_branch_num = child.j_branch_num
-                     AND newer_tx.outcome != {rejected}
-                     AND newer.tx_num > child.tx_num
-                 )
+    let sql = format!(
+        "WITH RECURSIVE deleted_tree(row_num) AS (
+           SELECT h.row_num
+           FROM {history_table} h
+           JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+           WHERE h.op = 3
+             AND {branch_filter}
+             AND h.{parent_column} IN ({parent_row_nums})
+             AND tx.outcome != {rejected}
+             AND NOT EXISTS (
+               SELECT 1
+               FROM {history_table} newer
+               JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+               WHERE newer.row_num = h.row_num
+                 AND newer.j_branch_num = h.j_branch_num
+                 AND newer_tx.outcome != {rejected}
+                 AND newer.tx_num > h.tx_num
              )
-             SELECT row_num FROM deleted_tree",
-            history_table = crate::schema::history_table(table_name),
-            branch_filter = branch_filter_sql("h", branch_nums),
-            child_branch_filter = branch_filter_sql("child", branch_nums),
-            rejected = tx::OUTCOME_REJECTED,
-            parent_placeholders = sql_placeholders(parent_chunk.len()),
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(parent_chunk.iter()), |row| {
-            row.get::<_, i64>(0)
-        })?;
-        for row in rows {
-            row_nums.insert(row?);
-        }
+           UNION
+           SELECT child.row_num
+           FROM {history_table} child
+           JOIN jazz_tx child_tx ON child_tx.tx_num = child.tx_num
+           JOIN deleted_tree parent ON child.{parent_column} = parent.row_num
+           WHERE child.op = 3
+             AND {child_branch_filter}
+             AND child_tx.outcome != {rejected}
+             AND NOT EXISTS (
+               SELECT 1
+               FROM {history_table} newer
+               JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+               WHERE newer.row_num = child.row_num
+                 AND newer.j_branch_num = child.j_branch_num
+                 AND newer_tx.outcome != {rejected}
+                 AND newer.tx_num > child.tx_num
+             )
+         )
+         SELECT row_num FROM deleted_tree",
+        history_table = crate::schema::history_table(table_name),
+        branch_filter = branch_filter_sql("h", branch_nums),
+        child_branch_filter = branch_filter_sql("child", branch_nums),
+        rejected = tx::OUTCOME_REJECTED,
+        parent_row_nums = integer_list_sql(&parent_row_nums),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    for row in rows {
+        row_nums.insert(row?);
     }
     let row_nums = row_nums.into_iter().collect::<Vec<_>>();
     export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), None)
@@ -6276,37 +6092,33 @@ fn export_recursive_scope_repair_history(
         .ok_or_else(|| crate::Error::new(format!("unknown ref field {parent_field}")))?;
     let parent_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let mut row_nums = BTreeSet::new();
-    for parent_chunk in parent_row_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
-        let sql = format!(
-            "WITH RECURSIVE historical_tree(row_num) AS (
-               SELECT h.row_num
-               FROM {history_table} h
-               JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-               WHERE {branch_filter}
-                 AND h.{parent_column} IN ({parent_placeholders})
-                 AND tx.outcome != {rejected}
-               UNION
-               SELECT child.row_num
-               FROM {history_table} child
-               JOIN jazz_tx child_tx ON child_tx.tx_num = child.tx_num
-               JOIN historical_tree parent ON child.{parent_column} = parent.row_num
-               WHERE {child_branch_filter}
-                 AND child_tx.outcome != {rejected}
-             )
-             SELECT DISTINCT row_num FROM historical_tree",
-            history_table = crate::schema::history_table(table_name),
-            branch_filter = branch_filter_sql("h", branch_nums),
-            child_branch_filter = branch_filter_sql("child", branch_nums),
-            rejected = tx::OUTCOME_REJECTED,
-            parent_placeholders = sql_placeholders(parent_chunk.len()),
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(parent_chunk.iter()), |row| {
-            row.get::<_, i64>(0)
-        })?;
-        for row in rows {
-            row_nums.insert(row?);
-        }
+    let sql = format!(
+        "WITH RECURSIVE historical_tree(row_num) AS (
+           SELECT h.row_num
+           FROM {history_table} h
+           JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+           WHERE {branch_filter}
+             AND h.{parent_column} IN ({parent_row_nums})
+             AND tx.outcome != {rejected}
+           UNION
+           SELECT child.row_num
+           FROM {history_table} child
+           JOIN jazz_tx child_tx ON child_tx.tx_num = child.tx_num
+           JOIN historical_tree parent ON child.{parent_column} = parent.row_num
+           WHERE {child_branch_filter}
+             AND child_tx.outcome != {rejected}
+         )
+         SELECT DISTINCT row_num FROM historical_tree",
+        history_table = crate::schema::history_table(table_name),
+        branch_filter = branch_filter_sql("h", branch_nums),
+        child_branch_filter = branch_filter_sql("child", branch_nums),
+        rejected = tx::OUTCOME_REJECTED,
+        parent_row_nums = integer_list_sql(&parent_row_nums),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    for row in rows {
+        row_nums.insert(row?);
     }
     let row_nums = row_nums.into_iter().collect::<Vec<_>>();
     export_history_versions_for_rows(conn, schema, table_name, Some(&row_nums), None)
@@ -6810,24 +6622,16 @@ fn delete_current_rows_outside_keep_set(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    for delete_chunk in delete_row_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
+    if !delete_row_nums.is_empty() {
         let sql = format!(
             "DELETE FROM {}
              WHERE j_branch_num = ?
                AND is_deleted = 0
                AND row_num IN ({})",
             crate::schema::current_table(table_name),
-            sql_placeholders(delete_chunk.len()),
+            integer_list_sql(&delete_row_nums),
         );
-        let mut params = Vec::with_capacity(1 + delete_chunk.len());
-        params.push(rusqlite::types::Value::Integer(branch_num));
-        params.extend(
-            delete_chunk
-                .iter()
-                .copied()
-                .map(rusqlite::types::Value::Integer),
-        );
-        db.execute(&sql, params_from_iter(params.iter()))?;
+        db.execute(&sql, params![branch_num])?;
     }
     Ok(())
 }
@@ -6885,19 +6689,6 @@ fn export_visible_table_history(
     if let Some(row_nums) = row_nums {
         if row_nums.is_empty() {
             return Ok(Vec::new());
-        }
-        if row_nums.len() > crate::SQL_VARIABLE_CHUNK_SIZE {
-            let row_nums = sorted_unique_row_nums(row_nums);
-            let mut records = Vec::new();
-            for row_chunk in row_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
-                records.extend(export_visible_table_history(
-                    visibility,
-                    table_name,
-                    branch_nums,
-                    Some(row_chunk),
-                )?);
-            }
-            return Ok(records);
         }
     }
     let conn = visibility.conn;
@@ -6957,10 +6748,7 @@ fn export_visible_table_history(
     let mut stmt = conn.prepare(&sql)?;
     let row_width = 4 + table.fields.len() + 4;
     let mut records = Vec::new();
-    let mut rows = match row_nums {
-        Some(row_nums) => stmt.query(params_from_iter(row_nums.iter()))?,
-        None => stmt.query([])?,
-    };
+    let mut rows = stmt.query([])?;
     let mut public_row_id_cache = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let row = (0..row_width)
@@ -7155,21 +6943,6 @@ fn export_history_versions_for_rows_with_branch_filter(
         if row_nums.is_empty() {
             return Ok(Vec::new());
         }
-        if row_nums.len() > crate::SQL_VARIABLE_CHUNK_SIZE {
-            let row_nums = sorted_unique_row_nums(row_nums);
-            let mut records = Vec::new();
-            for row_chunk in row_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
-                records.extend(export_history_versions_for_rows_with_branch_filter(
-                    conn,
-                    schema,
-                    table_name,
-                    Some(row_chunk),
-                    max_global_epoch,
-                    branch_nums,
-                )?);
-            }
-            return Ok(records);
-        }
     }
     let table = schema.table_def(table_name)?;
     let field_columns = table
@@ -7214,10 +6987,7 @@ fn export_history_versions_for_rows_with_branch_filter(
     );
     let mut stmt = conn.prepare(&sql)?;
     let row_width = 4 + table.fields.len() + 4;
-    let mut rows = match row_nums {
-        Some(row_nums) => stmt.query(params_from_iter(row_nums.iter()))?,
-        None => stmt.query([])?,
-    };
+    let mut rows = stmt.query([])?;
     let mut records = Vec::new();
     let mut public_row_id_cache = BTreeMap::new();
     while let Some(row) = rows.next()? {
@@ -7258,7 +7028,7 @@ fn history_epoch_filter_sql(max_global_epoch: Option<i64>) -> String {
 fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
     match row_nums {
         Some([]) => "0 = 1".to_owned(),
-        Some(row_nums) => format!("h.row_num IN ({})", sql_placeholders(row_nums.len())),
+        Some(row_nums) => format!("h.row_num IN ({})", integer_list_sql(row_nums)),
         None => "1 = 1".to_owned(),
     }
 }
@@ -7266,14 +7036,7 @@ fn row_filter_sql(row_nums: Option<&[i64]>) -> String {
 fn history_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
     match row_nums {
         Some([]) => "0 = 1".to_owned(),
-        Some(row_nums) => format!(
-            "{alias}.row_num IN ({})",
-            row_nums
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Some(row_nums) => format!("{alias}.row_num IN ({})", integer_list_sql(row_nums)),
         None => "1 = 1".to_owned(),
     }
 }
@@ -7283,11 +7046,7 @@ fn history_branch_filter_sql(alias: &str, branch_nums: Option<&[i64]>) -> String
         Some([]) => "0 = 1".to_owned(),
         Some(branch_nums) => format!(
             "{alias}.j_branch_num IN ({})",
-            branch_nums
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            integer_list_sql(branch_nums)
         ),
         None => "1 = 1".to_owned(),
     }
@@ -7299,12 +7058,16 @@ fn branch_filter_sql(alias: &str, branch_nums: &[i64]) -> String {
     }
     format!(
         "{alias}.j_branch_num IN ({})",
-        branch_nums
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
+        integer_list_sql(branch_nums)
     )
+}
+
+fn integer_list_sql(values: &[i64]) -> String {
+    values
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn sorted_unique_row_nums(row_nums: &[i64]) -> Vec<i64> {
@@ -7312,10 +7075,6 @@ fn sorted_unique_row_nums(row_nums: &[i64]) -> Vec<i64> {
     row_nums.sort();
     row_nums.dedup();
     row_nums
-}
-
-fn sql_placeholders(count: usize) -> String {
-    (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
 }
 
 fn sql_value_to_json(

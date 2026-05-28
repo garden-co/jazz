@@ -55,21 +55,6 @@ impl ReadVisibility<'_> {
         if matches!(row_nums, Some([])) {
             return Ok(Vec::new());
         }
-        if let Some(row_nums) = row_nums {
-            if row_nums.len() > crate::SQL_VARIABLE_CHUNK_SIZE {
-                let mut visible_row_nums = Vec::new();
-                for chunk in row_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
-                    visible_row_nums.extend(self.base_snapshot_row_nums_visible_in_branch(
-                        table_name,
-                        base_epoch,
-                        Some(chunk),
-                    )?);
-                }
-                visible_row_nums.sort();
-                visible_row_nums.dedup();
-                return Ok(visible_row_nums);
-            }
-        }
         let table = self.schema.table_def(table_name)?;
         let snapshot_policy_sql = self.snapshot_policy_sql(table, "h", base_epoch)?;
         let effective_branch_policy_sql =
@@ -109,12 +94,7 @@ impl ReadVisibility<'_> {
             history_table = crate::schema::history_table(table_name),
             current_table = crate::schema::current_table(table_name),
         );
-        let mut params = row_nums
-            .unwrap_or(&[])
-            .iter()
-            .copied()
-            .map(SqlValue::Integer)
-            .collect::<Vec<_>>();
+        let mut params = Vec::new();
         params.extend([
             SqlValue::Integer(tx::OUTCOME_REJECTED),
             SqlValue::Integer(base_epoch),
@@ -264,8 +244,9 @@ fn row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
         Some([]) => "0 = 1".to_owned(),
         Some(row_nums) => format!(
             "{alias}.row_num IN ({})",
-            (0..row_nums.len())
-                .map(|_| "?")
+            row_nums
+                .iter()
+                .map(i64::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
