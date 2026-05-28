@@ -451,3 +451,11 @@ Decision: bump newly sealed columnar blocks to v9 and run-code repeated nullable
 Why: accepted blocks usually have no rejection details, and receipt tiers often repeat. Leaving those as raw per-transaction JSON arrays preserves lots of `null` and `[]` scaffolding even after earlier string and integer column compression.
 
 Scope impact: transaction rejection details and receipt tiers now choose run columns when repeated. Older v3 through v8 columnar blocks still decode.
+
+## Thu May 28 02:44:35 PDT 2026 - Block Size Tradeoff Looks Real
+
+Decision: keep `max_rows_per_block` as a first-class compaction policy knob rather than treating one block per deep row as the obvious default.
+
+Why: a quick append sweep showed historical point-read average improving as the per-block row cap dropped, while compressed payload bytes stayed in the same order of magnitude. The exact optimum will vary by workload, but the policy needs to expose this storage/read-latency tradeoff.
+
+Scope impact: no API change in this step; document the measured non-canonical sweep so future tuning can compare against it.

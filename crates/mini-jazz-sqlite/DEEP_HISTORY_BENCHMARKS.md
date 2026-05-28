@@ -245,3 +245,21 @@ Interpretation: grouped SQLite commits do help the pure write side, but the
 large remaining time is still history export/apply/cold load. This argues for
 tracking batched writes as an orthogonal benchmark dimension, not as a
 replacement for history blocks.
+
+## Block Size Probe
+
+Quick non-canonical append Block sweep after adding
+`MINI_JAZZ_DEEP_HISTORY_MAX_ROWS_PER_BLOCK`. Inputs were the canonical append
+Block workload (`2225` updates, sample every `445`) with v9 columnar lz4 blocks.
+
+| max rows/block | blocks | historical read avg | block-native import | block payload bytes | database bytes |
+| -------------: | -----: | ------------------: | ------------------: | ------------------: | -------------: |
+|          unset |      1 |            79.22 ms |           182.35 ms |              70,162 |     18,726,912 |
+|           1000 |      2 |            76.55 ms |           186.12 ms |              59,999 |     18,681,856 |
+|            500 |      4 |            66.96 ms |           194.06 ms |              61,130 |     18,673,664 |
+|            250 |      8 |            59.30 ms |           188.32 ms |              64,717 |     18,673,664 |
+|            100 |     18 |            57.29 ms |           188.78 ms |              73,355 |     18,673,664 |
+
+Interpretation: one huge per-row block is not automatically best. Smaller
+blocks reduce point-read decode units and the compressed payload stayed close
+enough that this should remain a tunable compaction policy.
