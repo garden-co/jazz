@@ -105,7 +105,9 @@ For append and document edits, final-payload ratios compare storage to the text
 content produced by the run. For canvas positions, final-payload ratios are
 intentionally `N/A`; compare to the gzipped position trace instead. Storage rows
 use measured `live_database_bytes`; because these canonical runs completed their
-target update counts, no extrapolation was needed.
+target update counts, no extrapolation was needed. Aggregate write-loop, cold
+load, and block-native sync timings are normalized by completed update count;
+point reads and `transaction_info` stay as absolute per-call latencies.
 
 ## Comparison Tables
 
@@ -114,15 +116,15 @@ target update counts, no extrapolation was needed.
 | Metric                        |      Base3 |      Block |  Block+S |
 | ----------------------------- | ---------: | ---------: | -------: |
 | completed updates             |       2225 |       2225 |     2225 |
-| total loop                    |    7609 ms |    7733 ms |  8331 ms |
-| write only                    |     767 ms |     680 ms |  2934 ms |
-| sampled receive               |    6839 ms |    7048 ms |  5395 ms |
-| cold load                     |    1961 ms |    2012 ms |  2589 ms |
+| total loop / update           |    3.42 ms |    3.48 ms |  3.74 ms |
+| write only / update           |    0.34 ms |    0.31 ms |  1.32 ms |
+| sampled receive / update      |    3.07 ms |    3.17 ms |  2.42 ms |
+| cold load / update            |    0.88 ms |    0.90 ms |  1.16 ms |
 | current read                  |    0.15 ms |    0.14 ms |  0.32 ms |
 | historical read avg           |        N/A |   41.79 ms | 49.98 ms |
 | tx info avg                   |        N/A |    0.27 ms |  0.26 ms |
-| block-native export           |        N/A |   21.72 ms | 18.35 ms |
-| block-native import           |        N/A |  302.87 ms |   137 ms |
+| block-native export / update  |        N/A |   0.010 ms | 0.008 ms |
+| block-native import / update  |        N/A |   0.136 ms | 0.062 ms |
 | compatibility bundle bytes    | 15,235,071 | 15,235,071 |  567,966 |
 | block-native payload bytes    |        N/A |     67,005 |   31,452 |
 | current-root sidecar bytes    |        N/A |        N/A |   13,742 |
@@ -130,40 +132,40 @@ target update counts, no extrapolation was needed.
 
 ### Automerge
 
-| Metric                      |     Base3 |     Block |   Block+S |
-| --------------------------- | --------: | --------: | --------: |
-| completed updates           |      2900 |      2900 |      2900 |
-| total loop                  |   7999 ms |   8176 ms |  18423 ms |
-| write only                  |    969 ms |    764 ms |   6840 ms |
-| sampled receive             |   7025 ms |   7303 ms |  11580 ms |
-| cold load                   |   2031 ms |   2100 ms |   7055 ms |
-| current read                |   0.13 ms |   0.14 ms |   0.19 ms |
-| historical read avg         |       N/A |  61.47 ms |  72.89 ms |
-| tx info avg                 |       N/A |   0.36 ms |   0.33 ms |
-| block-native export         |       N/A |  25.94 ms |  23.71 ms |
-| block-native import         |       N/A | 272.37 ms |    188 ms |
-| compatibility bundle bytes  | 4,152,081 | 4,152,081 | 1,090,481 |
-| block-native payload bytes  |       N/A |    87,526 |    41,677 |
-| current-root sidecar bytes  |       N/A |       N/A |     1,806 |
-| live database / source gzip |    10.73x |     3.28x |     0.65x |
+| Metric                       |     Base3 |     Block |   Block+S |
+| ---------------------------- | --------: | --------: | --------: |
+| completed updates            |      2900 |      2900 |      2900 |
+| total loop / update          |   2.76 ms |   2.82 ms |   6.35 ms |
+| write only / update          |   0.33 ms |   0.26 ms |   2.36 ms |
+| sampled receive / update     |   2.42 ms |   2.52 ms |   3.99 ms |
+| cold load / update           |   0.70 ms |   0.72 ms |   2.43 ms |
+| current read                 |   0.13 ms |   0.14 ms |   0.19 ms |
+| historical read avg          |       N/A |  61.47 ms |  72.89 ms |
+| tx info avg                  |       N/A |   0.36 ms |   0.33 ms |
+| block-native export / update |       N/A |  0.009 ms |  0.008 ms |
+| block-native import / update |       N/A |  0.094 ms |  0.065 ms |
+| compatibility bundle bytes   | 4,152,081 | 4,152,081 | 1,090,481 |
+| block-native payload bytes   |       N/A |    87,526 |    41,677 |
+| current-root sidecar bytes   |       N/A |       N/A |     1,806 |
+| live database / source gzip  |    10.73x |     3.28x |     0.65x |
 
 ### Canvas
 
-| Metric                        |   Base3 |     Block | Block+S |
-| ----------------------------- | ------: | --------: | ------: |
-| completed updates             |    3900 |      3900 |     N/A |
-| total loop                    | 8455 ms |   8513 ms |     N/A |
-| write only                    |  903 ms |    817 ms |     N/A |
-| sampled receive               | 7548 ms |   7691 ms |     N/A |
-| cold load                     | 2236 ms |   2269 ms |     N/A |
-| current read                  | 0.13 ms |   0.13 ms |     N/A |
-| historical read avg           |     N/A |  98.89 ms |     N/A |
-| tx info avg                   |     N/A |   0.44 ms |     N/A |
-| block-native export           |     N/A |  32.56 ms |     N/A |
-| block-native import           |     N/A | 295.79 ms |     N/A |
-| compatibility bundle bytes    | 858,561 |   858,108 |     N/A |
-| block-native payload bytes    |     N/A |   173,244 |     N/A |
-| live database / position gzip |   8.61x |     5.11x |     N/A |
+| Metric                        |   Base3 |    Block | Block+S |
+| ----------------------------- | ------: | -------: | ------: |
+| completed updates             |    3900 |     3900 |     N/A |
+| total loop / update           | 2.17 ms |  2.18 ms |     N/A |
+| write only / update           | 0.23 ms |  0.21 ms |     N/A |
+| sampled receive / update      | 1.94 ms |  1.97 ms |     N/A |
+| cold load / update            | 0.57 ms |  0.58 ms |     N/A |
+| current read                  | 0.13 ms |  0.13 ms |     N/A |
+| historical read avg           |     N/A | 98.89 ms |     N/A |
+| tx info avg                   |     N/A |  0.44 ms |     N/A |
+| block-native export / update  |     N/A | 0.008 ms |     N/A |
+| block-native import / update  |     N/A | 0.076 ms |     N/A |
+| compatibility bundle bytes    | 858,561 |  858,108 |     N/A |
+| block-native payload bytes    |     N/A |  173,244 |     N/A |
+| live database / position gzip |   8.61x |    5.11x |     N/A |
 
 ## Notes
 
