@@ -886,6 +886,12 @@ impl Runtime {
         Ok(total)
     }
 
+    pub fn reclaim_storage(&mut self) -> Result<()> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+            .map_err(Into::into)
+    }
+
     pub fn export_exclusive_transaction_forwarding(
         &self,
         table_name: &str,

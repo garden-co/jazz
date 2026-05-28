@@ -166,3 +166,10 @@ Wed May 27 23:50:05 PDT 2026
 Decision: raw history block import should populate node ids and block tx-range indexes, but should not recreate ordinary `jazz_tx` rows for every archived transaction. Transaction helpers can resolve through the block index and decode tx metadata from the block payload.
 
 Scope impact: rebuilding current projection may still recreate the visible transaction row needed by current rows, but cold archived txs remain block-native on import.
+Wed May 27 23:55:30 PDT 2026
+
+## Explicit SQLite Space Reclaim
+
+Decision: keep history compaction and SQLite file reclamation separate. Compaction should free rows/pages quickly inside the normal write path; a separate explicit reclaim operation can checkpoint/truncate WAL and run `VACUUM` when the caller is willing to pay the latency.
+
+Scope impact: benchmarks can report both live database bytes after compaction and total file bytes after reclaim, instead of hiding vacuum cost inside every compaction call.

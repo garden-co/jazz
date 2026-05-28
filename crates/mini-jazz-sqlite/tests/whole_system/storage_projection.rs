@@ -481,6 +481,50 @@ fn compaction_keeps_visible_head_rebuildable_with_zero_hot_tail() {
 }
 
 #[test]
+fn reclaim_storage_returns_compacted_pages_to_sqlite_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reclaim.sqlite");
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::File(path), "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    for idx in 2..=300 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+    alice
+        .compact_accepted_history("notes", "note-1", 0)
+        .unwrap();
+    let before = alice.storage_stats().unwrap();
+    assert!(before.freelist_bytes > 0);
+
+    alice.reclaim_storage().unwrap();
+    let after = alice.storage_stats().unwrap();
+    assert_eq!(after.history_rows, 0);
+    assert_eq!(after.freelist_bytes, 0);
+    assert!(after.total_file_bytes < before.total_file_bytes);
+    assert_eq!(
+        alice.read_rows("notes").unwrap()[0].values["body"],
+        json!("v300")
+    );
+}
+
+#[test]
 fn table_compaction_seals_each_deep_row_independently() {
     let schema = support::notes_schema();
     let mut alice =

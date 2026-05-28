@@ -430,6 +430,12 @@ The hot tail is important. It gives recent listeners, reconnects, and near-now
 historical reads a simple ordinary-row path. It also gives compaction freedom to
 operate in the background without touching the newest writes.
 
+Compaction only makes SQLite pages reusable. It should not automatically force
+the database file to shrink, because checkpoint/truncate/vacuum work can be a
+large latency spike. The runtime should expose explicit storage reclamation for
+maintenance windows, imports, or tests that want the on-disk file to reflect the
+new live footprint immediately.
+
 Open questions:
 
 - whether compacted open rows are deleted or replaced with tombstone stubs
