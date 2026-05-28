@@ -643,8 +643,8 @@ Implemented in the current spike:
 - branch-base anchor preservation in `history_open`
 - branch export and branch-scoped history-delta guards for sealed main history
 - canonical benchmark metrics for Base/Base1/Base2/Base3/Block/Incr
-- narrow batched-update/upsert APIs and benchmark switch for grouped SQLite
-  commits
+- narrow batched insert/update/upsert APIs and benchmark switch for grouped
+  SQLite commits
 
 Still deliberately partial:
 

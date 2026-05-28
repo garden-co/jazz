@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:37:36 PDT 2026
+
+Decision: round out the narrow grouped-commit prototype with explicit batched inserts.
+
+Why: the write-policy stretch goal covers both imports and high-frequency streams. Imports often start with many creates, so update/upsert-only batching leaves a common fast path unrepresented.
+
+Scope impact: the prototype now has explicit insert, update, and upsert batch APIs. They all share one SQLite commit while preserving one Jazz tx per logical row write.
+
 ## Thu May 28 03:35:18 PDT 2026
 
 Decision: cover recursive-reference branch history deltas with the same future-block omission invariant.

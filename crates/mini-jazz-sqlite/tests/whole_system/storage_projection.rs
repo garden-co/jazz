@@ -1850,6 +1850,47 @@ fn batched_updates_keep_distinct_jazz_transactions_but_commit_together() {
 }
 
 #[test]
+fn batched_inserts_keep_distinct_jazz_transactions_but_commit_together() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    let tx_ids = alice
+        .insert_rows_batched(
+            "notes",
+            vec![
+                (
+                    "note-1".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("first")),
+                        ("pinned".to_owned(), json!(false)),
+                    ]),
+                ),
+                (
+                    "note-2".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("second")),
+                        ("pinned".to_owned(), json!(true)),
+                    ]),
+                ),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(tx_ids, vec!["tx-alice-node-1", "tx-alice-node-2"]);
+    assert_eq!(alice.read_rows("notes").unwrap().len(), 2);
+    assert_eq!(
+        alice.export_table_history("notes").unwrap().history.len(),
+        2
+    );
+
+    bob.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    assert_eq!(bob.read_rows("notes").unwrap().len(), 2);
+}
+
+#[test]
 fn batched_upserts_can_mix_creates_and_updates() {
     let schema = support::notes_schema();
     let mut alice =

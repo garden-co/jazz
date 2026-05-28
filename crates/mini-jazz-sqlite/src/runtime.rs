@@ -68,6 +68,7 @@ struct BatchedQueryScopeItem {
 
 #[derive(Clone, Copy)]
 enum BatchedWriteMode {
+    Insert,
     Update,
     Upsert,
 }
@@ -318,6 +319,14 @@ impl Runtime {
         self.write_row(table_name, id, values, 1)
     }
 
+    pub fn insert_rows_batched(
+        &mut self,
+        table_name: &str,
+        rows: Vec<(String, BTreeMap<String, JsonValue>)>,
+    ) -> Result<Vec<String>> {
+        self.write_rows_batched(table_name, rows, BatchedWriteMode::Insert)
+    }
+
     pub fn update_row(
         &mut self,
         table_name: &str,
@@ -359,6 +368,7 @@ impl Runtime {
             let now = now_ms();
             let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
             let op = match mode {
+                BatchedWriteMode::Insert => 1,
                 BatchedWriteMode::Update => 2,
                 BatchedWriteMode::Upsert => {
                     if row_has_current_branch_value(&db, table_name, &id, self.branch_num)? {
