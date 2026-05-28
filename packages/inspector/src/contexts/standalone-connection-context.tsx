@@ -18,10 +18,9 @@ import type { DbConfigFormValues } from "#db-config-form/index";
 import {
   createConnectionId,
   deriveConnectionName,
-  getActiveConnection,
+  getConnectionById,
   readFragmentConfig,
   readStoredConnections,
-  replaceConnection,
   writeStoredConnections,
   type StoredConnection,
   type StoredConnections,
@@ -68,8 +67,10 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
   const [error, setError] = useState<string | null>(null);
   const [isSwitchingSchema, setIsSwitchingSchema] = useState(false);
 
-  const activeConnection = getActiveConnection(connectionStore);
-  const isExtensionRoute = params.connectionId === "extension";
+  const routeConnectionId = params.connectionId;
+  const routeBranch = params.branch;
+  const routeSchemaHash = params.schemaHash;
+  const isExtensionRoute = routeConnectionId === "extension";
   const isConnectionManagementRoute =
     location.pathname === "/conn" ||
     location.pathname === "/conn/" ||
@@ -77,6 +78,16 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
     location.pathname.startsWith("/conn/edit/");
   const isStandaloneRuntimeRoute =
     isExtensionRoute === false && isConnectionManagementRoute === false;
+  const runtimeConnection = useMemo(
+    () =>
+      resolveRuntimeConnection(connectionStore, {
+        branch: routeBranch,
+        connectionId: routeConnectionId,
+        isStandaloneRuntimeRoute,
+        schemaHash: routeSchemaHash,
+      }),
+    [connectionStore, isStandaloneRuntimeRoute, routeBranch, routeConnectionId, routeSchemaHash],
+  );
 
   const clearRuntime = () => {
     setClient((previousClient) => {
@@ -200,19 +211,16 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
   };
 
   const selectSchema = (schemaHash: string) => {
-    if (activeConnection === null || activeConnection.schemaHash === schemaHash) return;
-    const nextConnection = { ...activeConnection, schemaHash };
-    const nextStore = replaceConnection(connectionStore, nextConnection, nextConnection.id);
+    if (runtimeConnection === null || runtimeConnection.schemaHash === schemaHash) return;
     setIsSwitchingSchema(true);
     setError(null);
     clearRuntime();
-    updateConnectionStore(nextStore);
 
     void navigate({
       to: appRoutes.dataExplorer,
       params: {
-        connectionId: nextConnection.id,
-        branch: nextConnection.branch,
+        connectionId: runtimeConnection.id,
+        branch: runtimeConnection.branch,
         schemaHash,
       },
       replace: true,
@@ -226,7 +234,7 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
   };
 
   useEffect(() => {
-    if (activeConnection === null || isStandaloneRuntimeRoute === false) return;
+    if (runtimeConnection === null || isStandaloneRuntimeRoute === false) return;
 
     let active = true;
 
@@ -234,25 +242,25 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
       try {
         const [resolvedClient, { schema }, { hashes }, permissions] = await Promise.all([
           createJazzClient({
-            appId: activeConnection.appId,
-            serverUrl: activeConnection.serverUrl,
-            env: activeConnection.env,
-            userBranch: activeConnection.branch,
-            adminSecret: activeConnection.adminSecret,
+            appId: runtimeConnection.appId,
+            serverUrl: runtimeConnection.serverUrl,
+            env: runtimeConnection.env,
+            userBranch: runtimeConnection.branch,
+            adminSecret: runtimeConnection.adminSecret,
             driver: { type: "memory" },
           }),
-          fetchStoredWasmSchema(activeConnection.serverUrl, {
-            appId: activeConnection.appId,
-            adminSecret: activeConnection.adminSecret,
-            schemaHash: activeConnection.schemaHash,
+          fetchStoredWasmSchema(runtimeConnection.serverUrl, {
+            appId: runtimeConnection.appId,
+            adminSecret: runtimeConnection.adminSecret,
+            schemaHash: runtimeConnection.schemaHash,
           }),
-          fetchSchemaHashes(activeConnection.serverUrl, {
-            appId: activeConnection.appId,
-            adminSecret: activeConnection.adminSecret,
+          fetchSchemaHashes(runtimeConnection.serverUrl, {
+            appId: runtimeConnection.appId,
+            adminSecret: runtimeConnection.adminSecret,
           }),
-          fetchStoredPermissions(activeConnection.serverUrl, {
-            appId: activeConnection.appId,
-            adminSecret: activeConnection.adminSecret,
+          fetchStoredPermissions(runtimeConnection.serverUrl, {
+            appId: runtimeConnection.appId,
+            adminSecret: runtimeConnection.adminSecret,
           }).catch(() => null),
         ]);
 
@@ -285,7 +293,7 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
     return () => {
       active = false;
     };
-  }, [activeConnection, isStandaloneRuntimeRoute]);
+  }, [runtimeConnection, isStandaloneRuntimeRoute]);
 
   const value = useMemo<StandaloneConnectionContextValue>(
     () => ({
@@ -308,7 +316,7 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
     );
   }
 
-  if (client !== null && wasmSchema !== null && activeConnection !== null) {
+  if (client !== null && wasmSchema !== null && runtimeConnection !== null) {
     return (
       <JazzClientProvider client={client}>
         <DevtoolsProvider
@@ -319,13 +327,13 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
           <StandaloneProvider
             onManageConnections={manageConnections}
             schemaHashes={availableSchemaHashes}
-            selectedSchemaHash={activeConnection.schemaHash}
+            selectedSchemaHash={runtimeConnection.schemaHash}
             onSelectSchema={selectSchema}
             isSwitchingSchema={isSwitchingSchema}
             connection={{
-              serverUrl: activeConnection.serverUrl,
-              appId: activeConnection.appId,
-              adminSecret: activeConnection.adminSecret,
+              serverUrl: runtimeConnection.serverUrl,
+              appId: runtimeConnection.appId,
+              adminSecret: runtimeConnection.adminSecret,
             }}
           >
             <StandaloneConnectionContext.Provider value={value}>
@@ -337,7 +345,7 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
     );
   }
 
-  if (activeConnection !== null && error !== null) {
+  if (runtimeConnection !== null && error !== null) {
     return (
       <StandaloneConnectionContext.Provider value={value}>
         <ConnectionRuntimeState
@@ -350,7 +358,7 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
     );
   }
 
-  if (activeConnection !== null) {
+  if (runtimeConnection !== null) {
     return (
       <StandaloneConnectionContext.Provider value={value}>
         <ConnectionRuntimeState
@@ -361,11 +369,58 @@ export function StandaloneConnectionProvider({ children }: PropsWithChildren) {
     );
   }
 
+  if (isStandaloneRuntimeRoute === true) {
+    return (
+      <StandaloneConnectionContext.Provider value={value}>
+        <ConnectionRuntimeState
+          title="Connection not found"
+          message="This inspector URL references a connection that is not saved locally."
+          actionLabel="Manage connections"
+          onAction={manageConnections}
+        />
+      </StandaloneConnectionContext.Provider>
+    );
+  }
+
   return (
     <StandaloneConnectionContext.Provider value={value}>
       {children}
     </StandaloneConnectionContext.Provider>
   );
+}
+
+function resolveRuntimeConnection(
+  connectionStore: StoredConnections,
+  {
+    branch,
+    connectionId,
+    isStandaloneRuntimeRoute,
+    schemaHash,
+  }: {
+    branch: string | undefined;
+    connectionId: string | undefined;
+    isStandaloneRuntimeRoute: boolean;
+    schemaHash: string | undefined;
+  },
+): StoredConnection | null {
+  if (isStandaloneRuntimeRoute === false) {
+    return null;
+  }
+
+  if (connectionId === undefined || branch === undefined || schemaHash === undefined) {
+    return null;
+  }
+
+  const storedConnection = getConnectionById(connectionStore, connectionId);
+  if (storedConnection === null) {
+    return null;
+  }
+
+  return {
+    ...storedConnection,
+    branch,
+    schemaHash,
+  };
 }
 
 interface ConnectionRuntimeStateProps {
