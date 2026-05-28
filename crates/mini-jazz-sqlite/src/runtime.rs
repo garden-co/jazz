@@ -51,6 +51,12 @@ struct QueryScopeOptions<'a> {
     extra_row_ids: &'a [String],
 }
 
+struct QueryScopeDeltaOptions<'a> {
+    ref_include_fields: &'a [&'a str],
+    extra_row_ids: &'a [String],
+    remote_block_manifests: &'a [HistoryBlockManifest],
+}
+
 struct BatchedQueryScopeItem {
     op: String,
     value: JsonValue,
@@ -99,6 +105,16 @@ impl QueryScopeOptions<'_> {
         Self {
             ref_include_fields: &[],
             extra_row_ids: &[],
+        }
+    }
+}
+
+impl<'a> QueryScopeDeltaOptions<'a> {
+    fn remote(remote_block_manifests: &'a [HistoryBlockManifest]) -> Self {
+        Self {
+            ref_include_fields: &[],
+            extra_row_ids: &[],
+            remote_block_manifests,
         }
     }
 }
@@ -3619,7 +3635,7 @@ impl Runtime {
             "eq",
             value,
             rows,
-            remote_block_manifests,
+            QueryScopeDeltaOptions::remote(remote_block_manifests),
         )
     }
 
@@ -3637,7 +3653,7 @@ impl Runtime {
             "contains",
             JsonValue::String(needle.to_owned()),
             rows,
-            remote_block_manifests,
+            QueryScopeDeltaOptions::remote(remote_block_manifests),
         )
     }
 
@@ -3655,7 +3671,7 @@ impl Runtime {
             "in",
             JsonValue::Array(values),
             rows,
-            remote_block_manifests,
+            QueryScopeDeltaOptions::remote(remote_block_manifests),
         )
     }
 
@@ -3673,7 +3689,7 @@ impl Runtime {
             "ne",
             value,
             rows,
-            remote_block_manifests,
+            QueryScopeDeltaOptions::remote(remote_block_manifests),
         )
     }
 
@@ -3701,7 +3717,40 @@ impl Runtime {
                 "observed_ids": observed_row_ids(&rows),
             }),
             rows,
-            remote_block_manifests,
+            QueryScopeDeltaOptions::remote(remote_block_manifests),
+        )
+    }
+
+    pub fn export_query_where_eq_top_created_at_desc_history_delta_with_previous_observed(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+        previous_observed_ids: Vec<String>,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<HistoryDelta> {
+        let rows = self.read_rows_where_eq_top_created_at_desc(
+            table_name,
+            field_name,
+            value.clone(),
+            limit,
+        )?;
+        self.export_query_scope_history_delta(
+            table_name,
+            field_name,
+            "eq_top_created_at_desc",
+            json!({
+                "eq": value,
+                "limit": limit,
+                "observed_ids": observed_row_ids(&rows),
+            }),
+            rows,
+            QueryScopeDeltaOptions {
+                ref_include_fields: &[],
+                extra_row_ids: &previous_observed_ids,
+                remote_block_manifests,
+            },
         )
     }
 
@@ -3732,7 +3781,7 @@ impl Runtime {
                 "observed_ids": observed_row_ids(&rows),
             }),
             rows,
-            remote_block_manifests,
+            QueryScopeDeltaOptions::remote(remote_block_manifests),
         )
     }
 
@@ -4486,7 +4535,7 @@ impl Runtime {
         op: &str,
         value: JsonValue,
         rows: Vec<RowView>,
-        remote_block_manifests: &[HistoryBlockManifest],
+        options: QueryScopeDeltaOptions<'_>,
     ) -> Result<HistoryDelta> {
         let table = self.schema.table_def(table_name)?;
         let user = self.policy_user();
@@ -4496,6 +4545,9 @@ impl Runtime {
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
         let mut repair_row_nums = Vec::new();
+        for row_id in options.extra_row_ids {
+            repair_row_nums.push(row_num(&self.conn, row_id)?);
+        }
         repair_row_nums.extend(query_scope_repair_row_nums(
             &self.conn, table, field_name, op, &value,
         )?);
@@ -4549,6 +4601,14 @@ impl Runtime {
                 child_row_nums: Some(&row_nums),
             },
         )?);
+        for ref_field_name in options.ref_include_fields {
+            history.extend(self.export_ref_include_history(
+                table,
+                &rows,
+                ref_field_name,
+                &branch_nums,
+            )?);
+        }
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
                 history.extend(export_history_versions_for_rows(
@@ -4585,7 +4645,8 @@ impl Runtime {
             value,
         }];
         let bundle = make_bundle(&self.schema, branches, txs, reads, query_reads, history);
-        let remote_keys = remote_block_manifests
+        let remote_keys = options
+            .remote_block_manifests
             .iter()
             .map(history_block_manifest_key)
             .collect::<BTreeSet<_>>();

@@ -309,3 +309,9 @@ Scope impact: page-like query sync can now transfer matching sealed row blocks w
 Decision: Bump newly sealed blocks to format v4 and add a column codec for text values that are JSON strings shaped like `{x, y}` numeric objects.
 
 Scope impact: canvas-style coordinate columns now store sealed values as numeric `x[]`/`y[]` arrays inside the columnar block and decode back to the same text value. This is a deliberately narrow bridge toward per-column codecs; the canonical canvas block payload fell from roughly 206 KB to 200 KB, so the idea helps but is not enough by itself.
+
+## Thu May 28 01:38:39 PDT 2026 - Top Created Repair Delta
+
+Decision: Add a previous-observed variant for top-created block-native history deltas.
+
+Scope impact: top-created observed refreshes can now include caller-provided previous row ids in the open-history repair set while still sending matching sealed history as blocks. I deferred the equivalent top-field previous-observed method because its signature needs a small options type rather than another long positional API.

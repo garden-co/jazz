@@ -599,6 +599,23 @@ fn top_created_query_history_delta_syncs_matching_blocks() {
         vec!["note-2", "note-1"]
     );
     assert_eq!(rows[1].values["body"], json!("v5"));
+
+    let refresh = alice
+        .export_query_where_eq_top_created_at_desc_history_delta_with_previous_observed(
+            "notes",
+            "pinned",
+            json!(true),
+            1,
+            vec!["note-1".to_owned()],
+            &bob.all_history_block_manifests().unwrap(),
+        )
+        .unwrap();
+    assert!(refresh.blocks.is_empty());
+    assert!(refresh
+        .bundle
+        .history
+        .iter()
+        .any(|record| record.row_id == "note-1"));
 }
 
 #[test]
