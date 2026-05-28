@@ -2692,6 +2692,44 @@ impl Runtime {
         self.query_context().read_rows(table_name)
     }
 
+    pub fn read_row_at_global_epoch(
+        &self,
+        table_name: &str,
+        row_id: &str,
+        global_epoch: i64,
+    ) -> Result<Option<RowView>> {
+        self.schema.table_def(table_name)?;
+        let mut candidates = open_history_records_for_row_at_epoch(
+            &self.conn,
+            &self.schema,
+            table_name,
+            row_id,
+            global_epoch,
+        )?;
+        candidates.extend(sealed_history_records_for_row_at_epoch(
+            &self.conn,
+            table_name,
+            row_id,
+            global_epoch,
+        )?);
+        let Some(record) = candidates.into_iter().max_by_key(|record| {
+            record_global_epoch_for_point_read(&self.conn, &record.tx_id).unwrap_or(0)
+        }) else {
+            return Ok(None);
+        };
+        if record.op == 3 {
+            return Ok(None);
+        }
+        Ok(Some(RowView {
+            table: record.table,
+            id: record.row_id,
+            values: record.values,
+            created_by: record.created_by,
+            tx_id: record.tx_id,
+            conflict_count: 0,
+        }))
+    }
+
     pub fn read_rows_require_ref(
         &self,
         table_name: &str,
@@ -5888,6 +5926,77 @@ fn decoded_history_blocks_for_table(conn: &Connection, table_name: &str) -> Resu
         )?);
     }
     Ok(bundles)
+}
+
+fn open_history_records_for_row_at_epoch(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    row_id: &str,
+    global_epoch: i64,
+) -> Result<Vec<HistoryRecord>> {
+    let row_num = match row_num(conn, row_id) {
+        Ok(row_num) => row_num,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut records = export_history_versions_for_rows(
+        conn,
+        schema,
+        table_name,
+        Some(&[row_num]),
+        Some(global_epoch),
+    )?;
+    records.retain(|record| {
+        tx_global_epoch_for_id(conn, &record.tx_id)
+            .map(|epoch| epoch <= global_epoch)
+            .unwrap_or(false)
+    });
+    Ok(records)
+}
+
+fn sealed_history_records_for_row_at_epoch(
+    conn: &Connection,
+    table_name: &str,
+    row_id: &str,
+    global_epoch: i64,
+) -> Result<Vec<HistoryRecord>> {
+    let mut records = Vec::new();
+    for bundle in decoded_history_blocks_for_table(conn, table_name)? {
+        let tx_epochs = bundle
+            .txs
+            .iter()
+            .filter_map(|tx| tx.global_epoch.map(|epoch| (tx.tx_id.as_str(), epoch)))
+            .collect::<BTreeMap<_, _>>();
+        records.extend(bundle.history.into_iter().filter(|record| {
+            record.row_id == row_id
+                && tx_epochs
+                    .get(record.tx_id.as_str())
+                    .map(|epoch| *epoch <= global_epoch)
+                    .unwrap_or(false)
+        }));
+    }
+    Ok(records)
+}
+
+fn tx_global_epoch_for_id(conn: &Connection, tx_id: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT global_epoch FROM jazz_tx_public WHERE tx_id = ?",
+        params![tx_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )?
+    .ok_or_else(|| crate::Error::new(format!("transaction {tx_id} has no global epoch")))
+}
+
+fn record_global_epoch_for_point_read(conn: &Connection, tx_id: &str) -> Option<i64> {
+    if let Ok(epoch) = tx_global_epoch_for_id(conn, tx_id) {
+        return Some(epoch);
+    }
+    decoded_history_blocks(conn)
+        .ok()?
+        .into_iter()
+        .flat_map(|bundle| bundle.txs)
+        .find(|tx| tx.tx_id == tx_id)
+        .and_then(|tx| tx.global_epoch)
 }
 
 fn decoded_history_blocks(conn: &Connection) -> Result<Vec<Bundle>> {

@@ -253,6 +253,65 @@ fn accepted_history_compaction_seals_old_versions_without_changing_exports() {
 }
 
 #[test]
+fn point_read_at_global_epoch_can_decode_sealed_history_block() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let tx1 = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&tx1, 1).unwrap();
+    for epoch in 2..=6 {
+        let tx = alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{epoch}")))]),
+            )
+            .unwrap();
+        alice.accept_transaction_at_global(&tx, epoch).unwrap();
+    }
+
+    assert_eq!(
+        alice
+            .read_row_at_global_epoch("notes", "note-1", 3)
+            .unwrap()
+            .unwrap()
+            .values["body"],
+        json!("v3")
+    );
+
+    alice
+        .compact_accepted_history("notes", "note-1", 2)
+        .unwrap();
+
+    assert_eq!(
+        alice
+            .read_row_at_global_epoch("notes", "note-1", 3)
+            .unwrap()
+            .unwrap()
+            .values["body"],
+        json!("v3")
+    );
+    assert_eq!(
+        alice
+            .read_row_at_global_epoch("notes", "note-1", 6)
+            .unwrap()
+            .unwrap()
+            .values["body"],
+        json!("v6")
+    );
+}
+
+#[test]
 fn delete_is_history_not_removal() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
