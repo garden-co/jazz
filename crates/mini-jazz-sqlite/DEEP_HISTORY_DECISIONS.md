@@ -539,3 +539,11 @@ Decision: when exporting table history from a pinned branch, filter sealed main-
 Why: ordinary open-history branch export already avoids leaking main history that happened after the branch base. Once main history is sealed, blindly appending the whole accepted block would reintroduce those future main versions and violate branch snapshot semantics.
 
 Scope impact: branch-local sealed records are still retained, while main sealed records whose tx global epoch is newer than the branch base are omitted along with their sealed read/tx records. Added a regression test that failed before the filter.
+
+## Thu May 28 03:14:38 PDT 2026 - Query Exports Can Discover Sealed Branch Base Rows
+
+Decision: branch query-scope exports should scan sealed accepted blocks for rows whose latest main value at the branch base matches the query predicate.
+
+Why: once `hot_tail = 0` can seal the branch base, the current/open query path may not discover a matching base row at all. Exporting only the rows returned by current query evaluation would omit the pinned base row, while exporting all sealed history would leak future main versions. The query exporter therefore needs a narrow sealed-base predicate repair path.
+
+Scope impact: support equality, not-equal, contains, and in predicates over sealed branch-base records. The table and query sealed-branch regression tests now cover both over-export and under-export.

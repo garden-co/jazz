@@ -477,11 +477,7 @@ impl Runtime {
         )?;
         let sealed = self.decoded_history_blocks_for_table(table_name)?;
         let mut sealed_reads = Vec::new();
-        let branch_base_epoch = if self.branch_num == 1 {
-            None
-        } else {
-            branch::base_global_epoch(&self.conn, self.branch_num)?
-        };
+        let branch_base_epoch = branch_base_epoch(&self.conn, self.branch_num)?;
         if !sealed.is_empty() {
             for block in sealed {
                 let tx_ids_before = txs.len();
@@ -4068,6 +4064,92 @@ impl Runtime {
         Ok((history, reads))
     }
 
+    fn filter_branch_base_sealed_history(
+        &self,
+        history: &mut Vec<HistoryRecord>,
+        reads: &mut Vec<ReadRecord>,
+        base_epoch: i64,
+    ) -> Result<()> {
+        let mut removed_tx_ids = BTreeSet::new();
+        let mut tx_epochs = BTreeMap::new();
+        for record in history.iter() {
+            if record.branch_id != "main" || tx_epochs.contains_key(&record.tx_id) {
+                continue;
+            }
+            tx_epochs.insert(
+                record.tx_id.clone(),
+                self.transaction_info(&record.tx_id)?.global_epoch,
+            );
+        }
+        history.retain(|record| {
+            let remove = record.branch_id == "main"
+                && tx_epochs
+                    .get(&record.tx_id)
+                    .copied()
+                    .flatten()
+                    .map(|epoch| epoch > base_epoch)
+                    .unwrap_or(false);
+            if remove {
+                removed_tx_ids.insert(record.tx_id.clone());
+            }
+            !remove
+        });
+        let kept_tx_ids = history
+            .iter()
+            .map(|record| record.tx_id.clone())
+            .collect::<BTreeSet<_>>();
+        reads.retain(|read| {
+            !removed_tx_ids.contains(&read.tx_id) || kept_tx_ids.contains(&read.tx_id)
+        });
+        Ok(())
+    }
+
+    fn sealed_branch_base_predicate_row_nums(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        op: &str,
+        value: &JsonValue,
+        base_epoch: i64,
+    ) -> Result<Vec<i64>> {
+        let mut latest_by_row = BTreeMap::<String, (i64, HistoryRecord)>::new();
+        for block in self.decoded_history_blocks_for_table(table_name)? {
+            let tx_epochs = block
+                .txs
+                .iter()
+                .map(|tx| (tx.tx_id.as_str(), tx.global_epoch))
+                .collect::<BTreeMap<_, _>>();
+            for record in &block.history {
+                if record.branch_id != "main" || record.op == 3 {
+                    continue;
+                }
+                let Some(epoch) = tx_epochs.get(record.tx_id.as_str()).copied().flatten() else {
+                    continue;
+                };
+                if epoch > base_epoch {
+                    continue;
+                }
+                let replace = latest_by_row
+                    .get(&record.row_id)
+                    .map(|(current_epoch, _)| epoch > *current_epoch)
+                    .unwrap_or(true);
+                if replace {
+                    latest_by_row.insert(record.row_id.clone(), (epoch, record.clone()));
+                }
+            }
+        }
+        let mut row_nums = Vec::new();
+        for (row_id, (_, record)) in latest_by_row {
+            let Some(field_value) = record.values.get(field_name) else {
+                continue;
+            };
+            if json_predicate_matches(field_value, op, value)? {
+                row_nums.push(row_num(&self.conn, &row_id)?);
+            }
+        }
+        Ok(row_nums)
+    }
+
     pub fn read_rows_require_ref(
         &self,
         table_name: &str,
@@ -4887,8 +4969,15 @@ impl Runtime {
         }
         let branch_snapshot_history_ms = duration_ms(snapshot_started.elapsed());
 
-        let (sealed_history, sealed_reads) =
+        let (mut sealed_history, mut sealed_reads) =
             self.sealed_history_for_row_nums(table_name, &row_nums)?;
+        if let Some(base_epoch) = branch_base_epoch(&self.conn, self.branch_num)? {
+            self.filter_branch_base_sealed_history(
+                &mut sealed_history,
+                &mut sealed_reads,
+                base_epoch,
+            )?;
+        }
         let has_sealed_history = !sealed_history.is_empty();
         history.extend(sealed_history);
 
@@ -4983,6 +5072,11 @@ impl Runtime {
         repair_row_nums.extend(query_scope_repair_row_nums(
             &self.conn, table, field_name, op, &value,
         )?);
+        if let Some(base_epoch) = branch_base_epoch(&self.conn, self.branch_num)? {
+            repair_row_nums.extend(self.sealed_branch_base_predicate_row_nums(
+                table_name, field_name, op, &value, base_epoch,
+            )?);
+        }
         let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
         repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
         repair_row_nums.sort();
@@ -5059,8 +5153,15 @@ impl Runtime {
                 )?);
             }
         }
-        let (sealed_history, sealed_reads) =
+        let (mut sealed_history, mut sealed_reads) =
             self.sealed_history_for_row_nums(table_name, &row_nums)?;
+        if let Some(base_epoch) = branch_base_epoch(&self.conn, self.branch_num)? {
+            self.filter_branch_base_sealed_history(
+                &mut sealed_history,
+                &mut sealed_reads,
+                base_epoch,
+            )?;
+        }
         let has_sealed_history = !sealed_history.is_empty();
         history.extend(sealed_history);
         if has_sealed_history {
@@ -5116,6 +5217,11 @@ impl Runtime {
         repair_row_nums.extend(query_scope_repair_row_nums(
             &self.conn, table, field_name, op, &value,
         )?);
+        if let Some(base_epoch) = branch_base_epoch(&self.conn, self.branch_num)? {
+            repair_row_nums.extend(self.sealed_branch_base_predicate_row_nums(
+                table_name, field_name, op, &value, base_epoch,
+            )?);
+        }
         let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
         repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
         repair_row_nums.sort();
@@ -5260,6 +5366,15 @@ impl Runtime {
                 &item.op,
                 &item.value,
             )?);
+            if let Some(base_epoch) = branch_base_epoch(&self.conn, self.branch_num)? {
+                repair_row_nums.extend(self.sealed_branch_base_predicate_row_nums(
+                    table_name,
+                    field_name,
+                    &item.op,
+                    &item.value,
+                    base_epoch,
+                )?);
+            }
             rejected_tx_ids.extend(query_scope_rejected_tx_ids(
                 &self.conn,
                 table,
@@ -5356,8 +5471,15 @@ impl Runtime {
                 )?);
             }
         }
-        let (sealed_history, sealed_reads) =
+        let (mut sealed_history, mut sealed_reads) =
             self.sealed_history_for_row_nums(table_name, &row_nums)?;
+        if let Some(base_epoch) = branch_base_epoch(&self.conn, self.branch_num)? {
+            self.filter_branch_base_sealed_history(
+                &mut sealed_history,
+                &mut sealed_reads,
+                base_epoch,
+            )?;
+        }
         let has_sealed_history = !sealed_history.is_empty();
         history.extend(sealed_history);
         if has_sealed_history {
@@ -8086,6 +8208,39 @@ fn filter_branch_base_sealed_records(
         tx_index += 1;
         keep
     });
+}
+
+fn branch_base_epoch(conn: &Connection, branch_num: i64) -> Result<Option<i64>> {
+    if branch_num == 1 {
+        Ok(None)
+    } else {
+        branch::base_global_epoch(conn, branch_num)
+    }
+}
+
+fn json_predicate_matches(field_value: &JsonValue, op: &str, value: &JsonValue) -> Result<bool> {
+    match op {
+        "eq" => Ok(field_value == value),
+        "ne" => Ok(field_value != value),
+        "contains" => {
+            let field_text = field_value
+                .as_str()
+                .ok_or_else(|| crate::Error::new("contains expects a string field value"))?;
+            let needle = value
+                .as_str()
+                .ok_or_else(|| crate::Error::new("contains expects a string value"))?;
+            Ok(field_text.contains(needle))
+        }
+        "in" => {
+            let values = value
+                .as_array()
+                .ok_or_else(|| crate::Error::new("in expects an array value"))?;
+            Ok(values.iter().any(|candidate| candidate == field_value))
+        }
+        other => Err(crate::Error::new(format!(
+            "unsupported sealed branch-base predicate {other}"
+        ))),
+    }
 }
 
 fn open_history_records_for_row_at_epoch(
