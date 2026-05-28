@@ -9222,3 +9222,121 @@ fn insert_dynamic(
     stmt.execute(params_from_iter(values.iter()))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_block_bundle() -> Bundle {
+        Bundle {
+            protocol_version: BUNDLE_PROTOCOL_VERSION,
+            schema_fingerprint: "schema".to_owned(),
+            policy_fingerprint: "policy".to_owned(),
+            branches: vec![BranchRecord {
+                branch_id: "main".to_owned(),
+                base_global_epoch: None,
+                source_branch_ids: Vec::new(),
+                source_version: 0,
+            }],
+            txs: vec![TxRecord {
+                tx_id: "tx-node-1".to_owned(),
+                node_id: "node".to_owned(),
+                local_epoch: 1,
+                global_epoch: Some(1),
+                conflict_mode: tx::MODE_MERGEABLE,
+                outcome: tx::OUTCOME_ACCEPTED,
+                auth_user: Some("alice".to_owned()),
+                rejection_code: None,
+                rejection_detail: None,
+                receipt_tiers: vec![tx::TIER_GLOBAL],
+                created_at: 42,
+            }],
+            reads: vec![ReadRecord {
+                tx_id: "tx-node-1".to_owned(),
+                table: "notes".to_owned(),
+                row_id: "note-1".to_owned(),
+                reason: 2,
+                observed_tx_id: Some("tx-node-1".to_owned()),
+            }],
+            query_reads: vec![QueryReadRecord {
+                branch_id: "main".to_owned(),
+                table: "notes".to_owned(),
+                field: "body".to_owned(),
+                op: "eq".to_owned(),
+                value: json!("hello"),
+            }],
+            history: vec![HistoryRecord {
+                table: "notes".to_owned(),
+                row_id: "note-1".to_owned(),
+                branch_id: "main".to_owned(),
+                tx_id: "tx-node-1".to_owned(),
+                op: 1,
+                values: BTreeMap::from([("body".to_owned(), json!("hello"))]),
+                created_at: 42,
+                updated_at: 42,
+                created_by: "alice".to_owned(),
+                updated_by: "alice".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn columnar_history_block_payload_round_trips_bundle() {
+        let bundle = sample_block_bundle();
+        let encoded = encode_history_block_payload(&bundle).unwrap();
+        let compressed = lz4_flex::compress_prepend_size(&encoded);
+
+        let decoded = decode_history_block_payload(
+            HISTORY_BLOCK_CODEC,
+            HISTORY_BLOCK_FORMAT_VERSION,
+            &compressed,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.txs, bundle.txs);
+        assert_eq!(decoded.reads, bundle.reads);
+        assert_eq!(decoded.query_reads, bundle.query_reads);
+        assert_eq!(decoded.history, bundle.history);
+    }
+
+    #[test]
+    fn legacy_bundle_history_block_payload_still_decodes() {
+        let bundle = sample_block_bundle();
+        let legacy = serde_json::to_vec(&bundle).unwrap();
+        let compressed = lz4_flex::compress_prepend_size(&legacy);
+
+        let decoded = decode_history_block_payload(
+            LEGACY_HISTORY_BLOCK_CODEC,
+            LEGACY_HISTORY_BLOCK_FORMAT_VERSION,
+            &compressed,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.txs, bundle.txs);
+        assert_eq!(decoded.reads, bundle.reads);
+        assert_eq!(decoded.history, bundle.history);
+    }
+
+    #[test]
+    fn columnar_history_block_payload_rejects_mismatched_columns() {
+        let bundle = sample_block_bundle();
+        let mut payload = ColumnarHistoryBlockPayload::from_bundle(&bundle);
+        payload.history.row_id.clear();
+        let encoded = serde_json::to_vec(&payload).unwrap();
+        let compressed = lz4_flex::compress_prepend_size(&encoded);
+
+        let error = decode_history_block_payload(
+            HISTORY_BLOCK_CODEC,
+            HISTORY_BLOCK_FORMAT_VERSION,
+            &compressed,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("history block column history.row_id length 0 != 1"),
+            "{error}"
+        );
+    }
+}
