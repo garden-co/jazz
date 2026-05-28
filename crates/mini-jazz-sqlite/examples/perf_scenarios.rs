@@ -5230,8 +5230,9 @@ fn run_naive_deep_history_case(
             ));
         }
         let block_export_started = Instant::now();
-        let history_blocks = writer.export_history_blocks(input.table)?;
+        let (delta_bundle, history_blocks) = writer.export_table_history_delta(input.table, &[])?;
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
+        let delta_bundle_summary = BundleSummary::from(&delta_bundle)?;
         block_native_blocks = Some(history_blocks.len());
         block_native_payload_bytes = Some(
             history_blocks
@@ -5239,6 +5240,11 @@ fn run_naive_deep_history_case(
                 .map(|block| block.payload.len())
                 .sum::<usize>(),
         );
+        notes.push(format!(
+            "Block-native table delta: open bundle bytes {}, block payload bytes {}.",
+            delta_bundle_summary.bytes,
+            block_native_payload_bytes.unwrap_or(0)
+        ));
         let mut block_peer = Runtime::open_with_schema(
             Storage::Memory,
             "block-peer-node",
@@ -5247,6 +5253,16 @@ fn run_naive_deep_history_case(
         )?;
         let block_import_started = Instant::now();
         block_peer.import_history_blocks(&history_blocks)?;
+        block_peer.rebuild_current_projection()?;
+        block_peer.profile_apply_bundle(&delta_bundle)?;
+        let block_rows = block_peer.read_rows(input.table)?;
+        if block_rows.len() != 1 {
+            return Err(format!(
+                "expected one block-native imported row, got {}",
+                block_rows.len()
+            )
+            .into());
+        }
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
     }
     let bundle = writer.export_table_history(input.table)?;

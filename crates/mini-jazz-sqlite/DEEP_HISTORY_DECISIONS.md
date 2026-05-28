@@ -225,3 +225,9 @@ Scope impact: this keeps block sync scalable with the number of requested missin
 Decision: Add a table delta export that leaves sealed history as raw history blocks and sends only open history rows in the ordinary bundle. The receiver imports missing blocks, rebuilds from sealed state if needed, then applies the open bundle.
 
 Scope impact: this creates the first end-to-end sync shape for compacted history without decoding cold blocks back into row-version bundles on the sender. It still uses existing bundle semantics for hot/open history.
+
+## Thu May 28 00:30:54 PDT 2026 - Benchmark Block Delta Path
+
+Decision: Benchmark block-native export/import as open bundle plus sealed block transfer, including receiver block import, projection rebuild, and open bundle apply. Keep the old full bundle bytes separately so we can see how expensive compatibility export remains.
+
+Scope impact: future canonical Block numbers should represent the intended compacted-history sync shape rather than a raw-block-only microprobe.
