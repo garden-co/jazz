@@ -155,7 +155,7 @@ impl TodoRuntime {
                 ]),
             )?;
             browser.refresh_subscriptions()?;
-            browser.sync_queries_after_render(vec![todo_ids_query(vec![id])]);
+            browser.sync_queries(vec![todo_ids_query(vec![id])])?;
             Ok(())
         })() {
             self.set_error(error);
@@ -167,7 +167,7 @@ impl TodoRuntime {
         if let Err(error) = (|| {
             browser.update_row("todos", &id, row_values([("done", json!(done))]))?;
             browser.refresh_subscriptions()?;
-            browser.sync_queries_after_render(vec![todo_ids_query(vec![id])]);
+            browser.sync_queries(vec![todo_ids_query(vec![id])])?;
             Ok(())
         })() {
             self.set_error(error);
@@ -179,7 +179,7 @@ impl TodoRuntime {
         if let Err(error) = (|| {
             browser.delete_row("todos", &id)?;
             browser.refresh_subscriptions()?;
-            browser.sync_queries_after_render(vec![todo_ids_query(vec![id])]);
+            browser.sync_queries(vec![todo_ids_query(vec![id])])?;
             Ok(())
         })() {
             self.set_error(error);
