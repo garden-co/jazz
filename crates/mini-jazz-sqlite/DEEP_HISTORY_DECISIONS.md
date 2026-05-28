@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 12:38:37 PDT 2026
+
+Decision: make persisted rope sidecar segments immutable and use root compaction after sealing Jazz root history in the Block+Incr text benchmark.
+
+Why: sync and GC are much easier if durable sidecar objects never change after a row/root references them. We accept the short-term append triangle, then rely on frequent history compaction plus a current-root rebuild to keep recent/current reads and block-native current-root sync shallow.
+
+Scope impact: text appends and position samples now create new segment rows instead of extending the previous segment. `compact_text_root` materializes a text root and rebuilds it into large immutable leaves; the Block+Incr text benchmark calls it after history block compaction and records the extra root write. The latest canonical run is `/tmp/deep_history_block_incr_immutable_compacted.json`.
+
 ## Thu May 28 10:24:47 PDT 2026
 
 Decision: make the Block+Incr benchmark's block-native import sync only sidecar data reachable from the received current rope root.

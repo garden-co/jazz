@@ -4378,7 +4378,7 @@ fn run_append_stream_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
         }),
         final_reference_json: None,
         notes: vec![
-            "Incremental sequence sidecar: Jazz row history stores sequence root refs; appended text lives in shared UTF-8 sidecar segments.".to_owned(),
+            "Incremental sequence sidecar: Jazz row history stores sequence root refs; appended text lives in immutable UTF-8 sidecar segments.".to_owned(),
         ],
     })
 }
@@ -4401,7 +4401,7 @@ fn run_append_stream_history_blocks_jazz_rope_probe() -> BenchResult<DeepHistory
         }),
         final_reference_json: None,
         notes: vec![
-            "Block+Incr: Jazz row history stores sequence root refs and seals cold root history into lz4 blocks; appended text lives in shared UTF-8 sidecar segments.".to_owned(),
+            "Block+Incr: Jazz row history stores sequence root refs and seals cold root history into lz4 blocks; appended text lives in immutable UTF-8 sidecar segments.".to_owned(),
         ],
     })
 }
@@ -4437,7 +4437,7 @@ fn run_automerge_paper_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: None,
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
-            "Incremental sequence sidecar: Jazz row history stores sequence root refs; document text lives in shared UTF-8 sidecar segments.".to_owned(),
+            "Incremental sequence sidecar: Jazz row history stores sequence root refs; document text lives in immutable UTF-8 sidecar segments.".to_owned(),
         ],
     })
 }
@@ -4474,7 +4474,7 @@ fn run_automerge_paper_history_blocks_jazz_rope_probe() -> BenchResult<DeepHisto
         final_reference_json: None,
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
-            "Block+Incr: Jazz row history stores sequence root refs and seals cold root history into lz4 blocks; document text lives in shared UTF-8 sidecar segments.".to_owned(),
+            "Block+Incr: Jazz row history stores sequence root refs and seals cold root history into lz4 blocks; document text lives in immutable UTF-8 sidecar segments.".to_owned(),
         ],
     })
 }
@@ -4573,7 +4573,7 @@ fn run_canvas_positions_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> 
         positions: all_positions,
         final_reference_json: Some(reference_json),
         notes: vec![
-            "Incremental sequence sidecar: Jazz row history stores sequence root refs; position samples live in compact delta sidecar runs.".to_owned(),
+            "Incremental sequence sidecar: Jazz row history stores sequence root refs; position samples live in immutable sidecar segments.".to_owned(),
             "Final-payload ratios are not meaningful for presence-like coordinates and are emitted as null.".to_owned(),
         ],
     })
@@ -4706,14 +4706,6 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         }
     }
     let total_loop_ms = ms(started.elapsed());
-    let current_started = Instant::now();
-    let current_rows = writer.read_rows("documents")?;
-    let current_root = row_root_id(&current_rows, "body_root")?;
-    let current = persisted_rope::materialize(&writer_rope, Some(current_root))?;
-    let current_read_ms = ms(current_started.elapsed());
-    if current.len() != final_payload_bytes {
-        return Err("jazz rope text current read materialized unexpected length".into());
-    }
 
     let mut block_native_export_ms = None;
     let mut block_native_import_ms = None;
@@ -4744,6 +4736,22 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
             compaction.uncompressed_bytes,
             compaction.compressed_bytes,
             compaction_ms
+        ));
+        let root_compaction_started = Instant::now();
+        let current_rows = writer.read_rows("documents")?;
+        let current_root = row_root_id(&current_rows, "body_root")?;
+        let compacted_root = persisted_rope::compact_text_root(&writer_rope, Some(current_root))?
+            .ok_or("compacted non-empty rope lost root")?;
+        writer.update_row(
+            "documents",
+            "doc",
+            map1("body_root", json!(compacted_root.to_string())),
+        )?;
+        input.notes.push(format!(
+            "Current root sidecar compaction: old leaves {}, new leaves {}, compaction+root write {:.2} ms.",
+            persisted_rope::root_leaf_count(&writer_rope, Some(current_root))?,
+            persisted_rope::root_leaf_count(&writer_rope, Some(compacted_root))?,
+            ms(root_compaction_started.elapsed())
         ));
 
         let block_export_started = Instant::now();
@@ -4783,6 +4791,15 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
             return Err("block+incr import materialized unexpected length".into());
         }
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
+    }
+
+    let current_started = Instant::now();
+    let current_rows = writer.read_rows("documents")?;
+    let current_root = row_root_id(&current_rows, "body_root")?;
+    let current = persisted_rope::materialize(&writer_rope, Some(current_root))?;
+    let current_read_ms = ms(current_started.elapsed());
+    if current.len() != final_payload_bytes {
+        return Err("jazz rope text current read materialized unexpected length".into());
     }
 
     let final_bundle = writer.export_table_history("documents")?;

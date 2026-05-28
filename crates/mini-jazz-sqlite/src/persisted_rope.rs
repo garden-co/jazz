@@ -6,7 +6,6 @@ const KIND_LEAF: i64 = 1;
 const KIND_CONCAT: i64 = 2;
 const KIND_POSITION_LEAF: i64 = 3;
 const MAX_LEAF_BYTES: usize = 4096;
-const MAX_POSITION_RUN_SAMPLES: i64 = 512;
 const POSITION_SCALE: f64 = 1000.0;
 
 pub type RopeRoot = Option<i64>;
@@ -89,6 +88,11 @@ pub fn materialize(conn: &Connection, root: RopeRoot) -> Result<String> {
     let mut segments = BTreeMap::new();
     materialize_into(conn, root, &mut out, &mut segments)?;
     Ok(out)
+}
+
+pub fn compact_text_root(conn: &Connection, root: RopeRoot) -> Result<RopeRoot> {
+    let text = materialize(conn, root)?;
+    build_from_text(conn, &text)
 }
 
 pub fn stats(conn: &Connection) -> Result<RopeStats> {
@@ -344,73 +348,15 @@ fn node(conn: &Connection, node_id: i64) -> Result<Node> {
 }
 
 fn append_segment(conn: &Connection, text: &str) -> Result<(i64, i64)> {
-    let existing = conn
-        .query_row(
-            "SELECT segment_id, length(CAST(text AS BLOB))
-             FROM jazz_rope_segment
-             ORDER BY segment_id DESC
-             LIMIT 1",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()?;
-    if let Some((segment_id, start)) = existing {
-        if start as usize + text.len() > MAX_LEAF_BYTES {
-            conn.execute(
-                "INSERT INTO jazz_rope_segment (text) VALUES (?)",
-                params![text],
-            )?;
-            return Ok((conn.last_insert_rowid(), 0));
-        }
-        conn.execute(
-            "UPDATE jazz_rope_segment SET text = text || ? WHERE segment_id = ?",
-            params![text, segment_id],
-        )?;
-        Ok((segment_id, start))
-    } else {
-        conn.execute(
-            "INSERT INTO jazz_rope_segment (text) VALUES (?)",
-            params![text],
-        )?;
-        Ok((conn.last_insert_rowid(), 0))
-    }
+    conn.execute(
+        "INSERT INTO jazz_rope_segment (text) VALUES (?)",
+        params![text],
+    )?;
+    Ok((conn.last_insert_rowid(), 0))
 }
 
 fn append_position_segment(conn: &Connection, position: Position) -> Result<(i64, i64)> {
     let encoded = encode_position(position);
-    let existing = conn
-        .query_row(
-            "SELECT segment_id, sample_count, last_x, last_y, deltas
-             FROM jazz_rope_position_segment
-             ORDER BY segment_id DESC
-             LIMIT 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    if let Some((segment_id, sample_count, last_x, last_y, mut deltas)) = existing {
-        if sample_count < MAX_POSITION_RUN_SAMPLES {
-            let dx = checked_i32(encoded.0 - last_x)?;
-            let dy = checked_i32(encoded.1 - last_y)?;
-            deltas.extend(dx.to_le_bytes());
-            deltas.extend(dy.to_le_bytes());
-            conn.execute(
-                "UPDATE jazz_rope_position_segment
-                 SET last_x = ?, last_y = ?, sample_count = ?, deltas = ?
-                 WHERE segment_id = ?",
-                params![encoded.0, encoded.1, sample_count + 1, deltas, segment_id],
-            )?;
-            return Ok((segment_id, sample_count));
-        }
-    }
     conn.execute(
         "INSERT INTO jazz_rope_position_segment (base_x, base_y, last_x, last_y, sample_count, deltas)
          VALUES (?, ?, ?, ?, 1, zeroblob(0))",
@@ -496,10 +442,6 @@ fn decode_position(position: (i64, i64)) -> Position {
     }
 }
 
-fn checked_i32(value: i64) -> Result<i32> {
-    i32::try_from(value).map_err(|_| Error::new("position delta exceeds i32 range"))
-}
-
 fn leaf_text(conn: &Connection, node: &Node) -> Result<String> {
     let mut segments = BTreeMap::new();
     leaf_text_cached(conn, node, &mut segments)
@@ -568,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn append_packs_small_runs_and_materializes_current_root() {
+    fn appends_create_immutable_segments_and_materialize_current_root() {
         let conn = conn();
         let mut root = None;
         for _ in 0..100 {
@@ -577,6 +519,12 @@ mod tests {
 
         assert_eq!(materialize(&conn, root).unwrap(), " token".repeat(100));
         assert_eq!(root_leaf_count(&conn, root).unwrap(), 100);
+        let segment_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM jazz_rope_segment", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(segment_count, 100);
         assert_eq!(stats(&conn).unwrap().leaf_bytes, 600);
         assert_eq!(stats(&conn).unwrap().segment_bytes, 600);
         assert_eq!(root_len(&conn, root).unwrap(), 600);
@@ -595,7 +543,28 @@ mod tests {
     }
 
     #[test]
-    fn positions_use_delta_segments_and_return_latest_sample() {
+    fn compact_text_root_rebuilds_deep_append_chain_into_large_immutable_leaves() {
+        let conn = conn();
+        let mut root = None;
+        for _ in 0..100 {
+            root = append(&conn, root, " token").unwrap();
+        }
+
+        let compacted = compact_text_root(&conn, root).unwrap();
+
+        assert_eq!(materialize(&conn, compacted).unwrap(), " token".repeat(100));
+        assert_eq!(root_leaf_count(&conn, root).unwrap(), 100);
+        assert_eq!(root_leaf_count(&conn, compacted).unwrap(), 1);
+        let segment_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM jazz_rope_segment", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(segment_count, 101);
+    }
+
+    #[test]
+    fn positions_create_immutable_segments_and_return_latest_sample() {
         let conn = conn();
         let mut root = None;
         for index in 0..100 {
@@ -615,6 +584,14 @@ mod tests {
         assert_eq!(latest.y, -29.5);
         let stats = stats(&conn).unwrap();
         assert_eq!(stats.position_leaf_nodes, 100);
-        assert!(stats.position_segment_bytes < 100 * 16);
+        let segment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM jazz_rope_position_segment",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(segment_count, 100);
+        assert_eq!(stats.position_segment_bytes, 100 * 32);
     }
 }

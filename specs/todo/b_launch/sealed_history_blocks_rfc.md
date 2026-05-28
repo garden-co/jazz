@@ -128,6 +128,14 @@ unchanged subtrees with previous roots. Recent `history_open` rows may therefore
 point at many roots while the underlying segment storage only contains the new
 pieces and concat structure needed for each edit.
 
+The simplest first implementation should also make leaf payload segments
+immutable. Append-heavy text may temporarily form a deep concat chain while it is
+hot. Background compaction is responsible for keeping this bounded: after old
+root history is sealed into `history_blocks`, the current/open head can be
+materialized and rebuilt into larger immutable leaves, then written as the new
+current root. That intentionally trades a little temporary duplicated sidecar
+storage for a much cleaner sync and GC story.
+
 Segment-tree values are opt-in by physical column type or storage policy. They
 are appropriate for:
 

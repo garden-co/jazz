@@ -270,10 +270,12 @@ replacement for history blocks.
 
 Canonical append and Automerge run combining the incremental rope sidecar with
 history blocks. Jazz row history stores only rope root refs, then cold root
-history is sealed into lz4 blocks. Cold load still imports a full sidecar
-snapshot for compatibility-bundle import. Block-native import now applies the
-history delta first, then imports only the sidecar nodes/segments reachable from
-the received current root.
+history is sealed into lz4 blocks. Sidecar segments are immutable; after sealing
+cold Jazz history, the benchmark rewrites the current text root into a compact
+immutable root so recent/current reads are shallow. Cold load still imports a
+full sidecar snapshot for compatibility-bundle import. Block-native import
+applies the history delta first, then imports only the sidecar nodes/segments
+reachable from the received current root.
 
 Run:
 
@@ -286,19 +288,22 @@ MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY=580 \
 target/debug/examples/perf_scenarios
 ```
 
-Output: `/tmp/deep_history_block_incr_reachable_sidecar.json`.
+Output: `/tmp/deep_history_block_incr_immutable_compacted.json`.
 
 | Scenario  | total loop | write only | sampled receive | cold load | current read | historical read avg | tx info avg | block import | block payload bytes | current-root sidecar bytes | database bytes | live database bytes | bundle bytes |
 | --------- | ---------: | ---------: | --------------: | --------: | -----------: | ------------------: | ----------: | -----------: | ------------------: | -------------------------: | -------------: | ------------------: | -----------: |
-| Append    |    7424 ms |    2804 ms |         4617 ms |   2998 ms |     52.35 ms |            62.37 ms |     0.26 ms |      1660 ms |              30,971 |                    262,494 |        479,232 |             315,392 |      533,420 |
-| Automerge |   18500 ms |    6999 ms |        11498 ms |  11308 ms |     40.73 ms |            82.75 ms |     0.33 ms |      1683 ms |              41,291 |                    198,269 |        778,240 |             561,152 |    1,066,270 |
+| Append    |    8331 ms |    2934 ms |         5395 ms |   2589 ms |      0.32 ms |            49.98 ms |     0.26 ms |       137 ms |              31,452 |                     13,742 |        503,808 |             339,968 |      567,966 |
+| Automerge |   18423 ms |    6840 ms |        11580 ms |   7055 ms |      0.19 ms |            72.89 ms |     0.33 ms |       188 ms |              41,677 |                      1,806 |        802,816 |             585,728 |    1,090,481 |
 
 Interpretation: the storage wins stack nicely, especially for append
 (`35.90x` database/final payload, better than Incr alone at `42.95x` and far
-better than Block at `1402.46x`). Reachable sidecar sync helps block-native
-import materially for Automerge (`4865 ms` before, `1683 ms` now) because the
-final document root can skip abandoned edit structure. Append barely changes
-because the final append root still reaches almost the entire append chain.
+better than Block at `1402.46x`). Immutable segments make lifecycle reasoning
+simpler and current-root compaction turns the latest value into a shallow root.
+That changes the time profile substantially: current reads are sub-millisecond,
+and block-native import falls to `137 ms` for append and `188 ms` for Automerge.
+The short-term cost is extra sidecar storage until we add segment-object GC:
+append database/final payload rises from `35.90x` to `37.74x`, and Automerge
+database/source gzip rises from `0.86x` to `0.89x`.
 
 This is not the final sidecar protocol yet: historical roots sealed inside
 blocks still need explicit sidecar root manifests/deltas if a receiver should be
