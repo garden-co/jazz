@@ -7,8 +7,16 @@ const SORT_COLUMNS = {
   date: "$createdAt",
   name: "title",
 };
+const LABELS_QUERY = {
+  table: "labels",
+  conditions: [],
+  includes: {},
+  orderBy: [["name", "asc"]],
+};
 let db;
 let labelsById = new Map();
+let labelsSubscription;
+let suppressLabelSubscriptionState = false;
 let filters = {
   search: "",
   labelIds: [],
@@ -24,7 +32,7 @@ self.onmessage = async ({ data }) => {
       if (!db.readRows("projects").some((row) => row.id === PROJECT_ID)) {
         db.insertRow("projects", PROJECT_ID, { title: "Todo list" });
       }
-      refreshLabelCache();
+      withSuppressedLabelState(() => subscribeToLabels());
     } else if (data.type === "add") {
       const id = `todo-${crypto.randomUUID()}`;
       db.insertRow("todos", id, {
@@ -32,12 +40,12 @@ self.onmessage = async ({ data }) => {
         done: false,
         project: PROJECT_ID,
       });
-      addTodoLabels(id, data.labels);
+      withSuppressedLabelState(() => addTodoLabels(id, data.labels));
     } else if (data.type === "setFilters") {
       filters = sanitizeFilters(data.filters);
     } else if (data.type === "generate") {
       const startedAt = performance.now();
-      ensureLabels(GENERATED_LABELS);
+      withSuppressedLabelState(() => ensureLabels(GENERATED_LABELS));
       for (let i = 0; i < data.count; i++) {
         const todoId = `todo-${crypto.randomUUID()}`;
         const todoLabels = labelsForGeneratedTodo(i);
@@ -67,7 +75,6 @@ self.onmessage = async ({ data }) => {
 };
 
 function postState(generateMs) {
-  refreshLabelCache();
   const startedAt = performance.now();
   const todoIds = todoIdsForSelectedLabels(filters.labelIds);
   let rows = [];
@@ -75,29 +82,28 @@ function postState(generateMs) {
   if (!todoIds || todoIds.length > 0) {
     rows = db.query(buildTodoQuery(todoIds));
   }
+  const queryMs = performance.now() - startedAt;
 
-  const todos = attachLabels(
-    rows.map((row) => ({
-      id: row.id,
-      title: row.values.title,
-      done: row.values.done,
-      txId: row.tx_id,
-    })),
-  );
+  const todos = rows.map((row) => ({
+    id: row.id,
+    title: row.values.title,
+    done: row.values.done,
+    txId: row.tx_id,
+  }));
 
   postMessage({
     type: "state",
     filters,
     labels: sortedLabels(),
     todos,
-    queryMs: performance.now() - startedAt,
+    queryMs,
     currentRows: db.storageStats().current_rows,
     generateMs,
   });
 }
 
 function buildTodoQuery(todoIds) {
-  const conditions = [{ column: "done", op: "eq", value: false }];
+  const conditions = [];
   const search = filters.search.trim();
 
   if (search) {
@@ -126,6 +132,25 @@ function addTodoLabels(todoId, labelNames) {
   }
 }
 
+function subscribeToLabels() {
+  if (labelsSubscription !== undefined) return;
+  labelsSubscription = db.subscribe(LABELS_QUERY, ({ all }) => {
+    labelsById = new Map(all.map(labelRow));
+    if (!suppressLabelSubscriptionState) {
+      postState();
+    }
+  });
+}
+
+function withSuppressedLabelState(fn) {
+  suppressLabelSubscriptionState = true;
+  try {
+    return fn();
+  } finally {
+    suppressLabelSubscriptionState = false;
+  }
+}
+
 function ensureLabels(labelNames) {
   const labels = [];
   const seen = new Set();
@@ -143,10 +168,8 @@ function ensureLabels(labelNames) {
   return labels;
 }
 
-function refreshLabelCache() {
-  labelsById = new Map(
-    db.readRows("labels").map((row) => [row.id, { id: row.id, name: row.values.name }]),
-  );
+function labelRow(row) {
+  return [row.id, { id: row.id, name: row.values.name }];
 }
 
 function sortedLabels() {
@@ -188,27 +211,6 @@ function todoIdsForSelectedLabels(labelIds) {
   }
 
   return [...intersection];
-}
-
-function attachLabels(todos) {
-  if (!todos.length) return todos;
-
-  const byTodo = new Map(todos.map((todo) => [todo.id, []]));
-  for (const todo of todos) {
-    for (const row of db.query({
-      table: "todo_labels",
-      conditions: [{ column: "todo", op: "eq", value: todo.id }],
-      includes: {},
-    })) {
-      const label = labelsById.get(row.values.label);
-      if (label) byTodo.get(todo.id).push(label);
-    }
-  }
-
-  return todos.map((todo) => ({
-    ...todo,
-    labels: byTodo.get(todo.id).sort((left, right) => left.name.localeCompare(right.name)),
-  }));
 }
 
 function sanitizeFilters(nextFilters = {}) {

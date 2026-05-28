@@ -226,9 +226,6 @@ function todoHtml(todo) {
         <input type="checkbox" data-role="toggle" data-id="${escapeAttr(todo.id)}" ${todo.done ? "checked" : ""}>
         <span>${escapeHtml(todo.title)}</span>
       </label>
-      <div class="todo-meta">
-        ${todo.labels.map((label) => `<span class="label-chip">${escapeHtml(label.name)}</span>`).join("")}
-      </div>
       <button type="button" data-role="delete" data-id="${escapeAttr(todo.id)}">Delete</button>
     </li>
   `;

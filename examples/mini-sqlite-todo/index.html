@@ -133,8 +133,7 @@
         margin-top: 14px;
       }
 
-      .chip,
-      .label-chip {
+      .chip {
         border-radius: 999px;
         font-size: 0.82rem;
         line-height: 1;
@@ -175,7 +174,7 @@
 
       .todo-item {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(160px, auto) auto;
+        grid-template-columns: minmax(0, 1fr) auto;
         align-items: center;
         gap: 10px;
         min-height: 48px;
@@ -204,20 +203,6 @@
       .todo-item.done span {
         color: #6b756f;
         text-decoration: line-through;
-      }
-
-      .todo-meta {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: flex-end;
-        gap: 6px;
-        min-width: 0;
-      }
-
-      .label-chip {
-        background: #f4ead5;
-        color: #5f4418;
-        padding: 0.34rem 0.48rem;
       }
 
       .todo-item button {
@@ -251,10 +236,6 @@
           display: grid;
           align-items: start;
           gap: 10px;
-        }
-
-        .todo-meta {
-          justify-content: flex-start;
         }
 
         .todo-item button {
