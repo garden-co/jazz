@@ -154,7 +154,6 @@ This spec does not specify:
 - production policy language
 - production schema-lens completeness
 - networking transports
-- custom SQLite VFS behavior
-- page/range compression
+- userland history-range compression
 - garbage collection of history
 - final UI behavior for conflict resolution

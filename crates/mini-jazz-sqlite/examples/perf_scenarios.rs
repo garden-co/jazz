@@ -9,8 +9,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
-use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -199,9 +198,6 @@ enum DeepHistoryReport {
     AppendStream(DeepHistoryCaseReport),
     AutomergePaper(DeepHistoryCaseReport),
     CanvasPositions(DeepHistoryCaseReport),
-    AppendStreamLz4Vfs(DeepHistoryCaseReport),
-    AutomergePaperLz4Vfs(DeepHistoryCaseReport),
-    CanvasPositionsLz4Vfs(DeepHistoryCaseReport),
     AppendStreamJazzRope(DeepHistoryCaseReport),
     AutomergePaperJazzRope(DeepHistoryCaseReport),
     CanvasPositionsJazzRope(DeepHistoryCaseReport),
@@ -243,14 +239,6 @@ struct DeepHistoryCaseReport {
     bundle_to_reference_gzip_ratio: Option<f64>,
     extrapolated_write_ms_for_target: Option<f64>,
     extrapolated_database_bytes_for_target: Option<i64>,
-    lz4_cold_compact_ms: Option<f64>,
-    page_count_for_compression: Option<usize>,
-    lz4_page_compressed_bytes: Option<usize>,
-    lz4_page_compressed_to_database_ratio: Option<f64>,
-    lz4_page_compress_ms: Option<f64>,
-    lz4_page_decompress_ms: Option<f64>,
-    lz4_page_compress_us_per_page: Option<f64>,
-    lz4_page_decompress_us_per_page: Option<f64>,
     notes: Vec<String>,
 }
 
@@ -4105,19 +4093,11 @@ fn timed_apply_bundles(runtime: &mut Runtime, bundles: Vec<Bundle>) -> Result<Du
 fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
     match kind {
         "append" | "append-stream" => Ok(DeepHistoryReport::AppendStream(run_append_stream_probe()?)),
-        "append-lz4-vfs" | "append-stream-lz4-vfs" => Ok(DeepHistoryReport::AppendStreamLz4Vfs(
-            run_append_stream_probe_with_storage(DeepHistoryStorage::Lz4Vfs)?,
-        )),
         "append-jazz-rope" | "append-stream-jazz-rope" => Ok(
             DeepHistoryReport::AppendStreamJazzRope(run_append_stream_jazz_rope_probe()?),
         ),
         "automerge" | "automerge-paper" => {
             Ok(DeepHistoryReport::AutomergePaper(run_automerge_paper_probe()?))
-        }
-        "automerge-lz4-vfs" | "automerge-paper-lz4-vfs" => {
-            Ok(DeepHistoryReport::AutomergePaperLz4Vfs(
-                run_automerge_paper_probe_with_storage(DeepHistoryStorage::Lz4Vfs)?,
-            ))
         }
         "automerge-jazz-rope" | "automerge-paper-jazz-rope" => Ok(
             DeepHistoryReport::AutomergePaperJazzRope(run_automerge_paper_jazz_rope_probe()?),
@@ -4125,11 +4105,6 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
         "canvas" | "canvas-positions" => {
             Ok(DeepHistoryReport::CanvasPositions(run_canvas_positions_probe()?))
         }
-        "canvas-lz4-vfs" | "canvas-positions-lz4-vfs" => Ok(
-            DeepHistoryReport::CanvasPositionsLz4Vfs(run_canvas_positions_probe_with_storage(
-                DeepHistoryStorage::Lz4Vfs,
-            )?),
-        ),
         "canvas-jazz-rope" | "canvas-positions-jazz-rope" => Ok(
             DeepHistoryReport::CanvasPositionsJazzRope(run_canvas_positions_jazz_rope_probe()?),
         ),
@@ -4141,12 +4116,6 @@ fn run_deep_history_probe(kind: &str) -> BenchResult<DeepHistoryReport> {
 }
 
 fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
-    run_append_stream_probe_with_storage(DeepHistoryStorage::Sqlite)
-}
-
-fn run_append_stream_probe_with_storage(
-    storage: DeepHistoryStorage,
-) -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 100_000);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
@@ -4168,18 +4137,11 @@ fn run_append_stream_probe_with_storage(
         }),
         final_reference_json: None,
         compare_to_final_payload: true,
-        storage,
         notes: vec!["Naive baseline: one full-row text update per token-like append.".to_owned()],
     })
 }
 
 fn run_automerge_paper_probe() -> BenchResult<DeepHistoryCaseReport> {
-    run_automerge_paper_probe_with_storage(DeepHistoryStorage::Sqlite)
-}
-
-fn run_automerge_paper_probe_with_storage(
-    storage: DeepHistoryStorage,
-) -> BenchResult<DeepHistoryCaseReport> {
     let trace_path = automerge_trace_path()?;
     let trace_bytes = std::fs::metadata(&trace_path)?.len() as usize;
     let trace_json = gzip_decode_to_string(&trace_path)?;
@@ -4208,7 +4170,6 @@ fn run_automerge_paper_probe_with_storage(
         }),
         final_reference_json: None,
         compare_to_final_payload: true,
-        storage,
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
             "Naive baseline: apply trace patch locally, then write whole document body.".to_owned(),
@@ -4231,7 +4192,7 @@ fn run_append_stream_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
         }),
         final_reference_json: None,
         notes: vec![
-            "Hybrid Jazz + persisted-sequence baseline: Jazz row history stores sequence root refs; appended text lives in shared UTF-8 sidecar segments.".to_owned(),
+            "Incremental sequence sidecar: Jazz row history stores sequence root refs; appended text lives in shared UTF-8 sidecar segments.".to_owned(),
         ],
     })
 }
@@ -4264,18 +4225,12 @@ fn run_automerge_paper_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: None,
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
-            "Hybrid Jazz + persisted-sequence baseline: Jazz row history stores sequence root refs; document text lives in shared UTF-8 sidecar segments.".to_owned(),
+            "Incremental sequence sidecar: Jazz row history stores sequence root refs; document text lives in shared UTF-8 sidecar segments.".to_owned(),
         ],
     })
 }
 
 fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
-    run_canvas_positions_probe_with_storage(DeepHistoryStorage::Sqlite)
-}
-
-fn run_canvas_positions_probe_with_storage(
-    storage: DeepHistoryStorage,
-) -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES", 60 * 60 * 60);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
     let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
@@ -4298,7 +4253,6 @@ fn run_canvas_positions_probe_with_storage(
         next_value: Box::new(move |index| Ok(all_positions[index].clone())),
         final_reference_json: Some(reference_json),
         compare_to_final_payload: false,
-        storage,
         notes: vec![
             "Naive baseline: one full-row position JSON text update per 60 FPS frame.".to_owned(),
             "Final-payload ratios are not meaningful for presence-like coordinates and are emitted as null.".to_owned(),
@@ -4327,7 +4281,7 @@ fn run_canvas_positions_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> 
         positions: all_positions,
         final_reference_json: Some(reference_json),
         notes: vec![
-            "Hybrid Jazz + persisted-sequence baseline: Jazz row history stores sequence root refs; position samples live in compact delta sidecar runs.".to_owned(),
+            "Incremental sequence sidecar: Jazz row history stores sequence root refs; position samples live in compact delta sidecar runs.".to_owned(),
             "Final-payload ratios are not meaningful for presence-like coordinates and are emitted as null.".to_owned(),
         ],
     })
@@ -4346,14 +4300,7 @@ struct DeepHistoryCaseInput {
     next_value: Box<dyn FnMut(usize) -> BenchResult<String>>,
     final_reference_json: Option<String>,
     compare_to_final_payload: bool,
-    storage: DeepHistoryStorage,
     notes: Vec<String>,
-}
-
-#[derive(Clone, Copy)]
-enum DeepHistoryStorage {
-    Sqlite,
-    Lz4Vfs,
 }
 
 struct JazzRopePositionCaseInput {
@@ -4473,9 +4420,6 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     let final_bundle = writer.export_table_history("documents")?;
     let final_bundle_summary = BundleSummary::from(&final_bundle)?;
     let sidecar_bundle_bytes = rope_sidecar_bundle_bytes(&writer_rope)?;
-    let writer_page_compression = offline_page_compression_probe(&writer_db_path)?;
-    let rope_page_compression =
-        offline_sqlite_page_compression_probe(&writer_rope, &writer_rope_path)?;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
     let cold_rope = Connection::open(&cold_rope_path)?;
     persisted_rope::install(&cold_rope)?;
@@ -4561,33 +4505,6 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         }),
         extrapolated_write_ms_for_target: None,
         extrapolated_database_bytes_for_target: None,
-        lz4_cold_compact_ms: None,
-        page_count_for_compression: Some(
-            writer_page_compression.page_count + rope_page_compression.page_count,
-        ),
-        lz4_page_compressed_bytes: Some(
-            writer_page_compression.lz4.compressed_bytes
-                + rope_page_compression.lz4.compressed_bytes,
-        ),
-        lz4_page_compressed_to_database_ratio: ratio_usize_i64(
-            writer_page_compression.lz4.compressed_bytes
-                + rope_page_compression.lz4.compressed_bytes,
-            database_bytes,
-        ),
-        lz4_page_compress_ms: Some(
-            writer_page_compression.lz4.compress_ms + rope_page_compression.lz4.compress_ms,
-        ),
-        lz4_page_decompress_ms: Some(
-            writer_page_compression.lz4.decompress_ms + rope_page_compression.lz4.decompress_ms,
-        ),
-        lz4_page_compress_us_per_page: weighted_us_per_page([
-            &writer_page_compression.lz4,
-            &rope_page_compression.lz4,
-        ]),
-        lz4_page_decompress_us_per_page: weighted_decompress_us_per_page([
-            &writer_page_compression.lz4,
-            &rope_page_compression.lz4,
-        ]),
         notes,
     })
 }
@@ -4688,9 +4605,6 @@ fn run_jazz_rope_position_case(
     let final_bundle = writer.export_table_history("canvas_objects")?;
     let final_bundle_summary = BundleSummary::from(&final_bundle)?;
     let sidecar_bundle_bytes = rope_sidecar_bundle_bytes(&writer_rope)?;
-    let writer_page_compression = offline_page_compression_probe(&writer_db_path)?;
-    let rope_page_compression =
-        offline_sqlite_page_compression_probe(&writer_rope, &writer_rope_path)?;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
     let cold_rope = Connection::open(&cold_rope_path)?;
     persisted_rope::install(&cold_rope)?;
@@ -4770,33 +4684,6 @@ fn run_jazz_rope_position_case(
         }),
         extrapolated_write_ms_for_target: None,
         extrapolated_database_bytes_for_target: None,
-        lz4_cold_compact_ms: None,
-        page_count_for_compression: Some(
-            writer_page_compression.page_count + rope_page_compression.page_count,
-        ),
-        lz4_page_compressed_bytes: Some(
-            writer_page_compression.lz4.compressed_bytes
-                + rope_page_compression.lz4.compressed_bytes,
-        ),
-        lz4_page_compressed_to_database_ratio: ratio_usize_i64(
-            writer_page_compression.lz4.compressed_bytes
-                + rope_page_compression.lz4.compressed_bytes,
-            database_bytes,
-        ),
-        lz4_page_compress_ms: Some(
-            writer_page_compression.lz4.compress_ms + rope_page_compression.lz4.compress_ms,
-        ),
-        lz4_page_decompress_ms: Some(
-            writer_page_compression.lz4.decompress_ms + rope_page_compression.lz4.decompress_ms,
-        ),
-        lz4_page_compress_us_per_page: weighted_us_per_page([
-            &writer_page_compression.lz4,
-            &rope_page_compression.lz4,
-        ]),
-        lz4_page_decompress_us_per_page: weighted_decompress_us_per_page([
-            &writer_page_compression.lz4,
-            &rope_page_compression.lz4,
-        ]),
         notes,
     })
 }
@@ -5062,12 +4949,12 @@ fn run_naive_deep_history_case(
 ) -> BenchResult<DeepHistoryCaseReport> {
     let tmp = tempdir()?;
     let db_path = tmp.path().join("writer.sqlite");
-    let storage = match input.storage {
-        DeepHistoryStorage::Sqlite => Storage::File(db_path.clone()),
-        DeepHistoryStorage::Lz4Vfs => Storage::Lz4File(db_path.clone()),
-    };
-    let mut writer =
-        Runtime::open_with_schema(storage, "writer-node", "alice", input.schema.clone())?;
+    let mut writer = Runtime::open_with_schema(
+        Storage::File(db_path.clone()),
+        "writer-node",
+        "alice",
+        input.schema.clone(),
+    )?;
     let mut receiver = Runtime::open_with_schema(
         Storage::Memory,
         "receiver-node",
@@ -5123,10 +5010,6 @@ fn run_naive_deep_history_case(
     let total_loop_ms = ms(started.elapsed());
     let bundle = writer.export_table_history(input.table)?;
     let bundle_summary = BundleSummary::from(&bundle)?;
-    let page_compression = match input.storage {
-        DeepHistoryStorage::Sqlite => Some(offline_page_compression_probe(&db_path)?),
-        DeepHistoryStorage::Lz4Vfs => None,
-    };
     let cold_schema = input.schema.clone();
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", cold_schema)?;
     let cold_started = Instant::now();
@@ -5148,18 +5031,7 @@ fn run_naive_deep_history_case(
     let final_payload_bytes = final_payload.len();
     let stats = writer.storage_stats()?;
     drop(writer);
-    let lz4_cold_compact_ms = if matches!(input.storage, DeepHistoryStorage::Lz4Vfs) {
-        let compact_started = Instant::now();
-        mini_jazz_sqlite::compact_lz4_storage(&db_path)?;
-        Some(ms(compact_started.elapsed()))
-    } else {
-        None
-    };
-    let total_file_bytes = if matches!(input.storage, DeepHistoryStorage::Lz4Vfs) {
-        sqlite_path_total_file_bytes(&db_path)
-    } else {
-        stats.total_file_bytes
-    };
+    let total_file_bytes = stats.total_file_bytes;
     let extrapolated_final_payload_bytes_for_target =
         if input.compare_to_final_payload && stopped_early && completed_updates > 0 {
             Some(
@@ -5186,11 +5058,6 @@ fn run_naive_deep_history_case(
         None
     };
     let mut notes = input.notes;
-    if matches!(input.storage, DeepHistoryStorage::Lz4Vfs) {
-        notes.push(
-            "Storage: main SQLite database file used the experimental lz4 VFS; WAL/SHM files were uncompressed passthrough files.".to_owned(),
-        );
-    }
     if let Some(reference_json) = input.final_reference_json {
         notes.push(format!(
             "Reference uncompressed JSON bytes: {}",
@@ -5255,26 +5122,6 @@ fn run_naive_deep_history_case(
             .and_then(|bytes| ratio_usize(bundle_summary.bytes, bytes)),
         extrapolated_write_ms_for_target,
         extrapolated_database_bytes_for_target,
-        lz4_cold_compact_ms,
-        page_count_for_compression: page_compression.as_ref().map(|report| report.page_count),
-        lz4_page_compressed_bytes: page_compression
-            .as_ref()
-            .map(|report| report.lz4.compressed_bytes),
-        lz4_page_compressed_to_database_ratio: page_compression
-            .as_ref()
-            .and_then(|report| ratio_usize_i64(report.lz4.compressed_bytes, stats.database_bytes)),
-        lz4_page_compress_ms: page_compression
-            .as_ref()
-            .map(|report| report.lz4.compress_ms),
-        lz4_page_decompress_ms: page_compression
-            .as_ref()
-            .map(|report| report.lz4.decompress_ms),
-        lz4_page_compress_us_per_page: page_compression
-            .as_ref()
-            .map(|report| report.lz4.compress_us_per_page),
-        lz4_page_decompress_us_per_page: page_compression
-            .as_ref()
-            .map(|report| report.lz4.decompress_us_per_page),
         notes,
     })
 }
@@ -5360,134 +5207,6 @@ fn gzip_bytes(input: &[u8]) -> BenchResult<usize> {
     Ok(output.stdout.len())
 }
 
-struct PageCompressionCodecReport {
-    page_count: usize,
-    compressed_bytes: usize,
-    compress_ms: f64,
-    decompress_ms: f64,
-    compress_us_per_page: f64,
-    decompress_us_per_page: f64,
-}
-
-struct PageCompressionReport {
-    page_count: usize,
-    lz4: PageCompressionCodecReport,
-}
-
-fn offline_page_compression_probe(path: &std::path::Path) -> BenchResult<PageCompressionReport> {
-    let conn = Connection::open(path)?;
-    offline_sqlite_page_compression_probe(&conn, path)
-}
-
-fn offline_sqlite_page_compression_probe(
-    conn: &Connection,
-    path: &std::path::Path,
-) -> BenchResult<PageCompressionReport> {
-    conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
-    let page_size: usize = conn.pragma_query_value(None, "page_size", |row| row.get(0))?;
-    let pages = read_sqlite_pages(path, page_size)?;
-    let page_count = pages.len();
-    Ok(PageCompressionReport {
-        page_count,
-        lz4: compress_pages_with(
-            &pages,
-            |page| Ok(lz4_flex::compress_prepend_size(page)),
-            |page| lz4_flex::decompress_size_prepended(page).map_err(Into::into),
-        )?,
-    })
-}
-
-fn read_sqlite_pages(path: &std::path::Path, page_size: usize) -> BenchResult<Vec<Vec<u8>>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut pages = Vec::new();
-    loop {
-        let mut page = vec![0; page_size];
-        let mut read = 0;
-        while read < page_size {
-            let n = reader.read(&mut page[read..])?;
-            if n == 0 {
-                break;
-            }
-            read += n;
-        }
-        if read == 0 {
-            break;
-        }
-        page.truncate(read);
-        pages.push(page);
-        if read < page_size {
-            break;
-        }
-    }
-    Ok(pages)
-}
-
-fn compress_pages_with(
-    pages: &[Vec<u8>],
-    mut compress: impl FnMut(&[u8]) -> BenchResult<Vec<u8>>,
-    mut decompress: impl FnMut(&[u8]) -> BenchResult<Vec<u8>>,
-) -> BenchResult<PageCompressionCodecReport> {
-    let started = Instant::now();
-    let mut compressed_pages = Vec::with_capacity(pages.len());
-    for page in pages {
-        compressed_pages.push(compress(page)?);
-    }
-    let compress_ms = ms(started.elapsed());
-    let compressed_bytes = compressed_pages.iter().map(Vec::len).sum();
-    let decompress_started = Instant::now();
-    for compressed_page in &compressed_pages {
-        let decoded = decompress(compressed_page)?;
-        std::hint::black_box(&decoded);
-    }
-    let decompress_ms = ms(decompress_started.elapsed());
-    let page_count = pages.len();
-    let page_count_for_rate = page_count.max(1) as f64;
-    Ok(PageCompressionCodecReport {
-        page_count,
-        compressed_bytes,
-        compress_ms,
-        decompress_ms,
-        compress_us_per_page: compress_ms * 1000.0 / page_count_for_rate,
-        decompress_us_per_page: decompress_ms * 1000.0 / page_count_for_rate,
-    })
-}
-
-fn weighted_us_per_page<'a>(
-    reports: impl IntoIterator<Item = &'a PageCompressionCodecReport>,
-) -> Option<f64> {
-    let reports = reports.into_iter().collect::<Vec<_>>();
-    let total_ms = reports.iter().map(|report| report.compress_ms).sum::<f64>();
-    let total_pages = reports
-        .iter()
-        .map(|report| report.page_count)
-        .sum::<usize>();
-    if total_pages == 0 {
-        None
-    } else {
-        Some(total_ms * 1000.0 / total_pages as f64)
-    }
-}
-
-fn weighted_decompress_us_per_page<'a>(
-    reports: impl IntoIterator<Item = &'a PageCompressionCodecReport>,
-) -> Option<f64> {
-    let reports = reports.into_iter().collect::<Vec<_>>();
-    let total_ms = reports
-        .iter()
-        .map(|report| report.decompress_ms)
-        .sum::<f64>();
-    let total_pages = reports
-        .iter()
-        .map(|report| report.page_count)
-        .sum::<usize>();
-    if total_pages == 0 {
-        None
-    } else {
-        Some(total_ms * 1000.0 / total_pages as f64)
-    }
-}
-
 fn canvas_position_json(frame: usize) -> String {
     let position = canvas_position(frame);
     serde_json::json!({ "x": position.x, "y": position.y }).to_string()
@@ -5543,14 +5262,6 @@ fn ratio_i64_usize(numerator: i64, denominator: usize) -> Option<f64> {
 
 fn ratio_usize(numerator: usize, denominator: usize) -> Option<f64> {
     if denominator == 0 {
-        None
-    } else {
-        Some(numerator as f64 / denominator as f64)
-    }
-}
-
-fn ratio_usize_i64(numerator: usize, denominator: i64) -> Option<f64> {
-    if denominator <= 0 {
         None
     } else {
         Some(numerator as f64 / denominator as f64)

@@ -562,8 +562,8 @@ High-value things to try next:
 - validate exclusive predicate/range read sets under writer-user policy
   context
 - compare column-history with JSON/BLOB-history layouts
-- test SQLite VFS/page or range compression for deep histories, including
-  physical ordering that co-locates redundant history
+- test userland history-block compression for deep histories, including
+  logical ordering that co-locates redundant history
 - test transport stream compression over long-lived sync connections
 - stress recursive queries and recursive policies beyond toy examples
 - prove the blessed rich-text conflict-resolution path across sync/rebuild
@@ -605,7 +605,7 @@ Future work may revisit:
 - columnar history tables if JSONB-style payloads make policy, lenses,
   conflicts, or historical queries too slow or complex
 - payload compression for special large metadata/blob cases
-- custom SQLite VFS/page or range compression
+- userland history-block compression
 - opaque policy proofs
 - compact encrypted indexes
 - query-scope repair via durable observed-fact indexes rather than broad

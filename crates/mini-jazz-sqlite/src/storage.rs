@@ -8,15 +8,13 @@ pub const STORAGE_FORMAT_VERSION: i64 = 7;
 pub enum Storage {
     Memory,
     File(PathBuf),
-    Lz4File(PathBuf),
 }
 
 pub(crate) fn open(storage: Storage) -> Result<Connection> {
-    let durable = matches!(storage, Storage::File(_) | Storage::Lz4File(_));
+    let durable = matches!(storage, Storage::File(_));
     let conn = match storage {
         Storage::Memory => Connection::open_in_memory()?,
         Storage::File(path) => Connection::open(path)?,
-        Storage::Lz4File(path) => crate::lz4_vfs::open(path)?,
     };
     apply_tuning_pragmas(&conn, durable)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;

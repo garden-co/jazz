@@ -176,28 +176,6 @@ fn durable_nodes_survive_reopen_but_memory_nodes_start_empty() {
 }
 
 #[test]
-fn lz4_vfs_nodes_survive_reopen() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("compressed.sqlite");
-
-    {
-        let mut compressed =
-            Runtime::open(Storage::Lz4File(path.clone()), "worker", "alice").unwrap();
-        compressed
-            .create_project("project-1", "Compressed")
-            .unwrap();
-        compressed
-            .create_todo("todo-1", "Survives compressed reopen", false, "project-1")
-            .unwrap();
-    }
-
-    let reopened = Runtime::open(Storage::Lz4File(path), "worker", "alice").unwrap();
-    let todos = reopened.open_todos().unwrap();
-    assert_eq!(todos.len(), 1);
-    assert_eq!(todos[0].title, "Survives compressed reopen");
-}
-
-#[test]
 fn rebuild_current_projection_from_history_matches_current_reads() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

@@ -130,14 +130,12 @@ query plans. Generated or side indexes over history payloads should be added
 only when measurements show a hot historical query, conflict lookup, or
 authority-validation path needs them.
 
-Storage compression should target whole SQLite pages or larger ordered ranges,
-not individual row payloads. Per-row history payload compression has too little
-compression window for the expected complexity. History table ordering and
-primary keys should therefore be chosen with compression locality in mind:
-nearby pages should tend to contain related table/layout/row/history data so
-redundant append-only history can compress well. Custom VFS/page compression is
-a serious storage research target despite portability cost across browser,
-native, and server runtimes.
+Storage compression should target logical history ranges, not individual row
+payloads. Per-row history payload compression has too little compression window
+for the expected complexity. History table ordering and primary keys should
+therefore be chosen with compression locality in mind: nearby archived ranges
+should tend to contain related table/layout/row/history data so redundant
+append-only history can compress well inside ordinary SQLite tables.
 
 ### 26.3 Branch View Tables
 
