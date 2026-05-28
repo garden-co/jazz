@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:52:33 PDT 2026
+
+Decision: verify the grouped Block selector with real canonical caps.
+
+Why: Block is the RFC's main compacted-history path, and the grouped selector should exercise compaction, block-native export/import, historical reads, and tx-info lookup across all three scenarios in one command.
+
+Scope impact: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all-history-blocks` completed append, Automerge, and canvas at canonical update counts. The output was saved in `/tmp/deep_history_all_canonical_blocks.json`; numbers remained in line with the existing Block table, so the benchmark comparison table was left unchanged.
+
 ## Thu May 28 03:51:24 PDT 2026
 
 Decision: verify the documented grouped baseline selector with real canonical caps, but do not rewrite the comparison table from that smoke.
