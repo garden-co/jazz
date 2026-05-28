@@ -231,3 +231,9 @@ Scope impact: this creates the first end-to-end sync shape for compacted history
 Decision: Benchmark block-native export/import as open bundle plus sealed block transfer, including receiver block import, projection rebuild, and open bundle apply. Keep the old full bundle bytes separately so we can see how expensive compatibility export remains.
 
 Scope impact: future canonical Block numbers should represent the intended compacted-history sync shape rather than a raw-block-only microprobe.
+
+## Thu May 28 00:36:36 PDT 2026 - No Rebuild For Block Delta Apply
+
+Decision: Do not require a projection rebuild between importing sealed blocks and applying the open-history bundle in the block-native table delta path. Open history exports already contain full row values, so applying the hot tail can materialize current state directly.
+
+Scope impact: block-native receiver timing should include block import plus open bundle apply, not an avoidable full sealed-block projection rebuild. Historical reads and explicit rebuild still decode sealed blocks when requested.

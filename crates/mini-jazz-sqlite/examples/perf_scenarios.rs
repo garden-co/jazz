@@ -5253,7 +5253,6 @@ fn run_naive_deep_history_case(
         )?;
         let block_import_started = Instant::now();
         block_peer.import_history_blocks(&history_blocks)?;
-        block_peer.rebuild_current_projection()?;
         block_peer.profile_apply_bundle(&delta_bundle)?;
         let block_rows = block_peer.read_rows(input.table)?;
         if block_rows.len() != 1 {

@@ -397,7 +397,6 @@ fn table_history_delta_syncs_open_rows_and_missing_blocks() {
     assert_eq!(blocks.len(), 1);
 
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
-    bob.rebuild_current_projection().unwrap();
     bob.apply_bundle(&bundle).unwrap();
 
     let rows = bob.read_rows("notes").unwrap();
