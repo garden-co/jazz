@@ -7817,6 +7817,29 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
     {
         return Err(crate::Error::new("history block invalid tx range"));
     }
+    let mut expected_ranges = BTreeMap::<String, (i64, i64)>::new();
+    for tx in &bundle.txs {
+        expected_ranges
+            .entry(tx.node_id.clone())
+            .and_modify(|(min, max)| {
+                *min = (*min).min(tx.local_epoch);
+                *max = (*max).max(tx.local_epoch);
+            })
+            .or_insert((tx.local_epoch, tx.local_epoch));
+    }
+    let actual_ranges = block
+        .tx_ranges
+        .iter()
+        .map(|range| {
+            (
+                range.node_id.clone(),
+                (range.min_local_epoch, range.max_local_epoch),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if expected_ranges != actual_ranges {
+        return Err(crate::Error::new("history block tx range mismatch"));
+    }
     Ok(())
 }
 

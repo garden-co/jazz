@@ -355,6 +355,10 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
         err.to_string().contains("invalid tx range"),
         "unexpected error: {err}"
     );
+    let mut wrong_range = blocks.clone();
+    wrong_range[0].tx_ranges[0].max_local_epoch += 1;
+    let err = bob.import_history_blocks(&wrong_range).unwrap_err();
+    assert!(err.to_string().contains("tx range mismatch"));
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 0);
     assert!(bob

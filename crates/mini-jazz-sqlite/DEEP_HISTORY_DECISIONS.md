@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:59:58 PDT 2026
+
+Decision: require imported tx-range indexes to exactly match decoded block txs.
+
+Why: the tx-range side index is what lets `transaction_info(tx-id)` and point reads find sealed block payloads without scanning every block. If a peer can attach a valid payload to a wider or wrong node/local range, later reads may decode the wrong block set or miss the right one.
+
+Scope impact: import derives the expected `(node_id, min_local_epoch, max_local_epoch)` ranges from decoded `bundle.txs` and rejects mismatches. The raw-block sync test now covers both impossible ranges and plausible-but-wrong ranges.
+
 ## Thu May 28 03:58:57 PDT 2026
 
 Decision: validate imported block manifests against decoded payload summaries.
