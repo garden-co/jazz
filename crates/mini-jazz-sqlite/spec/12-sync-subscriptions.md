@@ -123,6 +123,16 @@ the same semantic value but changes position in the ordered result. This matters
 for ordered pages and subscriptions whose user-visible state is the sequence,
 not only the set of rows.
 
+Row diffs identify the semantic row by public id, describe the change kind, and
+carry the row's deterministic position in the newly delivered result for added,
+updated, and moved rows, or in the previous delivered result for removed rows.
+Added and updated diffs carry the new semantic row. Moved diffs do not carry a
+row payload because the semantic row is unchanged. At the JavaScript wire
+boundary, moved diffs use the existing `updated` row-change kind without a row
+payload (`kind: 2`, `id`, `index`) so existing subscription managers can reorder
+without learning a fourth wire kind. Removed diffs do not need to carry the old
+row unless a higher-level binding chooses to retain it for ergonomics.
+
 Diff ordering is deterministic and follows the corresponding query's effective
 semantic order. The product contract should promise deterministic semantic
 diffs, but should avoid freezing incidental internal variant choices beyond the

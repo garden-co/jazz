@@ -153,15 +153,15 @@ fn id_magic_field_query_matches_public_row_id() {
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("notes", "id", json!("note-public-id"))
+        .query(support::eq_query("notes", "id", json!("note-public-id")))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "note-public-id");
     assert!(alice
-        .read_rows_where_eq("notes", "id", json!(7))
+        .query(support::eq_query("notes", "id", json!(7)))
         .unwrap_err()
         .to_string()
-        .contains("id equality expects a string"));
+        .contains("query system field expects a string"));
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn id_magic_field_query_scope_syncs_and_repairs_delete() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("notes", "id", json!("note-public-id"))
+        peer.query(support::eq_query("notes", "id", json!("note-public-id")))
             .unwrap()
             .len(),
         1
@@ -203,7 +203,7 @@ fn id_magic_field_query_scope_syncs_and_repairs_delete() {
     )
     .unwrap();
     assert!(peer
-        .read_rows_where_eq("notes", "id", json!("note-public-id"))
+        .query(support::eq_query("notes", "id", json!("note-public-id")))
         .unwrap()
         .is_empty());
 }
@@ -523,15 +523,15 @@ fn created_by_magic_field_query_matches_creator_user() {
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("notes", "$createdBy", json!("bob"))
+        .query(support::eq_query("notes", "$createdBy", json!("bob")))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "note-bob");
     assert!(alice
-        .read_rows_where_eq("notes", "$createdBy", json!(true))
+        .query(support::eq_query("notes", "$createdBy", json!(true)))
         .unwrap_err()
         .to_string()
-        .contains("$createdBy equality expects a string"));
+        .contains("query system field expects a string"));
 }
 
 #[test]
@@ -559,7 +559,7 @@ fn created_by_magic_field_query_scope_syncs_and_repairs_delete() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("notes", "$createdBy", json!("alice"))
+        peer.query(support::eq_query("notes", "$createdBy", json!("alice")))
             .unwrap()
             .len(),
         1
@@ -573,7 +573,7 @@ fn created_by_magic_field_query_scope_syncs_and_repairs_delete() {
     )
     .unwrap();
     assert!(peer
-        .read_rows_where_eq("notes", "$createdBy", json!("alice"))
+        .query(support::eq_query("notes", "$createdBy", json!("alice")))
         .unwrap()
         .is_empty());
 }
@@ -732,16 +732,26 @@ fn generic_top_created_at_query_scope_refresh_replaces_displaced_boundary_row() 
 
     peer.apply_bundle(
         &alice
-            .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+            .export_query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                2,
+            ))
             .unwrap(),
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
-            .unwrap()
-            .iter()
-            .map(|row| row.id.as_str())
-            .collect::<Vec<_>>(),
+        peer.query(support::top_created_query(
+            "notes",
+            "pinned",
+            json!(true),
+            2,
+        ))
+        .unwrap()
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>(),
         vec!["note-middle", "note-old"]
     );
 
@@ -758,19 +768,225 @@ fn generic_top_created_at_query_scope_refresh_replaces_displaced_boundary_row() 
         .unwrap();
     peer.apply_bundle(
         &alice
-            .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+            .export_query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                2,
+            ))
             .unwrap(),
     )
     .unwrap();
 
     assert_eq!(
-        peer.read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 3)
-            .unwrap()
-            .iter()
-            .map(|row| row.id.as_str())
-            .collect::<Vec<_>>(),
+        peer.query(support::top_created_query(
+            "notes",
+            "pinned",
+            json!(true),
+            3,
+        ))
+        .unwrap()
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>(),
         vec!["note-new", "note-middle"]
     );
+}
+
+#[test]
+fn built_query_scope_export_accepts_multiple_filters() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-match",
+            BTreeMap::from([
+                ("body".to_owned(), json!("ship the small thing")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-filtered",
+            BTreeMap::from([
+                ("body".to_owned(), json!("ship something later")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [
+            {"column": "pinned", "op": "eq", "value": true},
+            {"column": "body", "op": "contains", "value": "ship"}
+        ],
+    }))
+    .unwrap();
+    assert_eq!(alice.query(query.clone()).unwrap()[0].id, "note-match");
+
+    peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
+        .unwrap();
+
+    let rows = peer.query(query.clone()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-match");
+
+    alice
+        .update_row(
+            "notes",
+            "note-match",
+            BTreeMap::from([("pinned".to_owned(), json!(false))]),
+        )
+        .unwrap();
+
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(peer.query(query).unwrap().is_empty());
+}
+
+#[test]
+fn built_query_scope_refresh_removes_row_that_left_custom_order() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-match",
+            BTreeMap::from([
+                ("body".to_owned(), json!("alpha")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [
+            {"column": "pinned", "op": "eq", "value": true}
+        ],
+        "orderBy": [["body", "asc"]],
+    }))
+    .unwrap();
+
+    peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
+        .unwrap();
+    assert_eq!(peer.query(query.clone()).unwrap()[0].id, "note-match");
+
+    alice
+        .update_row(
+            "notes",
+            "note-match",
+            BTreeMap::from([("pinned".to_owned(), json!(false))]),
+        )
+        .unwrap();
+
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    assert!(peer.query(query).unwrap().is_empty());
+}
+
+#[test]
+fn built_query_scope_export_includes_offset_support_rows() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-older",
+            BTreeMap::from([
+                ("body".to_owned(), json!("older")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-newer",
+            BTreeMap::from([
+                ("body".to_owned(), json!("newer")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "conditions": [{"column": "pinned", "op": "eq", "value": true}],
+        "orderBy": [["$createdAt", "desc"]],
+        "limit": 1,
+        "offset": 1,
+    }))
+    .unwrap();
+    assert_eq!(alice.query(query.clone()).unwrap()[0].id, "note-older");
+
+    peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
+        .unwrap();
+
+    let rows = peer.query(query).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-older");
+}
+
+#[test]
+fn generic_top_created_at_query_scope_repairs_system_predicates() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-target",
+            BTreeMap::from([
+                ("body".to_owned(), json!("target")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    for query in [
+        support::top_created_query("notes", "id", json!("note-target"), 1),
+        support::top_created_query("notes", "$createdBy", json!("alice"), 1),
+    ] {
+        let mut peer =
+            Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema.clone())
+                .unwrap();
+
+        peer.apply_bundle(&alice.export_query(query.clone()).unwrap())
+            .unwrap();
+
+        let rows = peer.query(query).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "note-target");
+    }
 }
 
 #[test]
@@ -869,7 +1085,7 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-open");
@@ -893,7 +1109,7 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
 
     peer.apply_bundle(&bundle).unwrap();
     let peer_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(peer_rows.len(), 1);
     assert_eq!(peer_rows[0].id, "task-open");
@@ -960,7 +1176,7 @@ fn query_scope_bundle_dedupes_shared_policy_dependency_history() {
 
     peer.apply_bundle(&bundle).unwrap();
     let peer_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(peer_rows.len(), 2);
     assert!(peer_rows
@@ -996,7 +1212,7 @@ fn equality_query_scope_resync_removes_row_that_left_predicate() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -1020,7 +1236,7 @@ fn equality_query_scope_resync_removes_row_that_left_predicate() {
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -1053,7 +1269,7 @@ fn equality_query_scope_resync_removes_deleted_matching_row() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -1068,7 +1284,7 @@ fn equality_query_scope_resync_removes_deleted_matching_row() {
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -1104,7 +1320,7 @@ fn nullable_text_round_trips_and_filters_with_is_null_semantics() {
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("notes", "tag", json!(null))
+        .query(support::eq_query("notes", "tag", json!(null)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "note-2");
@@ -1156,7 +1372,7 @@ fn nullable_ref_round_trips_filters_and_is_skipped_by_require_ref() {
         .unwrap();
 
     let floating = alice
-        .read_rows_where_eq("todos", "project", json!(null))
+        .query(support::eq_query("todos", "project", json!(null)))
         .unwrap();
     assert_eq!(floating.len(), 1);
     assert_eq!(floating[0].id, "todo-floating");
@@ -1758,7 +1974,7 @@ fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_delete
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -1779,7 +1995,7 @@ fn query_scope_refresh_does_not_leak_unrelated_tombstones_while_repairing_delete
 
     peer.apply_bundle(&bundle).unwrap();
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -1812,7 +2028,7 @@ fn empty_equality_query_scope_later_delivers_inserted_match_without_table_replic
     assert_eq!(initial.query_reads.len(), 1);
     peer.apply_bundle(&initial).unwrap();
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
     assert_eq!(peer.observed_query_reads().unwrap(), initial.query_reads);
@@ -1843,7 +2059,7 @@ fn empty_equality_query_scope_later_delivers_inserted_match_without_table_replic
     }
 
     let rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-open");
@@ -1894,7 +2110,7 @@ fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() 
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -1917,7 +2133,7 @@ fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() 
         )
         .unwrap();
     assert!(alice
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 
@@ -1929,7 +2145,7 @@ fn equality_query_scope_resync_removes_row_hidden_by_policy_dependency_change() 
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -1990,7 +2206,7 @@ fn durable_query_read_refresh_repairs_policy_dependency_change_after_restart() {
             .unwrap();
         assert_eq!(
             worker
-                .read_rows_where_eq("tasks", "done", json!(false))
+                .query(support::eq_query("tasks", "done", json!(false)))
                 .unwrap()
                 .len(),
             1
@@ -2030,7 +2246,7 @@ fn durable_query_read_refresh_repairs_policy_dependency_change_after_restart() {
     }
 
     assert!(reopened
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -2100,7 +2316,7 @@ fn branch_equality_query_scope_resync_repairs_row_that_left_predicate() {
     .unwrap();
     peer.checkout_branch("draft").unwrap();
     let draft_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(draft_rows.len(), 1);
     assert_eq!(draft_rows[0].id, "task-1");
@@ -2123,7 +2339,7 @@ fn branch_equality_query_scope_resync_repairs_row_that_left_predicate() {
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap()
         .is_empty());
 }
@@ -2213,7 +2429,7 @@ fn branch_query_scope_repair_does_not_delete_same_predicate_row_on_main() {
     )
     .unwrap();
     assert_eq!(
-        peer.read_rows_where_eq("tasks", "done", json!(false))
+        peer.query(support::eq_query("tasks", "done", json!(false)))
             .unwrap()
             .len(),
         1
@@ -2239,7 +2455,7 @@ fn branch_query_scope_repair_does_not_delete_same_predicate_row_on_main() {
     .unwrap();
     peer.checkout_branch("draft").unwrap();
     let draft_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(draft_rows.len(), 2);
     assert!(draft_rows.iter().any(|row| row.id == "task-main"));
@@ -2260,13 +2476,13 @@ fn branch_query_scope_repair_does_not_delete_same_predicate_row_on_main() {
     .unwrap();
 
     let draft_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(draft_rows.len(), 1);
     assert_eq!(draft_rows[0].id, "task-main");
     peer.checkout_branch("main").unwrap();
     let main_rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(main_rows.len(), 1);
     assert_eq!(main_rows[0].id, "task-main");
@@ -2369,11 +2585,147 @@ fn generic_equality_query_lowers_public_ref_ids_to_physical_row_ids() {
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("tasks", "project", json!("project-2"))
+        .query(support::eq_query("tasks", "project", json!("project-2")))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-2");
     assert_eq!(rows[0].values["project"], json!("project-2"));
+}
+
+#[test]
+fn generic_ref_field_order_uses_public_ref_ids() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-z",
+            BTreeMap::from([("title".to_owned(), json!("Z project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("A project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-z",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Z task")),
+                ("project".to_owned(), json!("project-z")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-a",
+            BTreeMap::from([
+                ("title".to_owned(), json!("A task")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )
+        .unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "orderBy": [["project", "asc"]],
+    }))
+    .unwrap();
+    let ids = alice
+        .query(query)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["task-a", "task-z"]);
+}
+
+#[test]
+fn branch_ref_field_order_uses_public_ref_ids() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let project_z_tx = alice
+        .insert_row(
+            "projects",
+            "project-z",
+            BTreeMap::from([("title".to_owned(), json!("Z project"))]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&project_z_tx, 1)
+        .unwrap();
+    let project_a_tx = alice
+        .insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("A project"))]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&project_a_tx, 2)
+        .unwrap();
+    let task_z_tx = alice
+        .insert_row(
+            "tasks",
+            "task-z",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Z task")),
+                ("project".to_owned(), json!("project-z")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&task_z_tx, 3).unwrap();
+    let task_a_tx = alice
+        .insert_row(
+            "tasks",
+            "task-a",
+            BTreeMap::from([
+                ("title".to_owned(), json!("A task")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&task_a_tx, 4).unwrap();
+    alice.create_branch("draft", Some(4)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "orderBy": [["project", "asc"]],
+    }))
+    .unwrap();
+    let ids = alice
+        .query(query)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["task-a", "task-z"]);
 }
 
 #[test]

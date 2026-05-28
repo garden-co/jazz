@@ -255,7 +255,7 @@ fn renamed_field_lens_query_scope_syncs_and_repairs_rows() {
     )
     .unwrap();
     let rows = peer
-        .read_rows_where_eq("tasks", "name", json!("Important"))
+        .query(support::eq_query("tasks", "name", json!("Important")))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "task-1");
@@ -277,7 +277,7 @@ fn renamed_field_lens_query_scope_syncs_and_repairs_rows() {
     .unwrap();
 
     assert!(peer
-        .read_rows_where_eq("tasks", "name", json!("Important"))
+        .query(support::eq_query("tasks", "name", json!("Important")))
         .unwrap()
         .is_empty());
 }
@@ -342,7 +342,7 @@ fn renamed_field_lens_observed_query_refresh_emits_semantic_removal() {
     let diffs = peer.poll_subscription(&mut subscription).unwrap();
     assert!(matches!(&diffs[..], [RowDiff::Removed(row)] if row.id == "task-1"));
     assert!(peer
-        .read_rows_where_eq("tasks", "name", json!("Important"))
+        .query(support::eq_query("tasks", "name", json!("Important")))
         .unwrap()
         .is_empty());
 }
@@ -659,7 +659,11 @@ fn user_columns_with_system_prefix_are_escaped_physically() {
         .unwrap();
 
     let rows = alice
-        .read_rows_where_eq("records", "j_title", json!("Looks like system"))
+        .query(support::eq_query(
+            "records",
+            "j_title",
+            json!("Looks like system"),
+        ))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values["j_pinned"], json!(true));
@@ -741,14 +745,14 @@ fn index_only_schema_changes_are_semantically_compatible() {
         .unwrap();
 
     let rows = peer
-        .read_rows_where_eq("tasks", "done", json!(false))
+        .query(support::eq_query("tasks", "done", json!(false)))
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values["title"], json!("Compatible"));
 
     peer.apply_bundle(
         &alice
-            .export_query_where_eq_top_created_at_desc("tasks", "done", json!(false), 1)
+            .export_query(support::top_created_query("tasks", "done", json!(false), 1))
             .unwrap(),
     )
     .unwrap();

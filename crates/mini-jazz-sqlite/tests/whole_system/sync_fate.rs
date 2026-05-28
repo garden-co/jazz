@@ -138,14 +138,24 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
             .unwrap();
         support::apply(
             upstream
-                .export_query_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+                .export_query(support::top_created_query(
+                    "notes",
+                    "pinned",
+                    json!(true),
+                    2,
+                ))
                 .unwrap(),
             &mut worker,
         )
         .unwrap();
         assert_eq!(
             worker
-                .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
+                .query(support::top_created_query(
+                    "notes",
+                    "pinned",
+                    json!(true),
+                    2,
+                ))
                 .unwrap()
                 .iter()
                 .map(|row| row.id.as_str())
@@ -173,7 +183,12 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
 
     assert_eq!(
         reopened
-            .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 3)
+            .query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                3,
+            ))
             .unwrap()
             .iter()
             .map(|row| row.id.as_str())
@@ -1227,10 +1242,13 @@ fn top_created_at_query_scope_refresh_replaces_displaced_page_boundary_row() {
 
     peer.apply_bundle(&alice.export_query_scope_newest_open_todos(2).unwrap())
         .unwrap();
+    let observed_query = peer.observed_query_reads().unwrap()[0].clone();
+    assert_eq!(observed_query.op, "query");
     assert_eq!(
-        peer.observed_query_reads().unwrap()[0].op,
-        "eq_top_created_at_desc"
+        observed_query.value["orderBy"],
+        json!([["$createdAt", "desc"]])
     );
+    assert_eq!(observed_query.value["limit"], json!(2));
     assert_eq!(
         peer.newest_open_todos(2)
             .unwrap()
@@ -1255,6 +1273,102 @@ fn top_created_at_query_scope_refresh_replaces_displaced_page_boundary_row() {
             .collect::<Vec<_>>(),
         vec!["todo-new", "todo-middle"]
     );
+}
+
+#[test]
+fn top_created_at_query_scope_refresh_repairs_system_predicates() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "peer-node", "alice", schema.clone()).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-old",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old boundary")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-middle",
+            BTreeMap::from([
+                ("body".to_owned(), json!("middle")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let created_by_query = support::top_created_query("notes", "$createdBy", json!("alice"), 2);
+    peer.apply_bundle(&alice.export_query(created_by_query.clone()).unwrap())
+        .unwrap();
+    assert_eq!(
+        peer.query(created_by_query.clone())
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-middle", "note-old"]
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .insert_row(
+            "notes",
+            "note-new",
+            BTreeMap::from([
+                ("body".to_owned(), json!("newest")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    assert_eq!(
+        peer.query(support::top_created_query(
+            "notes",
+            "$createdBy",
+            json!("alice"),
+            3,
+        ))
+        .unwrap()
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>(),
+        vec!["note-new", "note-middle"]
+    );
+
+    let mut id_source =
+        Runtime::open_with_schema(Storage::Memory, "id-source", "alice", schema.clone()).unwrap();
+    let mut id_peer =
+        Runtime::open_with_schema(Storage::Memory, "id-peer", "alice", schema).unwrap();
+    id_source
+        .insert_row(
+            "notes",
+            "note-target",
+            BTreeMap::from([
+                ("body".to_owned(), json!("target")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    let id_query = support::top_created_query("notes", "id", json!("note-target"), 1);
+    id_peer
+        .apply_bundle(&id_source.export_query(id_query.clone()).unwrap())
+        .unwrap();
+    assert_eq!(id_peer.query(id_query).unwrap()[0].id, "note-target");
 }
 
 #[test]

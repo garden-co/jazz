@@ -1,5 +1,6 @@
+use crate::query_api::BuiltQuery;
 use crate::sync::QueryPredicateRecord;
-use crate::types::{RejectionInfo, RowDiff, RowView};
+use crate::types::{RejectionInfo, RowDiff, RowView, SubscriptionDelta, SubscriptionRowDelta};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
@@ -18,6 +19,7 @@ pub struct RejectionSubscription {
 pub(crate) enum RowsSubscriptionQuery {
     Table { table: String },
     Predicate(QueryPredicateRecord),
+    Built(BuiltQuery),
 }
 
 impl RowsSubscription {
@@ -143,8 +145,19 @@ impl RowsSubscription {
         }
     }
 
+    pub(crate) fn query(query: BuiltQuery, rows: Vec<RowView>) -> Self {
+        Self {
+            query: RowsSubscriptionQuery::Built(query),
+            last_rows: rows,
+        }
+    }
+
     pub fn initial_rows(&self) -> &[RowView] {
         &self.last_rows
+    }
+
+    pub fn initial_delta(&self) -> SubscriptionDelta {
+        SubscriptionDelta::initial(self.last_rows.clone())
     }
 
     pub(crate) fn replace_with_diff(&mut self, next_rows: Vec<RowView>) -> Vec<RowDiff> {
@@ -197,6 +210,18 @@ impl RowsSubscription {
         self.last_rows = next_rows;
         diffs
     }
+
+    pub(crate) fn replace_with_subscription_delta(
+        &mut self,
+        next_rows: Vec<RowView>,
+    ) -> SubscriptionDelta {
+        let delta = indexed_delta(&self.last_rows, &next_rows);
+        self.last_rows = next_rows;
+        SubscriptionDelta {
+            all: self.last_rows.clone(),
+            delta,
+        }
+    }
 }
 
 impl RejectionSubscription {
@@ -244,6 +269,62 @@ fn positions_by_id(rows: &[RowView]) -> BTreeMap<String, usize> {
         .collect()
 }
 
+fn indexed_delta(before: &[RowView], after: &[RowView]) -> Vec<SubscriptionRowDelta> {
+    let before = before
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id.as_str(), (index, row)))
+        .collect::<BTreeMap<_, _>>();
+    let after = after
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id.as_str(), (index, row)))
+        .collect::<BTreeMap<_, _>>();
+    let mut delta = Vec::new();
+
+    for (id, (before_index, before_row)) in &before {
+        match after.get(id) {
+            Some((after_index, after_row)) => {
+                if before_row != after_row {
+                    delta.push(SubscriptionRowDelta::Updated {
+                        id: (*id).to_owned(),
+                        index: *after_index,
+                        item: Some((*after_row).clone()),
+                    });
+                } else if before_index != after_index {
+                    delta.push(SubscriptionRowDelta::Moved {
+                        id: (*id).to_owned(),
+                        previous_index: *before_index,
+                        index: *after_index,
+                    });
+                }
+            }
+            None => delta.push(SubscriptionRowDelta::Removed {
+                id: (*id).to_owned(),
+                index: *before_index,
+            }),
+        }
+    }
+
+    for (id, (after_index, after_row)) in &after {
+        if !before.contains_key(id) {
+            delta.push(SubscriptionRowDelta::Added {
+                id: (*id).to_owned(),
+                index: *after_index,
+                item: (*after_row).clone(),
+            });
+        }
+    }
+
+    delta.sort_by(|left, right| {
+        left.index()
+            .cmp(&right.index())
+            .then(left.kind().cmp(&right.kind()))
+            .then(left.id().cmp(right.id()))
+    });
+    delta
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +361,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["second", "first"]
         );
+    }
+
+    #[test]
+    fn subscription_delta_serializes_added_and_updated_payloads_as_row() {
+        let first = row("first");
+        let mut subscription = RowsSubscription::new("items", vec![first.clone()]);
+
+        let initial = serde_json::to_value(subscription.initial_delta()).unwrap();
+        assert_eq!(initial["delta"][0]["row"], json!(first));
+        assert!(initial["delta"][0].get("item").is_none());
+
+        let mut changed = first.clone();
+        changed.values.insert("name".to_owned(), json!("updated"));
+        let update = serde_json::to_value(
+            subscription.replace_with_subscription_delta(vec![changed.clone()]),
+        )
+        .unwrap();
+        assert_eq!(update["delta"][0]["row"], json!(changed));
+        assert!(update["delta"][0].get("item").is_none());
+    }
+
+    #[test]
+    fn subscription_delta_serializes_order_only_changes_as_update_without_row() {
+        let first = row("first");
+        let second = row("second");
+        let mut subscription = RowsSubscription::new("items", vec![first, second]);
+
+        let delta = serde_json::to_value(
+            subscription.replace_with_subscription_delta(vec![row("second"), row("first")]),
+        )
+        .unwrap();
+
+        assert_eq!(delta["delta"][0]["kind"], json!(2));
+        assert_eq!(delta["delta"][0]["id"], json!("second"));
+        assert_eq!(delta["delta"][0]["index"], json!(0));
+        assert!(delta["delta"][0].get("row").is_none());
+        assert!(delta["delta"][0].get("previousIndex").is_none());
     }
 
     fn row(id: &str) -> RowView {

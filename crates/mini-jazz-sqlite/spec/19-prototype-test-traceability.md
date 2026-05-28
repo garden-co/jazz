@@ -131,6 +131,8 @@ Coverage labels:
 - `query_predicate_reads_survive_bundle_serialization`: D.6, D.7
 - `generic_equality_query_lowers_public_ref_ids_to_physical_row_ids`: D.1,
   D.6, D.14
+- `generic_ref_field_order_uses_public_ref_ids`: D.1, D.6
+- `branch_ref_field_order_uses_public_ref_ids`: D.1, D.5, D.6
 - `generic_update_records_update_op_and_syncs_current_value`: D.2, D.3, D.7
 
 #### `policies.rs`

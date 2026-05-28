@@ -1,5 +1,5 @@
 use mini_jazz_sqlite::sync::{Bundle, QueryReadRecord};
-use mini_jazz_sqlite::{Result, RowView, Runtime, SchemaDef, Storage};
+use mini_jazz_sqlite::{BuiltQuery, Result, RowView, Runtime, SchemaDef, Storage};
 use serde_json::json;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -366,12 +366,12 @@ impl FixtureRuntimeExt for Runtime {
     }
 
     fn newest_open_todos(&self, limit: usize) -> Result<Vec<TodoView>> {
-        let todos = self.read_rows_where_eq_top_created_at_desc(
+        let todos = self.query(top_created_query(
             "todos",
             "done",
             JsonValue::Bool(false),
             limit,
-        )?;
+        ))?;
         open_todo_rows_with_sort(todos, self.read_rows("projects")?, false)
     }
 
@@ -389,12 +389,9 @@ impl FixtureRuntimeExt for Runtime {
 
     fn export_query_scope_newest_open_todos(&self, limit: usize) -> Result<Bundle> {
         let todos = self.newest_open_todos(limit)?;
-        let mut bundle = self.export_query_where_eq_top_created_at_desc_with_ref_include(
-            "todos",
-            "done",
-            JsonValue::Bool(false),
-            limit,
-            "project",
+        let mut bundle = self.export_query_with_ref_includes(
+            top_created_query("todos", "done", JsonValue::Bool(false), limit),
+            &["project"],
         )?;
         extend_with_project_scope(self, &mut bundle, &todos)?;
         Ok(bundle)
@@ -497,6 +494,24 @@ pub fn notes_schema() -> SchemaDef {
         table.text("body");
         table.bool("pinned");
     })
+}
+
+pub fn eq_query(table: &str, field: &str, value: JsonValue) -> BuiltQuery {
+    BuiltQuery::from_json_value(json!({
+        "table": table,
+        "conditions": [{"column": field, "op": "eq", "value": value}],
+    }))
+    .unwrap()
+}
+
+pub fn top_created_query(table: &str, field: &str, value: JsonValue, limit: usize) -> BuiltQuery {
+    BuiltQuery::from_json_value(json!({
+        "table": table,
+        "conditions": [{"column": field, "op": "eq", "value": value}],
+        "orderBy": [["$createdAt", "desc"]],
+        "limit": limit,
+    }))
+    .unwrap()
 }
 
 pub fn folders_schema() -> SchemaDef {

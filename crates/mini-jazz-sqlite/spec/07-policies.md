@@ -29,6 +29,55 @@ Policy operations:
   influence downstream row visibility in that branch view
 - catalogue publication is admin/core-controlled rather than ordinary row policy
 
+## Server Permission Validation Flow
+
+Permission enforcement follows the current Jazz Tools server flow:
+
+1. Untrusted client writes enter the sync layer as pending permission checks
+   with client id, session, operation, branch, table metadata, old content when
+   known, new content when present, and row provenance.
+2. The query/runtime layer drains pending checks and resolves the structural
+   schema for the target branch. If the schema is temporarily unavailable, the
+   check is requeued; if it stays unavailable past the wait budget, the write is
+   rejected.
+3. The runtime resolves the current authorization schema from the published
+   permissions head for the target branch context. Dynamic servers are
+   fail-closed before the permissions head is available. A loaded empty
+   permissions bundle is still enforcing and grants nothing implicitly.
+4. Missing tables, malformed row content, missing required old/new content, and
+   missing provenance fail closed.
+5. Insert checks evaluate the table insert `WITH CHECK` policy against the
+   proposed row and payload provenance.
+6. Update checks evaluate `USING` against the old visible row/provenance and
+   `WITH CHECK` against the proposed row/provenance. If both clauses are
+   present, both must pass. If neither clause exists in enforcing mode, the
+   update is rejected.
+7. Delete checks evaluate explicit delete `USING` when present, otherwise the
+   effective update `USING` fallback. Missing explicit policy in enforcing mode
+   rejects.
+8. Approval applies the pending payload and may settle the sealed batch.
+   Rejection records a replayable rejected fate or emits a permission-denied
+   error for non-row payloads.
+
+Read/query permission validation is the same authority boundary, not a client
+cleanup pass. A server answering a user-scoped query must compile the read
+policy into the query plan, evaluate it in the same session, branch, schema,
+lens, and snapshot context as the query itself, and export only rows and policy
+dependency rows visible in that context. Query-scope repair rows are part of the
+same user-facing delivery surface: they must be collected with the checked-out
+branch view and requester read policy, never with admin/system bypass, and the
+history exported for them must stay branch-scoped. A repair scan may consider
+history to find rows that left a predicate or page, but it must not use that as
+permission to send unrelated branch history or rows the requester cannot read.
+
+Read visibility planning is centralized for read surfaces. Query execution,
+sync export, query-scope repair, and policy dependency export must derive their
+current-row, snapshot-row, and effective-branch policy SQL from the same
+read-visibility context: requester, bypass mode, branch, branch sources, base
+snapshot epoch, and schema. Read paths must not call raw policy lowering
+directly, because that makes it too easy for query and export to disagree about
+which rows are visible. Write permission validation remains a separate flow.
+
 Policies may depend on rows other than the result row. In the running example,
 a todo read may depend on the referenced project row and the project membership
 rows that authorize Alice.

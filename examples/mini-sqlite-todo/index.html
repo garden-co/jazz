@@ -28,7 +28,8 @@
       }
 
       button,
-      input {
+      input,
+      select {
         font: inherit;
       }
 
@@ -47,7 +48,8 @@
       }
 
       button:disabled,
-      input:disabled {
+      input:disabled,
+      select:disabled {
         cursor: wait;
         opacity: 0.6;
       }
@@ -90,12 +92,14 @@
 
       .todo-form {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1.3fr) minmax(180px, 0.7fr) auto;
         gap: 10px;
         margin-top: 22px;
       }
 
-      .todo-form input {
+      .todo-form input,
+      .controls input,
+      .controls select {
         width: 100%;
         min-height: 2.5rem;
         border: 1px solid #b7c1ba;
@@ -103,6 +107,55 @@
         background: #ffffff;
         color: #18211f;
         padding: 0 0.85rem;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 142px 142px;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      .controls label {
+        display: grid;
+        gap: 4px;
+        color: #596760;
+        font-size: 0.8rem;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .label-filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        min-height: 34px;
+        margin-top: 14px;
+      }
+
+      .chip {
+        border-radius: 999px;
+        font-size: 0.82rem;
+        line-height: 1;
+      }
+
+      .chip {
+        min-height: 2rem;
+        border-color: #b7c1ba;
+        background: #ffffff;
+        color: #24352f;
+        padding: 0 0.75rem;
+      }
+
+      .chip:hover:not(:disabled),
+      .chip.selected {
+        border-color: #2f66c3;
+        background: #e9f0ff;
+        color: #163d82;
+      }
+
+      .generate {
+        margin-top: 12px;
       }
 
       .error-message {
@@ -174,6 +227,7 @@
 
         .app-header,
         .todo-form,
+        .controls,
         .todo-item {
           grid-template-columns: 1fr;
         }

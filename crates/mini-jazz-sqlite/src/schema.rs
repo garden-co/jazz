@@ -25,6 +25,18 @@ impl SchemaDef {
                 table.bool("done");
                 table.ref_("project", "projects");
                 table.index("open_created", ["done", "$createdAt"]);
+                table.index("created", ["$createdAt"]);
+                table.index("by_title", ["title"]);
+            })
+            .table("labels", |table| {
+                table.text("name");
+                table.index("by_name", ["name"]);
+            })
+            .table("todo_labels", |table| {
+                table.ref_("todo", "todos");
+                table.ref_("label", "labels");
+                table.index("by_todo", ["todo"]);
+                table.index("by_label", ["label"]);
             })
     }
 
@@ -563,17 +575,19 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
     ))?;
 
     for index in &table.indexes {
-        let columns = index
-            .columns
-            .iter()
-            .map(|column| storage_column_name(column))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut columns = vec!["j_branch_num".to_owned(), "is_deleted".to_owned()];
+        columns.extend(
+            index
+                .columns
+                .iter()
+                .map(|column| index_storage_column_name(column)),
+        );
+        columns.push("row_num".to_owned());
         conn.execute_batch(&format!(
-            "CREATE INDEX IF NOT EXISTS {} ON {}(is_deleted, {});",
-            quote_ident(&format!("{}_current_{}", table.name, index.name)),
+            "CREATE INDEX IF NOT EXISTS {} ON {}({});",
+            quote_ident(&format!("{}_current_{}_v2", table.name, index.name)),
             current_table(&table.name),
-            columns
+            columns.join(", ")
         ))?;
     }
     Ok(())
@@ -655,6 +669,13 @@ pub(crate) fn storage_column_name(column: &str) -> String {
     quote_ident(&storage)
 }
 
+fn index_storage_column_name(column: &str) -> String {
+    match column {
+        "$createdAt" => format!("{} DESC", quote_ident("j_created_at")),
+        other => storage_column_name(other),
+    }
+}
+
 fn user_storage_name(name: &str) -> String {
     if name.starts_with("j_") {
         format!("u_{name}")
@@ -676,4 +697,47 @@ fn sql_type(kind: &FieldKind) -> &'static str {
 
 pub(crate) fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{storage, Storage};
+
+    #[test]
+    fn current_index_for_created_at_page_queries_matches_query_order() -> Result<()> {
+        let schema = SchemaDef::attempt3_fixture();
+        let conn = storage::open(Storage::Memory)?;
+        install(&conn, &schema)?;
+
+        let open_created_sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'todos_current_open_created_v2'",
+            [],
+            |row| row.get(0),
+        )?;
+        let created_sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'todos_current_created_v2'",
+            [],
+            |row| row.get(0),
+        )?;
+        let title_sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'todos_current_by_title_v2'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(
+            open_created_sql,
+            "CREATE INDEX \"todos_current_open_created_v2\" ON \"todos__schema_v1_current\"(j_branch_num, is_deleted, \"done\", \"j_created_at\" DESC, row_num)"
+        );
+        assert_eq!(
+            created_sql,
+            "CREATE INDEX \"todos_current_created_v2\" ON \"todos__schema_v1_current\"(j_branch_num, is_deleted, \"j_created_at\" DESC, row_num)"
+        );
+        assert_eq!(
+            title_sql,
+            "CREATE INDEX \"todos_current_by_title_v2\" ON \"todos__schema_v1_current\"(j_branch_num, is_deleted, \"title\", row_num)"
+        );
+        Ok(())
+    }
 }

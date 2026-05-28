@@ -1,4 +1,6 @@
-use mini_jazz_sqlite::{RejectionInfo, RowDiff, Runtime, SchemaDef, Storage};
+use mini_jazz_sqlite::{
+    BuiltQuery, RejectionInfo, RowDiff, Runtime, SchemaDef, Storage, SubscriptionRowDelta,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
@@ -14,6 +16,8 @@ mod generic_schema;
 mod invariant_coverage;
 #[path = "whole_system/policies.rs"]
 mod policies;
+#[path = "whole_system/query_matrix.rs"]
+mod query_matrix;
 #[path = "whole_system/recursive_queries.rs"]
 mod recursive_queries;
 #[path = "whole_system/schema_lenses.rs"]
