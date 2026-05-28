@@ -725,14 +725,12 @@ unsafe extern "C" fn compressed_truncate(
     }
 }
 
-unsafe extern "C" fn compressed_sync(file: *mut ffi::sqlite3_file, _flags: c_int) -> c_int {
-    let Lz4FileKind::Compressed(db) = &mut wrapper(file).kind else {
-        return ffi::SQLITE_IOERR_FSYNC;
-    };
-    match db.file.sync_all() {
-        Ok(()) => ffi::SQLITE_OK,
-        Err(_) => ffi::SQLITE_IOERR_FSYNC,
-    }
+unsafe extern "C" fn compressed_sync(_file: *mut ffi::sqlite3_file, _flags: c_int) -> c_int {
+    // In WAL + synchronous=NORMAL mode SQLite does not need the main database
+    // file fsynced on each commit. WAL/SHM files are passthrough and keep the
+    // default VFS sync behavior, so the compressed main DB mirrors NORMAL by
+    // treating main-file sync as a barrier-free no-op in this prototype.
+    ffi::SQLITE_OK
 }
 
 unsafe extern "C" fn compressed_file_size(

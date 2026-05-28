@@ -381,6 +381,8 @@ Shape:
 - Register an experimental SQLite VFS named `mini_jazz_lz4`.
 - Store the main database as lz4-compressed logical SQLite pages.
 - Leave WAL/SHM/temp files as passthrough files on SQLite's default VFS.
+- Treat main database `xSync` as a no-op to approximate WAL +
+  `synchronous=NORMAL`; WAL/SHM files still use the default VFS sync behavior.
 - Keep an in-memory page cache for this prototype.
 - Maintain a fixed page table mapping logical SQLite page numbers to allocated
   slot runs.
@@ -394,18 +396,25 @@ Shape:
 
 | Scenario        | Updates | Logical DB bytes | Physical file bytes | Physical/logical | Total loop | Write only | Cold compact | Cold load | Current read |
 | --------------- | ------: | ---------------: | ------------------: | ---------------: | ---------: | ---------: | -----------: | --------: | -----------: |
-| Append stream   |    2225 |       18,796,544 |           3,520,032 |            0.19x |  18,844 ms |  15,430 ms |       106 ms |    927 ms |      0.07 ms |
-| Automerge paper |    2900 |        9,859,072 |           4,060,192 |            0.41x |  21,425 ms |  18,849 ms |        63 ms |    700 ms |      0.07 ms |
-| Canvas          |    3900 |          884,736 |           1,568,288 |            1.77x |  26,861 ms |  24,556 ms |        15 ms |    642 ms |      0.06 ms |
+| Append stream   |    2225 |       18,796,544 |           3,513,888 |            0.19x |    5096 ms |    1750 ms |       108 ms |    950 ms |      0.08 ms |
+| Automerge paper |    2900 |        9,859,072 |           4,054,560 |            0.41x |    4543 ms |    2000 ms |        73 ms |    728 ms |      0.08 ms |
+| Canvas          |    3900 |          884,736 |           1,544,736 |            1.75x |    4419 ms |    2219 ms |        38 ms |    640 ms |      0.07 ms |
 
 ### Takeaway
 
-Cold-page compression makes the maintenance pass cheap: `15-106 ms` for these
+Cold-page compression makes the maintenance pass cheap: `38-108 ms` for these
 canonical caps. It also improves final physical size versus raw hot slots.
 
-It does not yet recover naive SQLite write speed. The write-only time remains
-far above the normal file VFS, which means our custom VFS bookkeeping is now the
-bottleneck rather than lz4 itself. The next target is to make hot pages look
-much more like ordinary SQLite pages: avoid page-table writes for hot pages,
-batch header updates, and revisit whether the main DB should delegate hot-page
-storage to the default VFS until pages are explicitly cooled.
+Profiling showed the first VFS version was mostly paying for `sync_all` on the
+compressed main database file, which is much stronger than the WAL +
+`synchronous=NORMAL` baseline we usually care about. Making main-file sync a
+barrier-free no-op dropped a 1000-append write-only probe from about `6452 ms`
+to about `707 ms`, versus about `153 ms` for vanilla SQLite.
+
+This still does not recover naive SQLite write speed. After the sync fix,
+`compressed_write`, page-table updates, header writes, and extra `pwrite`/`write`
+calls dominate the VFS-specific cost; lz4 compression itself remains tiny. The
+next target is to make hot pages look much more like ordinary SQLite pages:
+avoid page-table writes for hot pages, batch header updates, and revisit whether
+the main DB should delegate hot-page storage to the default VFS until pages are
+explicitly cooled.
