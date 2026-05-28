@@ -130,3 +130,11 @@ Decision: add an all-table maintenance compaction API that compacts accepted and
 Why: callers should not need to know which table or row is currently hot to get the storage benefits. The RFC describes `history_open` as an operational hot tail and blocks as colder maintenance output, so the natural application boundary is "compact this database with these retention knobs."
 
 Scope impact: keep the accepted and rejected streams separate but aggregate their stats into one return value for observability.
+
+## Wed May 27 23:38:24 PDT 2026
+
+Decision: rejected tx metadata can leave `jazz_tx` only after every open history row for that tx has been sealed.
+
+Why: rejected multi-row transactions can write multiple rows. Compacting one row must not delete the shared tx/rejection metadata while sibling rejected rows still live in ordinary history tables, or those rows become relationally stranded.
+
+Scope impact: rejected compaction now mirrors accepted compaction's conservative metadata deletion rule: seal row history first, delete tx metadata only when no open history row still references it.

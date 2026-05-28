@@ -620,6 +620,79 @@ fn compact_all_history_runs_accepted_and_rejected_passes() {
 }
 
 #[test]
+fn rejected_multi_row_tx_metadata_stays_open_until_all_rows_are_compacted() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice doc"))]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "docs",
+        "doc-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob doc"))]),
+    )
+    .unwrap();
+    alice
+        .apply_bundle(&bob.export_table_history("docs").unwrap())
+        .unwrap();
+
+    let tx = alice
+        .transaction()
+        .insert_row(
+            "comments",
+            "comment-allowed",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Would be allowed alone")),
+                ("doc".to_owned(), json!("doc-alice")),
+            ]),
+        )
+        .insert_row(
+            "comments",
+            "comment-denied",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Rejects whole transaction")),
+                ("doc".to_owned(), json!("doc-bob")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let first = alice
+        .compact_rejected_history("comments", "comment-allowed", 0)
+        .unwrap();
+    assert_eq!(first.sealed_transactions, 0);
+    assert!(alice.transaction_physical_num_for(&tx).is_ok());
+    assert_eq!(alice.transaction_write_rows(&tx).unwrap().len(), 2);
+
+    let second = alice
+        .compact_rejected_history("comments", "comment-denied", 0)
+        .unwrap();
+    assert_eq!(second.sealed_transactions, 1);
+    assert!(alice.transaction_physical_num_for(&tx).is_err());
+    assert_eq!(alice.transaction_write_rows(&tx).unwrap().len(), 2);
+    assert_eq!(
+        alice.transaction_info(&tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+}
+
+#[test]
 fn batched_updates_keep_distinct_jazz_transactions_but_commit_together() {
     let schema = support::notes_schema();
     let mut alice =

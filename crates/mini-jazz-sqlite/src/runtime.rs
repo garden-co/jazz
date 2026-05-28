@@ -691,7 +691,7 @@ impl Runtime {
         let block_id = db.last_insert_rowid();
         insert_history_block_tx_index(&db, block_id, &selected)?;
         delete_history_rows_for_tx_nums(&db, table_name, row_num, &selected)?;
-        let sealed_transactions = delete_rejected_compacted_tx_rows(&db, &selected)?;
+        let sealed_transactions = delete_rejected_compacted_tx_rows(&db, &self.schema, &selected)?;
         db.commit()?;
 
         Ok(HistoryCompactionStats {
@@ -6289,9 +6289,16 @@ fn delete_compacted_tx_rows(conn: &Connection, schema: &SchemaDef, tx_nums: &[i6
     Ok(deleted)
 }
 
-fn delete_rejected_compacted_tx_rows(conn: &Connection, tx_nums: &[i64]) -> Result<i64> {
+fn delete_rejected_compacted_tx_rows(
+    conn: &Connection,
+    schema: &SchemaDef,
+    tx_nums: &[i64],
+) -> Result<i64> {
     let mut deleted = 0;
     for tx_num in tx_nums {
+        if !rejected_tx_can_leave_open_store(conn, schema, *tx_num)? {
+            continue;
+        }
         conn.execute(
             "DELETE FROM jazz_tx_receipt WHERE tx_num = ?",
             params![tx_num],
@@ -6304,6 +6311,32 @@ fn delete_rejected_compacted_tx_rows(conn: &Connection, tx_nums: &[i64]) -> Resu
         deleted += 1;
     }
     Ok(deleted)
+}
+
+fn rejected_tx_can_leave_open_store(
+    conn: &Connection,
+    schema: &SchemaDef,
+    tx_num: i64,
+) -> Result<bool> {
+    for table in schema.tables() {
+        let history_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE tx_num = ?",
+                crate::schema::history_table(&table.name)
+            ),
+            params![tx_num],
+            |row| row.get(0),
+        )?;
+        if history_count > 0 {
+            return Ok(false);
+        }
+    }
+    let awaiting_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM jazz_tx_awaiting_dependency WHERE tx_num = ?",
+        params![tx_num],
+        |row| row.get(0),
+    )?;
+    Ok(awaiting_count == 0)
 }
 
 fn tx_can_leave_open_store(
