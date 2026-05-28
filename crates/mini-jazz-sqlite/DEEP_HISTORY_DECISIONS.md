@@ -595,3 +595,11 @@ Decision: add an explicit implemented/partial status section to the sealed-histo
 Why: the overnight spike now covers more than the original design sketch: compaction, block-native deltas, columnar codecs, cache policy, branch anchors, and benchmark integration are all real. The RFC should make the boundary visible so the next iteration can focus on the remaining hard problems instead of rediscovering what is already in place.
 
 Scope impact: documentation only.
+
+## Thu May 28 03:25:12 PDT 2026 - Cover Branch Query History Delta
+
+Decision: add a regression test for branch query history deltas after accepted-history compaction.
+
+Why: bundle query export and block-native query delta export are separate surfaces. Both must respect pinned branch bases and avoid leaking future main history once compaction has moved cold history around.
+
+Scope impact: test-only coverage for `export_query_where_eq_history_delta` plus `apply_history_delta` in a compacted branch-base scenario.
