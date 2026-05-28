@@ -1955,6 +1955,46 @@ fn batched_upserts_can_mix_creates_and_updates() {
 }
 
 #[test]
+fn sealed_transaction_lookup_handles_hyphenated_node_ids() {
+    let schema = support::notes_schema();
+    let mut alice = Runtime::open_with_schema(
+        Storage::Memory,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "alice",
+        schema,
+    )
+    .unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx = alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("v2"))]),
+        )
+        .unwrap();
+    alice
+        .compact_accepted_history("notes", "note-1", 0)
+        .unwrap();
+
+    assert_eq!(tx, "tx-550e8400-e29b-41d4-a716-446655440000-2".to_owned());
+    assert_eq!(alice.transaction_info(&tx).unwrap().tx_id, tx);
+    assert_eq!(
+        alice.transaction_write_rows(&tx).unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned())]
+    );
+}
+
+#[test]
 fn delete_is_history_not_removal() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

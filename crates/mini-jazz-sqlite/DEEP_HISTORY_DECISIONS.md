@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:39:06 PDT 2026
+
+Decision: add explicit compacted-history coverage for hyphenated node ids in public tx ids.
+
+Why: production node ids may be UUIDs. Public tx ids are currently derived as `tx-{node_id}-{local_epoch}`, so every parser and sealed tx lookup path must split from the right, not assume simple hyphen-free node ids.
+
+Scope impact: a sealed transaction lookup regression now uses a UUID-shaped node id, compacts the row history, and verifies transaction metadata/write-row lookup still resolves through the block index.
+
 ## Thu May 28 03:37:36 PDT 2026
 
 Decision: round out the narrow grouped-commit prototype with explicit batched inserts.
