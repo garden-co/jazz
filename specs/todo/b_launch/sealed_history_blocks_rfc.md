@@ -495,7 +495,9 @@ Prototype note: the current spike exposes this boundary as
 `export_history_blocks(table)` / `import_history_blocks(blocks)`. The exported
 unit is the exact lz4 block payload plus manifest metadata. Import validates the
 payload, inserts the block idempotently, and rebuilds the local tx lookup index
-from decoded tx metadata without recreating ordinary user history rows.
+from decoded tx metadata without recreating ordinary user history rows. It also
+avoids recreating ordinary `jazz_tx` rows for cold archived txs; tx helpers
+resolve those through the block index and decode the block on demand.
 
 That optimization is deliberately separate from the first storage change. The
 first goal is to prove that sealed blocks reduce local storage and historical

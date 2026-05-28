@@ -842,8 +842,7 @@ impl Runtime {
                 ],
             )?;
             let block_id = db.last_insert_rowid();
-            let tx_nums = ensure_tx_ids_for_history_block(&db, &bundle)?;
-            insert_history_block_tx_index(&db, block_id, &tx_nums)?;
+            insert_history_block_tx_index_for_records(&db, block_id, &bundle.txs)?;
             imported += 1;
         }
         db.commit()?;
@@ -6275,51 +6274,6 @@ fn validate_history_block_export(block: &HistoryBlockExport, bundle: &Bundle) ->
     Ok(())
 }
 
-fn ensure_tx_ids_for_history_block(conn: &Connection, bundle: &Bundle) -> Result<Vec<i64>> {
-    let mut tx_nums_by_id = BTreeMap::new();
-    for tx_record in &bundle.txs {
-        let tx_num = ensure_tx_record_for_history_block(conn, tx_record)?;
-        tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
-    }
-    for history_record in &bundle.history {
-        let tx_num = tx_nums_by_id
-            .get(&history_record.tx_id)
-            .copied()
-            .ok_or_else(|| crate::Error::new("history block references missing tx"))?;
-        let table_num = crate::schema::table_num(conn, &history_record.table)?;
-        let row_num = ensure_row_id(conn, &history_record.table, &history_record.row_id)?;
-        record_tx_write_num(conn, tx_num, table_num, row_num, history_record.op)?;
-    }
-    for read_record in &bundle.reads {
-        let tx_num = tx_nums_by_id
-            .get(&read_record.tx_id)
-            .copied()
-            .ok_or_else(|| crate::Error::new("history block read references missing tx"))?;
-        let table_num = crate::schema::table_num(conn, &read_record.table)?;
-        let row_num = ensure_row_id(conn, &read_record.table, &read_record.row_id)?;
-        let observed_tx_num = read_record
-            .observed_tx_id
-            .as_deref()
-            .map(|tx_id| {
-                tx_nums_by_id
-                    .get(tx_id)
-                    .copied()
-                    .map(Ok)
-                    .unwrap_or_else(|| tx::tx_num(conn, tx_id))
-            })
-            .transpose()?;
-        tx::append_read(
-            conn,
-            tx_num,
-            table_num,
-            row_num,
-            read_record.reason,
-            observed_tx_num,
-        )?;
-    }
-    Ok(tx_nums_by_id.into_values().collect())
-}
-
 fn ensure_tx_record_for_history_block(conn: &Connection, tx_record: &TxRecord) -> Result<i64> {
     let node_num = tx::ensure_node(conn, &tx_record.node_id)?;
     let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
@@ -6481,6 +6435,33 @@ fn insert_history_block_tx_index(conn: &Connection, block_id: i64, tx_nums: &[i6
                 range.1 = range.1.max(local_epoch);
             })
             .or_insert((local_epoch, local_epoch));
+    }
+    for (node_num, (min_local_epoch, max_local_epoch)) in by_node {
+        conn.execute(
+            "INSERT INTO history_block_tx_index
+             (node_num, min_local_epoch, max_local_epoch, block_id)
+             VALUES (?, ?, ?, ?)",
+            params![node_num, min_local_epoch, max_local_epoch, block_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_history_block_tx_index_for_records(
+    conn: &Connection,
+    block_id: i64,
+    txs: &[TxRecord],
+) -> Result<()> {
+    let mut by_node = BTreeMap::<i64, (i64, i64)>::new();
+    for tx in txs {
+        let node_num = tx::ensure_node(conn, &tx.node_id)?;
+        by_node
+            .entry(node_num)
+            .and_modify(|range| {
+                range.0 = range.0.min(tx.local_epoch);
+                range.1 = range.1.max(tx.local_epoch);
+            })
+            .or_insert((tx.local_epoch, tx.local_epoch));
     }
     for (node_num, (min_local_epoch, max_local_epoch)) in by_node {
         conn.execute(

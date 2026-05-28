@@ -159,3 +159,10 @@ Wed May 27 23:48:21 PDT 2026
 Decision: allow accepted compaction with `hot_tail = 0` to seal the current visible history row. The current projection row remains the hot read copy, and the tx row remains open while current points at it; block-aware rebuild can recover the projection if current is cleared.
 
 Scope impact: this reduces open history rows further without forcing current reads to decode blocks or deleting transaction metadata still referenced by current rows.
+Wed May 27 23:50:05 PDT 2026
+
+## Block Import Does Not Recreate Archived Tx Rows
+
+Decision: raw history block import should populate node ids and block tx-range indexes, but should not recreate ordinary `jazz_tx` rows for every archived transaction. Transaction helpers can resolve through the block index and decode tx metadata from the block payload.
+
+Scope impact: rebuilding current projection may still recreate the visible transaction row needed by current rows, but cold archived txs remain block-native on import.

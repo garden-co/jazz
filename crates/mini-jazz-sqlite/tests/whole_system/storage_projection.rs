@@ -310,6 +310,11 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
 
     assert_eq!(bob.storage_stats().unwrap().history_rows, 0);
     assert_eq!(bob.storage_stats().unwrap().sealed_history_rows, 4);
+    assert!(bob
+        .storage_stats()
+        .unwrap()
+        .physical_tx_num_for("tx-alice-node-2")
+        .is_none());
     assert_eq!(
         bob.transaction_info("tx-alice-node-2").unwrap(),
         alice.transaction_info("tx-alice-node-2").unwrap()
