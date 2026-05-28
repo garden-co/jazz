@@ -435,3 +435,11 @@ Decision: bump newly sealed columnar blocks to v7 and encode integer metadata co
 Why: local epochs, transaction outcomes, read reasons, history op codes, and timestamps are often monotonic or constant over a sealed block. Raw JSON integer arrays preserve semantics but waste bytes before lz4 even sees the payload.
 
 Scope impact: tx/read/history integer columns now choose run, delta, or raw encoding per column. Older v3 through v6 columnar blocks still decode because raw arrays remain accepted.
+
+## Thu May 28 02:33:19 PDT 2026 - Nullable Epoch Runs
+
+Decision: bump newly sealed columnar blocks to v8 and run-code nullable integer metadata, starting with transaction global epochs.
+
+Why: local-only history commonly has no global epochs yet, so the block payload otherwise carries long raw arrays of `null`. That is semantically simple but unnecessary overhead in exactly the deep local-write workloads we are studying.
+
+Scope impact: `global_epoch` now chooses a nullable run column when repeated null or repeated epoch values dominate. Older v3 through v7 columnar blocks still decode.

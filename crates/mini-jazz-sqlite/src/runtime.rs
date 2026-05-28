@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HISTORY_BLOCK_FORMAT_VERSION: i64 = 7;
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 8;
 const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
 const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
 const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
@@ -8171,7 +8171,7 @@ struct ColumnarTxRecords {
     tx_id: ColumnarStringColumn,
     node_id: ColumnarStringColumn,
     local_epoch: ColumnarI64Column,
-    global_epoch: Vec<Option<i64>>,
+    global_epoch: ColumnarNullableI64Column,
     conflict_mode: ColumnarI64Column,
     outcome: ColumnarI64Column,
     auth_user: ColumnarNullableStringColumn,
@@ -8196,7 +8196,9 @@ impl ColumnarTxRecords {
             local_epoch: ColumnarI64Column::from_values(
                 records.iter().map(|record| record.local_epoch).collect(),
             ),
-            global_epoch: records.iter().map(|record| record.global_epoch).collect(),
+            global_epoch: ColumnarNullableI64Column::from_values(
+                records.iter().map(|record| record.global_epoch).collect(),
+            ),
             conflict_mode: ColumnarI64Column::from_values(
                 records.iter().map(|record| record.conflict_mode).collect(),
             ),
@@ -8250,7 +8252,7 @@ impl ColumnarTxRecords {
                 tx_id: self.tx_id.value(idx),
                 node_id: self.node_id.value(idx),
                 local_epoch: self.local_epoch.value(idx),
-                global_epoch: self.global_epoch[idx],
+                global_epoch: self.global_epoch.value(idx),
                 conflict_mode: self.conflict_mode.value(idx),
                 outcome: self.outcome.value(idx),
                 auth_user: self.auth_user.value(idx),
@@ -8470,6 +8472,72 @@ impl ColumnarI64Column {
                     value += *delta;
                 }
                 value
+            }
+            Self::Raw(values) => values[idx],
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ColumnarNullableI64Column {
+    Runs {
+        nullable_i64_runs: Vec<ColumnarNullableI64Run>,
+    },
+    Raw(Vec<Option<i64>>),
+}
+
+#[derive(Serialize, Deserialize)]
+struct ColumnarNullableI64Run {
+    value: Option<i64>,
+    len: usize,
+}
+
+impl ColumnarNullableI64Column {
+    fn from_values(values: Vec<Option<i64>>) -> Self {
+        if values.is_empty() {
+            return Self::Raw(values);
+        }
+        let mut runs = Vec::<ColumnarNullableI64Run>::new();
+        for value in &values {
+            if let Some(last) = runs.last_mut() {
+                if last.value == *value {
+                    last.len += 1;
+                    continue;
+                }
+            }
+            runs.push(ColumnarNullableI64Run {
+                value: *value,
+                len: 1,
+            });
+        }
+        if runs.len() * 2 < values.len() {
+            Self::Runs {
+                nullable_i64_runs: runs,
+            }
+        } else {
+            Self::Raw(values)
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Runs { nullable_i64_runs } => nullable_i64_runs.iter().map(|run| run.len).sum(),
+            Self::Raw(values) => values.len(),
+        }
+    }
+
+    fn value(&self, idx: usize) -> Option<i64> {
+        match self {
+            Self::Runs { nullable_i64_runs } => {
+                let mut remaining = idx;
+                for run in nullable_i64_runs {
+                    if remaining < run.len {
+                        return run.value;
+                    }
+                    remaining -= run.len;
+                }
+                panic!("nullable i64 run column index out of bounds");
             }
             Self::Raw(values) => values[idx],
         }
@@ -11008,6 +11076,10 @@ mod tests {
         assert!(matches!(
             &payload.txs.local_epoch,
             ColumnarI64Column::Delta { .. }
+        ));
+        assert!(matches!(
+            &payload.txs.global_epoch,
+            ColumnarNullableI64Column::Runs { .. }
         ));
         assert!(matches!(
             &payload.txs.outcome,
