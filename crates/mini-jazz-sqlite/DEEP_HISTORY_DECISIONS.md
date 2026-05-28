@@ -207,3 +207,9 @@ Scope impact: keep decoding support for the existing v1 `bundle-json-lz4` blocks
 Decision: Treat history block manifests as a peer-comparable inventory, but keep SQLite `block_id` local-only. A remote block is considered present when kind, table, row id, epoch range, codec, format version, byte counts, and payload hash match.
 
 Scope impact: add APIs for computing missing remote block manifests and exporting only matching local blocks. This gives sync a first-class block delta path without decoding cold history or reopening compacted rows.
+
+## Thu May 28 00:24:30 PDT 2026 - Persisted Block Hashes
+
+Decision: Store `payload_sha256` in `history_blocks` and bump the prototype storage format to 12. Hashing remains mandatory at import boundaries, but local inventory reads should not deserialize or hash compressed payload blobs.
+
+Scope impact: manifest listing and block existence checks can use metadata columns and an inventory index. This keeps the block-native sync path shaped like a real delta protocol rather than an O(payload bytes) scan.

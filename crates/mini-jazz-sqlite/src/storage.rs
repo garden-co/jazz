@@ -2,7 +2,7 @@ use crate::Result;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
-pub const STORAGE_FORMAT_VERSION: i64 = 11;
+pub const STORAGE_FORMAT_VERSION: i64 = 12;
 
 #[derive(Clone, Debug)]
 pub enum Storage {

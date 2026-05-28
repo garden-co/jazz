@@ -426,11 +426,15 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           format_version INTEGER NOT NULL,
           uncompressed_bytes INTEGER NOT NULL,
           compressed_bytes INTEGER NOT NULL,
+          payload_sha256 TEXT NOT NULL,
           payload BLOB NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS history_blocks_row_epoch
           ON history_blocks(block_kind, table_num, row_num, max_global_epoch DESC, min_global_epoch);
+
+        CREATE INDEX IF NOT EXISTS history_blocks_inventory
+          ON history_blocks(block_kind, table_num, row_num, min_global_epoch, max_global_epoch, payload_sha256);
 
         CREATE TABLE IF NOT EXISTS history_block_tx_index (
           node_num INTEGER NOT NULL,

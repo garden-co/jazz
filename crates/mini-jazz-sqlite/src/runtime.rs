@@ -529,6 +529,7 @@ impl Runtime {
         let uncompressed = encode_history_block_payload(&payload_bundle)
             .map_err(|err| crate::Error::new(format!("encode history block: {err}")))?;
         let compressed = lz4_flex::compress_prepend_size(&uncompressed);
+        let payload_sha256 = sha256_hex(&compressed);
         let min_epoch = selected
             .iter()
             .map(|tx_num| tx_epoch_for_block(&self.conn, *tx_num))
@@ -547,8 +548,8 @@ impl Runtime {
         let db = self.conn.transaction()?;
         db.execute(
             "INSERT INTO history_blocks
-             (block_kind, table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (block_kind, table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload_sha256, payload)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 HISTORY_BLOCK_KIND_ACCEPTED,
                 table_num,
@@ -561,6 +562,7 @@ impl Runtime {
                 HISTORY_BLOCK_FORMAT_VERSION,
                 uncompressed.len() as i64,
                 compressed.len() as i64,
+                payload_sha256,
                 compressed,
             ],
         )?;
@@ -658,6 +660,7 @@ impl Runtime {
         let uncompressed = encode_history_block_payload(&payload_bundle)
             .map_err(|err| crate::Error::new(format!("encode rejected history block: {err}")))?;
         let compressed = lz4_flex::compress_prepend_size(&uncompressed);
+        let payload_sha256 = sha256_hex(&compressed);
         let min_epoch = selected
             .iter()
             .map(|tx_num| tx_epoch_for_block(&self.conn, *tx_num))
@@ -676,8 +679,8 @@ impl Runtime {
         let db = self.conn.transaction()?;
         db.execute(
             "INSERT INTO history_blocks
-             (block_kind, table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (block_kind, table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload_sha256, payload)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 HISTORY_BLOCK_KIND_REJECTED,
                 table_num,
@@ -690,6 +693,7 @@ impl Runtime {
                 HISTORY_BLOCK_FORMAT_VERSION,
                 uncompressed.len() as i64,
                 compressed.len() as i64,
+                payload_sha256,
                 compressed,
             ],
         )?;
@@ -743,7 +747,7 @@ impl Runtime {
                     block.min_global_epoch, block.max_global_epoch,
                     block.row_count, block.tx_count, block.codec,
                     block.format_version, block.uncompressed_bytes,
-                    block.compressed_bytes, block.payload
+                    block.compressed_bytes, block.payload_sha256
              FROM history_blocks block
              JOIN jazz_row_id ids ON ids.row_num = block.row_num
              WHERE block.table_num = ?
@@ -751,7 +755,6 @@ impl Runtime {
         )?;
         let rows = stmt.query_map(params![table_num], |row| {
             let block_kind = row.get::<_, i64>(1)?;
-            let payload = row.get::<_, Vec<u8>>(11)?;
             Ok(HistoryBlockManifest {
                 block_id: row.get(0)?,
                 kind: history_block_kind_name(block_kind).to_owned(),
@@ -765,7 +768,7 @@ impl Runtime {
                 format_version: row.get(8)?,
                 uncompressed_bytes: row.get(9)?,
                 compressed_bytes: row.get(10)?,
-                payload_sha256: sha256_hex(&payload),
+                payload_sha256: row.get(11)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -804,7 +807,7 @@ impl Runtime {
                     block.min_global_epoch, block.max_global_epoch,
                     block.row_count, block.tx_count, block.codec,
                     block.format_version, block.uncompressed_bytes,
-                    block.compressed_bytes, block.payload
+                    block.compressed_bytes, block.payload_sha256, block.payload
              FROM history_blocks block
              JOIN jazz_row_id ids ON ids.row_num = block.row_num
              WHERE block.table_num = ?
@@ -813,7 +816,7 @@ impl Runtime {
         let rows = stmt.query_map(params![table_num], |row| {
             let block_kind = row.get::<_, i64>(1)?;
             let block_id = row.get(0)?;
-            let payload = row.get::<_, Vec<u8>>(11)?;
+            let payload = row.get::<_, Vec<u8>>(12)?;
             let manifest = HistoryBlockManifest {
                 block_id,
                 kind: history_block_kind_name(block_kind).to_owned(),
@@ -827,7 +830,7 @@ impl Runtime {
                 format_version: row.get(8)?,
                 uncompressed_bytes: row.get(9)?,
                 compressed_bytes: row.get(10)?,
-                payload_sha256: sha256_hex(&payload),
+                payload_sha256: row.get(11)?,
             };
             Ok(HistoryBlockExport {
                 manifest,
@@ -876,8 +879,8 @@ impl Runtime {
             }
             db.execute(
                 "INSERT INTO history_blocks
-                 (block_kind, table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (block_kind, table_num, row_num, min_global_epoch, max_global_epoch, row_count, tx_count, codec, format_version, uncompressed_bytes, compressed_bytes, payload_sha256, payload)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     block_kind,
                     table_num,
@@ -890,6 +893,7 @@ impl Runtime {
                     block.manifest.format_version,
                     block.manifest.uncompressed_bytes,
                     block.manifest.compressed_bytes,
+                    block.manifest.payload_sha256,
                     block.payload,
                 ],
             )?;
@@ -6281,7 +6285,7 @@ fn history_block_exists(
            AND min_global_epoch = ?
            AND max_global_epoch = ?
            AND compressed_bytes = ?
-           AND payload = ?",
+           AND payload_sha256 = ?",
         params![
             block_kind,
             table_num,
@@ -6289,7 +6293,7 @@ fn history_block_exists(
             block.manifest.min_global_epoch,
             block.manifest.max_global_epoch,
             block.manifest.compressed_bytes,
-            block.payload,
+            block.manifest.payload_sha256,
         ],
         |row| row.get(0),
     )?;
