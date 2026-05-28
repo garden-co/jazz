@@ -427,3 +427,11 @@ Decision: bump newly sealed columnar blocks to v6 and dictionary-code repeated u
 Why: the whole-row thesis depends on compressing unchanged columns, not just large edited text blobs or repeated Jazz metadata. In a wide row, many columns can remain byte-identical across a deep edit history, and those should become one dictionary value plus small refs inside the sealed block.
 
 Scope impact: non-coordinate user value columns now choose a JSON-value dictionary when values repeat. The decoder remains compatible with v3 through v5 columnar blocks and v1 bundle-json blocks.
+
+## Thu May 28 02:29:19 PDT 2026 - Integer Run/Delta Columns
+
+Decision: bump newly sealed columnar blocks to v7 and encode integer metadata columns as runs or deltas.
+
+Why: local epochs, transaction outcomes, read reasons, history op codes, and timestamps are often monotonic or constant over a sealed block. Raw JSON integer arrays preserve semantics but waste bytes before lz4 even sees the payload.
+
+Scope impact: tx/read/history integer columns now choose run, delta, or raw encoding per column. Older v3 through v6 columnar blocks still decode because raw arrays remain accepted.

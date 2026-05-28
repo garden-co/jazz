@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HISTORY_BLOCK_FORMAT_VERSION: i64 = 6;
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 7;
 const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
 const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
 const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
@@ -8170,15 +8170,15 @@ impl ColumnarHistoryBlockPayload {
 struct ColumnarTxRecords {
     tx_id: ColumnarStringColumn,
     node_id: ColumnarStringColumn,
-    local_epoch: Vec<i64>,
+    local_epoch: ColumnarI64Column,
     global_epoch: Vec<Option<i64>>,
-    conflict_mode: Vec<i64>,
-    outcome: Vec<i64>,
+    conflict_mode: ColumnarI64Column,
+    outcome: ColumnarI64Column,
     auth_user: ColumnarNullableStringColumn,
     rejection_code: ColumnarNullableStringColumn,
     rejection_detail: Vec<Option<JsonValue>>,
     receipt_tiers: Vec<Vec<i64>>,
-    created_at: Vec<i64>,
+    created_at: ColumnarI64Column,
 }
 
 impl ColumnarTxRecords {
@@ -8193,10 +8193,16 @@ impl ColumnarTxRecords {
                     .map(|record| record.node_id.clone())
                     .collect(),
             ),
-            local_epoch: records.iter().map(|record| record.local_epoch).collect(),
+            local_epoch: ColumnarI64Column::from_values(
+                records.iter().map(|record| record.local_epoch).collect(),
+            ),
             global_epoch: records.iter().map(|record| record.global_epoch).collect(),
-            conflict_mode: records.iter().map(|record| record.conflict_mode).collect(),
-            outcome: records.iter().map(|record| record.outcome).collect(),
+            conflict_mode: ColumnarI64Column::from_values(
+                records.iter().map(|record| record.conflict_mode).collect(),
+            ),
+            outcome: ColumnarI64Column::from_values(
+                records.iter().map(|record| record.outcome).collect(),
+            ),
             auth_user: ColumnarNullableStringColumn::from_values(
                 records
                     .iter()
@@ -8217,7 +8223,9 @@ impl ColumnarTxRecords {
                 .iter()
                 .map(|record| record.receipt_tiers.clone())
                 .collect(),
-            created_at: records.iter().map(|record| record.created_at).collect(),
+            created_at: ColumnarI64Column::from_values(
+                records.iter().map(|record| record.created_at).collect(),
+            ),
         }
     }
 
@@ -8241,15 +8249,15 @@ impl ColumnarTxRecords {
             .map(|idx| TxRecord {
                 tx_id: self.tx_id.value(idx),
                 node_id: self.node_id.value(idx),
-                local_epoch: self.local_epoch[idx],
+                local_epoch: self.local_epoch.value(idx),
                 global_epoch: self.global_epoch[idx],
-                conflict_mode: self.conflict_mode[idx],
-                outcome: self.outcome[idx],
+                conflict_mode: self.conflict_mode.value(idx),
+                outcome: self.outcome.value(idx),
                 auth_user: self.auth_user.value(idx),
                 rejection_code: self.rejection_code.value(idx),
                 rejection_detail: self.rejection_detail[idx].clone(),
                 receipt_tiers: self.receipt_tiers[idx].clone(),
-                created_at: self.created_at[idx],
+                created_at: self.created_at.value(idx),
             })
             .collect();
         Ok(records)
@@ -8388,11 +8396,92 @@ impl ColumnarNullableStringColumn {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ColumnarI64Column {
+    Runs { i64_runs: Vec<[i64; 2]> },
+    Delta { i64_base: i64, i64_deltas: Vec<i64> },
+    Raw(Vec<i64>),
+}
+
+impl ColumnarI64Column {
+    fn from_values(values: Vec<i64>) -> Self {
+        if values.is_empty() {
+            return Self::Raw(values);
+        }
+        let mut runs = Vec::<[i64; 2]>::new();
+        for value in &values {
+            if let Some(last) = runs.last_mut() {
+                if last[0] == *value {
+                    last[1] += 1;
+                    continue;
+                }
+            }
+            runs.push([*value, 1]);
+        }
+        if runs.len() * 2 < values.len() {
+            return Self::Runs { i64_runs: runs };
+        }
+        if values.len() > 1 {
+            let mut previous = values[0];
+            let deltas = values
+                .iter()
+                .skip(1)
+                .map(|value| {
+                    let delta = *value - previous;
+                    previous = *value;
+                    delta
+                })
+                .collect();
+            return Self::Delta {
+                i64_base: values[0],
+                i64_deltas: deltas,
+            };
+        }
+        Self::Raw(values)
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Runs { i64_runs } => i64_runs.iter().map(|run| run[1] as usize).sum(),
+            Self::Delta { i64_deltas, .. } => i64_deltas.len() + 1,
+            Self::Raw(values) => values.len(),
+        }
+    }
+
+    fn value(&self, idx: usize) -> i64 {
+        match self {
+            Self::Runs { i64_runs } => {
+                let mut remaining = idx;
+                for [value, len] in i64_runs {
+                    let len = *len as usize;
+                    if remaining < len {
+                        return *value;
+                    }
+                    remaining -= len;
+                }
+                panic!("i64 run column index out of bounds");
+            }
+            Self::Delta {
+                i64_base,
+                i64_deltas,
+            } => {
+                let mut value = *i64_base;
+                for delta in i64_deltas.iter().take(idx) {
+                    value += *delta;
+                }
+                value
+            }
+            Self::Raw(values) => values[idx],
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 struct ColumnarReadRecords {
     tx_id: ColumnarStringColumn,
     table: ColumnarStringColumn,
     row_id: ColumnarStringColumn,
-    reason: Vec<i64>,
+    reason: ColumnarI64Column,
     observed_tx_id: ColumnarNullableStringColumn,
 }
 
@@ -8408,7 +8497,9 @@ impl ColumnarReadRecords {
             row_id: ColumnarStringColumn::from_values(
                 records.iter().map(|record| record.row_id.clone()).collect(),
             ),
-            reason: records.iter().map(|record| record.reason).collect(),
+            reason: ColumnarI64Column::from_values(
+                records.iter().map(|record| record.reason).collect(),
+            ),
             observed_tx_id: ColumnarNullableStringColumn::from_values(
                 records
                     .iter()
@@ -8433,7 +8524,7 @@ impl ColumnarReadRecords {
                 tx_id: self.tx_id.value(idx),
                 table: self.table.value(idx),
                 row_id: self.row_id.value(idx),
-                reason: self.reason[idx],
+                reason: self.reason.value(idx),
                 observed_tx_id: self.observed_tx_id.value(idx),
             })
             .collect();
@@ -8447,11 +8538,11 @@ struct ColumnarHistoryRecords {
     row_id: ColumnarStringColumn,
     branch_id: ColumnarStringColumn,
     tx_id: ColumnarStringColumn,
-    op: Vec<i64>,
+    op: ColumnarI64Column,
     value_keys: Vec<String>,
     value_columns: Vec<ColumnarValueColumn>,
-    created_at: Vec<i64>,
-    updated_at: Vec<i64>,
+    created_at: ColumnarI64Column,
+    updated_at: ColumnarI64Column,
     created_by: ColumnarStringColumn,
     updated_by: ColumnarStringColumn,
 }
@@ -8491,11 +8582,15 @@ impl ColumnarHistoryRecords {
             tx_id: ColumnarStringColumn::from_values(
                 records.iter().map(|record| record.tx_id.clone()).collect(),
             ),
-            op: records.iter().map(|record| record.op).collect(),
+            op: ColumnarI64Column::from_values(records.iter().map(|record| record.op).collect()),
             value_keys,
             value_columns,
-            created_at: records.iter().map(|record| record.created_at).collect(),
-            updated_at: records.iter().map(|record| record.updated_at).collect(),
+            created_at: ColumnarI64Column::from_values(
+                records.iter().map(|record| record.created_at).collect(),
+            ),
+            updated_at: ColumnarI64Column::from_values(
+                records.iter().map(|record| record.updated_at).collect(),
+            ),
             created_by: ColumnarStringColumn::from_values(
                 records
                     .iter()
@@ -8539,15 +8634,15 @@ impl ColumnarHistoryRecords {
                 row_id: self.row_id.value(idx),
                 branch_id: self.branch_id.value(idx),
                 tx_id: self.tx_id.value(idx),
-                op: self.op[idx],
+                op: self.op.value(idx),
                 values: self
                     .value_keys
                     .iter()
                     .cloned()
                     .zip(self.value_columns.iter().map(|column| column.value(idx)))
                     .collect(),
-                created_at: self.created_at[idx],
-                updated_at: self.updated_at[idx],
+                created_at: self.created_at.value(idx),
+                updated_at: self.updated_at.value(idx),
                 created_by: self.created_by.value(idx),
                 updated_by: self.updated_by.value(idx),
             })
@@ -10887,6 +10982,40 @@ mod tests {
         assert!(matches!(
             &payload.history.value_columns[status_idx],
             ColumnarValueColumn::JsonDictionary { .. }
+        ));
+        assert_eq!(payload.into_bundle().unwrap().history, bundle.history);
+    }
+
+    #[test]
+    fn columnar_history_block_payload_compresses_integer_runs_and_deltas() {
+        let mut bundle = sample_block_bundle();
+        for epoch in 2..=5 {
+            let mut tx = bundle.txs[0].clone();
+            tx.tx_id = format!("tx-node-{epoch}");
+            tx.local_epoch = epoch;
+            tx.created_at = 42;
+            bundle.txs.push(tx);
+
+            let mut history = bundle.history[0].clone();
+            history.tx_id = format!("tx-node-{epoch}");
+            history.created_at = 42;
+            history.updated_at = 42;
+            bundle.history.push(history);
+        }
+
+        let payload = ColumnarHistoryBlockPayload::from_bundle(&bundle);
+
+        assert!(matches!(
+            &payload.txs.local_epoch,
+            ColumnarI64Column::Delta { .. }
+        ));
+        assert!(matches!(
+            &payload.txs.outcome,
+            ColumnarI64Column::Runs { .. }
+        ));
+        assert!(matches!(
+            &payload.history.op,
+            ColumnarI64Column::Runs { .. }
         ));
         assert_eq!(payload.into_bundle().unwrap().history, bundle.history);
     }
