@@ -1,0 +1,39 @@
+[package]
+name = "mini-sqlite-todo-yew"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "mini-sqlite-todo-yew"
+path = "src/main.rs"
+
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
+[dependencies]
+console_error_panic_hook = "0.1"
+mini-jazz-sqlite = { path = "../../crates/mini-jazz-sqlite" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+  "console",
+  "DedicatedWorkerGlobalScope",
+  "Event",
+  "HtmlInputElement",
+  "HtmlSelectElement",
+  "InputEvent",
+  "MessageEvent",
+  "SubmitEvent",
+  "Worker",
+  "Window",
+] }
+yew = { version = "0.23", features = ["csr"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+sqlite-wasm-rs = "0.5"
+sqlite-wasm-vfs = "0.2"

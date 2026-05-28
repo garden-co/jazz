@@ -86,6 +86,43 @@ fn built_query_matrix_matches_expected_rows_for_supported_operations() {
 }
 
 #[test]
+fn large_built_query_export_does_not_exceed_sqlite_variable_limit() {
+    const ROW_COUNT: usize = 40_000;
+
+    let schema = support::tasks_schema();
+    let mut upstream =
+        Runtime::open_trusted_with_schema(Storage::Memory, "large-query-upstream", schema.clone())
+            .unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "large-query-peer", "alice", schema).unwrap();
+
+    for index in 0..ROW_COUNT {
+        upstream
+            .insert_row(
+                "tasks",
+                &format!("task-{index:05}"),
+                BTreeMap::from([
+                    ("title".to_owned(), json!(format!("Task {index:05}"))),
+                    ("done".to_owned(), json!(false)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "conditions": [{"column": "done", "op": "eq", "value": false}],
+        "orderBy": [["$createdAt", "desc"]]
+    }))
+    .unwrap();
+
+    peer.apply_bundle(&upstream.export_query(query.clone()).unwrap())
+        .unwrap();
+
+    assert_eq!(peer.query(query).unwrap().len(), ROW_COUNT);
+}
+
+#[test]
 fn policy_filtered_built_query_subscription_tracks_rows_entering_and_leaving() {
     let mut runtime = Runtime::open_trusted_with_schema(
         Storage::Memory,

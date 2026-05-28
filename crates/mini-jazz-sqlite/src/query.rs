@@ -114,6 +114,7 @@ impl QueryContext<'_> {
         let mut select_columns = vec!["j_query_row_id".to_owned(), "j_query_tx_id".to_owned()];
         select_columns.extend(field_columns.iter().cloned());
         select_columns.push("j_query_created_by".to_owned());
+        select_columns.push("j_query_created_at".to_owned());
         let mut sql = format!(
             "WITH candidates AS (
                {candidates_sql}
@@ -134,7 +135,7 @@ impl QueryContext<'_> {
         }
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = 2 + table.fields.len() + 2;
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, SqlValue>(idx))
@@ -300,6 +301,7 @@ impl QueryContext<'_> {
             "{} AS j_created_by",
             users::user_id_expr("current", "j_created_by")
         ));
+        select_columns.push("current.j_created_at".to_owned());
         let mut sql = format!(
             "SELECT {}
              FROM {} current
@@ -323,7 +325,7 @@ impl QueryContext<'_> {
         append_query_window_sql(&mut sql, &mut query_params, query.limit, query.offset)?;
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = 2 + table.fields.len() + 2;
         let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, SqlValue>(idx))
@@ -2782,6 +2784,11 @@ fn row_to_view(
         tx_id: text_value(&raw[1], "tx_id")?,
         values,
         created_by: text_value(&raw[2 + table.fields.len()], "j_created_by")?,
+        created_at: raw
+            .get(3 + table.fields.len())
+            .map(|value| integer_value(value, "j_created_at"))
+            .transpose()?
+            .unwrap_or(0),
         conflict_count: 0,
     })
 }
@@ -2866,6 +2873,13 @@ pub(crate) fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<S
     match value {
         rusqlite::types::Value::Text(value) => Ok(value.clone()),
         _ => Err(crate::Error::new(format!("expected text {name}"))),
+    }
+}
+
+fn integer_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
+    match value {
+        rusqlite::types::Value::Integer(value) => Ok(*value),
+        _ => Err(crate::Error::new(format!("expected integer {name}"))),
     }
 }
 

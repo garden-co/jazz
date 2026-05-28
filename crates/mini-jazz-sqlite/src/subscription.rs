@@ -405,6 +405,7 @@ mod tests {
             table: "items".to_owned(),
             id: id.to_owned(),
             values: BTreeMap::from([("title".to_owned(), json!(id))]),
+            created_at: 0,
             created_by: "alice".to_owned(),
             tx_id: format!("tx-{id}"),
             conflict_count: 0,

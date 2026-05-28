@@ -1,9 +1,10 @@
 use crate::Result;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SchemaDef {
     tables: BTreeMap<String, TableDef>,
 }
@@ -101,7 +102,7 @@ impl Default for SchemaDef {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct TableDef {
     pub(crate) name: String,
     pub(crate) fields: Vec<FieldDef>,
@@ -110,16 +111,17 @@ pub(crate) struct TableDef {
     pub(crate) write_policy: PolicyDef,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct FieldDef {
     pub(crate) name: String,
     pub(crate) storage_name: String,
     pub(crate) kind: FieldKind,
     pub(crate) nullable: bool,
+    #[serde(default)]
     pub(crate) default_value: Option<JsonValue>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum FieldKind {
     Text,
     Bool,
@@ -136,13 +138,13 @@ impl FieldKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct IndexDef {
     pub(crate) name: String,
     pub(crate) columns: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) enum PolicyDef {
     #[default]
     AllowAll,
