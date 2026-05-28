@@ -562,6 +562,10 @@ refresh by sending missing sealed blocks directly. Recursive-reference queries
 also have a block-native delta path for the visible recursive row set. Unsupported
 query shapes fall back to ordinary bundle refreshes with no blocks until they
 get dedicated block planning.
+Raw block exports are serializable with manifest metadata, tx ranges, and the
+compressed payload bytes. The prototype JSON representation is not intended as
+the final compact wire encoding, but the transfer artifact must include payload
+bytes so peers can import blocks without re-expanding them into row history.
 
 That optimization is deliberately separate from the first storage change. The
 first goal is to prove that sealed blocks reduce local storage and historical

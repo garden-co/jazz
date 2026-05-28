@@ -332,6 +332,10 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
             .unwrap(),
         blocks
     );
+    let encoded_blocks = serde_json::to_vec(&blocks).unwrap();
+    let decoded_blocks: Vec<HistoryBlockExport> = serde_json::from_slice(&encoded_blocks).unwrap();
+    assert_eq!(decoded_blocks, blocks);
+    assert_eq!(decoded_blocks[0].payload, blocks[0].payload);
 
     let mut tampered = blocks.clone();
     tampered[0].payload[0] ^= 1;

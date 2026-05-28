@@ -371,3 +371,11 @@ Decision: Add sealed history block compressed and uncompressed byte totals to `S
 Why: once history can live in both ordinary rows and sealed blobs, row counts and page counts are not enough to explain storage behavior. The block byte totals make it clear how much payload is useful sealed history versus SQLite pages, freelist, and other metadata.
 
 Scope impact: storage stats now expose block payload totals directly. This is observability only; it does not change compaction or sync semantics.
+
+## Thu May 28 02:07:21 PDT 2026 - Serializable History Block Exports
+
+Decision: Make `HistoryBlockExport` serialize and deserialize with its payload bytes.
+
+Why: raw block sync is only real if the transfer artifact includes the compressed payload, not just the manifest and tx ranges. The previous in-memory API could move payloads, but serde output skipped them.
+
+Scope impact: block exports now round-trip through serde JSON in tests. The JSON byte-array representation is not the final wire encoding, but it prevents accidental manifest-only block transport.

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::sync::Bundle;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,7 +146,7 @@ impl HistoryCompactionPolicy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryBlockManifest {
     pub block_id: i64,
     pub kind: String,
@@ -163,15 +163,14 @@ pub struct HistoryBlockManifest {
     pub payload_sha256: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryBlockExport {
     pub manifest: HistoryBlockManifest,
     pub tx_ranges: Vec<HistoryBlockTxRange>,
-    #[serde(skip)]
     pub payload: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoryDelta {
     pub bundle: Bundle,
     pub blocks: Vec<HistoryBlockExport>,
@@ -206,7 +205,7 @@ impl TopFieldHistoryDeltaOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryBlockTxRange {
     pub node_id: String,
     pub min_local_epoch: i64,
