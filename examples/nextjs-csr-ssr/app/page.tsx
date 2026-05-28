@@ -1,15 +1,16 @@
 import ClientTodo from "./ClientTodo";
 import ServerTodo from "./ServerTodo";
+import HydratedTodoServer from "./HydratedTodoServer";
 
 export const dynamic = "force-dynamic";
 
 export default function Home() {
   return (
-    <main className="min-h-screen p-8 max-w-5xl mx-auto">
+    <main className="min-h-screen p-8 max-w-6xl mx-auto">
       <h1 className="text-lg font-semibold mb-6 text-foreground/50 tracking-tight">
         jazz — nextjs CSR / SSR
       </h1>
-      <div className="grid grid-cols-2 gap-6">
+      <div className="grid grid-cols-3 gap-6">
         <section className="border border-foreground/10 rounded-lg p-5">
           <span className="text-xs font-mono text-foreground/40 uppercase tracking-widest mb-4 block">
             Client-side (React)
@@ -21,6 +22,12 @@ export default function Home() {
             Server-side (RSC)
           </span>
           <ServerTodo />
+        </section>
+        <section className="border border-foreground/10 rounded-lg p-5">
+          <span className="text-xs font-mono text-foreground/40 uppercase tracking-widest mb-4 block">
+            Server prefetch + client hydrate
+          </span>
+          <HydratedTodoServer />
         </section>
       </div>
     </main>
