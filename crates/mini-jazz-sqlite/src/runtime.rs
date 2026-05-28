@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HISTORY_BLOCK_FORMAT_VERSION: i64 = 8;
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 9;
 const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
 const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
 const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
@@ -8176,8 +8176,8 @@ struct ColumnarTxRecords {
     outcome: ColumnarI64Column,
     auth_user: ColumnarNullableStringColumn,
     rejection_code: ColumnarNullableStringColumn,
-    rejection_detail: Vec<Option<JsonValue>>,
-    receipt_tiers: Vec<Vec<i64>>,
+    rejection_detail: ColumnarNullableJsonColumn,
+    receipt_tiers: ColumnarI64VecColumn,
     created_at: ColumnarI64Column,
 }
 
@@ -8217,14 +8217,18 @@ impl ColumnarTxRecords {
                     .map(|record| record.rejection_code.clone())
                     .collect(),
             ),
-            rejection_detail: records
-                .iter()
-                .map(|record| record.rejection_detail.clone())
-                .collect(),
-            receipt_tiers: records
-                .iter()
-                .map(|record| record.receipt_tiers.clone())
-                .collect(),
+            rejection_detail: ColumnarNullableJsonColumn::from_values(
+                records
+                    .iter()
+                    .map(|record| record.rejection_detail.clone())
+                    .collect(),
+            ),
+            receipt_tiers: ColumnarI64VecColumn::from_values(
+                records
+                    .iter()
+                    .map(|record| record.receipt_tiers.clone())
+                    .collect(),
+            ),
             created_at: ColumnarI64Column::from_values(
                 records.iter().map(|record| record.created_at).collect(),
             ),
@@ -8257,8 +8261,8 @@ impl ColumnarTxRecords {
                 outcome: self.outcome.value(idx),
                 auth_user: self.auth_user.value(idx),
                 rejection_code: self.rejection_code.value(idx),
-                rejection_detail: self.rejection_detail[idx].clone(),
-                receipt_tiers: self.receipt_tiers[idx].clone(),
+                rejection_detail: self.rejection_detail.value(idx),
+                receipt_tiers: self.receipt_tiers.value(idx),
                 created_at: self.created_at.value(idx),
             })
             .collect();
@@ -8540,6 +8544,136 @@ impl ColumnarNullableI64Column {
                 panic!("nullable i64 run column index out of bounds");
             }
             Self::Raw(values) => values[idx],
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ColumnarNullableJsonColumn {
+    Runs {
+        nullable_json_runs: Vec<ColumnarNullableJsonRun>,
+    },
+    Raw(Vec<Option<JsonValue>>),
+}
+
+#[derive(Serialize, Deserialize)]
+struct ColumnarNullableJsonRun {
+    value: Option<JsonValue>,
+    len: usize,
+}
+
+impl ColumnarNullableJsonColumn {
+    fn from_values(values: Vec<Option<JsonValue>>) -> Self {
+        if values.is_empty() {
+            return Self::Raw(values);
+        }
+        let mut runs = Vec::<ColumnarNullableJsonRun>::new();
+        for value in &values {
+            if let Some(last) = runs.last_mut() {
+                if last.value == *value {
+                    last.len += 1;
+                    continue;
+                }
+            }
+            runs.push(ColumnarNullableJsonRun {
+                value: value.clone(),
+                len: 1,
+            });
+        }
+        if runs.len() * 2 < values.len() {
+            Self::Runs {
+                nullable_json_runs: runs,
+            }
+        } else {
+            Self::Raw(values)
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Runs { nullable_json_runs } => nullable_json_runs.iter().map(|run| run.len).sum(),
+            Self::Raw(values) => values.len(),
+        }
+    }
+
+    fn value(&self, idx: usize) -> Option<JsonValue> {
+        match self {
+            Self::Runs { nullable_json_runs } => {
+                let mut remaining = idx;
+                for run in nullable_json_runs {
+                    if remaining < run.len {
+                        return run.value.clone();
+                    }
+                    remaining -= run.len;
+                }
+                panic!("nullable json run column index out of bounds");
+            }
+            Self::Raw(values) => values[idx].clone(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ColumnarI64VecColumn {
+    Runs {
+        i64_vec_runs: Vec<ColumnarI64VecRun>,
+    },
+    Raw(Vec<Vec<i64>>),
+}
+
+#[derive(Serialize, Deserialize)]
+struct ColumnarI64VecRun {
+    value: Vec<i64>,
+    len: usize,
+}
+
+impl ColumnarI64VecColumn {
+    fn from_values(values: Vec<Vec<i64>>) -> Self {
+        if values.is_empty() {
+            return Self::Raw(values);
+        }
+        let mut runs = Vec::<ColumnarI64VecRun>::new();
+        for value in &values {
+            if let Some(last) = runs.last_mut() {
+                if last.value == *value {
+                    last.len += 1;
+                    continue;
+                }
+            }
+            runs.push(ColumnarI64VecRun {
+                value: value.clone(),
+                len: 1,
+            });
+        }
+        if runs.len() * 2 < values.len() {
+            Self::Runs { i64_vec_runs: runs }
+        } else {
+            Self::Raw(values)
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Runs { i64_vec_runs } => i64_vec_runs.iter().map(|run| run.len).sum(),
+            Self::Raw(values) => values.len(),
+        }
+    }
+
+    fn value(&self, idx: usize) -> Vec<i64> {
+        match self {
+            Self::Runs { i64_vec_runs } => {
+                let mut remaining = idx;
+                for run in i64_vec_runs {
+                    if remaining < run.len {
+                        return run.value.clone();
+                    }
+                    remaining -= run.len;
+                }
+                panic!("i64 vec run column index out of bounds");
+            }
+            Self::Raw(values) => values[idx].clone(),
         }
     }
 }
@@ -11080,6 +11214,14 @@ mod tests {
         assert!(matches!(
             &payload.txs.global_epoch,
             ColumnarNullableI64Column::Runs { .. }
+        ));
+        assert!(matches!(
+            &payload.txs.rejection_detail,
+            ColumnarNullableJsonColumn::Runs { .. }
+        ));
+        assert!(matches!(
+            &payload.txs.receipt_tiers,
+            ColumnarI64VecColumn::Runs { .. }
         ));
         assert!(matches!(
             &payload.txs.outcome,

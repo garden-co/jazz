@@ -443,3 +443,11 @@ Decision: bump newly sealed columnar blocks to v8 and run-code nullable integer 
 Why: local-only history commonly has no global epochs yet, so the block payload otherwise carries long raw arrays of `null`. That is semantically simple but unnecessary overhead in exactly the deep local-write workloads we are studying.
 
 Scope impact: `global_epoch` now chooses a nullable run column when repeated null or repeated epoch values dominate. Older v3 through v7 columnar blocks still decode.
+
+## Thu May 28 02:38:30 PDT 2026 - Repeated Tx Detail Runs
+
+Decision: bump newly sealed columnar blocks to v9 and run-code repeated nullable JSON metadata plus repeated integer-vector metadata.
+
+Why: accepted blocks usually have no rejection details, and receipt tiers often repeat. Leaving those as raw per-transaction JSON arrays preserves lots of `null` and `[]` scaffolding even after earlier string and integer column compression.
+
+Scope impact: transaction rejection details and receipt tiers now choose run columns when repeated. Older v3 through v8 columnar blocks still decode.

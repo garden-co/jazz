@@ -394,12 +394,12 @@ The first implementation can use a simpler binary format if needed, but the
 target is columnar enough that unchanged columns and repeated metadata become
 near-free.
 
-Prototype note: newly sealed blocks now use a v8 `columnar-json-lz4` payload.
+Prototype note: newly sealed blocks now use a v9 `columnar-json-lz4` payload.
 It stores tx, read, history metadata, and user values as parallel arrays and
 decodes back to the same logical `Bundle`. This is still a stepping stone rather
 than the final binary/delta-varint format, but it removes repeated per-record
 JSON object keys and repeated per-row user value keys from the sealed block
-body. The v8 payload dictionary-codes repeated string columns such as table ids,
+body. The v9 payload dictionary-codes repeated string columns such as table ids,
 row ids, branch ids, node ids, and user ids. It also retains the v4 behavior that
 recognizes text values shaped as JSON `{x, y}` numeric objects and stores those
 as numeric `x[]`/`y[]` streams before reconstructing the same text value on
@@ -408,9 +408,11 @@ columns, are dictionary-coded as well; this is the first whole-row block codec
 step aimed at unchanged columns rather than only large edited values. Integer
 metadata columns such as local epochs, outcomes, read reasons, op codes, and
 timestamps are encoded as runs or deltas when that is denser than a raw array;
-nullable integer metadata such as global epochs can also use run encoding. The
-decoder still accepts the earlier `bundle-json-lz4` v1 blocks and v3 / v4 / v5 /
-v6 / v7 columnar blocks for compatibility within the spike.
+nullable integer metadata such as global epochs can also use run encoding.
+Repeated nullable JSON metadata and repeated integer-vector metadata, such as
+rejection details and receipt tiers, can also be run-coded. The decoder still
+accepts the earlier `bundle-json-lz4` v1 blocks and v3 / v4 / v5 / v6 / v7 / v8
+columnar blocks for compatibility within the spike.
 
 For segment-tree-backed columns, a sealed block should not blindly store one
 full materialized value per version. Acceptable first encodings include:
