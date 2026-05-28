@@ -237,3 +237,9 @@ Scope impact: future canonical Block numbers should represent the intended compa
 Decision: Do not require a projection rebuild between importing sealed blocks and applying the open-history bundle in the block-native table delta path. Open history exports already contain full row values, so applying the hot tail can materialize current state directly.
 
 Scope impact: block-native receiver timing should include block import plus open bundle apply, not an avoidable full sealed-block projection rebuild. Historical reads and explicit rebuild still decode sealed blocks when requested.
+
+## Thu May 28 00:40:11 PDT 2026 - All-Table Block Delta
+
+Decision: Add an all-table history delta API that merges per-table open-history bundles and exports only sealed blocks missing from the receiver inventory.
+
+Scope impact: compacted-history sync no longer requires callers to manually negotiate every table. This is still table-scope history, not query-scope block planning, but it matches the first peer inventory exchange shape.

@@ -414,6 +414,81 @@ fn table_history_delta_syncs_open_rows_and_missing_blocks() {
 }
 
 #[test]
+fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.bool("pinned");
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.bool("resolved");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("doc v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "comments",
+            "comment-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("comment v1")),
+                ("resolved".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    for idx in 2..=4 {
+        alice
+            .update_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("title".to_owned(), json!(format!("doc v{idx}")))]),
+            )
+            .unwrap();
+        alice
+            .update_row(
+                "comments",
+                "comment-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("comment v{idx}")))]),
+            )
+            .unwrap();
+    }
+    alice.compact_all_history(1, 1).unwrap();
+
+    let (bundle, blocks) = alice.export_all_history_delta(&[]).unwrap();
+    assert_eq!(bundle.history.len(), 2);
+    assert_eq!(blocks.len(), 2);
+
+    assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 2);
+    bob.apply_bundle(&bundle).unwrap();
+
+    let docs = bob.read_rows("docs").unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].values["title"], json!("doc v4"));
+    assert_eq!(docs[0].values["pinned"], json!(false));
+    let comments = bob.read_rows("comments").unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].values["body"], json!("comment v4"));
+    assert_eq!(comments[0].values["resolved"], json!(false));
+
+    let (_, already_have_blocks) = alice
+        .export_all_history_delta(&bob.all_history_block_manifests().unwrap())
+        .unwrap();
+    assert!(already_have_blocks.is_empty());
+}
+
+#[test]
 fn point_read_at_global_epoch_can_decode_sealed_history_block() {
     let schema = support::notes_schema();
     let mut alice =

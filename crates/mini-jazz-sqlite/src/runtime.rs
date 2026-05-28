@@ -513,6 +513,47 @@ impl Runtime {
         Ok((bundle, blocks))
     }
 
+    pub fn export_all_history_delta(
+        &self,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+        let txs = export_txs(&self.conn)?;
+        let mut history = Vec::new();
+        let mut blocks = Vec::new();
+        for table in self.schema.tables() {
+            history.extend(export_table_history(
+                &self.conn,
+                &self.schema,
+                &table.name,
+                user,
+                bypass_policy,
+                self.branch_num,
+            )?);
+            let remote_keys = remote_block_manifests
+                .iter()
+                .map(history_block_manifest_key)
+                .collect::<BTreeSet<_>>();
+            let missing_block_manifests = self
+                .history_block_manifests(&table.name)?
+                .into_iter()
+                .filter(|manifest| !remote_keys.contains(&history_block_manifest_key(manifest)))
+                .collect::<Vec<_>>();
+            let table_blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
+            blocks.extend(table_blocks);
+        }
+        sort_history_records(&mut history);
+        dedupe_history_records(&mut history);
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        Ok((
+            make_bundle(&self.schema, branches, txs, reads, Vec::new(), history),
+            blocks,
+        ))
+    }
+
     pub fn compact_accepted_history(
         &mut self,
         table_name: &str,
