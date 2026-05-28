@@ -381,26 +381,30 @@ Shape:
 - Register an experimental SQLite VFS named `mini_jazz_lz4`.
 - Store the main database as lz4-compressed logical SQLite pages.
 - Leave WAL/SHM/temp files as passthrough files on SQLite's default VFS.
-- Keep an in-memory page index for this prototype.
-- Compact the compressed main DB on `xSync` so the file keeps only the latest
-  compressed record for each logical page.
+- Keep an in-memory page cache for this prototype.
+- Maintain a fixed page table mapping logical SQLite page numbers to allocated
+  compressed slot runs.
+- Use 512-byte physical slots. Rewrites stay in the same slot run when the new
+  compressed payload still fits; otherwise they allocate a new run.
+- This version does not yet reuse freed slot runs.
 
 ### Naive Full-Row History, LZ4 VFS
 
 | Scenario        | Updates | Logical DB bytes | Physical file bytes | Physical/logical | Total loop | Write only | Cold load | Current read |
 | --------------- | ------: | ---------------: | ------------------: | ---------------: | ---------: | ---------: | --------: | -----------: |
-| Append stream   |    2225 |       18,796,544 |             472,314 |            0.03x |  44,912 ms |  41,550 ms |    967 ms |      0.07 ms |
-| Automerge paper |    2900 |        9,859,072 |           2,266,243 |            0.23x |  42,293 ms |  39,683 ms |    729 ms |      0.07 ms |
-| Canvas          |    3900 |          884,736 |             446,234 |            0.50x |  33,678 ms |  31,426 ms |    649 ms |      0.07 ms |
+| Append stream   |    2225 |       18,796,544 |           3,760,672 |            0.20x |  17,460 ms |  13,989 ms |    945 ms |      0.11 ms |
+| Automerge paper |    2900 |        9,859,072 |           4,477,984 |            0.45x |  20,984 ms |  18,310 ms |    707 ms |      0.08 ms |
+| Canvas          |    3900 |          884,736 |           2,447,392 |            2.77x |  28,486 ms |  26,203 ms |    636 ms |      0.06 ms |
 
 ### Takeaway
 
-The e2e VFS confirms that page compression can make the physical SQLite store
-much smaller without changing Jazz row semantics. The append-stream case drops
-from `18.8 MB` logical SQLite bytes to `0.47 MB` physical bytes.
+Slot allocation makes the write path much less pathological than compacting the
+whole compressed file on every sync. Append write-only time dropped from
+`41,550 ms` to `13,989 ms`.
 
-The current VFS is not a good write-path design yet. Compacting the whole
-compressed page set on every sync makes write-only time much worse than the
-normal SQLite file path. The next version should replace append-and-compact
-with stable compressed page slots, a free list, or chunk groups that can update
-locally without rewriting every live page.
+The tradeoff is storage: without free-list reuse, pages whose compressed size
+grows allocate new slot runs and leave old runs behind. Append still compresses
+well overall (`18.8 MB` logical SQLite bytes to `3.8 MB` physical bytes), but
+canvas is worse than plain SQLite because each tiny row update churns metadata
+pages through new slot runs. The next target is free-list reuse by slot class,
+plus less eager header/page-table writes.

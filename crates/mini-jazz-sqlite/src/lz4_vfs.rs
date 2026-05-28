@@ -11,10 +11,15 @@ use std::ptr;
 use std::sync::Once;
 
 const VFS_NAME: &str = "mini_jazz_lz4";
-const MAGIC: &[u8; 8] = b"MJLZ4V1\0";
-const HEADER_LEN: u64 = 24;
-const RECORD_HEADER_LEN: usize = 16;
+const MAGIC: &[u8; 8] = b"MJLZ4V3\0";
+const HEADER_LEN: u64 = 32;
+const PAGE_TABLE_ENTRIES: usize = 65_536;
+const PAGE_TABLE_ENTRY_LEN: usize = 16;
+const SLOT_HEADER_LEN: usize = 8;
 const DEFAULT_PAGE_SIZE: usize = 4096;
+const DEFAULT_SLOT_SIZE: usize = 512;
+const SLOT_CODEC_LZ4: u8 = 1;
+const SLOT_CODEC_RAW: u8 = 2;
 
 static REGISTER: Once = Once::new();
 static mut REGISTER_RESULT: c_int = ffi::SQLITE_OK;
@@ -95,7 +100,17 @@ struct CompressedMainDb {
     file: File,
     logical_size: u64,
     page_size: usize,
+    slot_size: usize,
+    next_slot: u64,
+    locations: BTreeMap<u64, PageLocation>,
     pages: BTreeMap<u64, Vec<u8>>,
+}
+
+#[derive(Clone, Copy)]
+struct PageLocation {
+    slot: u64,
+    slot_count: u32,
+    payload_len: u32,
 }
 
 unsafe extern "C" fn vfs_open(
@@ -256,11 +271,14 @@ impl CompressedMainDb {
         let metadata_len = file.metadata()?.len();
         if metadata_len < HEADER_LEN {
             file.set_len(0)?;
-            write_header(&mut file, DEFAULT_PAGE_SIZE, 0)?;
+            write_header(&mut file, DEFAULT_PAGE_SIZE, DEFAULT_SLOT_SIZE, 0, 0)?;
             return Ok(Self {
                 file,
                 logical_size: 0,
                 page_size: DEFAULT_PAGE_SIZE,
+                slot_size: DEFAULT_SLOT_SIZE,
+                next_slot: 0,
+                locations: BTreeMap::new(),
                 pages: BTreeMap::new(),
             });
         }
@@ -274,42 +292,34 @@ impl CompressedMainDb {
             ));
         }
         let page_size = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-        let logical_size = u64::from_le_bytes(header[12..20].try_into().unwrap());
+        let slot_size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+        let logical_size = u64::from_le_bytes(header[16..24].try_into().unwrap());
+        let next_slot = u64::from_le_bytes(header[24..32].try_into().unwrap());
+        if slot_size < SLOT_HEADER_LEN + 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "compressed sqlite slot size is too small",
+            ));
+        }
         let mut pages = BTreeMap::new();
-        file.seek(SeekFrom::Start(HEADER_LEN))?;
-        loop {
-            let mut record_header = [0; RECORD_HEADER_LEN];
-            match file.read_exact(&mut record_header) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(err) => return Err(err),
+        let mut locations = BTreeMap::new();
+        let page_count = logical_size.div_ceil(page_size as u64);
+        for page_no in 0..page_count {
+            let Some(location) = read_page_location(&mut file, page_no)? else {
+                continue;
+            };
+            if let Some(page) = read_page_slot(&mut file, page_size, slot_size, location)? {
+                locations.insert(page_no, location);
+                pages.insert(page_no, page);
             }
-            let page_no = u64::from_le_bytes(record_header[0..8].try_into().unwrap());
-            let original_len = u32::from_le_bytes(record_header[8..12].try_into().unwrap());
-            let compressed_len = u32::from_le_bytes(record_header[12..16].try_into().unwrap());
-            if original_len as usize != page_size {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "unexpected compressed sqlite page size",
-                ));
-            }
-            let mut compressed = vec![0; compressed_len as usize];
-            file.read_exact(&mut compressed)?;
-            let page = lz4_flex::decompress_size_prepended(&compressed).map_err(|err| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
-            })?;
-            if page.len() != page_size {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "decoded sqlite page had wrong size",
-                ));
-            }
-            pages.insert(page_no, page);
         }
         Ok(Self {
             file,
             logical_size,
             page_size,
+            slot_size,
+            next_slot,
+            locations,
             pages,
         })
     }
@@ -348,12 +358,28 @@ impl CompressedMainDb {
                 .remove(&page_no)
                 .unwrap_or_else(|| vec![0; self.page_size]);
             page[page_offset..page_offset + len].copy_from_slice(&input[copied..copied + len]);
-            self.append_page_record(page_no, &page)?;
+            let previous = self.locations.get(&page_no).copied();
+            let location = write_page_slot(
+                &mut self.file,
+                self.page_size,
+                self.slot_size,
+                &mut self.next_slot,
+                previous,
+                &page,
+            )?;
+            self.locations.insert(page_no, location);
+            write_page_location(&mut self.file, page_no, location)?;
             self.pages.insert(page_no, page);
             copied += len;
         }
         self.logical_size = self.logical_size.max(offset + input.len() as u64);
-        write_header(&mut self.file, self.page_size, self.logical_size)
+        write_header(
+            &mut self.file,
+            self.page_size,
+            self.slot_size,
+            self.next_slot,
+            self.logical_size,
+        )
     }
 
     fn truncate(&mut self, size: u64) -> std::io::Result<()> {
@@ -364,6 +390,7 @@ impl CompressedMainDb {
             ((size - 1) / self.page_size as u64) + 1
         };
         self.pages.retain(|page_no, _| *page_no < keep_pages);
+        self.locations.retain(|page_no, _| *page_no < keep_pages);
         if let Some(last_page) = keep_pages.checked_sub(1) {
             let used = (size % self.page_size as u64) as usize;
             if used != 0 {
@@ -372,42 +399,175 @@ impl CompressedMainDb {
                 }
             }
         }
-        write_header(&mut self.file, self.page_size, self.logical_size)
-    }
-
-    fn compact(&mut self) -> std::io::Result<()> {
-        self.file.set_len(0)?;
-        write_header(&mut self.file, self.page_size, self.logical_size)?;
-        let pages = self
-            .pages
-            .iter()
-            .map(|(page_no, page)| (*page_no, page.clone()))
-            .collect::<Vec<_>>();
-        for (page_no, page) in pages {
-            self.append_page_record(page_no, &page)?;
-        }
-        Ok(())
-    }
-
-    fn append_page_record(&mut self, page_no: u64, page: &[u8]) -> std::io::Result<()> {
-        let compressed = lz4_flex::compress_prepend_size(page);
-        self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(&page_no.to_le_bytes())?;
-        self.file.write_all(&(page.len() as u32).to_le_bytes())?;
-        self.file
-            .write_all(&(compressed.len() as u32).to_le_bytes())?;
-        self.file.write_all(&compressed)?;
-        Ok(())
+        write_header(
+            &mut self.file,
+            self.page_size,
+            self.slot_size,
+            self.next_slot,
+            self.logical_size,
+        )
     }
 }
 
-fn write_header(file: &mut File, page_size: usize, logical_size: u64) -> std::io::Result<()> {
+fn write_header(
+    file: &mut File,
+    page_size: usize,
+    slot_size: usize,
+    next_slot: u64,
+    logical_size: u64,
+) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
     file.write_all(MAGIC)?;
     file.write_all(&(page_size as u32).to_le_bytes())?;
+    file.write_all(&(slot_size as u32).to_le_bytes())?;
     file.write_all(&logical_size.to_le_bytes())?;
-    file.write_all(&0_u32.to_le_bytes())?;
+    file.write_all(&next_slot.to_le_bytes())?;
     Ok(())
+}
+
+fn data_start() -> u64 {
+    HEADER_LEN + (PAGE_TABLE_ENTRIES * PAGE_TABLE_ENTRY_LEN) as u64
+}
+
+fn page_table_offset(page_no: u64) -> std::io::Result<u64> {
+    if page_no >= PAGE_TABLE_ENTRIES as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sqlite page number exceeds prototype lz4 page table",
+        ));
+    }
+    Ok(HEADER_LEN + page_no * PAGE_TABLE_ENTRY_LEN as u64)
+}
+
+fn page_slot_offset(slot_size: usize, slot: u64) -> u64 {
+    data_start() + slot * slot_size as u64
+}
+
+fn read_page_location(file: &mut File, page_no: u64) -> std::io::Result<Option<PageLocation>> {
+    let offset = page_table_offset(page_no)?;
+    if file.metadata()?.len() < offset + PAGE_TABLE_ENTRY_LEN as u64 {
+        return Ok(None);
+    }
+    let mut entry = [0; PAGE_TABLE_ENTRY_LEN];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut entry)?;
+    let slot = u64::from_le_bytes(entry[0..8].try_into().unwrap());
+    let slot_count = u32::from_le_bytes(entry[8..12].try_into().unwrap());
+    let payload_len = u32::from_le_bytes(entry[12..16].try_into().unwrap());
+    if slot_count == 0 || payload_len == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(PageLocation {
+            slot,
+            slot_count,
+            payload_len,
+        }))
+    }
+}
+
+fn write_page_location(
+    file: &mut File,
+    page_no: u64,
+    location: PageLocation,
+) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(page_table_offset(page_no)?))?;
+    file.write_all(&location.slot.to_le_bytes())?;
+    file.write_all(&location.slot_count.to_le_bytes())?;
+    file.write_all(&location.payload_len.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_page_slot(
+    file: &mut File,
+    page_size: usize,
+    slot_size: usize,
+    location: PageLocation,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let offset = page_slot_offset(slot_size, location.slot);
+    if file.metadata()?.len() < offset + SLOT_HEADER_LEN as u64 {
+        return Ok(None);
+    }
+    let mut header = [0; SLOT_HEADER_LEN];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut header)?;
+    let codec = header[0];
+    let payload_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+    if payload_len == 0 || payload_len != location.payload_len as usize {
+        return Ok(None);
+    }
+    if payload_len > location.slot_count as usize * slot_size - SLOT_HEADER_LEN {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "compressed sqlite page slot payload is too large",
+        ));
+    }
+    let mut payload = vec![0; payload_len];
+    file.read_exact(&mut payload)?;
+    let page = match codec {
+        SLOT_CODEC_LZ4 => lz4_flex::decompress_size_prepended(&payload)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?,
+        SLOT_CODEC_RAW => payload,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unknown compressed sqlite page slot codec",
+            ))
+        }
+    };
+    if page.len() != page_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "decoded sqlite page had wrong size",
+        ));
+    }
+    Ok(Some(page))
+}
+
+fn write_page_slot(
+    file: &mut File,
+    page_size: usize,
+    slot_size: usize,
+    next_slot: &mut u64,
+    previous: Option<PageLocation>,
+    page: &[u8],
+) -> std::io::Result<PageLocation> {
+    if page.len() != page_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sqlite page has wrong size",
+        ));
+    }
+    let compressed = lz4_flex::compress_prepend_size(page);
+    let (codec, payload) = if compressed.len() < page.len() {
+        (SLOT_CODEC_LZ4, compressed.as_slice())
+    } else {
+        (SLOT_CODEC_RAW, page)
+    };
+    let required_slot_count = (SLOT_HEADER_LEN + payload.len()).div_ceil(slot_size).max(1);
+    let location = match previous {
+        Some(location) if location.slot_count as usize >= required_slot_count => PageLocation {
+            slot: location.slot,
+            slot_count: location.slot_count,
+            payload_len: payload.len() as u32,
+        },
+        _ => {
+            let slot = *next_slot;
+            *next_slot += required_slot_count as u64;
+            PageLocation {
+                slot,
+                slot_count: required_slot_count as u32,
+                payload_len: payload.len() as u32,
+            }
+        }
+    };
+    let allocation_len = location.slot_count as usize * slot_size;
+    let mut slots = vec![0; allocation_len];
+    slots[0] = codec;
+    slots[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    slots[SLOT_HEADER_LEN..SLOT_HEADER_LEN + payload.len()].copy_from_slice(payload);
+    file.seek(SeekFrom::Start(page_slot_offset(slot_size, location.slot)))?;
+    file.write_all(&slots)?;
+    Ok(location)
 }
 
 unsafe fn wrapper<'a>(file: *mut ffi::sqlite3_file) -> &'a mut Lz4File {
@@ -476,7 +636,7 @@ unsafe extern "C" fn compressed_sync(file: *mut ffi::sqlite3_file, _flags: c_int
     let Lz4FileKind::Compressed(db) = &mut wrapper(file).kind else {
         return ffi::SQLITE_IOERR_FSYNC;
     };
-    match db.compact().and_then(|()| db.file.sync_all()) {
+    match db.file.sync_all() {
         Ok(()) => ffi::SQLITE_OK,
         Err(_) => ffi::SQLITE_IOERR_FSYNC,
     }
