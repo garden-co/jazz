@@ -2861,6 +2861,22 @@ impl Runtime {
             op: "query".to_owned(),
             value: query.to_json_value(),
         };
+        let support_query = built_query_repair_keep_query(&query)?;
+        if let Some(row_scope) = self
+            .query_context()
+            .lower_built_query_row_scope(&support_query)?
+        {
+            return self.export_built_query_read_scope_sql(
+                query_read,
+                &query,
+                &row_scope,
+                rows,
+                QueryScopeOptions {
+                    ref_include_fields,
+                    extra_row_ids: &[],
+                },
+            );
+        }
         self.export_query_read_scope(
             query_read,
             rows,
@@ -3011,6 +3027,153 @@ impl Runtime {
             txs,
             reads,
             query_reads,
+            history,
+        ))
+    }
+
+    fn export_built_query_read_scope_sql(
+        &self,
+        query_read: QueryReadRecord,
+        built_query: &BuiltQuery,
+        visible_scope: &query::LoweredQueryRowScope,
+        rows: Vec<RowView>,
+        options: QueryScopeOptions<'_>,
+    ) -> Result<Bundle> {
+        let table_name = &query_read.table;
+        let table = self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+        let visible_row_nums = rows
+            .iter()
+            .map(|row| row_num(&self.conn, &row.id))
+            .collect::<Result<Vec<_>>>()?;
+        let mut repair_row_nums = Vec::new();
+        for row_id in options.extra_row_ids {
+            repair_row_nums.push(row_num(&self.conn, row_id)?);
+        }
+        repair_row_nums.extend(query_scope_repair_row_nums_for_read(
+            &self.conn,
+            &self.schema,
+            table,
+            &query_read,
+            self.branch_num,
+            user,
+            bypass_policy,
+        )?);
+        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
+        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
+        repair_row_nums.sort();
+        repair_row_nums.dedup();
+
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let visibility = self.read_visibility();
+        let mut history = export_history_versions_for_query_scope_in_branches(
+            &self.conn,
+            &self.schema,
+            table_name,
+            visible_scope,
+            None,
+            &branch_nums,
+        )?;
+        if !repair_row_nums.is_empty() {
+            history.extend(export_visible_table_history(
+                &visibility,
+                table_name,
+                &branch_nums,
+                Some(&repair_row_nums),
+            )?);
+            history.extend(export_history_versions_for_rows_in_branches(
+                &self.conn,
+                &self.schema,
+                table_name,
+                Some(&repair_row_nums),
+                None,
+                &branch_nums,
+            )?);
+        }
+        history.extend(export_policy_dependency_history_for_query_scope(
+            &visibility,
+            PolicyDependencyQueryScopeExport {
+                table_name,
+                policy: &table.read_policy,
+                branch_nums: &branch_nums,
+                child_scope: visible_scope,
+            },
+        )?);
+        if !repair_row_nums.is_empty() {
+            history.extend(export_policy_dependency_history(
+                &visibility,
+                PolicyDependencyExport {
+                    table_name,
+                    policy: &table.read_policy,
+                    branch_nums: &branch_nums,
+                    child_row_nums: Some(&repair_row_nums),
+                },
+            )?);
+        }
+        for ref_field_name in options.ref_include_fields {
+            history.extend(self.export_ref_include_history(
+                table,
+                &rows,
+                ref_field_name,
+                &branch_nums,
+            )?);
+        }
+        if self.branch_num != 1 {
+            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
+                history.extend(export_history_versions_for_query_scope_in_branches(
+                    &self.conn,
+                    &self.schema,
+                    table_name,
+                    visible_scope,
+                    Some(base_epoch),
+                    &[1],
+                )?);
+                history.extend(export_snapshot_policy_dependency_history_for_query_scope(
+                    &visibility,
+                    table_name,
+                    base_epoch,
+                    visible_scope,
+                )?);
+                if !repair_row_nums.is_empty() {
+                    history.extend(export_history_versions_for_rows_in_branches(
+                        &self.conn,
+                        &self.schema,
+                        table_name,
+                        Some(&repair_row_nums),
+                        Some(base_epoch),
+                        &[1],
+                    )?);
+                    history.extend(export_snapshot_policy_dependency_history(
+                        &visibility,
+                        table_name,
+                        base_epoch,
+                        Some(&repair_row_nums),
+                    )?);
+                }
+            }
+        }
+        dedupe_history_records(&mut history);
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let rejected_tx_ids = query_scope_rejected_tx_ids_for_built_query(
+            &self.conn,
+            &self.schema,
+            table,
+            built_query,
+            self.branch_num,
+            user,
+            bypass_policy,
+        )?;
+        let txs =
+            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        Ok(make_bundle(
+            &self.schema,
+            branches,
+            txs,
+            reads,
+            vec![query_read],
             history,
         ))
     }
@@ -5677,11 +5840,122 @@ fn export_snapshot_policy_dependency_history(
     Ok(records)
 }
 
+fn export_snapshot_policy_dependency_history_for_query_scope(
+    visibility: &ReadVisibility<'_>,
+    table_name: &str,
+    base_epoch: i64,
+    child_scope: &query::LoweredQueryRowScope,
+) -> Result<Vec<HistoryRecord>> {
+    export_snapshot_policy_dependency_history_for_query_scope_at_depth(
+        visibility,
+        table_name,
+        base_epoch,
+        child_scope,
+        0,
+    )
+}
+
+fn export_snapshot_policy_dependency_history_for_query_scope_at_depth(
+    visibility: &ReadVisibility<'_>,
+    table_name: &str,
+    base_epoch: i64,
+    child_scope: &query::LoweredQueryRowScope,
+    depth: usize,
+) -> Result<Vec<HistoryRecord>> {
+    let conn = visibility.conn;
+    let schema = visibility.schema;
+    let table = schema.table_def(table_name)?;
+    let PolicyDef::RefReadable { field } = &table.read_policy else {
+        return Ok(Vec::new());
+    };
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *field)
+        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+    let FieldKind::Ref {
+        table: parent_table,
+    } = &field.kind
+    else {
+        return Err(crate::Error::new(format!(
+            "policy field {} is not a ref",
+            field.name
+        )));
+    };
+    let policy_sql = visibility.snapshot_policy_sql(table, "h", base_epoch)?;
+    let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let child_scope_name = format!("snapshot_policy_child_scope_{depth}");
+    let parent_scope_name = format!("snapshot_policy_parent_scope_{depth}");
+    let mut ctes = child_scope.ctes.clone();
+    ctes.push(format!(
+        "{child_scope_name}(row_num) AS ({})",
+        child_scope.select_sql
+    ));
+    ctes.push(format!(
+        "{parent_scope_name}(row_num) AS (
+           SELECT DISTINCT h.{ref_column}
+           FROM {} h
+           JOIN {child_scope_name} child_scope ON child_scope.row_num = h.row_num
+           JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+           WHERE h.j_branch_num = 1
+             AND h.op != 3
+             AND tx.outcome != {}
+             AND tx.global_epoch IS NOT NULL
+             AND tx.global_epoch <= {base_epoch}
+             AND {policy_sql}
+             AND NOT EXISTS (
+               SELECT 1
+               FROM {history_table} newer
+               JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+               WHERE newer.row_num = h.row_num
+                 AND newer.j_branch_num = 1
+                 AND newer_tx.outcome != {}
+                 AND newer_tx.global_epoch IS NOT NULL
+                 AND newer_tx.global_epoch <= {base_epoch}
+                 AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
+             )
+         )",
+        crate::schema::history_table(table_name),
+        tx::OUTCOME_REJECTED,
+        tx::OUTCOME_REJECTED,
+        history_table = crate::schema::history_table(table_name),
+    ));
+    let parent_scope = query::LoweredQueryRowScope {
+        ctes,
+        select_sql: format!("SELECT row_num FROM {parent_scope_name} WHERE row_num IS NOT NULL"),
+        params: child_scope.params.clone(),
+    };
+    let mut records = export_history_versions_for_query_scope(
+        conn,
+        schema,
+        parent_table,
+        &parent_scope,
+        Some(base_epoch),
+    )?;
+    records.extend(
+        export_snapshot_policy_dependency_history_for_query_scope_at_depth(
+            visibility,
+            parent_table,
+            base_epoch,
+            &parent_scope,
+            depth + 1,
+        )?,
+    );
+    Ok(records)
+}
+
 struct PolicyDependencyExport<'a> {
     table_name: &'a str,
     policy: &'a PolicyDef,
     branch_nums: &'a [i64],
     child_row_nums: Option<&'a [i64]>,
+}
+
+struct PolicyDependencyQueryScopeExport<'a> {
+    table_name: &'a str,
+    policy: &'a PolicyDef,
+    branch_nums: &'a [i64],
+    child_scope: &'a query::LoweredQueryRowScope,
 }
 
 fn export_policy_dependency_history(
@@ -5754,6 +6028,80 @@ fn export_policy_dependency_history(
             branch_nums: args.branch_nums,
             child_row_nums: Some(&row_nums),
         },
+    )?);
+    Ok(records)
+}
+
+fn export_policy_dependency_history_for_query_scope(
+    visibility: &ReadVisibility<'_>,
+    args: PolicyDependencyQueryScopeExport<'_>,
+) -> Result<Vec<HistoryRecord>> {
+    export_policy_dependency_history_for_query_scope_at_depth(visibility, args, 0)
+}
+
+fn export_policy_dependency_history_for_query_scope_at_depth(
+    visibility: &ReadVisibility<'_>,
+    args: PolicyDependencyQueryScopeExport<'_>,
+    depth: usize,
+) -> Result<Vec<HistoryRecord>> {
+    let conn = visibility.conn;
+    let schema = visibility.schema;
+    let table = schema.table_def(args.table_name)?;
+    let PolicyDef::RefReadable { field } = args.policy else {
+        return Ok(Vec::new());
+    };
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == *field)
+        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+    let FieldKind::Ref {
+        table: parent_table,
+    } = &field.kind
+    else {
+        return Err(crate::Error::new(format!(
+            "policy field {} is not a ref",
+            field.name
+        )));
+    };
+    let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let child_scope_name = format!("policy_child_scope_{depth}");
+    let parent_scope_name = format!("policy_parent_scope_{depth}");
+    let mut ctes = args.child_scope.ctes.clone();
+    ctes.push(format!(
+        "{child_scope_name}(row_num) AS ({})",
+        args.child_scope.select_sql
+    ));
+    ctes.push(format!(
+        "{parent_scope_name}(row_num) AS (
+           SELECT DISTINCT current.{ref_column}
+           FROM {} current
+           JOIN {child_scope_name} child_scope ON child_scope.row_num = current.row_num
+           JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
+           WHERE current.is_deleted = 0
+             AND {}
+             AND current_tx.outcome != {}
+         )",
+        crate::schema::current_table(args.table_name),
+        branch_filter_sql("current", args.branch_nums),
+        tx::OUTCOME_REJECTED,
+    ));
+    let parent_scope = query::LoweredQueryRowScope {
+        ctes,
+        select_sql: format!("SELECT row_num FROM {parent_scope_name} WHERE row_num IS NOT NULL"),
+        params: args.child_scope.params.clone(),
+    };
+    let mut records =
+        export_history_versions_for_query_scope(conn, schema, parent_table, &parent_scope, None)?;
+    records.extend(export_policy_dependency_history_for_query_scope_at_depth(
+        visibility,
+        PolicyDependencyQueryScopeExport {
+            table_name: parent_table,
+            policy: &schema.table_def(parent_table)?.read_policy,
+            branch_nums: args.branch_nums,
+            child_scope: &parent_scope,
+        },
+        depth + 1,
     )?);
     Ok(records)
 }
@@ -6677,6 +7025,124 @@ fn export_history_versions_for_rows_in_branches(
     )
 }
 
+fn export_history_versions_for_query_scope(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    row_scope: &query::LoweredQueryRowScope,
+    max_global_epoch: Option<i64>,
+) -> Result<Vec<HistoryRecord>> {
+    export_history_versions_for_query_scope_with_branch_filter(
+        conn,
+        schema,
+        table_name,
+        row_scope,
+        max_global_epoch,
+        None,
+    )
+}
+
+fn export_history_versions_for_query_scope_in_branches(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    row_scope: &query::LoweredQueryRowScope,
+    max_global_epoch: Option<i64>,
+    branch_nums: &[i64],
+) -> Result<Vec<HistoryRecord>> {
+    export_history_versions_for_query_scope_with_branch_filter(
+        conn,
+        schema,
+        table_name,
+        row_scope,
+        max_global_epoch,
+        Some(branch_nums),
+    )
+}
+
+fn export_history_versions_for_query_scope_with_branch_filter(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    row_scope: &query::LoweredQueryRowScope,
+    max_global_epoch: Option<i64>,
+    branch_nums: Option<&[i64]>,
+) -> Result<Vec<HistoryRecord>> {
+    let table = schema.table_def(table_name)?;
+    let field_columns = table
+        .fields
+        .iter()
+        .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+        .collect::<Vec<_>>();
+    let mut select_columns = vec![
+        "ids.row_id".to_owned(),
+        "branch.branch_id".to_owned(),
+        "tx.tx_id".to_owned(),
+        "h.op".to_owned(),
+    ];
+    select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+    select_columns.extend([
+        "h.j_created_at".to_owned(),
+        "h.j_updated_at".to_owned(),
+        format!(
+            "{} AS j_created_by",
+            users::user_id_expr("h", "j_created_by")
+        ),
+        format!(
+            "{} AS j_updated_by",
+            users::user_id_expr("h", "j_updated_by")
+        ),
+    ]);
+    let sql = format!(
+        "{}
+         SELECT {}
+         FROM {} h
+         JOIN query_scope scope ON scope.row_num = h.row_num
+         JOIN jazz_row_id ids ON ids.row_num = h.row_num
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
+         WHERE {branch_filter}
+           AND {epoch_filter}
+         ORDER BY h.row_num, h.tx_num",
+        row_scope.with_scope_cte("query_scope"),
+        select_columns.join(", "),
+        crate::schema::history_table(table_name),
+        branch_filter = history_branch_filter_sql("h", branch_nums),
+        epoch_filter = history_epoch_filter_sql(max_global_epoch),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_width = 4 + table.fields.len() + 4;
+    let mut rows = stmt.query(params_from_iter(row_scope.params.iter()))?;
+    let mut records = Vec::new();
+    let mut public_row_id_cache = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let row = (0..row_width)
+            .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut values = BTreeMap::new();
+        for (idx, field) in table.fields.iter().enumerate() {
+            values.insert(
+                field.name.clone(),
+                sql_value_to_json_cached(conn, field, &row[idx + 4], &mut public_row_id_cache)?,
+            );
+        }
+        let sys = 4 + table.fields.len();
+        records.push(HistoryRecord {
+            table: table_name.to_owned(),
+            row_id: text_value(&row[0], "row_id")?,
+            branch_id: text_value(&row[1], "branch_id")?,
+            tx_id: text_value(&row[2], "tx_id")?,
+            op: integer_value(&row[3], "op")?,
+            values,
+            created_at: integer_value(&row[sys], "j_created_at")?,
+            updated_at: integer_value(&row[sys + 1], "j_updated_at")?,
+            created_by: text_value(&row[sys + 2], "j_created_by")?,
+            updated_by: text_value(&row[sys + 3], "j_updated_by")?,
+        });
+    }
+    Ok(records)
+}
+
 fn export_history_versions_for_rows_with_branch_filter(
     conn: &Connection,
     schema: &SchemaDef,
@@ -7074,4 +7540,53 @@ fn insert_dynamic(
     ))?;
     stmt.execute(params_from_iter(values.iter()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::limits::Limit;
+
+    #[test]
+    fn generic_built_query_export_uses_sql_scope_under_low_variable_limit() -> Result<()> {
+        const ROW_COUNT: usize = 120;
+
+        let schema = SchemaDef::new().table("tasks", |table| {
+            table.text("title");
+            table.bool("done");
+        });
+        let mut upstream = Runtime::open_trusted_with_schema(
+            Storage::Memory,
+            "low-limit-upstream",
+            schema.clone(),
+        )?;
+        let mut peer =
+            Runtime::open_with_schema(Storage::Memory, "low-limit-peer", "alice", schema)?;
+
+        upstream
+            .conn
+            .set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 32)?;
+
+        for index in 0..ROW_COUNT {
+            upstream.insert_row(
+                "tasks",
+                &format!("task-{index:03}"),
+                BTreeMap::from([
+                    ("title".to_owned(), json!(format!("Task {index:03}"))),
+                    ("done".to_owned(), json!(false)),
+                ]),
+            )?;
+        }
+
+        let query = BuiltQuery::from_json_value(json!({
+            "table": "tasks",
+            "conditions": [{"column": "done", "op": "eq", "value": false}],
+            "orderBy": [["$createdAt", "desc"]]
+        }))?;
+
+        peer.apply_bundle(&upstream.export_query(query.clone())?)?;
+
+        assert_eq!(peer.query(query)?.len(), ROW_COUNT);
+        Ok(())
+    }
 }
