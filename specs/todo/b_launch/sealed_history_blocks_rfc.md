@@ -510,6 +510,11 @@ Prototype note: block manifests include a SHA-256 hash of the compressed payload
 Import verifies this hash before inserting the block, so manifest-only import
 can stay fast without blindly accepting corrupted payload bytes.
 
+Prototype note: the runtime exposes both per-table and all-table block
+manifest/export helpers. The all-table helpers are intended for maintenance and
+sync discovery, where a peer may not know which user tables contain sealed
+history.
+
 That optimization is deliberately separate from the first storage change. The
 first goal is to prove that sealed blocks reduce local storage and historical
 load costs without changing Jazz semantics.

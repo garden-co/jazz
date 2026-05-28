@@ -187,3 +187,10 @@ Thu May 28 00:07:20 PDT 2026
 Decision: include SHA-256 payload hashes in block manifests/exports. Fast block import can validate the payload bytes against the manifest hash without decoding the block, and future sync can compare manifests by range plus hash.
 
 Scope impact: this adds a small dependency and a cheap per-block hash calculation, but avoids making block comparison depend on decoding the lz4 payload.
+Thu May 28 00:09:43 PDT 2026
+
+## All-Table Block Discovery
+
+Decision: expose all-table history block manifest/export helpers in addition to per-table helpers. Block-aware sync and maintenance should be able to discover sealed history without first knowing which user table has blocks.
+
+Scope impact: the helpers are still explicit runtime APIs, not automatic sync behavior; they reuse the same per-block manifests, tx ranges, hashes, and payload bytes.

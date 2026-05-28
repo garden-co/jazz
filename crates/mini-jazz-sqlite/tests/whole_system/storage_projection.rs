@@ -729,6 +729,8 @@ fn compact_all_history_runs_accepted_and_rejected_passes() {
     assert_eq!(accepted.sealed_history_rows, 3);
     assert_eq!(rejected.history_blocks, 2);
     assert_eq!(rejected.sealed_history_rows, 5);
+    assert_eq!(bob.all_history_block_manifests().unwrap().len(), 2);
+    assert_eq!(bob.export_all_history_blocks().unwrap().len(), 2);
 }
 
 #[test]

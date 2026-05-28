@@ -768,6 +768,14 @@ impl Runtime {
             .map_err(Into::into)
     }
 
+    pub fn all_history_block_manifests(&self) -> Result<Vec<HistoryBlockManifest>> {
+        let mut manifests = Vec::new();
+        for table in self.schema.tables() {
+            manifests.extend(self.history_block_manifests(&table.name)?);
+        }
+        Ok(manifests)
+    }
+
     pub fn export_history_blocks(&self, table_name: &str) -> Result<Vec<HistoryBlockExport>> {
         self.schema.table_def(table_name)?;
         let table_num = crate::schema::table_num(&self.conn, table_name)?;
@@ -807,6 +815,14 @@ impl Runtime {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    pub fn export_all_history_blocks(&self) -> Result<Vec<HistoryBlockExport>> {
+        let mut blocks = Vec::new();
+        for table in self.schema.tables() {
+            blocks.extend(self.export_history_blocks(&table.name)?);
+        }
+        Ok(blocks)
     }
 
     pub fn import_history_blocks(&mut self, blocks: &[HistoryBlockExport]) -> Result<usize> {
