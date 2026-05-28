@@ -700,6 +700,73 @@ fn observed_query_refresh_history_delta_includes_sealed_blocks() {
 }
 
 #[test]
+fn recursive_observed_query_refresh_history_delta_includes_sealed_blocks() {
+    let schema = support::folders_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "folders",
+            "child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Child")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+
+    let initial = alice
+        .export_recursive_refs_history_delta("folders", "root", "parent", &[])
+        .unwrap();
+    bob.apply_history_delta(&initial.bundle, &initial.blocks)
+        .unwrap();
+    assert_eq!(bob.observed_query_reads().unwrap()[0].op, "recursive_refs");
+
+    for idx in 0..4 {
+        alice
+            .update_row(
+                "folders",
+                "child",
+                BTreeMap::from([("name".to_owned(), json!(format!("Child {idx}")))]),
+            )
+            .unwrap();
+    }
+    alice
+        .compact_accepted_history("folders", "child", 1)
+        .unwrap();
+
+    let deltas = alice
+        .export_query_read_refresh_deltas(
+            &bob.observed_query_reads().unwrap(),
+            &bob.all_history_block_manifests().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].blocks.len(), 1);
+    bob.apply_history_delta(&deltas[0].bundle, &deltas[0].blocks)
+        .unwrap();
+
+    let rows = bob
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap();
+    let child = rows.iter().find(|row| row.id == "child").unwrap();
+    assert_eq!(child.values["name"], json!("Child 3"));
+    assert_eq!(bob.storage_stats().unwrap().history_blocks, 1);
+}
+
+#[test]
 fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

@@ -557,9 +557,10 @@ Observed-query refresh has the same delta-shaped path:
 `export_observed_query_refresh_deltas(remote_manifests)` and
 `export_query_read_refresh_deltas(reads, remote_manifests)` return one
 `HistoryDelta` per observed read. Simple predicates and top queries can therefore
-refresh by sending missing sealed blocks directly; unsupported query shapes
-fall back to ordinary bundle refreshes with no blocks until they get dedicated
-block planning.
+refresh by sending missing sealed blocks directly. Recursive-reference queries
+also have a block-native delta path for the visible recursive row set. Unsupported
+query shapes fall back to ordinary bundle refreshes with no blocks until they
+get dedicated block planning.
 
 That optimization is deliberately separate from the first storage change. The
 first goal is to prove that sealed blocks reduce local storage and historical

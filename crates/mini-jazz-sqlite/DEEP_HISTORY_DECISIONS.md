@@ -331,3 +331,11 @@ Decision: Add a `HistoryCompactionPolicy` API with accepted/rejected toggles, ho
 Why: production compaction should be triggerable as bounded maintenance work, not only as exact row-by-row calls. A block budget lets callers do useful background progress without accidentally spending an unbounded foreground latency slice.
 
 Scope impact: the prototype can now compact eligible rows across all user tables in chunks. Scheduling by age, byte estimate, or wall-clock budget remains future work.
+
+## Thu May 28 01:49:22 PDT 2026 - Recursive Ref History Deltas
+
+Decision: Add a block-native history delta for recursive reference queries and route observed recursive refreshes through it.
+
+Why: recursive refs are a common relationship query and their result is still a concrete row set. They should not be forced through ordinary bundle inflation just because the read shape is tree-like.
+
+Scope impact: recursive observed refreshes now send missing sealed blocks for visible recursive rows. Deeper block-native repair for descendants that exist only in sealed deleted history remains an optimization gap.
