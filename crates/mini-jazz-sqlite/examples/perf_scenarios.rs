@@ -1,7 +1,7 @@
 use mini_jazz_sqlite::sync::{merge_bundles, Bundle};
 use mini_jazz_sqlite::{
-    persisted_rope, ApplyBundleProfile, QueryExportProfile, Result, RowDiff, RowsSubscription,
-    Runtime, SchemaDef, Storage,
+    persisted_rope, ApplyBundleProfile, HistoryBlockManifest, QueryExportProfile, Result, RowDiff,
+    RowsSubscription, Runtime, SchemaDef, Storage,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -226,6 +226,9 @@ struct DeepHistoryCaseReport {
     live_receive_last_ms: Option<f64>,
     cold_load_ms: f64,
     current_read_ms: f64,
+    historical_read_total_ms: f64,
+    historical_read_count: usize,
+    historical_read_average_ms: Option<f64>,
     final_payload_bytes: usize,
     extrapolated_final_payload_bytes_for_target: Option<usize>,
     reference_gzip_bytes: Option<usize>,
@@ -4624,6 +4627,9 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         live_receive_last_ms: receive_samples.last().copied(),
         cold_load_ms,
         current_read_ms,
+        historical_read_total_ms: 0.0,
+        historical_read_count: 0,
+        historical_read_average_ms: None,
         final_payload_bytes,
         extrapolated_final_payload_bytes_for_target: Some(final_payload_bytes),
         reference_gzip_bytes: input.reference_gzip_bytes,
@@ -4816,6 +4822,9 @@ fn run_jazz_rope_position_case(
         live_receive_last_ms: receive_samples.last().copied(),
         cold_load_ms,
         current_read_ms,
+        historical_read_total_ms: 0.0,
+        historical_read_count: 0,
+        historical_read_average_ms: None,
         final_payload_bytes: canvas_position_json(input.target_updates - 1).len(),
         extrapolated_final_payload_bytes_for_target: None,
         reference_gzip_bytes: input.reference_gzip_bytes,
@@ -5285,6 +5294,22 @@ fn run_naive_deep_history_case(
         .map(str::to_owned)
         .unwrap_or(last_value);
     let final_payload_bytes = final_payload.len();
+    let historical_epochs = historical_read_epochs_for_case(
+        &bundle,
+        &writer.history_block_manifests(input.table)?,
+        input.row_id,
+    );
+    let historical_started = Instant::now();
+    let mut historical_read_count = 0;
+    for epoch in &historical_epochs {
+        if writer
+            .read_row_at_node_epoch(input.table, input.row_id, "writer-node", *epoch)?
+            .is_some()
+        {
+            historical_read_count += 1;
+        }
+    }
+    let historical_read_total_ms = ms(historical_started.elapsed());
     let stats = writer.storage_stats()?;
     drop(writer);
     let total_file_bytes = stats.total_file_bytes;
@@ -5319,7 +5344,6 @@ fn run_naive_deep_history_case(
             reference_json.len()
         ));
     }
-
     Ok(DeepHistoryCaseReport {
         target_updates: input.target_updates,
         completed_updates,
@@ -5347,6 +5371,13 @@ fn run_naive_deep_history_case(
         live_receive_last_ms: receive_samples.last().copied(),
         cold_load_ms,
         current_read_ms,
+        historical_read_total_ms,
+        historical_read_count,
+        historical_read_average_ms: if historical_read_count == 0 {
+            None
+        } else {
+            Some(historical_read_total_ms / historical_read_count as f64)
+        },
         final_payload_bytes,
         extrapolated_final_payload_bytes_for_target,
         reference_gzip_bytes: input.reference_gzip_bytes,
@@ -5502,6 +5533,40 @@ fn average(values: &[f64]) -> Option<f64> {
     } else {
         Some(values.iter().sum::<f64>() / values.len() as f64)
     }
+}
+
+fn historical_read_epochs_for_case(
+    bundle: &Bundle,
+    block_manifests: &[HistoryBlockManifest],
+    row_id: &str,
+) -> Vec<i64> {
+    let tx_epochs = bundle
+        .txs
+        .iter()
+        .map(|tx| (tx.tx_id.as_str(), tx.local_epoch))
+        .collect::<BTreeMap<_, _>>();
+    let mut row_epochs = bundle
+        .history
+        .iter()
+        .filter(|record| record.row_id == row_id)
+        .filter_map(|record| tx_epochs.get(record.tx_id.as_str()).copied())
+        .collect::<Vec<_>>();
+    for manifest in block_manifests
+        .iter()
+        .filter(|manifest| manifest.row_id == row_id && manifest.kind == "accepted")
+    {
+        row_epochs.push(manifest.min_global_epoch);
+        row_epochs.push(manifest.max_global_epoch);
+    }
+    if row_epochs.is_empty() {
+        return Vec::new();
+    }
+    let first = *row_epochs.iter().min().unwrap_or(&1);
+    let latest = *row_epochs.iter().max().unwrap_or(&first);
+    let mut epochs = vec![first, ((first + latest) / 2).max(first), latest];
+    epochs.sort_unstable();
+    epochs.dedup();
+    epochs
 }
 
 fn percentile(mut values: Vec<f64>, percentile: f64) -> Option<f64> {

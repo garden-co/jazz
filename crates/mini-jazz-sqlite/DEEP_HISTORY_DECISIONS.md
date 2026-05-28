@@ -255,3 +255,9 @@ Scope impact: the RFC now matches the current API boundary: receiver manifest in
 Decision: Bump new sealed blocks to v3 `columnar-json-lz4` and store history user values as per-column arrays instead of a per-row map array.
 
 Scope impact: this is still JSON inside lz4, but it removes repeated user column keys from sealed row history and moves the format closer to the RFC columnar target. The spike still keeps v1 bundle-json decode support.
+
+## Thu May 28 01:00:34 PDT 2026 - Local Historical Point Reads
+
+Decision: Add local node-epoch point reads for unglobalized local history and include them in the deep-history benchmark report. The benchmark now samples early, middle, and latest local epochs so sealed blocks are exercised even when transactions have not been assigned global epochs.
+
+Scope impact: this exposed and fixed an accidental slow path where newest-record selection could re-decode sealed blocks per candidate. The remaining Block historical-read numbers still decode and scan an entire selected block per sampled point read, which is the next obvious target for block-local indexing or lighter decoding.

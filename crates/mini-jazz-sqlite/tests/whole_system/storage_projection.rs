@@ -548,6 +548,63 @@ fn point_read_at_global_epoch_can_decode_sealed_history_block() {
 }
 
 #[test]
+fn point_read_at_node_epoch_can_decode_locally_sealed_history_block() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    for epoch in 2..=6 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("v{epoch}")))]),
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        alice
+            .read_row_at_node_epoch("notes", "note-1", "alice-node", 3)
+            .unwrap()
+            .unwrap()
+            .values["body"],
+        json!("v3")
+    );
+
+    alice
+        .compact_accepted_history("notes", "note-1", 2)
+        .unwrap();
+
+    assert_eq!(
+        alice
+            .read_row_at_node_epoch("notes", "note-1", "alice-node", 3)
+            .unwrap()
+            .unwrap()
+            .values["body"],
+        json!("v3")
+    );
+    assert_eq!(
+        alice
+            .read_row_at_node_epoch("notes", "note-1", "alice-node", 6)
+            .unwrap()
+            .unwrap()
+            .values["body"],
+        json!("v6")
+    );
+}
+
+#[test]
 fn query_scope_export_includes_sealed_history_for_matching_rows() {
     let schema = support::notes_schema();
     let mut alice =
