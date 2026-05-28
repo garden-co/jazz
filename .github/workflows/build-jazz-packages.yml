@@ -2,6 +2,12 @@ name: Build Jazz packages
 
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: Git ref (branch, tag, or SHA) to check out for every build job. Empty means use the caller's default ref.
+        required: false
+        type: string
+        default: ""
     outputs:
       tools_artifact:
         description: Artifact name for the assembled jazz-tools package.
@@ -41,6 +47,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: ./.github/actions/setup-build
         with:
@@ -86,6 +94,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: ./.github/actions/setup-build
         with:
@@ -112,6 +122,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: ./.github/actions/setup-build
         with:
@@ -164,6 +176,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: ./.github/actions/setup-build
         with:
@@ -197,6 +211,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: ./.github/actions/setup-build
         with:
@@ -245,6 +261,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: ./.github/actions/setup-build
 
@@ -288,6 +306,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: ./.github/actions/setup-build
         with:

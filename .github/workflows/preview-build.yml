@@ -21,6 +21,8 @@ jobs:
     if: github.event.label.name == 'preview-build'
     uses: ./.github/workflows/build-jazz-packages.yml
     secrets: inherit
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
 
   publish-pkg-pr-new:
     name: Publish to pkg.pr.new
@@ -76,9 +78,10 @@ jobs:
 
       - name: Publish to pkg.pr.new
         run: |
-          npx --yes pkg-pr-new publish \
+          pnpm exec pkg-pr-new publish \
             --pnpm \
             --comment=update \
+            --commentWithSha \
             --packageManager=pnpm \
             './packages/jazz-tools' \
             './crates/jazz-wasm' \
