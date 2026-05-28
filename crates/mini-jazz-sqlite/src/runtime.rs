@@ -1,4 +1,5 @@
 use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
+use crate::read_visibility::ReadVisibility;
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
@@ -399,23 +400,15 @@ impl Runtime {
         parent_field: &str,
     ) -> Result<Bundle> {
         self.schema.table_def(table_name)?;
-        let user = self.policy_user();
-        let bypass_policy = self.bypasses_policy();
         let rows = self.read_recursive_refs(table_name, root_id, parent_field)?;
         let row_nums = rows
             .iter()
             .map(|row| row_num(&self.conn, &row.id))
             .collect::<Result<Vec<_>>>()?;
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let mut history = export_visible_table_history(
-            &self.conn,
-            &self.schema,
-            table_name,
-            user,
-            bypass_policy,
-            &branch_nums,
-            Some(&row_nums),
-        )?;
+        let visibility = self.read_visibility();
+        let mut history =
+            export_visible_table_history(&visibility, table_name, &branch_nums, Some(&row_nums))?;
         history.extend(export_deleted_recursive_descendant_history(
             &self.conn,
             &self.schema,
@@ -433,13 +426,10 @@ impl Runtime {
             &row_nums,
         )?);
         history.extend(export_policy_dependency_history(
-            &self.conn,
-            &self.schema,
+            &visibility,
             PolicyDependencyExport {
                 table_name,
                 policy: &self.schema.table_def(table_name)?.read_policy,
-                user,
-                bypass_policy,
                 branch_nums: &branch_nums,
                 child_row_nums: Some(&row_nums),
             },
@@ -454,11 +444,8 @@ impl Runtime {
                     Some(base_epoch),
                 )?);
                 history.extend(export_snapshot_policy_dependency_history(
-                    &self.conn,
-                    &self.schema,
+                    &visibility,
                     table_name,
-                    user,
-                    bypass_policy,
                     base_epoch,
                     Some(&row_nums),
                 )?);
@@ -2698,9 +2685,8 @@ impl Runtime {
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
         let table = self.schema.table_def(table_name)?;
-        let user = self.policy_user();
-        let bypass_policy = self.bypasses_policy();
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let visibility = self.read_visibility();
         let mut all_rows = Vec::new();
         let mut visible_row_nums = Vec::new();
         let mut repair_row_nums = Vec::new();
@@ -2776,11 +2762,8 @@ impl Runtime {
         )?;
         if !repair_row_nums.is_empty() {
             history.extend(export_visible_table_history(
-                &self.conn,
-                &self.schema,
+                &visibility,
                 table_name,
-                user,
-                bypass_policy,
                 &branch_nums,
                 Some(&repair_row_nums),
             )?);
@@ -2794,13 +2777,10 @@ impl Runtime {
             )?);
         }
         history.extend(export_policy_dependency_history(
-            &self.conn,
-            &self.schema,
+            &visibility,
             PolicyDependencyExport {
                 table_name,
                 policy: &table.read_policy,
-                user,
-                bypass_policy,
                 branch_nums: &branch_nums,
                 child_row_nums: Some(&row_nums),
             },
@@ -2910,6 +2890,7 @@ impl Runtime {
         row_nums.sort();
         row_nums.dedup();
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let visibility = self.read_visibility();
         let mut history = export_history_versions_for_rows_in_branches(
             &self.conn,
             &self.schema,
@@ -2920,11 +2901,8 @@ impl Runtime {
         )?;
         if !repair_row_nums.is_empty() {
             history.extend(export_visible_table_history(
-                &self.conn,
-                &self.schema,
+                &visibility,
                 table_name,
-                user,
-                bypass_policy,
                 &branch_nums,
                 Some(&repair_row_nums),
             )?);
@@ -2938,13 +2916,10 @@ impl Runtime {
             )?);
         }
         history.extend(export_policy_dependency_history(
-            &self.conn,
-            &self.schema,
+            &visibility,
             PolicyDependencyExport {
                 table_name,
                 policy: &table.read_policy,
-                user,
-                bypass_policy,
                 branch_nums: &branch_nums,
                 child_row_nums: Some(&row_nums),
             },
@@ -2968,11 +2943,8 @@ impl Runtime {
                     &[1],
                 )?);
                 history.extend(export_snapshot_policy_dependency_history(
-                    &self.conn,
-                    &self.schema,
+                    &visibility,
                     table_name,
-                    user,
-                    bypass_policy,
                     base_epoch,
                     Some(&row_nums),
                 )?);
@@ -3058,8 +3030,6 @@ impl Runtime {
         let read_rows_ms = duration_ms(read_started.elapsed());
 
         let table = self.schema.table_def(table_name)?;
-        let user = self.policy_user();
-        let bypass_policy = self.bypasses_policy();
 
         let resolve_started = Instant::now();
         let visible_row_nums = rows
@@ -3093,6 +3063,7 @@ impl Runtime {
         row_nums.sort();
         row_nums.dedup();
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let visibility = self.read_visibility();
 
         let visible_history_started = Instant::now();
         let mut history = export_history_versions_for_rows_in_branches(
@@ -3108,11 +3079,8 @@ impl Runtime {
         let repair_visible_started = Instant::now();
         if !repair_row_nums.is_empty() {
             history.extend(export_visible_table_history(
-                &self.conn,
-                &self.schema,
+                &visibility,
                 table_name,
-                user,
-                bypass_policy,
                 &branch_nums,
                 Some(&repair_row_nums),
             )?);
@@ -3134,13 +3102,10 @@ impl Runtime {
 
         let policy_started = Instant::now();
         history.extend(export_policy_dependency_history(
-            &self.conn,
-            &self.schema,
+            &visibility,
             PolicyDependencyExport {
                 table_name,
                 policy: &self.schema.table_def(table_name)?.read_policy,
-                user,
-                bypass_policy,
                 branch_nums: &branch_nums,
                 child_row_nums: Some(&row_nums),
             },
@@ -3159,11 +3124,8 @@ impl Runtime {
                     &[1],
                 )?);
                 history.extend(export_snapshot_policy_dependency_history(
-                    &self.conn,
-                    &self.schema,
+                    &visibility,
                     table_name,
-                    user,
-                    bypass_policy,
                     base_epoch,
                     Some(&row_nums),
                 )?);
@@ -3260,8 +3222,6 @@ impl Runtime {
         ref_field_name: &str,
         branch_nums: &[i64],
     ) -> Result<Vec<HistoryRecord>> {
-        let user = self.policy_user();
-        let bypass_policy = self.bypasses_policy();
         let field = table
             .fields
             .iter()
@@ -3286,12 +3246,10 @@ impl Runtime {
         if ref_row_nums.is_empty() {
             return Ok(Vec::new());
         }
+        let visibility = self.read_visibility();
         let mut history = export_visible_table_history(
-            &self.conn,
-            &self.schema,
+            &visibility,
             ref_table_name,
-            user,
-            bypass_policy,
             branch_nums,
             Some(&ref_row_nums),
         )?;
@@ -3304,13 +3262,10 @@ impl Runtime {
             branch_nums,
         )?);
         history.extend(export_policy_dependency_history(
-            &self.conn,
-            &self.schema,
+            &visibility,
             PolicyDependencyExport {
                 table_name: ref_table_name,
                 policy: &self.schema.table_def(ref_table_name)?.read_policy,
-                user,
-                bypass_policy,
                 branch_nums,
                 child_row_nums: Some(&ref_row_nums),
             },
@@ -3640,6 +3595,16 @@ impl Runtime {
 
     fn query_context(&self) -> query::QueryContext<'_> {
         query::QueryContext {
+            conn: &self.conn,
+            schema: &self.schema,
+            branch_num: self.branch_num,
+            user: self.policy_user(),
+            bypass_policy: self.bypasses_policy(),
+        }
+    }
+
+    fn read_visibility(&self) -> ReadVisibility<'_> {
+        ReadVisibility {
             conn: &self.conn,
             schema: &self.schema,
             branch_num: self.branch_num,
@@ -5457,15 +5422,14 @@ fn export_table_history(
     branch_num: i64,
 ) -> Result<Vec<HistoryRecord>> {
     let branch_nums = branch::scope_nums(conn, branch_num)?;
-    let mut records = export_visible_table_history(
+    let visibility = ReadVisibility {
         conn,
         schema,
-        table_name,
+        branch_num,
         user,
         bypass_policy,
-        &branch_nums,
-        None,
-    )?;
+    };
+    let mut records = export_visible_table_history(&visibility, table_name, &branch_nums, None)?;
     records.extend(export_deleted_table_history(
         conn,
         schema,
@@ -5473,25 +5437,19 @@ fn export_table_history(
         &branch_nums,
     )?);
     records.extend(export_policy_dependency_history(
-        conn,
-        schema,
+        &visibility,
         PolicyDependencyExport {
             table_name,
             policy: &schema.table_def(table_name)?.read_policy,
-            user,
-            bypass_policy,
             branch_nums: &branch_nums,
             child_row_nums: None,
         },
     )?);
     records.extend(export_policy_dependency_history(
-        conn,
-        schema,
+        &visibility,
         PolicyDependencyExport {
             table_name,
             policy: &schema.table_def(table_name)?.write_policy,
-            user,
-            bypass_policy,
             branch_nums: &branch_nums,
             child_row_nums: None,
         },
@@ -5499,12 +5457,9 @@ fn export_table_history(
     if branch_num != 1 {
         if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
             records.extend(export_main_base_snapshot_history(
-                conn,
-                schema,
+                &visibility,
                 table_name,
                 base_epoch,
-                user,
-                bypass_policy,
             )?);
         }
     }
@@ -5512,55 +5467,14 @@ fn export_table_history(
 }
 
 fn export_main_base_snapshot_history(
-    conn: &Connection,
-    schema: &SchemaDef,
+    visibility: &ReadVisibility<'_>,
     table_name: &str,
     base_epoch: i64,
-    user: &str,
-    bypass_policy: bool,
 ) -> Result<Vec<HistoryRecord>> {
-    let table = schema.table_def(table_name)?;
-    let policy_sql = if bypass_policy {
-        "1 = 1".to_owned()
-    } else {
-        policy::snapshot_read_policy_sql_for_alias(schema, table, "h", user, base_epoch)?
-    };
-    let sql = format!(
-        "SELECT h.row_num
-         FROM {} h
-         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-         WHERE h.j_branch_num = 1
-           AND tx.outcome != ?
-           AND tx.global_epoch IS NOT NULL
-           AND tx.global_epoch <= ?
-           AND h.op != 3
-           AND {policy_sql}
-           AND NOT EXISTS (
-             SELECT 1
-             FROM {history_table} newer
-             JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
-             WHERE newer.row_num = h.row_num
-               AND newer.j_branch_num = 1
-               AND newer_tx.outcome != ?
-               AND newer_tx.global_epoch IS NOT NULL
-               AND newer_tx.global_epoch <= ?
-               AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
-           )",
-        crate::schema::history_table(table_name),
-        history_table = crate::schema::history_table(table_name),
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let row_nums = stmt
-        .query_map(
-            params![
-                tx::OUTCOME_REJECTED,
-                base_epoch,
-                tx::OUTCOME_REJECTED,
-                base_epoch
-            ],
-            |row| row.get::<_, i64>(0),
-        )?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let conn = visibility.conn;
+    let schema = visibility.schema;
+    let row_nums =
+        visibility.base_snapshot_row_nums_visible_in_branch(table_name, base_epoch, None)?;
     let mut records = export_history_versions_for_rows(
         conn,
         schema,
@@ -5569,11 +5483,8 @@ fn export_main_base_snapshot_history(
         Some(base_epoch),
     )?;
     records.extend(export_snapshot_policy_dependency_history(
-        conn,
-        schema,
+        visibility,
         table_name,
-        user,
-        bypass_policy,
         base_epoch,
         Some(&row_nums),
     )?);
@@ -5581,14 +5492,13 @@ fn export_main_base_snapshot_history(
 }
 
 fn export_snapshot_policy_dependency_history(
-    conn: &Connection,
-    schema: &SchemaDef,
+    visibility: &ReadVisibility<'_>,
     table_name: &str,
-    user: &str,
-    bypass_policy: bool,
     base_epoch: i64,
     child_row_nums: Option<&[i64]>,
 ) -> Result<Vec<HistoryRecord>> {
+    let conn = visibility.conn;
+    let schema = visibility.schema;
     let table = schema.table_def(table_name)?;
     let PolicyDef::RefReadable { field } = &table.read_policy else {
         return Ok(Vec::new());
@@ -5607,11 +5517,7 @@ fn export_snapshot_policy_dependency_history(
             field.name
         )));
     };
-    let policy_sql = if bypass_policy {
-        "1 = 1".to_owned()
-    } else {
-        policy::snapshot_read_policy_sql_for_alias(schema, table, "h", user, base_epoch)?
-    };
+    let policy_sql = visibility.snapshot_policy_sql(table, "h", base_epoch)?;
     let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let sql = format!(
         "SELECT DISTINCT h.{ref_column}
@@ -5653,11 +5559,8 @@ fn export_snapshot_policy_dependency_history(
         Some(base_epoch),
     )?;
     records.extend(export_snapshot_policy_dependency_history(
-        conn,
-        schema,
+        visibility,
         parent_table,
-        user,
-        bypass_policy,
         base_epoch,
         Some(&row_nums),
     )?);
@@ -5667,17 +5570,16 @@ fn export_snapshot_policy_dependency_history(
 struct PolicyDependencyExport<'a> {
     table_name: &'a str,
     policy: &'a PolicyDef,
-    user: &'a str,
-    bypass_policy: bool,
     branch_nums: &'a [i64],
     child_row_nums: Option<&'a [i64]>,
 }
 
 fn export_policy_dependency_history(
-    conn: &Connection,
-    schema: &SchemaDef,
+    visibility: &ReadVisibility<'_>,
     args: PolicyDependencyExport<'_>,
 ) -> Result<Vec<HistoryRecord>> {
+    let conn = visibility.conn;
+    let schema = visibility.schema;
     let table = schema.table_def(args.table_name)?;
     let PolicyDef::RefReadable { field } = args.policy else {
         return Ok(Vec::new());
@@ -5699,7 +5601,7 @@ fn export_policy_dependency_history(
     let policy_sql = if args.child_row_nums.is_some() {
         "1 = 1".to_owned()
     } else {
-        export_read_policy_sql(schema, table, args.user, args.bypass_policy)?
+        visibility.current_policy_sql(table, "current")?
     };
     let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let row_nums = if let Some(child_row_nums) = args.child_row_nums {
@@ -5732,24 +5634,13 @@ fn export_policy_dependency_history(
     let mut records = if args.child_row_nums.is_some() {
         export_history_versions_for_rows(conn, schema, parent_table, Some(&row_nums), None)?
     } else {
-        export_visible_table_history(
-            conn,
-            schema,
-            parent_table,
-            args.user,
-            args.bypass_policy,
-            args.branch_nums,
-            Some(&row_nums),
-        )?
+        export_visible_table_history(visibility, parent_table, args.branch_nums, Some(&row_nums))?
     };
     records.extend(export_policy_dependency_history(
-        conn,
-        schema,
+        visibility,
         PolicyDependencyExport {
             table_name: parent_table,
             policy: &schema.table_def(parent_table)?.read_policy,
-            user: args.user,
-            bypass_policy: args.bypass_policy,
             branch_nums: args.branch_nums,
             child_row_nums: Some(&row_nums),
         },
@@ -6521,16 +6412,15 @@ fn dedupe_history_records(records: &mut Vec<HistoryRecord>) {
 }
 
 fn export_visible_table_history(
-    conn: &Connection,
-    schema: &SchemaDef,
+    visibility: &ReadVisibility<'_>,
     table_name: &str,
-    user: &str,
-    bypass_policy: bool,
     branch_nums: &[i64],
     row_nums: Option<&[i64]>,
 ) -> Result<Vec<HistoryRecord>> {
+    let conn = visibility.conn;
+    let schema = visibility.schema;
     let table = schema.table_def(table_name)?;
-    let policy_sql = export_read_policy_sql(schema, table, user, bypass_policy)?;
+    let policy_sql = visibility.current_policy_sql(table, "current")?;
     let field_columns = table
         .fields
         .iter()
@@ -6798,19 +6688,6 @@ fn branch_filter_sql(alias: &str, branch_nums: &[i64]) -> String {
 
 fn sql_placeholders(count: usize) -> String {
     (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
-}
-
-fn export_read_policy_sql(
-    schema: &SchemaDef,
-    table: &crate::schema::TableDef,
-    user: &str,
-    bypass_policy: bool,
-) -> Result<String> {
-    if bypass_policy {
-        Ok("1 = 1".to_owned())
-    } else {
-        policy::read_policy_sql(schema, table, user)
-    }
 }
 
 fn sql_value_to_json(

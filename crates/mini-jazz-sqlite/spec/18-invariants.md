@@ -143,6 +143,11 @@ feature exists.
 
 - One-shot queries and subscriptions share query semantics.
 - Query results are deterministic even without explicit user ordering.
+- Query results and pagination are independent of storage-local identifiers
+  such as row numbers, transaction row numbers, insertion order, or SQLite
+  allocation order.
+- Ordering by a ref field uses the public referenced row id, not the local
+  numeric row id used to store the ref.
 - Queries return semantic rows and observed facts.
 - Required includes filter out the parent when missing or unauthorized.
 - Optional includes preserve the parent and return null/absent when missing or

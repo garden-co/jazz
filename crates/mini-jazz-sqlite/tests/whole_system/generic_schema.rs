@@ -2593,6 +2593,142 @@ fn generic_equality_query_lowers_public_ref_ids_to_physical_row_ids() {
 }
 
 #[test]
+fn generic_ref_field_order_uses_public_ref_ids() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-z",
+            BTreeMap::from([("title".to_owned(), json!("Z project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("A project"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-z",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Z task")),
+                ("project".to_owned(), json!("project-z")),
+            ]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-a",
+            BTreeMap::from([
+                ("title".to_owned(), json!("A task")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )
+        .unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "orderBy": [["project", "asc"]],
+    }))
+    .unwrap();
+    let ids = alice
+        .query(query)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["task-a", "task-z"]);
+}
+
+#[test]
+fn branch_ref_field_order_uses_public_ref_ids() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("tasks", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let project_z_tx = alice
+        .insert_row(
+            "projects",
+            "project-z",
+            BTreeMap::from([("title".to_owned(), json!("Z project"))]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&project_z_tx, 1)
+        .unwrap();
+    let project_a_tx = alice
+        .insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("A project"))]),
+        )
+        .unwrap();
+    alice
+        .accept_transaction_at_global(&project_a_tx, 2)
+        .unwrap();
+    let task_z_tx = alice
+        .insert_row(
+            "tasks",
+            "task-z",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Z task")),
+                ("project".to_owned(), json!("project-z")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&task_z_tx, 3).unwrap();
+    let task_a_tx = alice
+        .insert_row(
+            "tasks",
+            "task-a",
+            BTreeMap::from([
+                ("title".to_owned(), json!("A task")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&task_a_tx, 4).unwrap();
+    alice.create_branch("draft", Some(4)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "orderBy": [["project", "asc"]],
+    }))
+    .unwrap();
+    let ids = alice
+        .query(query)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["task-a", "task-z"]);
+}
+
+#[test]
 fn generic_required_ref_read_filters_parent_until_target_is_visible() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

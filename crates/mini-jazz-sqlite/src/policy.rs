@@ -192,10 +192,6 @@ fn effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> Strin
     )
 }
 
-pub(crate) fn read_policy_sql(schema: &SchemaDef, table: &TableDef, user: &str) -> Result<String> {
-    lower_policy(schema, table, "current", &table.read_policy, user, None, 0)
-}
-
 pub(crate) fn branch_read_policy_sql_for_alias(
     schema: &SchemaDef,
     table: &TableDef,

@@ -844,11 +844,7 @@ fn row_matches(row: &MatrixRow, condition: &JsonValue) -> bool {
     match op {
         "eq" => actual == *expected,
         "ne" => actual != *expected,
-        "in" => expected
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|candidate| *candidate == actual),
+        "in" => expected.as_array().unwrap().contains(&actual),
         "contains" => actual
             .as_str()
             .unwrap()

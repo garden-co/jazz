@@ -70,6 +70,14 @@ history exported for them must stay branch-scoped. A repair scan may consider
 history to find rows that left a predicate or page, but it must not use that as
 permission to send unrelated branch history or rows the requester cannot read.
 
+Read visibility planning is centralized for read surfaces. Query execution,
+sync export, query-scope repair, and policy dependency export must derive their
+current-row, snapshot-row, and effective-branch policy SQL from the same
+read-visibility context: requester, bypass mode, branch, branch sources, base
+snapshot epoch, and schema. Read paths must not call raw policy lowering
+directly, because that makes it too easy for query and export to disagree about
+which rows are visible. Write permission validation remains a separate flow.
+
 Policies may depend on rows other than the result row. In the running example,
 a todo read may depend on the referenced project row and the project membership
 rows that authorize Alice.

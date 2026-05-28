@@ -1212,6 +1212,62 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
 }
 
 #[test]
+fn branch_table_export_uses_effective_branch_policy_for_base_rows() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_if_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let project_tx = alice
+        .insert_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&project_tx, 1).unwrap();
+    let todo_tx = alice
+        .insert_row(
+            "todos",
+            "todo-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Hidden in branch")),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&todo_tx, 2).unwrap();
+    alice.create_branch("draft", Some(2)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    alice.session_user_for_test("bob");
+    alice
+        .update_row(
+            "projects",
+            "project-1",
+            BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
+        )
+        .unwrap();
+    alice.session_user_for_test("alice");
+
+    assert!(alice.read_rows("todos").unwrap().is_empty());
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    assert!(!bundle
+        .history
+        .iter()
+        .any(|record| record.table == "todos" && record.row_id == "todo-1"));
+}
+
+#[test]
 fn branch_equality_query_uses_effective_branch_policy() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

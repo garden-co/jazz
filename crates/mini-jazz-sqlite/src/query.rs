@@ -1,10 +1,11 @@
 use crate::query_api::{
     predicate_query, BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection, QueryOrderBy,
 };
+use crate::read_visibility::ReadVisibility;
 use crate::rows::{public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::types::RowView;
-use crate::{branch, policy, tx, users, Result};
+use crate::{branch, tx, users, Result};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -138,13 +139,7 @@ impl QueryContext<'_> {
         let policy_sql = if self.bypass_policy {
             "1 = 1".to_owned()
         } else {
-            policy::branch_read_policy_sql_for_alias(
-                self.schema,
-                table,
-                "h",
-                self.user,
-                self.branch_num,
-            )?
+            self.visibility().current_policy_sql(table, "h")?
         };
         let branch_placeholders = placeholders(branch_nums.len());
         let sql = format!(
@@ -185,13 +180,8 @@ impl QueryContext<'_> {
         let policy_sql = if self.bypass_policy {
             "1 = 1".to_owned()
         } else {
-            policy::snapshot_read_policy_sql_for_alias(
-                self.schema,
-                table,
-                "h",
-                self.user,
-                base_epoch,
-            )?
+            self.visibility()
+                .snapshot_policy_sql(table, "h", base_epoch)?
         };
         let sql = format!(
             "SELECT DISTINCT h.row_num
@@ -404,13 +394,8 @@ impl QueryContext<'_> {
         let policy_sql = if self.bypass_policy {
             "1 = 1".to_owned()
         } else {
-            policy::snapshot_read_policy_sql_for_alias(
-                self.schema,
-                table,
-                "h",
-                self.user,
-                base_epoch,
-            )?
+            self.visibility()
+                .snapshot_policy_sql(table, "h", base_epoch)?
         };
         let select_columns =
             query_candidate_select_columns(table, "h", "ids", "tx", &(i64::MAX / 4).to_string());
@@ -609,7 +594,10 @@ impl QueryContext<'_> {
                 QueryDirection::Asc => "ASC",
                 QueryDirection::Desc => "DESC",
             };
-            parts.push(format!("{} {direction}", final_query_column_sql(&column)));
+            parts.push(format!(
+                "{} {direction}",
+                final_query_order_column_sql(&column)
+            ));
         }
         parts.push("j_query_row_num".to_owned());
         Ok(parts.join(", "))
@@ -636,7 +624,7 @@ impl QueryContext<'_> {
             };
             parts.push(format!(
                 "{} {direction}",
-                source_query_column_sql(&column, row_alias, ids_alias)
+                source_query_order_column_sql(&column, row_alias, ids_alias)
             ));
         }
         parts.push(format!("{row_alias}.row_num"));
@@ -901,13 +889,8 @@ impl QueryContext<'_> {
         let snapshot_policy_sql = if self.bypass_policy {
             "1 = 1".to_owned()
         } else {
-            policy::snapshot_read_policy_sql_for_alias(
-                self.schema,
-                table,
-                "h",
-                self.user,
-                base_epoch,
-            )?
+            self.visibility()
+                .snapshot_policy_sql(table, "h", base_epoch)?
         };
         let sql = format!(
             "WITH
@@ -1352,13 +1335,7 @@ impl QueryContext<'_> {
             current_table = crate::schema::current_table(table_name),
             parent_column = parent_column,
             policy_sql = policy_sql,
-            child_policy_sql = policy::branch_read_policy_sql_for_alias(
-                self.schema,
-                table,
-                "child",
-                self.user,
-                self.branch_num
-            )?,
+            child_policy_sql = self.visibility().current_policy_sql(table, "child")?,
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
@@ -1467,16 +1444,16 @@ impl QueryContext<'_> {
     }
 
     fn read_policy_sql(&self, table: &crate::schema::TableDef) -> Result<String> {
-        if self.bypass_policy {
-            Ok("1 = 1".to_owned())
-        } else {
-            policy::branch_read_policy_sql_for_alias(
-                self.schema,
-                table,
-                "current",
-                self.user,
-                self.branch_num,
-            )
+        self.visibility().current_policy_sql(table, "current")
+    }
+
+    fn visibility(&self) -> ReadVisibility<'_> {
+        ReadVisibility {
+            conn: self.conn,
+            schema: self.schema,
+            branch_num: self.branch_num,
+            user: self.user,
+            bypass_policy: self.bypass_policy,
         }
     }
 
@@ -2065,13 +2042,8 @@ impl QueryContext<'_> {
         let policy_sql = if self.bypass_policy {
             "1 = 1".to_owned()
         } else {
-            policy::snapshot_read_policy_sql_for_alias(
-                self.schema,
-                table,
-                "h",
-                self.user,
-                base_epoch,
-            )?
+            self.visibility()
+                .snapshot_policy_sql(table, "h", base_epoch)?
         };
         let field_columns = table
             .fields
@@ -2219,6 +2191,34 @@ fn final_query_column_sql(column: &QueryColumn<'_>) -> String {
         QueryColumn::Field(field) => {
             crate::schema::quote_ident(&crate::schema::storage_column(field))
         }
+    }
+}
+
+fn source_query_order_column_sql(
+    column: &QueryColumn<'_>,
+    row_alias: &str,
+    ids_alias: &str,
+) -> String {
+    match column {
+        QueryColumn::Field(field) if matches!(field.kind, FieldKind::Ref { .. }) => {
+            let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+            format!(
+                "(SELECT ref_order_ids.row_id FROM jazz_row_id ref_order_ids WHERE ref_order_ids.row_num = {row_alias}.{ref_column})"
+            )
+        }
+        _ => source_query_column_sql(column, row_alias, ids_alias),
+    }
+}
+
+fn final_query_order_column_sql(column: &QueryColumn<'_>) -> String {
+    match column {
+        QueryColumn::Field(field) if matches!(field.kind, FieldKind::Ref { .. }) => {
+            let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+            format!(
+                "(SELECT ref_order_ids.row_id FROM jazz_row_id ref_order_ids WHERE ref_order_ids.row_num = {ref_column})"
+            )
+        }
+        _ => final_query_column_sql(column),
     }
 }
 

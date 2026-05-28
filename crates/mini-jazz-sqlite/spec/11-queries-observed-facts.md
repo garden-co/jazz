@@ -89,6 +89,14 @@ fallback paths for historical pinned-base branch snapshots, arbitrary historical
 snapshots, and other query-time visibility cases where no derived projection has
 been promoted yet.
 
+For the same logical dataset, branch scope, visibility policy, and query,
+result membership and ordering must not depend on storage-local identifiers such
+as row numbers, transaction row numbers, insertion order, or SQLite allocation
+order. Query ordering uses semantic values and public ids. For example, ordering
+by a ref field sorts by the public referenced row id, not by the local numeric
+row id used to store the ref. Pagination uses the same logical ordering, with a
+stable public tie-breaker.
+
 Query-scoped sync must include enough repair information for a receiver that
 previously synced the same scope to remove stale rows. Exporting only the
 current result rows is insufficient. If a row previously matched `done = false`
