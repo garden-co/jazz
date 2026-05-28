@@ -4112,29 +4112,34 @@ impl Runtime {
         value: &JsonValue,
         base_epoch: i64,
     ) -> Result<Vec<i64>> {
-        let mut latest_by_row = BTreeMap::<String, (i64, HistoryRecord)>::new();
+        let mut latest_by_row = BTreeMap::<String, ((i64, i64), HistoryRecord)>::new();
         for block in self.decoded_history_blocks_for_table(table_name)? {
             let tx_epochs = block
                 .txs
                 .iter()
-                .map(|tx| (tx.tx_id.as_str(), tx.global_epoch))
+                .map(|tx| (tx.tx_id.as_str(), (tx.global_epoch, tx.local_epoch)))
                 .collect::<BTreeMap<_, _>>();
             for record in &block.history {
                 if record.branch_id != "main" || record.op == 3 {
                     continue;
                 }
-                let Some(epoch) = tx_epochs.get(record.tx_id.as_str()).copied().flatten() else {
+                let Some((epoch, local_epoch)) = tx_epochs.get(record.tx_id.as_str()).copied()
+                else {
+                    continue;
+                };
+                let Some(epoch) = epoch else {
                     continue;
                 };
                 if epoch > base_epoch {
                     continue;
                 }
+                let order = (epoch, local_epoch);
                 let replace = latest_by_row
                     .get(&record.row_id)
-                    .map(|(current_epoch, _)| epoch > *current_epoch)
+                    .map(|(current_order, _)| order > *current_order)
                     .unwrap_or(true);
                 if replace {
-                    latest_by_row.insert(record.row_id.clone(), (epoch, record.clone()));
+                    latest_by_row.insert(record.row_id.clone(), (order, record.clone()));
                 }
             }
         }

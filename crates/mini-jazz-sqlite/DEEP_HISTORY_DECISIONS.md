@@ -579,3 +579,11 @@ Decision: update the RFC reads section to describe branch-base anchors as the cu
 Why: the earlier RFC left branch snapshots open-ended between sealed history and future sparse caches. The implemented policy is more concrete: keep sparse base anchors in `history_open` so ordinary branch reads remain cheap, while using blocks for colder non-anchor history and block-native sync/rebuild.
 
 Scope impact: documentation only.
+
+## Thu May 28 03:23:34 PDT 2026 - Tie-Break Sealed Branch Predicate Repair
+
+Decision: when scanning sealed branch-base rows for query repair, choose the latest record by `(global_epoch, local_epoch)` rather than only `global_epoch`.
+
+Why: branch base snapshots already care about deterministic latest-row choice when multiple transactions share a global epoch. The sealed predicate repair does not have local physical `tx_num` from the sender, but including local epoch is a better stable ordering than epoch alone.
+
+Scope impact: no API change. Focused branch sealed-history tests and clippy pass.
