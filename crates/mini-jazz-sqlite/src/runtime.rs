@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HISTORY_BLOCK_FORMAT_VERSION: i64 = 3;
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 4;
 const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
 const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
 const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
@@ -7625,7 +7625,7 @@ fn decode_history_block_payload(
             "unsupported history block codec {codec}"
         )));
     }
-    if format_version != HISTORY_BLOCK_FORMAT_VERSION {
+    if !matches!(format_version, 3 | HISTORY_BLOCK_FORMAT_VERSION) {
         return Err(crate::Error::new(format!(
             "unsupported history block format version {format_version}"
         )));
@@ -7813,7 +7813,7 @@ struct ColumnarHistoryRecords {
     tx_id: Vec<String>,
     op: Vec<i64>,
     value_keys: Vec<String>,
-    value_columns: Vec<Vec<JsonValue>>,
+    value_columns: Vec<ColumnarValueColumn>,
     created_at: Vec<i64>,
     updated_at: Vec<i64>,
     created_by: Vec<String>,
@@ -7831,10 +7831,12 @@ impl ColumnarHistoryRecords {
         let value_columns = value_keys
             .iter()
             .map(|key| {
-                records
-                    .iter()
-                    .map(|record| record.values.get(key).cloned().unwrap_or(JsonValue::Null))
-                    .collect()
+                encode_columnar_value_column(
+                    records
+                        .iter()
+                        .map(|record| record.values.get(key).cloned().unwrap_or(JsonValue::Null))
+                        .collect(),
+                )
             })
             .collect();
         Self {
@@ -7894,7 +7896,7 @@ impl ColumnarHistoryRecords {
                     .value_keys
                     .iter()
                     .cloned()
-                    .zip(self.value_columns.iter().map(|column| column[idx].clone()))
+                    .zip(self.value_columns.iter().map(|column| column.value(idx)))
                     .collect(),
                 created_at: self.created_at[idx],
                 updated_at: self.updated_at[idx],
@@ -7903,6 +7905,74 @@ impl ColumnarHistoryRecords {
             })
             .collect();
         Ok(records)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ColumnarValueColumn {
+    Json(Vec<JsonValue>),
+    JsonObjectXYStrings {
+        json_object_xy_strings: ColumnarXYStrings,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct ColumnarXYStrings {
+    x: Vec<f64>,
+    y: Vec<f64>,
+}
+
+impl ColumnarValueColumn {
+    fn len(&self) -> usize {
+        match self {
+            Self::Json(values) => values.len(),
+            Self::JsonObjectXYStrings {
+                json_object_xy_strings,
+            } => json_object_xy_strings.x.len(),
+        }
+    }
+
+    fn value(&self, idx: usize) -> JsonValue {
+        match self {
+            Self::Json(values) => values[idx].clone(),
+            Self::JsonObjectXYStrings {
+                json_object_xy_strings,
+            } => JsonValue::String(
+                json!({
+                    "x": json_object_xy_strings.x[idx],
+                    "y": json_object_xy_strings.y[idx],
+                })
+                .to_string(),
+            ),
+        }
+    }
+}
+
+fn encode_columnar_value_column(values: Vec<JsonValue>) -> ColumnarValueColumn {
+    let mut x = Vec::with_capacity(values.len());
+    let mut y = Vec::with_capacity(values.len());
+    for value in &values {
+        let Some((next_x, next_y)) = json_xy_string(value) else {
+            return ColumnarValueColumn::Json(values);
+        };
+        x.push(next_x);
+        y.push(next_y);
+    }
+    ColumnarValueColumn::JsonObjectXYStrings {
+        json_object_xy_strings: ColumnarXYStrings { x, y },
+    }
+}
+
+fn json_xy_string(value: &JsonValue) -> Option<(f64, f64)> {
+    let text = value.as_str()?;
+    let parsed = serde_json::from_str::<JsonValue>(text).ok()?;
+    let x = parsed.get("x")?.as_f64()?;
+    let y = parsed.get("y")?.as_f64()?;
+    if x.is_finite() && y.is_finite() {
+        Some((x, y))
+    } else {
+        None
     }
 }
 
@@ -10063,6 +10133,28 @@ mod tests {
         assert_eq!(decoded.txs, bundle.txs);
         assert_eq!(decoded.reads, bundle.reads);
         assert_eq!(decoded.query_reads, bundle.query_reads);
+        assert_eq!(decoded.history, bundle.history);
+    }
+
+    #[test]
+    fn columnar_history_block_payload_packs_json_xy_strings() {
+        let mut bundle = sample_block_bundle();
+        bundle.history[0]
+            .values
+            .insert("body".to_owned(), json!(r#"{"x":1.5,"y":2.25}"#));
+        let payload = ColumnarHistoryBlockPayload::from_bundle(&bundle);
+        let body_idx = payload
+            .history
+            .value_keys
+            .iter()
+            .position(|key| key == "body")
+            .unwrap();
+        assert!(matches!(
+            payload.history.value_columns[body_idx],
+            ColumnarValueColumn::JsonObjectXYStrings { .. }
+        ));
+        let decoded = payload.into_bundle().unwrap();
+
         assert_eq!(decoded.history, bundle.history);
     }
 

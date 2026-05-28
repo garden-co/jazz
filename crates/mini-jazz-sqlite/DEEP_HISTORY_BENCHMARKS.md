@@ -143,34 +143,34 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 | Automerge | sidecar concat nodes       |        N/A |        N/A |        N/A |        N/A |        N/A |    14,717 |
 | Automerge | sidecar segment bytes      |        N/A |        N/A |        N/A |        N/A |        N/A |      2325 |
 | Canvas    | completed updates          |       3900 |       3900 |       3900 |       3900 |       3900 |      3900 |
-| Canvas    | total loop                 |    7801 ms |    7896 ms |    8459 ms |    8455 ms |    8663 ms | 15,234 ms |
+| Canvas    | total loop                 |    7801 ms |    7896 ms |    8459 ms |    8455 ms |    8633 ms | 15,234 ms |
 | Canvas    | write only                 |    1043 ms |     766 ms |     912 ms |     903 ms |     887 ms |   5217 ms |
 | Canvas    | avg loop/update            |    2.00 ms |    2.02 ms |    2.17 ms |    2.17 ms |    2.22 ms |   3.91 ms |
 | Canvas    | avg write/update           |    0.27 ms |    0.20 ms |    0.23 ms |    0.23 ms |    0.23 ms |   1.34 ms |
-| Canvas    | sampled receive            |    6753 ms |    7126 ms |    7543 ms |    7548 ms |    7770 ms | 10,012 ms |
-| Canvas    | live receive avg           |    1125 ms |    1188 ms |    1257 ms |    1258 ms |    1295 ms |   1669 ms |
-| Canvas    | live receive p50           |    1119 ms |    1176 ms |    1261 ms |    1263 ms |    1295 ms |   1578 ms |
-| Canvas    | live receive p95           |    3026 ms |    3159 ms |    3292 ms |    3274 ms |    3380 ms |   4394 ms |
-| Canvas    | cold load                  |    2007 ms |    2072 ms |    2217 ms |    2236 ms |    2283 ms |   5479 ms |
-| Canvas    | current read               |    0.11 ms |    0.14 ms |    0.13 ms |    0.13 ms |    0.13 ms |   0.18 ms |
-| Canvas    | historical read avg        |        N/A |        N/A |        N/A |        N/A |  110.61 ms |       N/A |
-| Canvas    | tx info avg                |        N/A |        N/A |        N/A |        N/A |    0.44 ms |       N/A |
+| Canvas    | sampled receive            |    6753 ms |    7126 ms |    7543 ms |    7548 ms |    7740 ms | 10,012 ms |
+| Canvas    | live receive avg           |    1125 ms |    1188 ms |    1257 ms |    1258 ms |    1290 ms |   1669 ms |
+| Canvas    | live receive p50           |    1119 ms |    1176 ms |    1261 ms |    1263 ms |    1268 ms |   1578 ms |
+| Canvas    | live receive p95           |    3026 ms |    3159 ms |    3292 ms |    3274 ms |    3336 ms |   4394 ms |
+| Canvas    | cold load                  |    2007 ms |    2072 ms |    2217 ms |    2236 ms |    2288 ms |   5479 ms |
+| Canvas    | current read               |    0.11 ms |    0.14 ms |    0.13 ms |    0.13 ms |    0.16 ms |   0.18 ms |
+| Canvas    | historical read avg        |        N/A |        N/A |        N/A |        N/A |  111.84 ms |       N/A |
+| Canvas    | tx info avg                |        N/A |        N/A |        N/A |        N/A |    0.41 ms |       N/A |
 | Canvas    | history rows               |       3901 |       3901 |       3901 |       3901 |        780 |      3900 |
 | Canvas    | final payload bytes        |         46 |         46 |         46 |         46 |         46 |        46 |
 | Canvas    | position trace gzip bytes  |     78,526 |     78,526 |     78,526 |     78,526 |     78,526 |    77,211 |
 | Canvas    | position trace JSON bytes  |    205,609 |    205,609 |    205,609 |    205,609 |    205,609 |   182,209 |
 | Canvas    | bundle bytes               |  2,455,136 |  2,455,136 |  2,455,136 |    858,561 |    858,561 | 2,591,442 |
-| Canvas    | block-native export        |        N/A |        N/A |        N/A |        N/A |   31.86 ms |       N/A |
-| Canvas    | block-native import        |        N/A |        N/A |        N/A |        N/A |  213.74 ms |       N/A |
+| Canvas    | block-native export        |        N/A |        N/A |        N/A |        N/A |   49.62 ms |       N/A |
+| Canvas    | block-native import        |        N/A |        N/A |        N/A |        N/A |  213.24 ms |       N/A |
 | Canvas    | block-native blocks        |        N/A |        N/A |        N/A |        N/A |          1 |       N/A |
-| Canvas    | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    206,257 |       N/A |
-| Canvas    | database bytes             |    884,736 |    679,936 |    659,456 |    659,456 |    880,640 |   913,408 |
-| Canvas    | live database bytes        |        N/A |        N/A |        N/A |        N/A |    434,176 |       N/A |
+| Canvas    | block-native payload bytes |        N/A |        N/A |        N/A |        N/A |    199,928 |       N/A |
+| Canvas    | database bytes             |    884,736 |    679,936 |    659,456 |    659,456 |    872,448 |   913,408 |
+| Canvas    | live database bytes        |        N/A |        N/A |        N/A |        N/A |    425,984 |       N/A |
 | Canvas    | freelist bytes             |        N/A |        N/A |        N/A |        N/A |    446,464 |       N/A |
 | Canvas    | total file bytes           |  5,070,520 |  4,857,480 |  4,828,760 |  4,828,760 |  4,849,264 | 5,090,976 |
 | Canvas    | database / final payload   |        N/A |        N/A |        N/A |        N/A |        N/A |       N/A |
 | Canvas    | total file / final payload |        N/A |        N/A |        N/A |        N/A |        N/A |       N/A |
-| Canvas    | database / position gzip   |     11.27x |      8.66x |      8.40x |      8.40x |     11.21x |    11.83x |
+| Canvas    | database / position gzip   |     11.27x |      8.66x |      8.40x |      8.40x |     11.11x |    11.83x |
 | Canvas    | bundle / position gzip     |     31.27x |     31.27x |     31.27x |     10.93x |     10.93x |    33.56x |
 | Canvas    | sidecar nodes              |        N/A |        N/A |        N/A |        N/A |        N/A |      7799 |
 | Canvas    | sidecar leaves             |        N/A |        N/A |        N/A |        N/A |        N/A |      3900 |
@@ -200,10 +200,11 @@ intentionally `N/A`; compare to the gzipped position trace instead.
 - Historical local point reads currently decode and scan a whole selected block.
   The first measured Block numbers are intentionally rough but show this path is
   a real optimization target.
-- The current Block payload uses v3 columnar JSON compressed with lz4. It is
+- The current Block payload uses v4 columnar JSON compressed with lz4. It is
   not the final binary/delta-varint block format, but it already avoids repeated
   per-record JSON object keys and stores user values as per-column arrays inside
-  sealed history blocks.
+  sealed history blocks. v4 also packs text values shaped as JSON `{x, y}`
+  objects into numeric `x[]`/`y[]` streams.
 
 ## Reclaim Probe
 

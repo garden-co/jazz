@@ -303,3 +303,9 @@ Scope impact: table, all-table, and query predicate deltas now expose the same n
 Decision: Add block-native history delta APIs for top-created and top-field query shapes without previous-observed repair state.
 
 Scope impact: page-like query sync can now transfer matching sealed row blocks without expanding them into ordinary history when bootstrapping a top query. Previous-observed refresh variants still need a follow-up API because their repair row set is caller-provided state.
+
+## Thu May 28 01:33:50 PDT 2026 - JSON XY String Column Codec
+
+Decision: Bump newly sealed blocks to format v4 and add a column codec for text values that are JSON strings shaped like `{x, y}` numeric objects.
+
+Scope impact: canvas-style coordinate columns now store sealed values as numeric `x[]`/`y[]` arrays inside the columnar block and decode back to the same text value. This is a deliberately narrow bridge toward per-column codecs; the canonical canvas block payload fell from roughly 206 KB to 200 KB, so the idea helps but is not enough by itself.
