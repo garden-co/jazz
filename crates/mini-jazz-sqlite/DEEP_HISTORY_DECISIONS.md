@@ -339,3 +339,11 @@ Decision: Add a block-native history delta for recursive reference queries and r
 Why: recursive refs are a common relationship query and their result is still a concrete row set. They should not be forced through ordinary bundle inflation just because the read shape is tree-like.
 
 Scope impact: recursive observed refreshes now send missing sealed blocks for visible recursive rows. Deeper block-native repair for descendants that exist only in sealed deleted history remains an optimization gap.
+
+## Thu May 28 01:53:56 PDT 2026 - String Dictionary Block Columns
+
+Decision: Bump newly sealed columnar blocks to v5 and dictionary-code repeated string columns.
+
+Why: table names, row ids, branch ids, node ids, and user ids are highly repetitive inside per-row history blocks. LZ4 can find some of this, but explicit string dictionaries reduce the JSON payload before compression and keep decoding straightforward.
+
+Scope impact: the decoder accepts v3/v4 columnar blocks and v1 legacy bundle blocks. New v5 blocks keep the v4 JSON `{x,y}` value codec and add dictionary/raw dual decoding for string columns.

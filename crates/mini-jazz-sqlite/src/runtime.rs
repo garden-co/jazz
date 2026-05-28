@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HISTORY_BLOCK_FORMAT_VERSION: i64 = 4;
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 5;
 const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
 const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
 const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
@@ -8007,7 +8007,7 @@ fn decode_history_block_payload(
             "unsupported history block codec {codec}"
         )));
     }
-    if !matches!(format_version, 3 | HISTORY_BLOCK_FORMAT_VERSION) {
+    if !(3..=HISTORY_BLOCK_FORMAT_VERSION).contains(&format_version) {
         return Err(crate::Error::new(format!(
             "unsupported history block format version {format_version}"
         )));
@@ -8061,14 +8061,14 @@ impl ColumnarHistoryBlockPayload {
 
 #[derive(Serialize, Deserialize)]
 struct ColumnarTxRecords {
-    tx_id: Vec<String>,
-    node_id: Vec<String>,
+    tx_id: ColumnarStringColumn,
+    node_id: ColumnarStringColumn,
     local_epoch: Vec<i64>,
     global_epoch: Vec<Option<i64>>,
     conflict_mode: Vec<i64>,
     outcome: Vec<i64>,
-    auth_user: Vec<Option<String>>,
-    rejection_code: Vec<Option<String>>,
+    auth_user: ColumnarNullableStringColumn,
+    rejection_code: ColumnarNullableStringColumn,
     rejection_detail: Vec<Option<JsonValue>>,
     receipt_tiers: Vec<Vec<i64>>,
     created_at: Vec<i64>,
@@ -8077,23 +8077,31 @@ struct ColumnarTxRecords {
 impl ColumnarTxRecords {
     fn from_records(records: &[TxRecord]) -> Self {
         Self {
-            tx_id: records.iter().map(|record| record.tx_id.clone()).collect(),
-            node_id: records
-                .iter()
-                .map(|record| record.node_id.clone())
-                .collect(),
+            tx_id: ColumnarStringColumn::from_values(
+                records.iter().map(|record| record.tx_id.clone()).collect(),
+            ),
+            node_id: ColumnarStringColumn::from_values(
+                records
+                    .iter()
+                    .map(|record| record.node_id.clone())
+                    .collect(),
+            ),
             local_epoch: records.iter().map(|record| record.local_epoch).collect(),
             global_epoch: records.iter().map(|record| record.global_epoch).collect(),
             conflict_mode: records.iter().map(|record| record.conflict_mode).collect(),
             outcome: records.iter().map(|record| record.outcome).collect(),
-            auth_user: records
-                .iter()
-                .map(|record| record.auth_user.clone())
-                .collect(),
-            rejection_code: records
-                .iter()
-                .map(|record| record.rejection_code.clone())
-                .collect(),
+            auth_user: ColumnarNullableStringColumn::from_values(
+                records
+                    .iter()
+                    .map(|record| record.auth_user.clone())
+                    .collect(),
+            ),
+            rejection_code: ColumnarNullableStringColumn::from_values(
+                records
+                    .iter()
+                    .map(|record| record.rejection_code.clone())
+                    .collect(),
+            ),
             rejection_detail: records
                 .iter()
                 .map(|record| record.rejection_detail.clone())
@@ -8124,14 +8132,14 @@ impl ColumnarTxRecords {
         ensure_column_len("tx.created_at", self.created_at.len(), len)?;
         let records = (0..len)
             .map(|idx| TxRecord {
-                tx_id: self.tx_id[idx].clone(),
-                node_id: self.node_id[idx].clone(),
+                tx_id: self.tx_id.value(idx),
+                node_id: self.node_id.value(idx),
                 local_epoch: self.local_epoch[idx],
                 global_epoch: self.global_epoch[idx],
                 conflict_mode: self.conflict_mode[idx],
                 outcome: self.outcome[idx],
-                auth_user: self.auth_user[idx].clone(),
-                rejection_code: self.rejection_code[idx].clone(),
+                auth_user: self.auth_user.value(idx),
+                rejection_code: self.rejection_code.value(idx),
                 rejection_detail: self.rejection_detail[idx].clone(),
                 receipt_tiers: self.receipt_tiers[idx].clone(),
                 created_at: self.created_at[idx],
@@ -8142,25 +8150,164 @@ impl ColumnarTxRecords {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ColumnarStringColumn {
+    Dictionary {
+        string_dict: Vec<String>,
+        string_refs: Vec<usize>,
+    },
+    Raw(Vec<String>),
+}
+
+impl ColumnarStringColumn {
+    fn from_values(values: Vec<String>) -> Self {
+        let mut dict = Vec::new();
+        let mut indexes = BTreeMap::<String, usize>::new();
+        let mut refs = Vec::with_capacity(values.len());
+        for value in values {
+            let next = indexes.get(&value).copied().unwrap_or_else(|| {
+                let index = dict.len();
+                dict.push(value.clone());
+                indexes.insert(value, index);
+                index
+            });
+            refs.push(next);
+        }
+        if dict.len() < refs.len() {
+            Self::Dictionary {
+                string_dict: dict,
+                string_refs: refs,
+            }
+        } else {
+            let values = refs
+                .into_iter()
+                .map(|idx| dict[idx].clone())
+                .collect::<Vec<_>>();
+            Self::Raw(values)
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Dictionary { string_refs, .. } => string_refs.len(),
+            Self::Raw(values) => values.len(),
+        }
+    }
+
+    fn value(&self, idx: usize) -> String {
+        match self {
+            Self::Dictionary {
+                string_dict,
+                string_refs,
+            } => string_dict[string_refs[idx]].clone(),
+            Self::Raw(values) => values[idx].clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        match self {
+            Self::Dictionary {
+                string_dict,
+                string_refs,
+            } => {
+                string_dict.clear();
+                string_refs.clear();
+            }
+            Self::Raw(values) => values.clear(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ColumnarNullableStringColumn {
+    Dictionary {
+        nullable_string_dict: Vec<String>,
+        string_refs: Vec<Option<usize>>,
+    },
+    Raw(Vec<Option<String>>),
+}
+
+impl ColumnarNullableStringColumn {
+    fn from_values(values: Vec<Option<String>>) -> Self {
+        let mut dict = Vec::new();
+        let mut indexes = BTreeMap::<String, usize>::new();
+        let mut refs = Vec::with_capacity(values.len());
+        for value in values {
+            let Some(value) = value else {
+                refs.push(None);
+                continue;
+            };
+            let next = indexes.get(&value).copied().unwrap_or_else(|| {
+                let index = dict.len();
+                dict.push(value.clone());
+                indexes.insert(value, index);
+                index
+            });
+            refs.push(Some(next));
+        }
+        let non_null_count = refs.iter().filter(|value| value.is_some()).count();
+        if dict.len() < non_null_count {
+            Self::Dictionary {
+                nullable_string_dict: dict,
+                string_refs: refs,
+            }
+        } else {
+            let values = refs
+                .into_iter()
+                .map(|idx| idx.map(|idx| dict[idx].clone()))
+                .collect::<Vec<_>>();
+            Self::Raw(values)
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Dictionary { string_refs, .. } => string_refs.len(),
+            Self::Raw(values) => values.len(),
+        }
+    }
+
+    fn value(&self, idx: usize) -> Option<String> {
+        match self {
+            Self::Dictionary {
+                nullable_string_dict,
+                string_refs,
+            } => string_refs[idx].map(|idx| nullable_string_dict[idx].clone()),
+            Self::Raw(values) => values[idx].clone(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 struct ColumnarReadRecords {
-    tx_id: Vec<String>,
-    table: Vec<String>,
-    row_id: Vec<String>,
+    tx_id: ColumnarStringColumn,
+    table: ColumnarStringColumn,
+    row_id: ColumnarStringColumn,
     reason: Vec<i64>,
-    observed_tx_id: Vec<Option<String>>,
+    observed_tx_id: ColumnarNullableStringColumn,
 }
 
 impl ColumnarReadRecords {
     fn from_records(records: &[ReadRecord]) -> Self {
         Self {
-            tx_id: records.iter().map(|record| record.tx_id.clone()).collect(),
-            table: records.iter().map(|record| record.table.clone()).collect(),
-            row_id: records.iter().map(|record| record.row_id.clone()).collect(),
+            tx_id: ColumnarStringColumn::from_values(
+                records.iter().map(|record| record.tx_id.clone()).collect(),
+            ),
+            table: ColumnarStringColumn::from_values(
+                records.iter().map(|record| record.table.clone()).collect(),
+            ),
+            row_id: ColumnarStringColumn::from_values(
+                records.iter().map(|record| record.row_id.clone()).collect(),
+            ),
             reason: records.iter().map(|record| record.reason).collect(),
-            observed_tx_id: records
-                .iter()
-                .map(|record| record.observed_tx_id.clone())
-                .collect(),
+            observed_tx_id: ColumnarNullableStringColumn::from_values(
+                records
+                    .iter()
+                    .map(|record| record.observed_tx_id.clone())
+                    .collect(),
+            ),
         }
     }
 
@@ -8176,11 +8323,11 @@ impl ColumnarReadRecords {
         ensure_column_len("read.observed_tx_id", self.observed_tx_id.len(), len)?;
         let records = (0..len)
             .map(|idx| ReadRecord {
-                tx_id: self.tx_id[idx].clone(),
-                table: self.table[idx].clone(),
-                row_id: self.row_id[idx].clone(),
+                tx_id: self.tx_id.value(idx),
+                table: self.table.value(idx),
+                row_id: self.row_id.value(idx),
                 reason: self.reason[idx],
-                observed_tx_id: self.observed_tx_id[idx].clone(),
+                observed_tx_id: self.observed_tx_id.value(idx),
             })
             .collect();
         Ok(records)
@@ -8189,17 +8336,17 @@ impl ColumnarReadRecords {
 
 #[derive(Serialize, Deserialize)]
 struct ColumnarHistoryRecords {
-    table: Vec<String>,
-    row_id: Vec<String>,
-    branch_id: Vec<String>,
-    tx_id: Vec<String>,
+    table: ColumnarStringColumn,
+    row_id: ColumnarStringColumn,
+    branch_id: ColumnarStringColumn,
+    tx_id: ColumnarStringColumn,
     op: Vec<i64>,
     value_keys: Vec<String>,
     value_columns: Vec<ColumnarValueColumn>,
     created_at: Vec<i64>,
     updated_at: Vec<i64>,
-    created_by: Vec<String>,
-    updated_by: Vec<String>,
+    created_by: ColumnarStringColumn,
+    updated_by: ColumnarStringColumn,
 }
 
 impl ColumnarHistoryRecords {
@@ -8222,26 +8369,38 @@ impl ColumnarHistoryRecords {
             })
             .collect();
         Self {
-            table: records.iter().map(|record| record.table.clone()).collect(),
-            row_id: records.iter().map(|record| record.row_id.clone()).collect(),
-            branch_id: records
-                .iter()
-                .map(|record| record.branch_id.clone())
-                .collect(),
-            tx_id: records.iter().map(|record| record.tx_id.clone()).collect(),
+            table: ColumnarStringColumn::from_values(
+                records.iter().map(|record| record.table.clone()).collect(),
+            ),
+            row_id: ColumnarStringColumn::from_values(
+                records.iter().map(|record| record.row_id.clone()).collect(),
+            ),
+            branch_id: ColumnarStringColumn::from_values(
+                records
+                    .iter()
+                    .map(|record| record.branch_id.clone())
+                    .collect(),
+            ),
+            tx_id: ColumnarStringColumn::from_values(
+                records.iter().map(|record| record.tx_id.clone()).collect(),
+            ),
             op: records.iter().map(|record| record.op).collect(),
             value_keys,
             value_columns,
             created_at: records.iter().map(|record| record.created_at).collect(),
             updated_at: records.iter().map(|record| record.updated_at).collect(),
-            created_by: records
-                .iter()
-                .map(|record| record.created_by.clone())
-                .collect(),
-            updated_by: records
-                .iter()
-                .map(|record| record.updated_by.clone())
-                .collect(),
+            created_by: ColumnarStringColumn::from_values(
+                records
+                    .iter()
+                    .map(|record| record.created_by.clone())
+                    .collect(),
+            ),
+            updated_by: ColumnarStringColumn::from_values(
+                records
+                    .iter()
+                    .map(|record| record.updated_by.clone())
+                    .collect(),
+            ),
         }
     }
 
@@ -8269,10 +8428,10 @@ impl ColumnarHistoryRecords {
         ensure_column_len("history.updated_by", self.updated_by.len(), len)?;
         let records = (0..len)
             .map(|idx| HistoryRecord {
-                table: self.table[idx].clone(),
-                row_id: self.row_id[idx].clone(),
-                branch_id: self.branch_id[idx].clone(),
-                tx_id: self.tx_id[idx].clone(),
+                table: self.table.value(idx),
+                row_id: self.row_id.value(idx),
+                branch_id: self.branch_id.value(idx),
+                tx_id: self.tx_id.value(idx),
                 op: self.op[idx],
                 values: self
                     .value_keys
@@ -8282,8 +8441,8 @@ impl ColumnarHistoryRecords {
                     .collect(),
                 created_at: self.created_at[idx],
                 updated_at: self.updated_at[idx],
-                created_by: self.created_by[idx].clone(),
-                updated_by: self.updated_by[idx].clone(),
+                created_by: self.created_by.value(idx),
+                updated_by: self.updated_by.value(idx),
             })
             .collect();
         Ok(records)
