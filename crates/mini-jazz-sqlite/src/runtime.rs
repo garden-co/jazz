@@ -765,6 +765,43 @@ impl Runtime {
             .map_err(Into::into)
     }
 
+    pub fn compact_all_history(
+        &mut self,
+        hot_tail: usize,
+        min_versions: usize,
+    ) -> Result<HistoryCompactionStats> {
+        let table_names = self
+            .schema
+            .tables()
+            .map(|table| table.name.clone())
+            .collect::<Vec<_>>();
+        let mut total = HistoryCompactionStats {
+            sealed_history_rows: 0,
+            history_blocks: 0,
+            sealed_transactions: 0,
+            uncompressed_bytes: 0,
+            compressed_bytes: 0,
+        };
+        for table_name in table_names {
+            let accepted =
+                self.compact_table_accepted_history(&table_name, hot_tail, min_versions)?;
+            total.sealed_history_rows += accepted.sealed_history_rows;
+            total.history_blocks += accepted.history_blocks;
+            total.sealed_transactions += accepted.sealed_transactions;
+            total.uncompressed_bytes += accepted.uncompressed_bytes;
+            total.compressed_bytes += accepted.compressed_bytes;
+
+            let rejected =
+                self.compact_table_rejected_history(&table_name, hot_tail, min_versions)?;
+            total.sealed_history_rows += rejected.sealed_history_rows;
+            total.history_blocks += rejected.history_blocks;
+            total.sealed_transactions += rejected.sealed_transactions;
+            total.uncompressed_bytes += rejected.uncompressed_bytes;
+            total.compressed_bytes += rejected.compressed_bytes;
+        }
+        Ok(total)
+    }
+
     pub fn export_exclusive_transaction_forwarding(
         &self,
         table_name: &str,

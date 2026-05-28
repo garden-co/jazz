@@ -122,3 +122,11 @@ Decision: add a payload-free history block manifest API before attempting block-
 Why: sync and maintenance need a cheap way to discover which blocks exist, what row/table/epoch range they cover, and how large they are without decompressing payloads. This is also the right inspection boundary for future "do I already have this block?" negotiation.
 
 Scope impact: `history_block_manifests(table)` exposes accepted and rejected block metadata with row ids and byte counts. It deliberately does not expose payload bytes or decode logical records.
+
+## Wed May 27 23:34:23 PDT 2026
+
+Decision: add an all-table maintenance compaction API that compacts accepted and rejected history separately for every table in the schema.
+
+Why: callers should not need to know which table or row is currently hot to get the storage benefits. The RFC describes `history_open` as an operational hot tail and blocks as colder maintenance output, so the natural application boundary is "compact this database with these retention knobs."
+
+Scope impact: keep the accepted and rejected streams separate but aggregate their stats into one return value for observability.

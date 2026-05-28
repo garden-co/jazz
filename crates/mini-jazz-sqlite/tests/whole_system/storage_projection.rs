@@ -567,6 +567,59 @@ fn table_rejected_history_compaction_seals_each_rejected_row() {
 }
 
 #[test]
+fn compact_all_history_runs_accepted_and_rejected_passes() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-1",
+            BTreeMap::from([("title".to_owned(), json!("v1"))]),
+        )
+        .unwrap();
+    for idx in 2..=4 {
+        alice
+            .update_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("title".to_owned(), json!(format!("v{idx}")))]),
+            )
+            .unwrap();
+    }
+    bob.apply_bundle(&alice.export_table_history("docs").unwrap())
+        .unwrap();
+    bob.insert_row(
+        "comments",
+        "comment-denied",
+        BTreeMap::from([
+            ("body".to_owned(), json!("not allowed")),
+            ("doc".to_owned(), json!("doc-1")),
+        ]),
+    )
+    .unwrap();
+
+    let accepted = alice.compact_all_history(1, 1).unwrap();
+    let rejected = bob.compact_all_history(0, 0).unwrap();
+
+    assert_eq!(accepted.history_blocks, 1);
+    assert_eq!(accepted.sealed_history_rows, 3);
+    assert_eq!(rejected.history_blocks, 2);
+    assert_eq!(rejected.sealed_history_rows, 4);
+}
+
+#[test]
 fn batched_updates_keep_distinct_jazz_transactions_but_commit_together() {
     let schema = support::notes_schema();
     let mut alice =
