@@ -51,6 +51,11 @@ pub enum SubscriptionRowDelta {
         index: usize,
         item: Option<RowView>,
     },
+    Moved {
+        id: String,
+        previous_index: usize,
+        index: usize,
+    },
 }
 
 impl SubscriptionDelta {
@@ -74,12 +79,16 @@ impl SubscriptionRowDelta {
             Self::Added { .. } => 0,
             Self::Removed { .. } => 1,
             Self::Updated { .. } => 2,
+            Self::Moved { .. } => 3,
         }
     }
 
     pub fn id(&self) -> &str {
         match self {
-            Self::Added { id, .. } | Self::Removed { id, .. } | Self::Updated { id, .. } => id,
+            Self::Added { id, .. }
+            | Self::Removed { id, .. }
+            | Self::Updated { id, .. }
+            | Self::Moved { id, .. } => id,
         }
     }
 
@@ -87,7 +96,8 @@ impl SubscriptionRowDelta {
         match self {
             Self::Added { index, .. }
             | Self::Removed { index, .. }
-            | Self::Updated { index, .. } => *index,
+            | Self::Updated { index, .. }
+            | Self::Moved { index, .. } => *index,
         }
     }
 }
@@ -103,7 +113,7 @@ impl Serialize for SubscriptionRowDelta {
                 state.serialize_field("kind", &0_u8)?;
                 state.serialize_field("id", id)?;
                 state.serialize_field("index", index)?;
-                state.serialize_field("item", item)?;
+                state.serialize_field("row", item)?;
                 state.end()
             }
             SubscriptionRowDelta::Removed { id, index } => {
@@ -120,8 +130,20 @@ impl Serialize for SubscriptionRowDelta {
                 state.serialize_field("id", id)?;
                 state.serialize_field("index", index)?;
                 if let Some(item) = item {
-                    state.serialize_field("item", item)?;
+                    state.serialize_field("row", item)?;
                 }
+                state.end()
+            }
+            SubscriptionRowDelta::Moved {
+                id,
+                previous_index,
+                index,
+            } => {
+                let mut state = serializer.serialize_struct("SubscriptionRowDelta", 4)?;
+                state.serialize_field("kind", &3_u8)?;
+                state.serialize_field("id", id)?;
+                state.serialize_field("previousIndex", previous_index)?;
+                state.serialize_field("index", index)?;
                 state.end()
             }
         }

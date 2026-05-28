@@ -230,6 +230,7 @@ impl MiniJazzRuntime {
             }
         }
 
+        let mut first_error = None;
         for notification in pending {
             if let Some(entry) = self.subscriptions.get_mut(&notification.id) {
                 entry.subscription = notification.next_subscription.clone();
@@ -244,11 +245,16 @@ impl MiniJazzRuntime {
                 if let Some(entry) = self.subscriptions.get_mut(&notification.id) {
                     entry.subscription = notification.previous_subscription;
                 }
-                return Err(error);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
         }
 
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -377,6 +383,57 @@ mod tests {
 
         assert_eq!(kinds.get(0).as_f64(), Some(0.0));
         assert_eq!(titles.get(0).as_string().as_deref(), Some("Retried"));
+    }
+
+    #[wasm_bindgen_test]
+    fn throwing_subscription_callback_does_not_block_later_callbacks() {
+        reset_test_globals();
+        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let throwing = js_sys::Function::new_with_args(
+            "delta",
+            r#"
+            if (globalThis.__miniJazzThrowNext) {
+                globalThis.__miniJazzThrowNext = false;
+                throw new Error("callback failed");
+            }
+            "#,
+        );
+        let observer = js_sys::Function::new_with_args(
+            "delta",
+            r#"
+            globalThis.__miniJazzDeltas.push({
+                all: delta.all.map((row) => row.id),
+                kinds: delta.delta.map((change) => change.kind),
+            });
+            "#,
+        );
+
+        runtime
+            .subscribe(JsValue::from_str(r#"{"table":"projects"}"#), throwing)
+            .unwrap();
+        runtime
+            .subscribe(JsValue::from_str(r#"{"table":"projects"}"#), observer)
+            .unwrap();
+        assert_eq!(observed_deltas().length(), 1);
+
+        set_throw_next();
+        let err = runtime
+            .insert_row("projects", "project-1", project_values("First"))
+            .unwrap_err();
+        let message = js_sys::Reflect::get(&err, &JsValue::from_str("message"))
+            .unwrap()
+            .as_string()
+            .unwrap();
+        assert_eq!(message, "callback failed");
+
+        let deltas = observed_deltas();
+        assert_eq!(deltas.length(), 2);
+        let delivered = deltas.get(1);
+        let all: js_sys::Array = js_sys::Reflect::get(&delivered, &JsValue::from_str("all"))
+            .unwrap()
+            .dyn_into()
+            .unwrap();
+        assert_eq!(all.get(0).as_string().as_deref(), Some("project-1"));
     }
 
     #[wasm_bindgen_test]

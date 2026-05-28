@@ -312,10 +312,10 @@ fn query_subscription_delta_matches_jazz_tools_subscribe_all_shape() {
                 id: "note-old".to_owned(),
                 index: 1,
             },
-            SubscriptionRowDelta::Updated {
+            SubscriptionRowDelta::Moved {
                 id: "note-middle".to_owned(),
+                previous_index: 0,
                 index: 1,
-                item: None,
             },
         ]
     );

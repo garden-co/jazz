@@ -225,6 +225,31 @@ impl Runtime {
 }
 
 fn reject_unsupported_fields(object: &JsonMap<String, JsonValue>) -> Result<()> {
+    if object.get("branch").is_some_and(|value| !value.is_null()) {
+        return Err(Error::new("mini-sqlite query does not support branch"));
+    }
+    if object
+        .get("branches")
+        .is_some_and(|value| !is_empty_array(value))
+    {
+        return Err(Error::new("mini-sqlite query does not support branches"));
+    }
+    if object
+        .get("include_deleted")
+        .is_some_and(|value| value.as_bool().unwrap_or(true))
+    {
+        return Err(Error::new(
+            "mini-sqlite query does not support include_deleted",
+        ));
+    }
+    if object
+        .get("includeDeleted")
+        .is_some_and(|value| value.as_bool().unwrap_or(true))
+    {
+        return Err(Error::new(
+            "mini-sqlite query does not support includeDeleted",
+        ));
+    }
     if object
         .get("includes")
         .is_some_and(|value| !is_empty_object(value))
@@ -411,6 +436,29 @@ mod tests {
                 err.to_string()
                     .contains(&format!("query {field} is too large")),
                 "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn built_query_rejects_branch_and_include_deleted_options_it_cannot_honor() {
+        for (field, value) in [
+            ("branch", json!("draft")),
+            ("branches", json!(["draft"])),
+            ("include_deleted", json!(true)),
+            ("includeDeleted", json!(true)),
+        ] {
+            let err = BuiltQuery::from_json_value(json!({
+                "table": "todos",
+                "conditions": [],
+                field: value,
+            }))
+            .unwrap_err();
+
+            assert!(
+                err.to_string()
+                    .contains("mini-sqlite query does not support"),
+                "{field}: {err}"
             );
         }
     }

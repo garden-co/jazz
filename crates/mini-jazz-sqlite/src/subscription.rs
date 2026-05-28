@@ -264,11 +264,17 @@ fn indexed_delta(before: &[RowView], after: &[RowView]) -> Vec<SubscriptionRowDe
     for (id, (before_index, before_row)) in &before {
         match after.get(id) {
             Some((after_index, after_row)) => {
-                if before_index != after_index || before_row != after_row {
+                if before_row != after_row {
                     delta.push(SubscriptionRowDelta::Updated {
                         id: (*id).to_owned(),
                         index: *after_index,
-                        item: (before_row != after_row).then(|| (*after_row).clone()),
+                        item: Some((*after_row).clone()),
+                    });
+                } else if before_index != after_index {
+                    delta.push(SubscriptionRowDelta::Moved {
+                        id: (*id).to_owned(),
+                        previous_index: *before_index,
+                        index: *after_index,
                     });
                 }
             }
@@ -334,6 +340,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["second", "first"]
         );
+    }
+
+    #[test]
+    fn subscription_delta_serializes_added_and_updated_payloads_as_row() {
+        let first = row("first");
+        let mut subscription = RowsSubscription::new("items", vec![first.clone()]);
+
+        let initial = serde_json::to_value(subscription.initial_delta()).unwrap();
+        assert_eq!(initial["delta"][0]["row"], json!(first));
+        assert!(initial["delta"][0].get("item").is_none());
+
+        let mut changed = first.clone();
+        changed.values.insert("name".to_owned(), json!("updated"));
+        let update = serde_json::to_value(
+            subscription.replace_with_subscription_delta(vec![changed.clone()]),
+        )
+        .unwrap();
+        assert_eq!(update["delta"][0]["row"], json!(changed));
+        assert!(update["delta"][0].get("item").is_none());
+    }
+
+    #[test]
+    fn subscription_delta_serializes_order_only_changes_as_moved() {
+        let first = row("first");
+        let second = row("second");
+        let mut subscription = RowsSubscription::new("items", vec![first, second]);
+
+        let delta = serde_json::to_value(
+            subscription.replace_with_subscription_delta(vec![row("second"), row("first")]),
+        )
+        .unwrap();
+
+        assert_eq!(delta["delta"][0]["kind"], json!(3));
+        assert_eq!(delta["delta"][0]["id"], json!("second"));
+        assert_eq!(delta["delta"][0]["index"], json!(0));
+        assert_eq!(delta["delta"][0]["previousIndex"], json!(1));
+        assert!(delta["delta"][0].get("row").is_none());
     }
 
     fn row(id: &str) -> RowView {

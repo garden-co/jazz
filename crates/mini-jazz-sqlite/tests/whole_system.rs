@@ -14,6 +14,8 @@ mod branches;
 mod generic_schema;
 #[path = "whole_system/policies.rs"]
 mod policies;
+#[path = "whole_system/query_matrix.rs"]
+mod query_matrix;
 #[path = "whole_system/recursive_queries.rs"]
 mod recursive_queries;
 #[path = "whole_system/schema_lenses.rs"]

@@ -533,6 +533,8 @@ impl Runtime {
         }
         let validation_ms = duration_ms(validation_started.elapsed());
         let schema = self.schema.clone();
+        let repair_user = self.policy_user().to_owned();
+        let repair_bypass_policy = self.bypasses_policy();
         let begin_tx_started = Instant::now();
         let db = self.conn.transaction()?;
         let begin_tx_ms = duration_ms(begin_tx_started.elapsed());
@@ -721,7 +723,13 @@ impl Runtime {
 
         let query_scope_repair_started = Instant::now();
         for query_read in &bundle.query_reads {
-            Self::apply_query_scope_repair(&schema, &db, query_read)?;
+            Self::apply_query_scope_repair(
+                &schema,
+                &db,
+                query_read,
+                &repair_user,
+                repair_bypass_policy,
+            )?;
         }
         let query_scope_repair_ms = duration_ms(query_scope_repair_started.elapsed());
 
@@ -1208,6 +1216,8 @@ impl Runtime {
         schema: &SchemaDef,
         db: &Connection,
         query_read: &QueryReadRecord,
+        user: &str,
+        bypass_policy: bool,
     ) -> Result<()> {
         // Query-scope repair keeps a receiver's current projection from retaining
         // rows that used to satisfy an observed query but are no longer covered by
@@ -1276,7 +1286,14 @@ impl Runtime {
         }
         if query_read.op == "query" {
             let query = built_query_from_read(query_read)?;
-            return Self::apply_built_query_scope_repair(schema, db, query_read, &query);
+            return Self::apply_built_query_scope_repair(
+                schema,
+                db,
+                query_read,
+                &query,
+                user,
+                bypass_policy,
+            );
         }
         if query_read.op == "eq_top_field_desc" {
             let value = query_read
@@ -1361,7 +1378,7 @@ impl Runtime {
                     op: "eq".to_owned(),
                     value: value.clone(),
                 };
-                Self::apply_query_scope_repair(schema, db, &eq_read)?;
+                Self::apply_query_scope_repair(schema, db, &eq_read, user, bypass_policy)?;
             }
             return Ok(());
         }
@@ -1529,6 +1546,8 @@ impl Runtime {
         db: &Connection,
         query_read: &QueryReadRecord,
         built_query: &BuiltQuery,
+        user: &str,
+        bypass_policy: bool,
     ) -> Result<()> {
         // Built queries are recorded as one opaque query-read value so they can
         // be replayed exactly after reconnect:
@@ -1572,11 +1591,16 @@ impl Runtime {
                     op: condition.op.as_str().to_owned(),
                     value: condition.value.clone(),
                 };
-                Self::apply_query_scope_repair(schema, db, &predicate_read)
+                Self::apply_query_scope_repair(schema, db, &predicate_read, user, bypass_policy)
             }
-            BuiltQueryRepairScope::Generic => {
-                Self::apply_generic_built_query_scope_repair(schema, db, query_read, built_query)
-            }
+            BuiltQueryRepairScope::Generic => Self::apply_generic_built_query_scope_repair(
+                schema,
+                db,
+                query_read,
+                built_query,
+                user,
+                bypass_policy,
+            ),
         }
     }
 
@@ -1585,6 +1609,8 @@ impl Runtime {
         db: &Connection,
         query_read: &QueryReadRecord,
         built_query: &BuiltQuery,
+        user: &str,
+        bypass_policy: bool,
     ) -> Result<()> {
         if built_query.limit.is_none() && built_query.offset.unwrap_or(0) == 0 {
             return Ok(());
@@ -1595,8 +1621,8 @@ impl Runtime {
             conn: db,
             schema,
             branch_num,
-            user: ADMIN_SYSTEM_USER,
-            bypass_policy: true,
+            user,
+            bypass_policy,
         };
         let mut scope_query = built_query.clone();
         scope_query.limit = None;
@@ -6459,9 +6485,12 @@ fn built_query_repair_scope(query: &BuiltQuery) -> Result<BuiltQueryRepairScope<
     if query.conditions.len() == 1 && query.offset.unwrap_or(0) == 0 {
         let condition = &query.conditions[0];
         match (query.order_by.as_slice(), query.limit) {
-            ([], None) => return Ok(BuiltQueryRepairScope::Predicate(condition)),
+            ([], None) if legacy_predicate_repair_supports(condition) => {
+                return Ok(BuiltQueryRepairScope::Predicate(condition));
+            }
             ([order], Some(limit))
                 if condition.op == QueryConditionOp::Eq
+                    && legacy_predicate_repair_supports(condition)
                     && order.column == "$createdAt"
                     && order.direction == QueryDirection::Desc =>
             {
@@ -6471,6 +6500,25 @@ fn built_query_repair_scope(query: &BuiltQuery) -> Result<BuiltQueryRepairScope<
         }
     }
     Ok(BuiltQueryRepairScope::Generic)
+}
+
+fn legacy_predicate_repair_supports(condition: &QueryCondition) -> bool {
+    match condition.column.as_str() {
+        "id" => matches!(
+            condition.op,
+            QueryConditionOp::Eq | QueryConditionOp::Ne | QueryConditionOp::In
+        ),
+        "$createdBy" => matches!(condition.op, QueryConditionOp::Eq | QueryConditionOp::Ne),
+        "$createdAt" | "$updatedAt" => false,
+        _ => !query_condition_value_contains_null(&condition.value),
+    }
+}
+
+fn query_condition_value_contains_null(value: &JsonValue) -> bool {
+    value.is_null()
+        || value
+            .as_array()
+            .is_some_and(|values| values.iter().any(JsonValue::is_null))
 }
 
 fn built_query_repair_keep_query(query: &BuiltQuery) -> Result<BuiltQuery> {
