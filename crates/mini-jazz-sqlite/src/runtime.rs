@@ -3063,7 +3063,8 @@ impl Runtime {
     }
 
     pub fn rebuild_current_projection(&mut self) -> Result<()> {
-        projection::rebuild(&self.conn, &self.schema, self.node_num)
+        projection::rebuild(&self.conn, &self.schema, self.node_num)?;
+        rebuild_current_projection_from_sealed_blocks(&self.conn, &self.schema)
     }
 
     pub fn physical_row_num_for(&self, row_id: &str) -> Result<i64> {
@@ -6866,6 +6867,165 @@ fn decode_history_block_payload(
         .map_err(|err| crate::Error::new(format!("decode history block: {err}")))?;
     serde_json::from_slice::<Bundle>(&decoded)
         .map_err(|err| crate::Error::new(format!("decode history block bundle: {err}")))
+}
+
+fn rebuild_current_projection_from_sealed_blocks(
+    conn: &Connection,
+    schema: &SchemaDef,
+) -> Result<()> {
+    let mut latest = BTreeMap::<(String, String, String), (TxRecord, HistoryRecord)>::new();
+    let mut stmt = conn.prepare(
+        "SELECT codec, format_version, payload
+         FROM history_blocks
+         WHERE block_kind = ?
+         ORDER BY min_global_epoch, block_id",
+    )?;
+    let rows = stmt.query_map(params![HISTORY_BLOCK_KIND_ACCEPTED], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (codec, format_version, payload) = row?;
+        let bundle = decode_history_block_payload(&codec, format_version, &payload)?;
+        let txs = bundle
+            .txs
+            .into_iter()
+            .map(|tx| (tx.tx_id.clone(), tx))
+            .collect::<BTreeMap<_, _>>();
+        for record in bundle.history {
+            let tx = txs
+                .get(&record.tx_id)
+                .ok_or_else(|| crate::Error::new("sealed history references missing tx"))?;
+            if tx.outcome == tx::OUTCOME_REJECTED {
+                continue;
+            }
+            let key = (
+                record.table.clone(),
+                record.row_id.clone(),
+                record.branch_id.clone(),
+            );
+            let replace = latest
+                .get(&key)
+                .map(|(existing_tx, _)| sealed_tx_is_newer(tx, existing_tx))
+                .unwrap_or(true);
+            if replace {
+                latest.insert(key, (tx.clone(), record));
+            }
+        }
+    }
+    for (_key, (tx, record)) in latest {
+        apply_sealed_current_candidate(conn, schema, &tx, &record)?;
+    }
+    Ok(())
+}
+
+fn sealed_tx_is_newer(candidate: &TxRecord, current: &TxRecord) -> bool {
+    match (candidate.global_epoch, current.global_epoch) {
+        (Some(left), Some(right)) if left != right => left > right,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        _ => tx_sort_key(&candidate.tx_id) > tx_sort_key(&current.tx_id),
+    }
+}
+
+fn apply_sealed_current_candidate(
+    conn: &Connection,
+    schema: &SchemaDef,
+    tx_record: &TxRecord,
+    record: &HistoryRecord,
+) -> Result<()> {
+    let table = schema.table_def(&record.table)?;
+    let row_num = ensure_row_id(conn, &record.table, &record.row_id)?;
+    let branch_num = branch::checkout(conn, &record.branch_id)?;
+    let visible_tx_num = current_visible_tx_num(conn, &record.table, row_num, branch_num)?;
+    if let Some(visible_tx_num) = visible_tx_num {
+        let current_tx = conn
+            .query_row(
+                "SELECT tx_id, global_epoch
+                 FROM jazz_tx_public
+                 WHERE tx_num = ?",
+                params![visible_tx_num],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?;
+        if let Some((current_tx_id, current_global_epoch)) = current_tx {
+            let current_tx_record = TxRecord {
+                tx_id: current_tx_id,
+                node_id: String::new(),
+                local_epoch: 0,
+                global_epoch: current_global_epoch,
+                conflict_mode: tx::MODE_MERGEABLE,
+                outcome: tx::OUTCOME_ACCEPTED,
+                auth_user: None,
+                rejection_code: None,
+                rejection_detail: None,
+                receipt_tiers: Vec::new(),
+                created_at: 0,
+            };
+            if !sealed_tx_is_newer(tx_record, &current_tx_record) {
+                return Ok(());
+            }
+        }
+    }
+
+    conn.execute(
+        &format!(
+            "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
+            crate::schema::current_table(&record.table)
+        ),
+        params![row_num, branch_num],
+    )?;
+    if record.op == 3 && branch_num == 1 {
+        return Ok(());
+    }
+
+    let mut columns = vec![
+        "row_num".to_owned(),
+        "j_branch_num".to_owned(),
+        "visible_tx_num".to_owned(),
+        "is_deleted".to_owned(),
+    ];
+    let mut values = vec![
+        rusqlite::types::Value::Integer(row_num),
+        rusqlite::types::Value::Integer(branch_num),
+        rusqlite::types::Value::Integer(ensure_tx_record_for_history_block(conn, tx_record)?),
+        rusqlite::types::Value::Integer(if record.op == 3 { 1 } else { 0 }),
+    ];
+    for field in &table.fields {
+        let value = record
+            .values
+            .get(&field.name)
+            .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
+        columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
+            field,
+        )));
+        values.push(crate::schema::field_sql_value(
+            field,
+            value,
+            |ref_table, row_id| ensure_row_id(conn, ref_table, row_id),
+        )?);
+    }
+    columns.extend([
+        "j_created_at".to_owned(),
+        "j_updated_at".to_owned(),
+        "j_created_by".to_owned(),
+        "j_updated_by".to_owned(),
+    ]);
+    values.extend([
+        rusqlite::types::Value::Integer(record.created_at),
+        rusqlite::types::Value::Integer(record.updated_at),
+        rusqlite::types::Value::Integer(users::ensure_user(conn, &record.created_by)?),
+        rusqlite::types::Value::Integer(users::ensure_user(conn, &record.updated_by)?),
+    ]);
+    insert_dynamic(
+        conn,
+        &crate::schema::current_table(&record.table),
+        &columns,
+        &values,
+    )
 }
 
 fn sealed_transaction_info(conn: &Connection, tx_id: &str) -> Result<TransactionInfo> {

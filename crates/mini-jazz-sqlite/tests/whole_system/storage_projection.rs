@@ -322,6 +322,11 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
     let sealed_only = bob.export_table_history("notes").unwrap();
     assert_eq!(sealed_only.history.len(), 4);
     assert_eq!(sealed_only.history, before_bundle.history[..4].to_vec());
+
+    bob.rebuild_current_projection().unwrap();
+    let rebuilt = bob.read_rows("notes").unwrap();
+    assert_eq!(rebuilt.len(), 1);
+    assert_eq!(rebuilt[0].values["body"], json!("v4"));
 }
 
 #[test]

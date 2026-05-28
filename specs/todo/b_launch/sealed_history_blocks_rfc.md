@@ -471,6 +471,12 @@ If branch snapshots require repeated random access into sealed accepted history,
 we may add sparse snapshot/cache tables later. That should be driven by
 benchmark data rather than designed up front.
 
+Prototype note: `rebuild_current_projection()` now performs the ordinary
+open-history replay and then considers the latest accepted sealed row version
+per `(table, row, branch)`. Sealed candidates fill gaps left by block-native
+import or aggressive compaction, while newer open rows still win. This gives us
+a recovery path without making current reads decode blocks.
+
 ## Sync
 
 Initially, sync can continue to export logical row history. When a sync scope

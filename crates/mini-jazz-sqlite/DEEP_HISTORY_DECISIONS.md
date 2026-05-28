@@ -145,3 +145,10 @@ Wed May 27 23:41:40 PDT 2026
 Decision: expose history blocks as raw lz4 payload records with manifest metadata, and import them idempotently by rebuilding the local tx index from the decoded block contents. This keeps sync experiments from expanding sealed history into ordinary rows while preserving existing Bundle decoding as the semantic validation step.
 
 Scope impact: this is not yet a full protocol; it is a local/runtime API that lets benchmarks and future sync code move sealed blocks as blocks.
+Wed May 27 23:45:50 PDT 2026
+
+## Block-Aware Projection Rebuild
+
+Decision: teach the runtime rebuild path to replay the latest accepted sealed history version per row/branch after the ordinary open-history rebuild. Open history remains authoritative when it contains a newer visible version; sealed blocks fill gaps left by aggressive compaction or block-native import.
+
+Scope impact: this is a runtime-level bridge for the prototype, not yet a shared projection engine. It deliberately decodes whole blocks because rebuild is already an offline recovery path.
