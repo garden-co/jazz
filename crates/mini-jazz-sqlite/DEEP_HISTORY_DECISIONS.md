@@ -378,4 +378,4 @@ Decision: Make `HistoryBlockExport` serialize and deserialize with its payload b
 
 Why: raw block sync is only real if the transfer artifact includes the compressed payload, not just the manifest and tx ranges. The previous in-memory API could move payloads, but serde output skipped them.
 
-Scope impact: block exports now round-trip through serde JSON in tests. The JSON byte-array representation is not the final wire encoding, but it prevents accidental manifest-only block transport.
+Scope impact: block exports now round-trip through serde JSON in tests. Payload bytes serialize as a hex string, which is not the final compact wire encoding but avoids accidentally shipping manifest-only blocks or huge JSON byte arrays.

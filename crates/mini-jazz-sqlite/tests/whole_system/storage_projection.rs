@@ -333,6 +333,8 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
         blocks
     );
     let encoded_blocks = serde_json::to_vec(&blocks).unwrap();
+    let encoded_json = String::from_utf8(encoded_blocks.clone()).unwrap();
+    assert!(encoded_json.contains("\"payload\":\""));
     let decoded_blocks: Vec<HistoryBlockExport> = serde_json::from_slice(&encoded_blocks).unwrap();
     assert_eq!(decoded_blocks, blocks);
     assert_eq!(decoded_blocks[0].payload, blocks[0].payload);

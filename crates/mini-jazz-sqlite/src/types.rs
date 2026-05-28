@@ -167,6 +167,7 @@ pub struct HistoryBlockManifest {
 pub struct HistoryBlockExport {
     pub manifest: HistoryBlockManifest,
     pub tx_ranges: Vec<HistoryBlockTxRange>,
+    #[serde(with = "hex_bytes")]
     pub payload: Vec<u8>,
 }
 
@@ -298,5 +299,52 @@ impl StorageStats {
 
     pub fn physical_tx_num_for(&self, tx_id: &str) -> Option<i64> {
         self.tx_nums_by_id.get(tx_id).copied()
+    }
+}
+
+mod hex_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            use std::fmt::Write as _;
+            write!(&mut out, "{byte:02x}").map_err(serde::ser::Error::custom)?;
+        }
+        serializer.serialize_str(&out)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        if text.len() % 2 != 0 {
+            return Err(serde::de::Error::custom("hex byte string has odd length"));
+        }
+        let mut bytes = Vec::with_capacity(text.len() / 2);
+        let raw = text.as_bytes();
+        for chunk in raw.chunks_exact(2) {
+            let high = hex_nibble(chunk[0]).ok_or_else(|| {
+                serde::de::Error::custom("hex byte string contains non-hex digit")
+            })?;
+            let low = hex_nibble(chunk[1]).ok_or_else(|| {
+                serde::de::Error::custom("hex byte string contains non-hex digit")
+            })?;
+            bytes.push((high << 4) | low);
+        }
+        Ok(bytes)
+    }
+
+    fn hex_nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
     }
 }
