@@ -513,6 +513,54 @@ fn rejected_history_compaction_keeps_diagnostics_but_not_accepted_exports() {
 }
 
 #[test]
+fn table_rejected_history_compaction_seals_each_rejected_row() {
+    let schema = SchemaDef::new()
+        .table("docs", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("comments", |table| {
+            table.text("body");
+            table.ref_("doc", "docs");
+            table.write_if_ref_readable("doc");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    alice
+        .insert_row(
+            "docs",
+            "doc-1",
+            BTreeMap::from([("title".to_owned(), json!("Private doc"))]),
+        )
+        .unwrap();
+    bob.apply_bundle(&alice.export_table_history("docs").unwrap())
+        .unwrap();
+    for idx in 1..=2 {
+        bob.insert_row(
+            "comments",
+            &format!("comment-denied-{idx}"),
+            BTreeMap::from([
+                ("body".to_owned(), json!(format!("not allowed {idx}"))),
+                ("doc".to_owned(), json!("doc-1")),
+            ]),
+        )
+        .unwrap();
+    }
+
+    let stats = bob
+        .compact_table_rejected_history("comments", 0, 0)
+        .unwrap();
+
+    assert_eq!(stats.history_blocks, 2);
+    assert_eq!(stats.sealed_history_rows, 2);
+    assert_eq!(bob.storage_stats().unwrap().rejected_transactions, 2);
+    assert_eq!(bob.rejected_transactions().unwrap().len(), 2);
+    assert!(bob.read_rows("comments").unwrap().is_empty());
+}
+
+#[test]
 fn delete_is_history_not_removal() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

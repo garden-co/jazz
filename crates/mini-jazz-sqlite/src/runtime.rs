@@ -660,6 +660,33 @@ impl Runtime {
         })
     }
 
+    pub fn compact_table_rejected_history(
+        &mut self,
+        table_name: &str,
+        hot_tail: usize,
+        min_versions: usize,
+    ) -> Result<HistoryCompactionStats> {
+        self.schema.table_def(table_name)?;
+        let row_ids =
+            compactable_rejected_row_ids_for_table(&self.conn, table_name, hot_tail, min_versions)?;
+        let mut total = HistoryCompactionStats {
+            sealed_history_rows: 0,
+            history_blocks: 0,
+            sealed_transactions: 0,
+            uncompressed_bytes: 0,
+            compressed_bytes: 0,
+        };
+        for row_id in row_ids {
+            let stats = self.compact_rejected_history(table_name, &row_id, hot_tail)?;
+            total.sealed_history_rows += stats.sealed_history_rows;
+            total.history_blocks += stats.history_blocks;
+            total.sealed_transactions += stats.sealed_transactions;
+            total.uncompressed_bytes += stats.uncompressed_bytes;
+            total.compressed_bytes += stats.compressed_bytes;
+        }
+        Ok(total)
+    }
+
     pub fn export_exclusive_transaction_forwarding(
         &self,
         table_name: &str,
@@ -6001,6 +6028,33 @@ fn compactable_rejected_history_tx_nums(
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let compact_len = tx_nums.len().saturating_sub(hot_tail);
     Ok(tx_nums.into_iter().take(compact_len).collect())
+}
+
+fn compactable_rejected_row_ids_for_table(
+    conn: &Connection,
+    table_name: &str,
+    hot_tail: usize,
+    min_versions: usize,
+) -> Result<Vec<String>> {
+    let threshold = hot_tail.max(min_versions) as i64;
+    let sql = format!(
+        "SELECT ids.row_id
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         JOIN jazz_row_id ids ON ids.row_num = h.row_num
+         WHERE h.j_branch_num = 1
+           AND tx.outcome = ?
+         GROUP BY h.row_num
+         HAVING COUNT(*) > ?
+         ORDER BY h.row_num",
+        crate::schema::history_table(table_name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![tx::OUTCOME_REJECTED, threshold], |row| {
+        row.get::<_, String>(0)
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn compactable_row_ids_for_table(

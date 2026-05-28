@@ -82,3 +82,11 @@ Decision: query-scoped sync exports should splice in sealed accepted history for
 Why: after compaction, a matching current row may have old versions and transaction records only in sealed blocks. Full-table export already decodes those blocks, but query-scoped export is the normal client path and should remain semantically equivalent without degrading into table replication.
 
 Scope impact: query export stays row-scoped. It decodes accepted blocks for the selected/repair row nums, merges their reads and tx metadata, and sorts only when sealed records were actually added so ordinary no-block export order remains unchanged.
+
+## Wed May 27 23:25:17 PDT 2026
+
+Decision: defer block-aware projection rebuild until the replay path can be shaped around logical records, and first make rejected compaction operationally symmetric with accepted compaction.
+
+Why: `projection.rs` currently rebuilds by replaying physical history SQL rows. Sealed blocks decode to logical bundle records, so teaching rebuild to use them cleanly is more than a local query patch. Table-level rejected compaction is smaller, directly useful for maintenance, and keeps rejected history from becoming the next open-row leak.
+
+Scope impact: continue keeping visible accepted heads open for now. Add a table-wide rejected compaction API before attempting a larger logical replay refactor.
