@@ -526,6 +526,38 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("SO-U19d seeded snapshot survives until subscribeAll delivers, then transitions to live data", async () => {
+    const harness = createUnitHarness("app-seed-order");
+    try {
+      const query = makeQuery();
+      const expectedKey = `app-seed-order:{}:${query._build()}`;
+      const seeded = [makeTodo("seeded", "from-server")];
+      const live = [makeTodo("live", "from-local")];
+
+      harness.manager.seedSnapshot<Todo>(expectedKey, seeded);
+      harness.manager.makeQueryKey(query);
+      const entry = harness.manager.getCacheEntry<Todo>(expectedKey);
+
+      // Before any local data arrives the entry exposes the seeded snapshot.
+      expect(entry.status).toBe("fulfilled");
+      const seededState = entry.state;
+      if (seededState.status !== "fulfilled") {
+        throw new Error(`expected fulfilled state but got ${seededState.status}`);
+      }
+      expect(seededState.data).toEqual(seeded);
+
+      // When local cache (or sync) emits, the entry transitions to live data.
+      harness.emit(0, makeDelta(live));
+      const liveState = entry.state;
+      if (liveState.status !== "fulfilled") {
+        throw new Error(`expected fulfilled state but got ${liveState.status}`);
+      }
+      expect(liveState.data).toEqual(live);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U19b seedSnapshot pre-fills the cache for a precomputed key", async () => {
     const harness = createUnitHarness("app-seed");
     try {
