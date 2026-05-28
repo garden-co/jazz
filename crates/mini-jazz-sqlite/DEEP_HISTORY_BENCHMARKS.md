@@ -23,6 +23,14 @@ input size. A full result includes:
 - cold-load apply and read
 - storage stats
 
+Timing fields:
+
+- `write_only_ms`: edit generation plus durable write/version insert work only.
+- `sampled_receive_total_ms`: sum of sampled live receive/listener checks.
+- `total_loop_ms`: write loop wall time, including sampled receive checks.
+- `elapsed_write_ms`/`average_write_ms`: legacy names for `total_loop_ms`
+  and per-update total loop time.
+
 Current canonical inputs:
 
 ```bash
@@ -150,3 +158,108 @@ Wall time under hard guard: `9.84s`
   canonical sizes.
 - These numbers are debug-build baselines and should be treated as directional,
   not launch targets.
+
+## Experiment: Jazz + Persisted Sequence Sidecar
+
+Date: 2026-05-27
+
+Branch: `codex/sqlite-core-deep-history-efficiency`
+
+Shape:
+
+- Jazz row history stores sequence root ids in ordinary text fields.
+- Text and position payloads live in the persisted sequence sidecar.
+- Sync in this experiment sends a normal Jazz bundle plus a full sidecar
+  snapshot. This is intentionally not incremental yet.
+
+### Append Stream, Jazz + Text Sequence
+
+Input: `2225` token-like appends
+
+| Metric                     |      Value |
+| -------------------------- | ---------: |
+| total loop                 | 7986.40 ms |
+| write only                 | 2050.71 ms |
+| average write only         |    0.92 ms |
+| sampled receive total      | 5933.25 ms |
+| live receive average       |  988.87 ms |
+| live receive p95           | 2191.56 ms |
+| cold load                  | 1853.95 ms |
+| current read               |   52.78 ms |
+| history rows               |       2225 |
+| final payload bytes        |     13,350 |
+| bundle bytes               |  1,411,141 |
+| database bytes             |    573,440 |
+| total SQLite file bytes    |  4,738,720 |
+| database / final payload   |     42.95x |
+| total file / final payload |    354.96x |
+
+Sidecar notes: `4449` sequence nodes, `2225` leaves, `2224` concat nodes,
+`13,350` segment bytes. Bundle bytes are `1,262,422` Jazz plus `148,719`
+sidecar snapshot bytes.
+
+### Automerge Paper, Jazz + Text Sequence
+
+Input: first `2900` edits from `automerge-paper.json.gz`
+
+| Metric                       |        Value |
+| ---------------------------- | -----------: |
+| total loop                   | 29,510.70 ms |
+| write only                   |   6562.95 ms |
+| average write only           |      2.26 ms |
+| sampled receive total        | 22,944.71 ms |
+| live receive average         |   3824.12 ms |
+| live receive p95             |   9865.29 ms |
+| cold load                    | 10,879.55 ms |
+| current read                 |     40.48 ms |
+| history rows                 |         2900 |
+| final payload bytes          |        1,750 |
+| source trace gzip bytes      |      904,360 |
+| bundle bytes                 |    2,209,941 |
+| database bytes               |      892,928 |
+| total SQLite file bytes      |    5,082,808 |
+| database / final payload     |      510.24x |
+| total file / final payload   |     2904.46x |
+| database / source trace gzip |        0.99x |
+| bundle / source trace gzip   |        2.44x |
+
+Sidecar notes: `17,042` sequence nodes, `2325` leaves, `14,717` concat nodes,
+`2325` segment bytes. Bundle bytes are `1,647,929` Jazz plus `562,012`
+sidecar snapshot bytes.
+
+### Canvas Positions, Jazz + Delta Sequence
+
+Input: `3900` frames
+
+| Metric                         |        Value |
+| ------------------------------ | -----------: |
+| total loop                     | 16,495.76 ms |
+| write only                     |   3681.13 ms |
+| average write only             |      0.94 ms |
+| sampled receive total          | 12,810.41 ms |
+| live receive average           |   2135.07 ms |
+| live receive p95               |   5595.58 ms |
+| cold load                      |   8541.08 ms |
+| current read                   |      0.21 ms |
+| history rows                   |         3900 |
+| position trace gzip bytes      |       77,211 |
+| position trace JSON bytes      |      182,209 |
+| bundle bytes                   |    2,591,442 |
+| database bytes                 |      913,408 |
+| total SQLite file bytes        |    5,090,976 |
+| database / final payload       |          N/A |
+| total file / final payload     |          N/A |
+| database / position trace gzip |       11.83x |
+| bundle / position trace gzip   |       33.56x |
+
+Sidecar notes: `7799` sequence nodes, `3900` position leaves, `3899` concat
+nodes, `31,392` position segment bytes. Bundle bytes are `2,295,186` Jazz plus
+`296,256` sidecar snapshot bytes.
+
+### Immediate Takeaway
+
+The persisted sequence sidecar cuts payload storage dramatically and keeps hot
+current reads tiny for presence-like positions. The remaining obvious problem is
+sync/cold-load: every sampled receive and cold load currently copies the full
+sidecar snapshot and exports full Jazz row history. The next experiment should
+make sidecar sync incremental across text and position codecs.
