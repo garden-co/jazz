@@ -387,3 +387,11 @@ Decision: Deduplicate sealed block exports across a batch of observed-query hist
 Why: one peer can remember multiple observed queries that all touch the same sealed row. Sending the same compressed block once per query would waste storage and wire bandwidth precisely where blocks are meant to help.
 
 Scope impact: `export_query_read_refresh_deltas` now treats remote manifests plus blocks already emitted earlier in the same call as known. Each returned delta remains individually applyable in order, but shared block payloads appear only once in the batch.
+
+## Thu May 28 02:13:16 PDT 2026 - Compressed Byte Compaction Budget
+
+Decision: Extend `HistoryCompactionPolicy` with an optional compressed-payload byte budget.
+
+Why: block-count and wall-clock budgets are useful but do not directly bound how much sealed payload maintenance emits. A compressed-byte budget lets callers make bounded progress in storage terms and complements the block-count limit.
+
+Scope impact: policy compaction checks compressed bytes before starting each next row block. The budget is post-block rather than a preflight estimate, so it can overshoot by one block; richer byte estimation remains future scheduling work.

@@ -1062,6 +1062,7 @@ impl Runtime {
                     if history_compaction_budget_reached(
                         &total,
                         policy.max_blocks,
+                        policy.max_compressed_bytes,
                         started,
                         policy.max_duration,
                     ) {
@@ -1084,6 +1085,7 @@ impl Runtime {
                     if history_compaction_budget_reached(
                         &total,
                         policy.max_blocks,
+                        policy.max_compressed_bytes,
                         started,
                         policy.max_duration,
                     ) {
@@ -7706,16 +7708,20 @@ fn add_history_compaction_stats(total: &mut HistoryCompactionStats, stats: Histo
 fn history_compaction_budget_reached(
     total: &HistoryCompactionStats,
     max_blocks: Option<usize>,
+    max_compressed_bytes: Option<i64>,
     started: Instant,
     max_duration: Option<Duration>,
 ) -> bool {
     let block_budget_reached = max_blocks
         .map(|max_blocks| total.history_blocks as usize >= max_blocks)
         .unwrap_or(false);
+    let byte_budget_reached = max_compressed_bytes
+        .map(|max_bytes| total.compressed_bytes >= max_bytes)
+        .unwrap_or(false);
     let duration_budget_reached = max_duration
         .map(|max_duration| started.elapsed() >= max_duration)
         .unwrap_or(false);
-    block_budget_reached || duration_budget_reached
+    block_budget_reached || byte_budget_reached || duration_budget_reached
 }
 
 fn rejected_tx_can_leave_open_store(

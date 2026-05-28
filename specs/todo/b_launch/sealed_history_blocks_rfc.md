@@ -445,9 +445,9 @@ operate in the background without touching the newest writes.
 Compaction should be invokable by policy as well as by exact row id. The first
 policy shape is deliberately small: accepted/rejected toggles, hot-tail and
 minimum-version thresholds, an optional maximum block budget, and an optional
-wall-clock budget. The budgets let an embedder run maintenance in bounded
-chunks, leaving age and byte-estimate scheduling as higher-level policy
-decisions.
+compressed-payload byte budget, and an optional wall-clock budget. The budgets
+let an embedder run maintenance in bounded chunks, leaving age and richer
+pre-compaction byte-estimate scheduling as higher-level policy decisions.
 
 Compaction only makes SQLite pages reusable. It should not automatically force
 the database file to shrink, because checkpoint/truncate/vacuum work can be a

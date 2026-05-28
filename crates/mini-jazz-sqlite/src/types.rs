@@ -109,6 +109,7 @@ pub struct HistoryCompactionPolicy {
     pub accepted: bool,
     pub rejected: bool,
     pub max_blocks: Option<usize>,
+    pub max_compressed_bytes: Option<i64>,
     pub max_duration: Option<Duration>,
 }
 
@@ -120,6 +121,7 @@ impl HistoryCompactionPolicy {
             accepted: true,
             rejected: true,
             max_blocks: None,
+            max_compressed_bytes: None,
             max_duration: None,
         }
     }
@@ -131,6 +133,7 @@ impl HistoryCompactionPolicy {
             accepted: true,
             rejected: false,
             max_blocks: None,
+            max_compressed_bytes: None,
             max_duration: None,
         }
     }
@@ -142,6 +145,11 @@ impl HistoryCompactionPolicy {
 
     pub fn with_max_duration(mut self, max_duration: Duration) -> Self {
         self.max_duration = Some(max_duration);
+        self
+    }
+
+    pub fn with_max_compressed_bytes(mut self, max_compressed_bytes: i64) -> Self {
+        self.max_compressed_bytes = Some(max_compressed_bytes);
         self
     }
 }
