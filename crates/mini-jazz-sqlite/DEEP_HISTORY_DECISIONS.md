@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 04:09:29 PDT 2026
+
+Decision: reject sealed block payloads whose history/read records reference missing tx records.
+
+Why: block-local history and read streams rely on the tx section for public tx identity, epochs, outcomes, and metadata. Accepting a block with dangling tx references would defer corruption until rebuild, sync export, or transaction lookup.
+
+Scope impact: import validation now requires every history `tx_id` and read `tx_id` in a block payload to appear in that block's tx section. Unit tests cover both dangling history and dangling read records.
+
 ## Thu May 28 04:07:17 PDT 2026
 
 Decision: document the accepted-block settledness gap instead of hiding it.

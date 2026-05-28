@@ -7802,6 +7802,29 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
     if tx_outcome_mismatch {
         return Err(crate::Error::new("history block tx outcome mismatch"));
     }
+    let tx_ids = bundle
+        .txs
+        .iter()
+        .map(|tx| tx.tx_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if bundle
+        .history
+        .iter()
+        .any(|record| !tx_ids.contains(record.tx_id.as_str()))
+    {
+        return Err(crate::Error::new(
+            "history block history references missing tx",
+        ));
+    }
+    if bundle
+        .reads
+        .iter()
+        .any(|record| !tx_ids.contains(record.tx_id.as_str()))
+    {
+        return Err(crate::Error::new(
+            "history block read references missing tx",
+        ));
+    }
     let tx_epochs = bundle
         .txs
         .iter()
@@ -11594,6 +11617,56 @@ mod tests {
                 updated_by: "alice".to_owned(),
             }],
         }
+    }
+
+    fn sample_history_block_export(bundle: &Bundle) -> HistoryBlockExport {
+        let encoded = encode_history_block_payload(bundle).unwrap();
+        let payload = lz4_flex::compress_prepend_size(&encoded);
+        HistoryBlockExport {
+            manifest: HistoryBlockManifest {
+                block_id: 1,
+                kind: "accepted".to_owned(),
+                table: "notes".to_owned(),
+                row_id: "note-1".to_owned(),
+                min_global_epoch: 1,
+                max_global_epoch: 1,
+                row_count: bundle.history.len() as i64,
+                tx_count: bundle.txs.len() as i64,
+                codec: HISTORY_BLOCK_CODEC.to_owned(),
+                format_version: HISTORY_BLOCK_FORMAT_VERSION,
+                uncompressed_bytes: encoded.len() as i64,
+                compressed_bytes: payload.len() as i64,
+                payload_sha256: sha256_hex(&payload),
+            },
+            tx_ranges: vec![HistoryBlockTxRange {
+                node_id: "node".to_owned(),
+                min_local_epoch: 1,
+                max_local_epoch: 1,
+            }],
+            payload,
+        }
+    }
+
+    #[test]
+    fn history_block_import_validation_rejects_history_without_tx_record() {
+        let mut bundle = sample_block_bundle();
+        bundle.history[0].tx_id = "tx-node-2".to_owned();
+        let block = sample_history_block_export(&bundle);
+
+        let err = validate_history_block_export_manifest(&block).unwrap_err();
+
+        assert!(err.to_string().contains("history references missing tx"));
+    }
+
+    #[test]
+    fn history_block_import_validation_rejects_read_without_tx_record() {
+        let mut bundle = sample_block_bundle();
+        bundle.reads[0].tx_id = "tx-node-2".to_owned();
+        let block = sample_history_block_export(&bundle);
+
+        let err = validate_history_block_export_manifest(&block).unwrap_err();
+
+        assert!(err.to_string().contains("read references missing tx"));
     }
 
     #[test]
