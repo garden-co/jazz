@@ -359,6 +359,11 @@ fn history_blocks_can_sync_as_raw_blocks_without_reopening_rows() {
     wrong_range[0].tx_ranges[0].max_local_epoch += 1;
     let err = bob.import_history_blocks(&wrong_range).unwrap_err();
     assert!(err.to_string().contains("tx range mismatch"));
+    let mut duplicate_range = blocks.clone();
+    let duplicate_tx_range = duplicate_range[0].tx_ranges[0].clone();
+    duplicate_range[0].tx_ranges.push(duplicate_tx_range);
+    let err = bob.import_history_blocks(&duplicate_range).unwrap_err();
+    assert!(err.to_string().contains("duplicate tx range"));
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 1);
     assert_eq!(bob.import_history_blocks(&blocks).unwrap(), 0);
     assert!(bob

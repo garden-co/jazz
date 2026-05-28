@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 04:01:03 PDT 2026
+
+Decision: reject duplicate imported tx-range entries for the same node.
+
+Why: `history_block_tx_index` is a summary index, not a row-by-row block payload. Each block should have one canonical local-epoch range per node; accepting duplicates would make sync payloads non-canonical and could hide malformed ranges behind map deduplication during validation.
+
+Scope impact: raw block import now fails duplicate range entries before comparing against the decoded tx summary.
+
 ## Thu May 28 03:59:58 PDT 2026
 
 Decision: require imported tx-range indexes to exactly match decoded block txs.

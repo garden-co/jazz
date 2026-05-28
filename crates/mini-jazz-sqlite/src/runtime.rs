@@ -7817,6 +7817,14 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
     {
         return Err(crate::Error::new("history block invalid tx range"));
     }
+    let mut range_nodes = BTreeSet::new();
+    if block
+        .tx_ranges
+        .iter()
+        .any(|range| !range_nodes.insert(range.node_id.as_str()))
+    {
+        return Err(crate::Error::new("history block duplicate tx range"));
+    }
     let mut expected_ranges = BTreeMap::<String, (i64, i64)>::new();
     for tx in &bundle.txs {
         expected_ranges
