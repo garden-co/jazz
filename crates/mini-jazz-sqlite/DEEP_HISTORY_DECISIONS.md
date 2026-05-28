@@ -18,3 +18,11 @@ Decision: keep no-block export ordering exactly on the old code path. Only sort/
 Why: two existing policy/lens tests caught that even harmless-looking tx/history reordering can change validation outcomes. The block path needs deterministic merge order, but the ordinary path should preserve current behavior until compaction is involved.
 
 Scope impact: sealed-block export has an explicit merge/sort step; ordinary export remains structurally unchanged.
+
+## Wed May 27 22:59:25 PDT 2026
+
+Decision: compact transaction rows opportunistically, not absolutely. A sealed tx row can be deleted from `jazz_tx` only if no current row, open history row, rejection, awaiting-dependency state, or implicit-read successor still needs its physical `tx_num`.
+
+Why: `tx_num` is still the open-store relational key for current projections and implicit previous-local-epoch reads. Deleting every tx in a sealed block would require a larger rewrite of those paths. Opportunistic deletion gives immediate metadata savings while preserving the current operational model.
+
+Scope impact: the block payload is the authoritative historical source for deleted tx metadata. Open tx rows remain where they are still operationally referenced.

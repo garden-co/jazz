@@ -403,16 +403,20 @@ impl Runtime {
             self.branch_num,
         )?;
         let sealed = decoded_history_blocks_for_table(&self.conn, table_name)?;
+        let mut sealed_reads = Vec::new();
         if !sealed.is_empty() {
             for block in sealed {
                 txs.extend(block.txs);
+                sealed_reads.extend(block.reads);
                 history.extend(block.history);
             }
             sort_history_records(&mut history);
             dedupe_history_records(&mut history);
             dedupe_txs(&mut txs);
         }
-        let reads = export_reads_for_history(&self.conn, &history)?;
+        let mut reads = export_reads_for_history(&self.conn, &history)?;
+        reads.extend(sealed_reads);
+        dedupe_reads(&mut reads);
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(make_bundle(
@@ -512,12 +516,13 @@ impl Runtime {
         let block_id = db.last_insert_rowid();
         insert_history_block_tx_index(&db, block_id, &selected)?;
         delete_history_rows_for_tx_nums(&db, table_name, row_num, &selected)?;
+        let sealed_transactions = delete_compacted_tx_rows(&db, &self.schema, &selected)?;
         db.commit()?;
 
         Ok(HistoryCompactionStats {
             sealed_history_rows: history.len() as i64,
             history_blocks: 1,
-            sealed_transactions: 0,
+            sealed_transactions,
             uncompressed_bytes: uncompressed.len() as i64,
             compressed_bytes: compressed.len() as i64,
         })
@@ -2165,17 +2170,23 @@ impl Runtime {
     }
 
     pub fn transaction_info(&self, tx_id: &str) -> Result<TransactionInfo> {
-        let (tx_id, global_epoch, conflict_mode) = self.conn.query_row(
-            "SELECT tx_id, global_epoch, conflict_mode FROM jazz_tx_public WHERE tx_id = ?",
-            params![tx_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    conflict_mode_name(row.get::<_, i64>(2)?),
-                ))
-            },
-        )?;
+        let open = self
+            .conn
+            .query_row(
+                "SELECT tx_id, global_epoch, conflict_mode FROM jazz_tx_public WHERE tx_id = ?",
+                params![tx_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        conflict_mode_name(row.get::<_, i64>(2)?),
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((tx_id, global_epoch, conflict_mode)) = open else {
+            return sealed_transaction_info(&self.conn, tx_id);
+        };
         let mut stmt = self.conn.prepare(
             "SELECT tier FROM jazz_tx_receipt receipt
              JOIN jazz_tx_public tx ON tx.tx_num = receipt.tx_num
@@ -5668,6 +5679,26 @@ fn dedupe_txs(records: &mut Vec<TxRecord>) {
     records.sort_by(|left, right| tx_sort_key(&left.tx_id).cmp(&tx_sort_key(&right.tx_id)));
 }
 
+fn dedupe_reads(records: &mut Vec<ReadRecord>) {
+    let mut by_key = BTreeMap::<(String, String, String, i64), ReadRecord>::new();
+    for record in records.drain(..) {
+        let key = (
+            record.tx_id.clone(),
+            record.table.clone(),
+            record.row_id.clone(),
+            record.reason,
+        );
+        match by_key.get(&key) {
+            Some(existing)
+                if existing.observed_tx_id.is_some() || record.observed_tx_id.is_none() => {}
+            _ => {
+                by_key.insert(key, record);
+            }
+        }
+    }
+    records.extend(by_key.into_values());
+}
+
 fn compactable_history_tx_nums(
     conn: &Connection,
     table_name: &str,
@@ -5759,6 +5790,79 @@ fn delete_history_rows_for_tx_nums(
     Ok(())
 }
 
+fn delete_compacted_tx_rows(conn: &Connection, schema: &SchemaDef, tx_nums: &[i64]) -> Result<i64> {
+    let mut deleted = 0;
+    let selected = tx_nums.iter().copied().collect::<BTreeSet<_>>();
+    for tx_num in tx_nums {
+        if !tx_can_leave_open_store(conn, schema, *tx_num, &selected)? {
+            continue;
+        }
+        conn.execute(
+            "DELETE FROM jazz_tx_receipt WHERE tx_num = ?",
+            params![tx_num],
+        )?;
+        conn.execute("DELETE FROM jazz_tx WHERE tx_num = ?", params![tx_num])?;
+        deleted += 1;
+    }
+    Ok(deleted)
+}
+
+fn tx_can_leave_open_store(
+    conn: &Connection,
+    schema: &SchemaDef,
+    tx_num: i64,
+    selected_tx_nums: &BTreeSet<i64>,
+) -> Result<bool> {
+    for table in schema.tables() {
+        let history_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE tx_num = ?",
+                crate::schema::history_table(&table.name)
+            ),
+            params![tx_num],
+            |row| row.get(0),
+        )?;
+        if history_count > 0 {
+            return Ok(false);
+        }
+        let current_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE visible_tx_num = ?",
+                crate::schema::current_table(&table.name)
+            ),
+            params![tx_num],
+            |row| row.get(0),
+        )?;
+        if current_count > 0 {
+            return Ok(false);
+        }
+    }
+    let blocked_count: i64 = conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM jazz_tx_rejection WHERE tx_num = ?)
+         + (SELECT COUNT(*) FROM jazz_tx_awaiting_dependency WHERE tx_num = ?)",
+        params![tx_num, tx_num],
+        |row| row.get(0),
+    )?;
+    if blocked_count > 0 {
+        return Ok(false);
+    }
+    let successor_tx_num = conn
+        .query_row(
+            "SELECT successor.tx_num
+             FROM jazz_tx successor
+             JOIN jazz_tx current ON current.tx_num = ?
+             WHERE successor.node_num = current.node_num
+               AND successor.local_epoch = current.local_epoch + 1",
+            params![tx_num],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(successor_tx_num
+        .map(|successor| selected_tx_nums.contains(&successor))
+        .unwrap_or(true))
+}
+
 fn decoded_history_blocks_for_table(conn: &Connection, table_name: &str) -> Result<Vec<Bundle>> {
     let table_num = crate::schema::table_num(conn, table_name)?;
     let mut stmt = conn.prepare(
@@ -5777,23 +5881,80 @@ fn decoded_history_blocks_for_table(conn: &Connection, table_name: &str) -> Resu
     let mut bundles = Vec::new();
     for row in rows {
         let (codec, format_version, payload) = row?;
-        if codec != HISTORY_BLOCK_CODEC {
-            return Err(crate::Error::new(format!(
-                "unsupported history block codec {codec}"
-            )));
-        }
-        if format_version != HISTORY_BLOCK_FORMAT_VERSION {
-            return Err(crate::Error::new(format!(
-                "unsupported history block format version {format_version}"
-            )));
-        }
-        let decoded = lz4_flex::decompress_size_prepended(&payload)
-            .map_err(|err| crate::Error::new(format!("decode history block: {err}")))?;
-        let bundle = serde_json::from_slice::<Bundle>(&decoded)
-            .map_err(|err| crate::Error::new(format!("decode history block bundle: {err}")))?;
-        bundles.push(bundle);
+        bundles.push(decode_history_block_payload(
+            &codec,
+            format_version,
+            &payload,
+        )?);
     }
     Ok(bundles)
+}
+
+fn decoded_history_blocks(conn: &Connection) -> Result<Vec<Bundle>> {
+    let mut stmt = conn.prepare(
+        "SELECT codec, format_version, payload
+         FROM history_blocks
+         ORDER BY table_num, row_num, min_global_epoch, block_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut bundles = Vec::new();
+    for row in rows {
+        let (codec, format_version, payload) = row?;
+        bundles.push(decode_history_block_payload(
+            &codec,
+            format_version,
+            &payload,
+        )?);
+    }
+    Ok(bundles)
+}
+
+fn decode_history_block_payload(
+    codec: &str,
+    format_version: i64,
+    payload: &[u8],
+) -> Result<Bundle> {
+    if codec != HISTORY_BLOCK_CODEC {
+        return Err(crate::Error::new(format!(
+            "unsupported history block codec {codec}"
+        )));
+    }
+    if format_version != HISTORY_BLOCK_FORMAT_VERSION {
+        return Err(crate::Error::new(format!(
+            "unsupported history block format version {format_version}"
+        )));
+    }
+    let decoded = lz4_flex::decompress_size_prepended(payload)
+        .map_err(|err| crate::Error::new(format!("decode history block: {err}")))?;
+    serde_json::from_slice::<Bundle>(&decoded)
+        .map_err(|err| crate::Error::new(format!("decode history block bundle: {err}")))
+}
+
+fn sealed_transaction_info(conn: &Connection, tx_id: &str) -> Result<TransactionInfo> {
+    for bundle in decoded_history_blocks(conn)? {
+        if let Some(tx) = bundle.txs.into_iter().find(|tx| tx.tx_id == tx_id) {
+            return Ok(TransactionInfo {
+                tx_id: tx.tx_id,
+                global_epoch: tx.global_epoch,
+                conflict_mode: conflict_mode_name(tx.conflict_mode),
+                receipt_tiers: tx
+                    .receipt_tiers
+                    .into_iter()
+                    .map(|tier| tier_name(tier).map_err(Into::into))
+                    .collect::<Result<Vec<_>>>()?,
+                awaiting_dependency: None,
+                rejection_code: tx.rejection_code,
+                rejection_detail: tx.rejection_detail,
+            });
+        }
+    }
+    Err(crate::Error::new(format!("unknown transaction {tx_id}")))
 }
 
 fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {

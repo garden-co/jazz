@@ -224,18 +224,24 @@ fn accepted_history_compaction_seals_old_versions_without_changing_exports() {
     let before_rows = alice.read_rows("notes").unwrap();
     let before_bundle = alice.export_table_history("notes").unwrap();
     assert_eq!(before_bundle.history.len(), 6);
+    let archived_tx_info = alice.transaction_info("tx-alice-node-2").unwrap();
 
     let compacted = alice
         .compact_accepted_history("notes", "note-1", 2)
         .unwrap();
     assert_eq!(compacted.sealed_history_rows, 4);
     assert_eq!(compacted.history_blocks, 1);
+    assert!(compacted.sealed_transactions > 0);
 
     let stats = alice.storage_stats().unwrap();
     assert_eq!(stats.history_rows, 2);
     assert_eq!(stats.sealed_history_rows, 4);
     assert_eq!(stats.history_blocks, 1);
     assert_eq!(alice.read_rows("notes").unwrap(), before_rows);
+    assert_eq!(
+        alice.transaction_info("tx-alice-node-2").unwrap(),
+        archived_tx_info
+    );
 
     let after_bundle = alice.export_table_history("notes").unwrap();
     assert_eq!(after_bundle.history, before_bundle.history);
