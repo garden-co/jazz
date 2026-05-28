@@ -1881,11 +1881,18 @@ fn batched_upserts_can_mix_creates_and_updates() {
                         ("pinned".to_owned(), json!(true)),
                     ]),
                 ),
+                (
+                    "note-2".to_owned(),
+                    BTreeMap::from([("body".to_owned(), json!("updated in same batch"))]),
+                ),
             ],
         )
         .unwrap();
 
-    assert_eq!(tx_ids, vec!["tx-alice-node-2", "tx-alice-node-3"]);
+    assert_eq!(
+        tx_ids,
+        vec!["tx-alice-node-2", "tx-alice-node-3", "tx-alice-node-4"]
+    );
     let rows = alice.read_rows("notes").unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(
@@ -1894,11 +1901,11 @@ fn batched_upserts_can_mix_creates_and_updates() {
     );
     assert_eq!(
         rows.iter().find(|row| row.id == "note-2").unwrap().values["body"],
-        json!("created in batch")
+        json!("updated in same batch")
     );
     assert_eq!(
         alice.export_table_history("notes").unwrap().history.len(),
-        3
+        4
     );
 
     bob.apply_bundle(&alice.export_table_history("notes").unwrap())
