@@ -7,16 +7,8 @@ const SORT_COLUMNS = {
   date: "$createdAt",
   name: "title",
 };
-const LABELS_QUERY = {
-  table: "labels",
-  conditions: [],
-  includes: {},
-  orderBy: [["name", "asc"]],
-};
 let db;
 let labelsById = new Map();
-let labelsSubscription;
-let suppressLabelSubscriptionState = false;
 let filters = {
   search: "",
   labelIds: [],
@@ -32,7 +24,7 @@ self.onmessage = async ({ data }) => {
       if (!db.readRows("projects").some((row) => row.id === PROJECT_ID)) {
         db.insertRow("projects", PROJECT_ID, { title: "Todo list" });
       }
-      withSuppressedLabelState(() => subscribeToLabels());
+      refreshLabelCache();
     } else if (data.type === "add") {
       const id = `todo-${crypto.randomUUID()}`;
       db.insertRow("todos", id, {
@@ -40,12 +32,12 @@ self.onmessage = async ({ data }) => {
         done: false,
         project: PROJECT_ID,
       });
-      withSuppressedLabelState(() => addTodoLabels(id, data.labels));
+      addTodoLabels(id, data.labels);
     } else if (data.type === "setFilters") {
       filters = sanitizeFilters(data.filters);
     } else if (data.type === "generate") {
       const startedAt = performance.now();
-      withSuppressedLabelState(() => ensureLabels(GENERATED_LABELS));
+      ensureLabels(GENERATED_LABELS);
       for (let i = 0; i < data.count; i++) {
         const todoId = `todo-${crypto.randomUUID()}`;
         const todoLabels = labelsForGeneratedTodo(i);
@@ -132,25 +124,6 @@ function addTodoLabels(todoId, labelNames) {
   }
 }
 
-function subscribeToLabels() {
-  if (labelsSubscription !== undefined) return;
-  labelsSubscription = db.subscribe(LABELS_QUERY, ({ all }) => {
-    labelsById = new Map(all.map(labelRow));
-    if (!suppressLabelSubscriptionState) {
-      postState();
-    }
-  });
-}
-
-function withSuppressedLabelState(fn) {
-  suppressLabelSubscriptionState = true;
-  try {
-    return fn();
-  } finally {
-    suppressLabelSubscriptionState = false;
-  }
-}
-
 function ensureLabels(labelNames) {
   const labels = [];
   const seen = new Set();
@@ -170,6 +143,10 @@ function ensureLabels(labelNames) {
 
 function labelRow(row) {
   return [row.id, { id: row.id, name: row.values.name }];
+}
+
+function refreshLabelCache() {
+  labelsById = new Map(db.readRows("labels").map(labelRow));
 }
 
 function sortedLabels() {

@@ -25,6 +25,8 @@ impl SchemaDef {
                 table.bool("done");
                 table.ref_("project", "projects");
                 table.index("open_created", ["done", "$createdAt"]);
+                table.index("created", ["$createdAt"]);
+                table.index("by_title", ["title"]);
             })
             .table("labels", |table| {
                 table.text("name");
@@ -708,15 +710,33 @@ mod tests {
         let conn = storage::open(Storage::Memory)?;
         install(&conn, &schema)?;
 
-        let sql: String = conn.query_row(
+        let open_created_sql: String = conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'todos_current_open_created_v2'",
+            [],
+            |row| row.get(0),
+        )?;
+        let created_sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'todos_current_created_v2'",
+            [],
+            |row| row.get(0),
+        )?;
+        let title_sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'todos_current_by_title_v2'",
             [],
             |row| row.get(0),
         )?;
 
         assert_eq!(
-            sql,
+            open_created_sql,
             "CREATE INDEX \"todos_current_open_created_v2\" ON \"todos__schema_v1_current\"(j_branch_num, is_deleted, \"done\", \"j_created_at\" DESC, row_num)"
+        );
+        assert_eq!(
+            created_sql,
+            "CREATE INDEX \"todos_current_created_v2\" ON \"todos__schema_v1_current\"(j_branch_num, is_deleted, \"j_created_at\" DESC, row_num)"
+        );
+        assert_eq!(
+            title_sql,
+            "CREATE INDEX \"todos_current_by_title_v2\" ON \"todos__schema_v1_current\"(j_branch_num, is_deleted, \"title\", row_num)"
         );
         Ok(())
     }
