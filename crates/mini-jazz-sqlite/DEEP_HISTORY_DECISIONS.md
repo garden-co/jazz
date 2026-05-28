@@ -523,3 +523,11 @@ Decision: route table-history export and query-scope sealed-history stitching th
 Why: repeated exports, observed refreshes, and query-scope repairs can touch the same sealed blocks repeatedly. If point reads and transaction lookups benefit from cached lz4/JSON decode, export paths should share that behavior too rather than quietly paying the cold decode cost on every call.
 
 Scope impact: move the accepted-block decode helpers onto `Runtime` so they can call `cached_history_block`. The exported logical bundle shape is unchanged.
+
+## Thu May 28 03:06:53 PDT 2026 - Align The RFC With One Physical Block Table
+
+Decision: update the RFC to describe accepted and rejected history as separate `block_kind` families inside one `history_blocks` table, rather than separate physical tables.
+
+Why: the implementation already proved that the payload codec, tx-range indexes, payload hashes, byte accounting, import path, and manifest comparison are shared. Keeping one table with kind filters gives the same logical separation with less schema and sync surface area.
+
+Scope impact: accepted blocks remain the only blocks used for visible history and accepted point reads. Rejected blocks stay explicit diagnostic/replay data even though they share storage machinery.

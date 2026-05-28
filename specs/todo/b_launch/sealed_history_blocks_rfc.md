@@ -39,15 +39,9 @@ history_open
   large/deep text-like values may point at segment-tree-backed content
 
 history_blocks
-  sealed accepted history ranges
-  includes row history plus the accepted tx metadata needed to decode it
+  sealed accepted and rejected history ranges, separated by block kind
+  includes row history plus the tx metadata needed to decode it
   columnar encoded and lz4-compressed inside ordinary SQLite BLOBs
-
-rejected_history_blocks
-  sealed rejected history ranges
-  includes rejected row history plus rejected tx metadata
-  stored separately from accepted blocks
-  optimized for audit/debug reads rather than visible history queries
 ```
 
 This stays in SQLite userland. We do not introduce a custom VFS, compressed
@@ -187,7 +181,11 @@ obsolete internal structure forever.
 
 ## `history_blocks`
 
-`history_blocks` stores sealed accepted history only.
+`history_blocks` stores sealed history blocks. Accepted and rejected history are
+separate block families inside the same physical table, distinguished by a
+`block_kind` value. This keeps accepted point-in-time reads from touching
+rejected history while reusing the same payload codec, hash, byte accounting,
+and tx-range index machinery.
 
 Each block covers a contiguous accepted-history range. The first implementation
 may make blocks per-row, because the motivating deep-history cases are single
@@ -205,10 +203,13 @@ Sketch:
 ```sql
 create table history_blocks (
   block_id integer primary key,
-  table_name text not null,
-  row_id blob not null,
-  min_batch_id blob not null,
-  max_batch_id blob not null,
+  block_kind integer not null,
+  table_num integer not null,
+  row_num integer not null,
+  min_node_num integer,
+  max_node_num integer,
+  min_local_epoch integer,
+  max_local_epoch integer,
   min_global_epoch integer,
   max_global_epoch integer,
   row_count integer not null,
@@ -216,11 +217,12 @@ create table history_blocks (
   format_version integer not null,
   uncompressed_bytes integer not null,
   compressed_bytes integer not null,
+  payload_sha256 blob not null,
   payload blob not null
 );
 
 create index history_blocks_row_epoch
-on history_blocks(table_name, row_id, max_global_epoch desc, min_global_epoch);
+on history_blocks(block_kind, table_num, row_num, max_global_epoch desc, min_global_epoch);
 ```
 
 The exact key columns should follow the durable storage format rather than this
@@ -323,9 +325,9 @@ visibility state, and it avoids making branch conflict resolution depend on
 opaque cold storage.
 
 Rejected records should also be compacted eventually, but into a separate
-rejected-history block family. They should not waste space forever in ordinary
-open history, and they should not pollute accepted blocks used for visible
-history, point-in-time reads, and ordinary sync.
+rejected-history block family selected by `block_kind`. They should not waste
+space forever in ordinary open history, and they should not pollute accepted
+blocks used for visible history, point-in-time reads, and ordinary sync.
 
 Recently rejected rows should remain in `history_open` for a while because they
 are useful for local diagnostics, user-facing error messages, and nearby sync
@@ -333,26 +335,8 @@ repair. Cold rejected blocks are for older rejected history that still needs to
 exist for audit, replay, or debugging but is not on the common visible-history
 path.
 
-Sketch:
-
-```sql
-create table rejected_history_blocks (
-  block_id integer primary key,
-  table_name text not null,
-  row_id blob not null,
-  min_batch_id blob not null,
-  max_batch_id blob not null,
-  row_count integer not null,
-  codec text not null,
-  format_version integer not null,
-  uncompressed_bytes integer not null,
-  compressed_bytes integer not null,
-  payload blob not null
-);
-```
-
 Rejected block manifests can be indexed for diagnostics and replay, but they do
-not need the same fast accepted point-in-time path as `history_blocks`.
+not need the same fast accepted point-in-time path as accepted blocks.
 
 ## Block Encoding
 
