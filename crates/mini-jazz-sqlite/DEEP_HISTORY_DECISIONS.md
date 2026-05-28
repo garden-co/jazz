@@ -90,3 +90,11 @@ Decision: defer block-aware projection rebuild until the replay path can be shap
 Why: `projection.rs` currently rebuilds by replaying physical history SQL rows. Sealed blocks decode to logical bundle records, so teaching rebuild to use them cleanly is more than a local query patch. Table-level rejected compaction is smaller, directly useful for maintenance, and keeps rejected history from becoming the next open-row leak.
 
 Scope impact: continue keeping visible accepted heads open for now. Add a table-wide rejected compaction API before attempting a larger logical replay refactor.
+
+## Wed May 27 23:27:00 PDT 2026
+
+Decision: benchmark block compaction should call the table-level compaction API, even in single-row workloads.
+
+Why: the maintenance boundary we want long-term is table/row-family compaction, not callers manually knowing a hot row id. Using the table API in benchmarks keeps the benchmark closer to the real maintenance shape while producing the same single-row behavior for the current canonical scenarios.
+
+Scope impact: the benchmark note now reports "table history block compaction". This is not expected to materially change current numbers because each canonical workload still has one hot row.

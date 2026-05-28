@@ -5140,10 +5140,10 @@ fn run_naive_deep_history_case(
     let mut notes = input.notes;
     if let Some(hot_tail) = input.compact_hot_tail {
         let compaction_started = Instant::now();
-        let compaction = writer.compact_accepted_history(input.table, input.row_id, hot_tail)?;
+        let compaction = writer.compact_table_accepted_history(input.table, hot_tail, hot_tail)?;
         let compaction_ms = ms(compaction_started.elapsed());
         notes.push(format!(
-            "History block compaction: hot tail {}, sealed rows {}, blocks {}, sealed tx rows {}, uncompressed bytes {}, compressed bytes {}, compaction {:.2} ms.",
+            "Table history block compaction: hot tail {}, sealed rows {}, blocks {}, sealed tx rows {}, uncompressed bytes {}, compressed bytes {}, compaction {:.2} ms.",
             hot_tail,
             compaction.sealed_history_rows,
             compaction.history_blocks,
