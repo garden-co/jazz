@@ -297,11 +297,11 @@ function todoHtml(todo) {
         <input type="checkbox" data-role="toggle" data-id="${escapeAttr(todo.id)}" ${todo.done ? "checked" : ""}>
         <span>
           <strong>${escapeHtml(todo.title)}</strong>
-          <small>${escapeHtml(todo.projectTitle)}</small>
+          <small>${escapeHtml(todo.projectTitle)} - by ${escapeHtml(todo.createdByName)}</small>
           ${labelHtml}
         </span>
       </label>
-      <button type="button" data-role="delete" data-id="${escapeAttr(todo.id)}">Delete</button>
+      <button type="button" data-role="delete" data-id="${escapeAttr(todo.id)}" ${todo.canDelete ? "" : "disabled"}>Delete</button>
     </li>
   `;
 }

@@ -138,8 +138,11 @@ self.onmessage = async ({ data }) => {
         db.updateRow("todos", data.id, { done: data.done });
       }
     } else if (data.type === "delete") {
-      if (visibleTodo(data.id)) {
+      const todo = visibleTodo(data.id);
+      if (todo?.created_by === activeUserId) {
         deleteTodoLabels(data.id);
+        db.deleteRow("todos", data.id);
+      } else if (todo) {
         db.deleteRow("todos", data.id);
       }
     }
@@ -226,6 +229,10 @@ function rowIds(table) {
   return new Set(db.readRows(table).map((row) => row.id));
 }
 
+function userName(userId) {
+  return USERS.find((user) => user.id === userId)?.name ?? userId;
+}
+
 function visibleScope() {
   const startedAt = performance.now();
   const projects = db
@@ -278,6 +285,9 @@ function postState(generateMs) {
     done: row.values.done,
     projectId: row.values.project,
     projectTitle: projectTitles.get(row.values.project) ?? row.values.project,
+    createdBy: row.created_by,
+    createdByName: userName(row.created_by),
+    canDelete: row.created_by === activeUserId,
     labels: todoLabels.get(row.id) ?? [],
     txId: row.tx_id,
   }));

@@ -2502,7 +2502,7 @@ impl Runtime {
             &db,
             &self.schema,
             &table,
-            &table.write_policy,
+            table.delete_policy(),
             &visible_row.values,
             self.branch_num,
             tx_num,
@@ -4665,18 +4665,28 @@ struct LocalWriteCheck<'a> {
 }
 
 fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
-    if check.op == 1 && matches!(check.table.write_policy, PolicyDef::CreatedByUser) {
+    let policy = write_policy_for_op(check.table, check.op);
+    if check.op == 1 && matches!(policy, PolicyDef::CreatedByUser) {
         return Ok(true);
     }
     policy::write_allowed(policy::WriteCheck {
         db: check.db,
         schema: check.schema,
         table: check.table,
+        policy,
         row_num: check.row_num,
         branch_num: check.branch_num,
         values: check.values,
         user: check.user,
     })
+}
+
+fn write_policy_for_op(table: &crate::schema::TableDef, op: i64) -> &PolicyDef {
+    if op == 3 {
+        table.delete_policy()
+    } else {
+        &table.write_policy
+    }
 }
 
 fn policy_denial_detail_for_history_record(
@@ -4686,6 +4696,7 @@ fn policy_denial_detail_for_history_record(
     tx_num: i64,
 ) -> Result<JsonValue> {
     let branch_num = branch::checkout(conn, &record.branch_id)?;
+    let policy = write_policy_for_op(table, record.op);
     if let Some(dependency) = unavailable_recorded_policy_dependency(conn, tx_num, branch_num)? {
         return Ok(json!({
             "reason": "policy_dependency_unavailable",
@@ -4695,7 +4706,7 @@ fn policy_denial_detail_for_history_record(
             "dependency_row_id": dependency.1,
         }));
     }
-    if let PolicyDef::RefReadable { field } = &table.write_policy {
+    if let PolicyDef::RefReadable { field } = policy {
         if let Some(dependency) = unavailable_policy_dependency(conn, table, record, tx_num, field)?
         {
             return Ok(json!({
@@ -5516,7 +5527,7 @@ impl<'a> TransactionBuilder<'a> {
                         &db,
                         &self.runtime.schema,
                         table_def,
-                        &table_def.write_policy,
+                        table_def.delete_policy(),
                         &visible_row.values,
                         self.runtime.branch_num,
                         tx_num,
@@ -5769,13 +5780,15 @@ fn write_allowed_for_history_record(
     let user = auth_user
         .ok_or_else(|| crate::Error::new("untrusted policy validation requires auth user"))?;
     let branch_num = branch::ensure(conn, &record.branch_id, None, now_ms())?;
-    if record.op == 3 && matches!(table.write_policy, PolicyDef::CreatedByUser) {
+    let policy = write_policy_for_op(table, record.op);
+    if record.op == 3 && matches!(policy, PolicyDef::CreatedByUser) {
         return Ok(record.created_by == user);
     }
     policy::write_allowed(policy::WriteCheck {
         db: conn,
         schema,
         table,
+        policy,
         row_num,
         branch_num,
         values: &record.values,
@@ -6247,6 +6260,15 @@ fn export_table_history(
         PolicyDependencyExport {
             table_name,
             policy: &schema.table_def(table_name)?.write_policy,
+            branch_nums: &branch_nums,
+            child_row_nums: None,
+        },
+    )?);
+    records.extend(export_policy_dependency_history(
+        &visibility,
+        PolicyDependencyExport {
+            table_name,
+            policy: schema.table_def(table_name)?.delete_policy(),
             branch_nums: &branch_nums,
             child_row_nums: None,
         },

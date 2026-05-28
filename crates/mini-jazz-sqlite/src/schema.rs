@@ -93,6 +93,7 @@ impl SchemaDef {
                 table.index("by_title", ["title"]);
                 table.index("open_visible", ["done", "project", "$createdAt"]);
                 table.read_if_ref_readable("project");
+                table.delete_if_created_by_user();
             })
             .table("labels", |table| {
                 table.text("name");
@@ -157,6 +158,11 @@ impl SchemaDef {
                 table.name,
                 table.write_policy.fingerprint_for_table(table)
             ));
+            parts.push(format!(
+                "{}:delete:{}",
+                table.name,
+                table.delete_policy().fingerprint_for_table(table)
+            ));
         }
         parts.join("|")
     }
@@ -175,6 +181,13 @@ pub(crate) struct TableDef {
     pub(crate) indexes: Vec<IndexDef>,
     pub(crate) read_policy: PolicyDef,
     pub(crate) write_policy: PolicyDef,
+    delete_policy: Option<PolicyDef>,
+}
+
+impl TableDef {
+    pub(crate) fn delete_policy(&self) -> &PolicyDef {
+        self.delete_policy.as_ref().unwrap_or(&self.write_policy)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -275,6 +288,7 @@ impl TableBuilder {
                 indexes: Vec::new(),
                 read_policy: PolicyDef::AllowAll,
                 write_policy: PolicyDef::AllowAll,
+                delete_policy: None,
             },
         }
     }
@@ -418,6 +432,10 @@ impl TableBuilder {
         self.table.write_policy = PolicyDef::RefReadable {
             field: field.to_owned(),
         };
+    }
+
+    pub fn delete_if_created_by_user(&mut self) {
+        self.table.delete_policy = Some(PolicyDef::CreatedByUser);
     }
 
     pub fn read_if_ref_readable(&mut self, field: &str) {
@@ -602,6 +620,9 @@ fn validate_policy_cycles(schema: &SchemaDef) -> Result<()> {
     for table in schema.tables() {
         validate_policy_cycle(schema, table, &table.read_policy, &mut BTreeSet::new())?;
         validate_policy_cycle(schema, table, &table.write_policy, &mut BTreeSet::new())?;
+        if let Some(delete_policy) = &table.delete_policy {
+            validate_policy_cycle(schema, table, delete_policy, &mut BTreeSet::new())?;
+        }
     }
     Ok(())
 }

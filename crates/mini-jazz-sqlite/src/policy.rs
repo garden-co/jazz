@@ -10,6 +10,7 @@ pub(crate) struct WriteCheck<'a> {
     pub(crate) db: &'a Connection,
     pub(crate) schema: &'a SchemaDef,
     pub(crate) table: &'a TableDef,
+    pub(crate) policy: &'a PolicyDef,
     pub(crate) row_num: i64,
     pub(crate) branch_num: i64,
     pub(crate) values: &'a BTreeMap<String, JsonValue>,
@@ -17,7 +18,7 @@ pub(crate) struct WriteCheck<'a> {
 }
 
 pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
-    match &check.table.write_policy {
+    match check.policy {
         PolicyDef::AllowAll => Ok(true),
         PolicyDef::CreatedByUser => {
             let user_num = users::ensure_user(check.db, check.user)?;
