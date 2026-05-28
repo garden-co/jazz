@@ -93,21 +93,26 @@ runs:
         prefix-key: rocksdb-v1
         key: ${{ inputs.rust-cache-key != '' && inputs.rust-cache-key || format('repo-{0}', env.CACHE_SCOPE_REPOSITORY_ID) }}
 
+    - name: Warn sccache unavailable on non-Linux runner
+      if: inputs.sccache == 'true' && runner.os != 'Linux'
+      shell: bash
+      run: echo "::warning::sccache is only supported on Linux runners (got ${{ runner.os }}); continuing without sccache."
+
     - name: Install sccache
-      if: inputs.sccache == 'true'
+      if: inputs.sccache == 'true' && runner.os == 'Linux'
       uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
       with:
         tool: sccache
 
     - name: Mount sccache sticky disk
-      if: inputs.sccache == 'true'
+      if: inputs.sccache == 'true' && runner.os == 'Linux'
       uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
       with:
         key: ${{ inputs.sccache-key != '' && inputs.sccache-key || format('sccache-{0}-{1}-v1', env.CACHE_SCOPE_REPOSITORY_ID, runner.os) }}
         path: /home/runner/.cache/sccache
 
     - name: Export sccache environment
-      if: inputs.sccache == 'true'
+      if: inputs.sccache == 'true' && runner.os == 'Linux'
       shell: bash
       run: |
         echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"

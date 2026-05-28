@@ -83,5 +83,9 @@ jobs:
             './packages/jazz-tools' \
             './crates/jazz-wasm' \
             './crates/jazz-napi' \
+            './crates/jazz-napi/npm/linux-x64-gnu' \
+            './crates/jazz-napi/npm/darwin-x64' \
+            './crates/jazz-napi/npm/darwin-arm64' \
+            './crates/jazz-napi/npm/win32-x64-msvc' \
             './crates/jazz-rn' \
             './packages/create-jazz'
