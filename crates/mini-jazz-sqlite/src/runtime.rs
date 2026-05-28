@@ -7762,6 +7762,51 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
     if block.manifest.payload_sha256 != actual_hash {
         return Err(crate::Error::new("history block payload hash mismatch"));
     }
+    let bundle = decode_history_block_payload(
+        &block.manifest.codec,
+        block.manifest.format_version,
+        &block.payload,
+    )?;
+    if block.manifest.row_count != bundle.history.len() as i64 {
+        return Err(crate::Error::new("history block row count mismatch"));
+    }
+    if block.manifest.tx_count != bundle.txs.len() as i64 {
+        return Err(crate::Error::new("history block tx count mismatch"));
+    }
+    if bundle.history.iter().any(|record| {
+        record.table != block.manifest.table || record.row_id != block.manifest.row_id
+    }) {
+        return Err(crate::Error::new("history block row identity mismatch"));
+    }
+    let tx_outcome_mismatch = match block.manifest.kind.as_str() {
+        "accepted" => bundle
+            .txs
+            .iter()
+            .any(|tx| tx.outcome == tx::OUTCOME_REJECTED),
+        "rejected" => bundle
+            .txs
+            .iter()
+            .any(|tx| tx.outcome != tx::OUTCOME_REJECTED),
+        _ => false,
+    };
+    if tx_outcome_mismatch {
+        return Err(crate::Error::new("history block tx outcome mismatch"));
+    }
+    let tx_epochs = bundle
+        .txs
+        .iter()
+        .map(|tx| tx.global_epoch.unwrap_or(tx.local_epoch))
+        .collect::<Vec<_>>();
+    if let Some(min_epoch) = tx_epochs.iter().min() {
+        if block.manifest.min_global_epoch != *min_epoch {
+            return Err(crate::Error::new("history block min epoch mismatch"));
+        }
+    }
+    if let Some(max_epoch) = tx_epochs.iter().max() {
+        if block.manifest.max_global_epoch != *max_epoch {
+            return Err(crate::Error::new("history block max epoch mismatch"));
+        }
+    }
     if block.manifest.tx_count > 0 && block.tx_ranges.is_empty() {
         return Err(crate::Error::new("history block missing tx ranges"));
     }

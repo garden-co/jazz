@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:58:57 PDT 2026
+
+Decision: validate imported block manifests against decoded payload summaries.
+
+Why: `payload_sha256` covers the compressed bytes, not the surrounding manifest. A peer should not be able to import a block whose payload is valid but whose row count, tx count, row identity, kind/outcome family, or epoch envelope lies to the SQLite indexes.
+
+Scope impact: raw block import now decodes the payload during validation and rejects manifest/payload mismatches before inserting `history_blocks` or `history_block_tx_index` rows. The raw-block sync test covers a row-count mismatch as the representative failure.
+
 ## Thu May 28 03:56:06 PDT 2026
 
 Decision: reject imported raw history blocks with nonsensical tx ranges.
