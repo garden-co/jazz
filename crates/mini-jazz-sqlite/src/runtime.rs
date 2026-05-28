@@ -477,11 +477,30 @@ impl Runtime {
         )?;
         let sealed = self.decoded_history_blocks_for_table(table_name)?;
         let mut sealed_reads = Vec::new();
+        let branch_base_epoch = if self.branch_num == 1 {
+            None
+        } else {
+            branch::base_global_epoch(&self.conn, self.branch_num)?
+        };
         if !sealed.is_empty() {
             for block in sealed {
+                let tx_ids_before = txs.len();
+                let history_before = history.len();
+                let reads_before = sealed_reads.len();
                 txs.extend(block.txs.iter().cloned());
                 sealed_reads.extend(block.reads.iter().cloned());
                 history.extend(block.history.iter().cloned());
+                if let Some(base_epoch) = branch_base_epoch {
+                    filter_branch_base_sealed_records(
+                        &mut txs,
+                        tx_ids_before,
+                        &mut sealed_reads,
+                        reads_before,
+                        &mut history,
+                        history_before,
+                        base_epoch,
+                    );
+                }
             }
             sort_history_records(&mut history);
             dedupe_history_records(&mut history);
@@ -8014,6 +8033,59 @@ fn tx_can_leave_open_store(
     Ok(successor_tx_num
         .map(|successor| selected_tx_nums.contains(&successor))
         .unwrap_or(true))
+}
+
+fn filter_branch_base_sealed_records(
+    txs: &mut Vec<TxRecord>,
+    txs_start: usize,
+    reads: &mut Vec<ReadRecord>,
+    reads_start: usize,
+    history: &mut Vec<HistoryRecord>,
+    history_start: usize,
+    base_epoch: i64,
+) {
+    let sealed_tx_epochs = txs[txs_start..]
+        .iter()
+        .map(|tx| (tx.tx_id.clone(), tx.global_epoch))
+        .collect::<BTreeMap<_, _>>();
+    let mut history_index = 0;
+    history.retain(|record| {
+        let keep = history_index < history_start
+            || record.branch_id != "main"
+            || !sealed_tx_epochs
+                .get(&record.tx_id)
+                .copied()
+                .flatten()
+                .map(|epoch| epoch > base_epoch)
+                .unwrap_or(false);
+        history_index += 1;
+        keep
+    });
+    let kept_history_tx_ids = history[history_start..]
+        .iter()
+        .map(|record| record.tx_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut read_index = 0;
+    reads.retain(|read| {
+        let keep = read_index < reads_start
+            || !sealed_tx_epochs.contains_key(&read.tx_id)
+            || kept_history_tx_ids.contains(&read.tx_id);
+        read_index += 1;
+        keep
+    });
+    let kept_read_tx_ids = reads[reads_start..]
+        .iter()
+        .map(|read| read.tx_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut tx_index = 0;
+    txs.retain(|tx| {
+        let keep = tx_index < txs_start
+            || !sealed_tx_epochs.contains_key(&tx.tx_id)
+            || kept_history_tx_ids.contains(&tx.tx_id)
+            || kept_read_tx_ids.contains(&tx.tx_id);
+        tx_index += 1;
+        keep
+    });
 }
 
 fn open_history_records_for_row_at_epoch(

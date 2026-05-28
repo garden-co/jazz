@@ -531,3 +531,11 @@ Decision: update the RFC to describe accepted and rejected history as separate `
 Why: the implementation already proved that the payload codec, tx-range indexes, payload hashes, byte accounting, import path, and manifest comparison are shared. Keeping one table with kind filters gives the same logical separation with less schema and sync surface area.
 
 Scope impact: accepted blocks remain the only blocks used for visible history and accepted point reads. Rejected blocks stay explicit diagnostic/replay data even though they share storage machinery.
+
+## Thu May 28 03:09:54 PDT 2026 - Branch Exports Filter Sealed Main History By Base Epoch
+
+Decision: when exporting table history from a pinned branch, filter sealed main-branch records to the branch base epoch before merging them into the bundle.
+
+Why: ordinary open-history branch export already avoids leaking main history that happened after the branch base. Once main history is sealed, blindly appending the whole accepted block would reintroduce those future main versions and violate branch snapshot semantics.
+
+Scope impact: branch-local sealed records are still retained, while main sealed records whose tx global epoch is newer than the branch base are omitted along with their sealed read/tx records. Added a regression test that failed before the filter.
