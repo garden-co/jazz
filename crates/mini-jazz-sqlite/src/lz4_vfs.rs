@@ -33,6 +33,11 @@ pub(crate) fn open(path: PathBuf) -> crate::Result<Connection> {
     Ok(Connection::open_with_flags_and_vfs(path, flags, VFS_NAME)?)
 }
 
+pub(crate) fn compact_cold_pages(path: &Path) -> std::io::Result<()> {
+    let mut db = CompressedMainDb::open(path, ffi::SQLITE_OPEN_READWRITE)?;
+    db.rewrite_compressed()
+}
+
 fn register() -> crate::Result<()> {
     REGISTER.call_once(|| unsafe {
         REGISTER_RESULT = register_inner();
@@ -407,6 +412,44 @@ impl CompressedMainDb {
             self.logical_size,
         )
     }
+
+    fn rewrite_compressed(&mut self) -> std::io::Result<()> {
+        self.file.set_len(0)?;
+        self.next_slot = 0;
+        self.locations.clear();
+        write_header(
+            &mut self.file,
+            self.page_size,
+            self.slot_size,
+            self.next_slot,
+            self.logical_size,
+        )?;
+        let pages = self
+            .pages
+            .iter()
+            .map(|(page_no, page)| (*page_no, page.clone()))
+            .collect::<Vec<_>>();
+        for (page_no, page) in pages {
+            let location = write_compressed_page_slot(
+                &mut self.file,
+                self.page_size,
+                self.slot_size,
+                &mut self.next_slot,
+                None,
+                &page,
+            )?;
+            self.locations.insert(page_no, location);
+            write_page_location(&mut self.file, page_no, location)?;
+        }
+        write_header(
+            &mut self.file,
+            self.page_size,
+            self.slot_size,
+            self.next_slot,
+            self.logical_size,
+        )?;
+        self.file.sync_all()
+    }
 }
 
 fn write_header(
@@ -537,12 +580,62 @@ fn write_page_slot(
             "sqlite page has wrong size",
         ));
     }
+    write_raw_page_slot(file, page_size, slot_size, next_slot, previous, page)
+}
+
+fn write_raw_page_slot(
+    file: &mut File,
+    page_size: usize,
+    slot_size: usize,
+    next_slot: &mut u64,
+    previous: Option<PageLocation>,
+    page: &[u8],
+) -> std::io::Result<PageLocation> {
+    if page.len() != page_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sqlite page has wrong size",
+        ));
+    }
+    write_page_slot_payload(
+        file,
+        page_size,
+        slot_size,
+        next_slot,
+        previous,
+        SLOT_CODEC_RAW,
+        page,
+    )
+}
+
+fn write_compressed_page_slot(
+    file: &mut File,
+    page_size: usize,
+    slot_size: usize,
+    next_slot: &mut u64,
+    previous: Option<PageLocation>,
+    page: &[u8],
+) -> std::io::Result<PageLocation> {
     let compressed = lz4_flex::compress_prepend_size(page);
     let (codec, payload) = if compressed.len() < page.len() {
         (SLOT_CODEC_LZ4, compressed.as_slice())
     } else {
         (SLOT_CODEC_RAW, page)
     };
+    write_page_slot_payload(
+        file, page_size, slot_size, next_slot, previous, codec, payload,
+    )
+}
+
+fn write_page_slot_payload(
+    file: &mut File,
+    _page_size: usize,
+    slot_size: usize,
+    next_slot: &mut u64,
+    previous: Option<PageLocation>,
+    codec: u8,
+    payload: &[u8],
+) -> std::io::Result<PageLocation> {
     let required_slot_count = (SLOT_HEADER_LEN + payload.len()).div_ceil(slot_size).max(1);
     let location = match previous {
         Some(location) if location.slot_count as usize >= required_slot_count => PageLocation {

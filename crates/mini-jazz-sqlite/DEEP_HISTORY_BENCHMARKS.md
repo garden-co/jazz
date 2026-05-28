@@ -383,28 +383,29 @@ Shape:
 - Leave WAL/SHM/temp files as passthrough files on SQLite's default VFS.
 - Keep an in-memory page cache for this prototype.
 - Maintain a fixed page table mapping logical SQLite page numbers to allocated
-  compressed slot runs.
-- Use 512-byte physical slots. Rewrites stay in the same slot run when the new
-  compressed payload still fits; otherwise they allocate a new run.
+  slot runs.
+- Use 512-byte physical slots.
+- Writes store raw page payloads in hot slots.
+- After the write loop, the benchmark explicitly runs a cold-page compaction
+  pass that rewrites live pages with lz4 when it wins.
 - This version does not yet reuse freed slot runs.
 
 ### Naive Full-Row History, LZ4 VFS
 
-| Scenario        | Updates | Logical DB bytes | Physical file bytes | Physical/logical | Total loop | Write only | Cold load | Current read |
-| --------------- | ------: | ---------------: | ------------------: | ---------------: | ---------: | ---------: | --------: | -----------: |
-| Append stream   |    2225 |       18,796,544 |           3,760,672 |            0.20x |  17,460 ms |  13,989 ms |    945 ms |      0.11 ms |
-| Automerge paper |    2900 |        9,859,072 |           4,477,984 |            0.45x |  20,984 ms |  18,310 ms |    707 ms |      0.08 ms |
-| Canvas          |    3900 |          884,736 |           2,447,392 |            2.77x |  28,486 ms |  26,203 ms |    636 ms |      0.06 ms |
+| Scenario        | Updates | Logical DB bytes | Physical file bytes | Physical/logical | Total loop | Write only | Cold compact | Cold load | Current read |
+| --------------- | ------: | ---------------: | ------------------: | ---------------: | ---------: | ---------: | -----------: | --------: | -----------: |
+| Append stream   |    2225 |       18,796,544 |           3,520,032 |            0.19x |  18,844 ms |  15,430 ms |       106 ms |    927 ms |      0.07 ms |
+| Automerge paper |    2900 |        9,859,072 |           4,060,192 |            0.41x |  21,425 ms |  18,849 ms |        63 ms |    700 ms |      0.07 ms |
+| Canvas          |    3900 |          884,736 |           1,568,288 |            1.77x |  26,861 ms |  24,556 ms |        15 ms |    642 ms |      0.06 ms |
 
 ### Takeaway
 
-Slot allocation makes the write path much less pathological than compacting the
-whole compressed file on every sync. Append write-only time dropped from
-`41,550 ms` to `13,989 ms`.
+Cold-page compression makes the maintenance pass cheap: `15-106 ms` for these
+canonical caps. It also improves final physical size versus raw hot slots.
 
-The tradeoff is storage: without free-list reuse, pages whose compressed size
-grows allocate new slot runs and leave old runs behind. Append still compresses
-well overall (`18.8 MB` logical SQLite bytes to `3.8 MB` physical bytes), but
-canvas is worse than plain SQLite because each tiny row update churns metadata
-pages through new slot runs. The next target is free-list reuse by slot class,
-plus less eager header/page-table writes.
+It does not yet recover naive SQLite write speed. The write-only time remains
+far above the normal file VFS, which means our custom VFS bookkeeping is now the
+bottleneck rather than lz4 itself. The next target is to make hot pages look
+much more like ordinary SQLite pages: avoid page-table writes for hot pages,
+batch header updates, and revisit whether the main DB should delegate hot-page
+storage to the default VFS until pages are explicitly cooled.

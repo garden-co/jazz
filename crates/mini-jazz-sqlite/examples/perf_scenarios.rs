@@ -243,6 +243,7 @@ struct DeepHistoryCaseReport {
     bundle_to_reference_gzip_ratio: Option<f64>,
     extrapolated_write_ms_for_target: Option<f64>,
     extrapolated_database_bytes_for_target: Option<i64>,
+    lz4_cold_compact_ms: Option<f64>,
     page_count_for_compression: Option<usize>,
     lz4_page_compressed_bytes: Option<usize>,
     lz4_page_compressed_to_database_ratio: Option<f64>,
@@ -4560,6 +4561,7 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         }),
         extrapolated_write_ms_for_target: None,
         extrapolated_database_bytes_for_target: None,
+        lz4_cold_compact_ms: None,
         page_count_for_compression: Some(
             writer_page_compression.page_count + rope_page_compression.page_count,
         ),
@@ -4768,6 +4770,7 @@ fn run_jazz_rope_position_case(
         }),
         extrapolated_write_ms_for_target: None,
         extrapolated_database_bytes_for_target: None,
+        lz4_cold_compact_ms: None,
         page_count_for_compression: Some(
             writer_page_compression.page_count + rope_page_compression.page_count,
         ),
@@ -5144,6 +5147,19 @@ fn run_naive_deep_history_case(
         .unwrap_or(last_value);
     let final_payload_bytes = final_payload.len();
     let stats = writer.storage_stats()?;
+    drop(writer);
+    let lz4_cold_compact_ms = if matches!(input.storage, DeepHistoryStorage::Lz4Vfs) {
+        let compact_started = Instant::now();
+        mini_jazz_sqlite::compact_lz4_storage(&db_path)?;
+        Some(ms(compact_started.elapsed()))
+    } else {
+        None
+    };
+    let total_file_bytes = if matches!(input.storage, DeepHistoryStorage::Lz4Vfs) {
+        sqlite_path_total_file_bytes(&db_path)
+    } else {
+        stats.total_file_bytes
+    };
     let extrapolated_final_payload_bytes_for_target =
         if input.compare_to_final_payload && stopped_early && completed_updates > 0 {
             Some(
@@ -5214,7 +5230,7 @@ fn run_naive_deep_history_case(
         reference_gzip_bytes: input.reference_gzip_bytes,
         bundle_bytes: bundle_summary.bytes,
         database_bytes: stats.database_bytes,
-        total_file_bytes: stats.total_file_bytes,
+        total_file_bytes,
         history_rows: stats.history_rows,
         current_rows: stats.current_rows,
         database_to_final_payload_ratio: if input.compare_to_final_payload {
@@ -5223,14 +5239,14 @@ fn run_naive_deep_history_case(
             None
         },
         total_file_to_final_payload_ratio: if input.compare_to_final_payload {
-            ratio_i64_usize(stats.total_file_bytes, final_payload_bytes)
+            ratio_i64_usize(total_file_bytes, final_payload_bytes)
         } else {
             None
         },
         database_to_extrapolated_final_payload_ratio: extrapolated_final_payload_bytes_for_target
             .and_then(|bytes| ratio_i64_usize(stats.database_bytes, bytes)),
         total_file_to_extrapolated_final_payload_ratio: extrapolated_final_payload_bytes_for_target
-            .and_then(|bytes| ratio_i64_usize(stats.total_file_bytes, bytes)),
+            .and_then(|bytes| ratio_i64_usize(total_file_bytes, bytes)),
         database_to_reference_gzip_ratio: input
             .reference_gzip_bytes
             .and_then(|bytes| ratio_i64_usize(stats.database_bytes, bytes)),
@@ -5239,6 +5255,7 @@ fn run_naive_deep_history_case(
             .and_then(|bytes| ratio_usize(bundle_summary.bytes, bytes)),
         extrapolated_write_ms_for_target,
         extrapolated_database_bytes_for_target,
+        lz4_cold_compact_ms,
         page_count_for_compression: page_compression.as_ref().map(|report| report.page_count),
         lz4_page_compressed_bytes: page_compression
             .as_ref()
