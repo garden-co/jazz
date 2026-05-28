@@ -197,7 +197,12 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
 }
 
 function ExtensionLiveQuery() {
-  const routeParams = useParams({ strict: false });
+  const routeParams = useParams({ from: appRoutes.liveQuery });
+  const linkRouteParams = {
+    branch: routeParams.branch,
+    connectionId: routeParams.connectionId,
+    schemaHash: routeParams.schemaHash,
+  };
   const { runtime, wasmSchema } = useDevtoolsContext();
   const subscriptions = useActiveSubscriptions(runtime);
   const [selectedTable, setSelectedTable] = useState("");
@@ -229,9 +234,7 @@ function ExtensionLiveQuery() {
           <Link
             to={appRoutes.tableData}
             params={{
-              connectionId: routeParams.connectionId ?? "",
-              branch: routeParams.branch ?? "",
-              schemaHash: routeParams.schemaHash ?? "",
+              ...linkRouteParams,
               tableName: row.original.table,
             }}
             search={buildExplorerSearch(row.original.query)}
@@ -285,7 +288,7 @@ function ExtensionLiveQuery() {
         ),
       },
     ],
-    [routeParams.branch, routeParams.connectionId, routeParams.schemaHash],
+    [linkRouteParams.branch, linkRouteParams.connectionId, linkRouteParams.schemaHash],
   );
 
   const table = useReactTable({
@@ -366,7 +369,12 @@ function ExtensionLiveQuery() {
 }
 
 function StandaloneLiveQuery() {
-  const routeParams = useParams({ strict: false });
+  const routeParams = useParams({ from: appRoutes.liveQuery });
+  const linkRouteParams = {
+    branch: routeParams.branch,
+    connectionId: routeParams.connectionId,
+    schemaHash: routeParams.schemaHash,
+  };
   const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry("standalone");
   const [selectedTable, setSelectedTable] = useState("");
 
@@ -437,9 +445,7 @@ function StandaloneLiveQuery() {
                     <Link
                       to={appRoutes.tableData}
                       params={{
-                        connectionId: routeParams.connectionId ?? "",
-                        branch: routeParams.branch ?? "",
-                        schemaHash: routeParams.schemaHash ?? "",
+                        ...linkRouteParams,
                         tableName: query.table,
                       }}
                       search={buildExplorerSearch(query.query)}

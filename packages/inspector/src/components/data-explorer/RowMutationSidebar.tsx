@@ -8,7 +8,7 @@ import {
   type MutationFormMode,
   parseMutationFieldValue,
 } from "./row-mutation-form.js";
-import { buildRelationFilterSearch } from "./tableSearchParams.js";
+import { buildRelationFilterSearch } from "#data-explorer/tableSearchParams.ts";
 import styles from "./RowMutationSidebar.module.css";
 
 interface FieldState {
@@ -97,7 +97,12 @@ export function RowMutationSidebar({
   onSave,
   onDelete,
 }: RowMutationSidebarProps) {
-  const routeParams = useParams({ strict: false });
+  const routeParams = useParams({ from: appRoutes.tableData });
+  const linkRouteParams = {
+    branch: routeParams.branch,
+    connectionId: routeParams.connectionId,
+    schemaHash: routeParams.schemaHash,
+  };
   const [fields, setFields] = useState<Record<string, FieldState>>(() =>
     createInitialFields(rowValues, mode, schemaColumns),
   );
@@ -227,9 +232,7 @@ export function RowMutationSidebar({
                       <Link
                         to={appRoutes.tableData}
                         params={{
-                          connectionId: routeParams.connectionId ?? "",
-                          branch: routeParams.branch ?? "",
-                          schemaHash: routeParams.schemaHash ?? "",
+                          ...linkRouteParams,
                           tableName: column.references,
                         }}
                         search={buildRelationFilterSearch(relationTarget)}

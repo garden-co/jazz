@@ -13,3 +13,9 @@ export const appRoutes = {
   tableData: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data",
   tableSchema: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema",
 } as const;
+
+export interface InspectorRouteParams {
+  branch: string;
+  connectionId: string;
+  schemaHash: string;
+}

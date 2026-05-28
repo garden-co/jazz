@@ -6,8 +6,13 @@ import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./TableSchemaSql.module.css";
 
 export function TableSchemaDefinition() {
-  const params = useParams({ strict: false });
-  const table = params.tableName ?? "";
+  const params = useParams({ from: appRoutes.tableSchema });
+  const table = params.tableName;
+  const routeParams = {
+    branch: params.branch,
+    connectionId: params.connectionId,
+    schemaHash: params.schemaHash,
+  };
 
   const { runtime, storedPermissions, wasmSchema: schema } = useDevtoolsContext();
 
@@ -45,9 +50,7 @@ export function TableSchemaDefinition() {
         <Link
           to={appRoutes.tableData}
           params={{
-            connectionId: params.connectionId ?? "",
-            branch: params.branch ?? "",
-            schemaHash: params.schemaHash ?? "",
+            ...routeParams,
             tableName: table,
           }}
           className={styles.backLink}

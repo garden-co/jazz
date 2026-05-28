@@ -2,8 +2,8 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import type { SortColumn } from "react-data-grid";
 
 import { appRoutes } from "#lib/navigation/appRoutes.ts";
-import type { TableFilterClause } from "./TableFilterBuilder.js";
-import { WHERE_OPERATORS, type WhereOperator } from "../../utility/where-operators.js";
+import type { TableFilterClause } from "#data-explorer/TableFilterBuilder.tsx";
+import { WHERE_OPERATORS, type WhereOperator } from "../../utility/where-operators.ts";
 
 export const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 export const DEFAULT_PAGE_SIZE = 25;

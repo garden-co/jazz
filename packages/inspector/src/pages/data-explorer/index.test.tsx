@@ -6,6 +6,7 @@ import { DataExplorer } from "./index";
 
 const mockSetQueryPropagation = vi.fn();
 const mockUseDevtoolsContext = vi.fn();
+const routeParams = { branch: "main", connectionId: "local", schemaHash: "hash-a" };
 
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => mockUseDevtoolsContext(),
@@ -32,8 +33,8 @@ describe("DataExplorer", () => {
 
   it("renders a resizable table list panel", async () => {
     renderWithRouter(
-      <InspectorLayout>
-        <DataExplorer>
+      <InspectorLayout routeParams={routeParams}>
+        <DataExplorer routeParams={routeParams}>
           <div>table content</div>
         </DataExplorer>
       </InspectorLayout>,
