@@ -12,10 +12,12 @@
   border-radius: 8px;
   background: #151a24;
   padding: 20px;
+  display: grid;
+  gap: 16px;
 }
 
 .stateTitle {
-  margin: 0 0 10px;
+  margin: 0;
   color: #e4e9f3;
   font-size: 20px;
 }
@@ -67,6 +69,18 @@
   margin: 0;
   color: #a6b3c8;
   font-size: 14px;
+}
+
+.connectionPage {
+  min-height: 100vh;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  background: #0f141b;
+}
+
+.connectionFormCard {
+  width: min(560px, 100%);
 }
 
 .connectionManager {
