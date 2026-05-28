@@ -4348,6 +4348,7 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
     let receiver_rope = Connection::open(&receiver_rope_path)?;
     persisted_rope::install(&writer_rope)?;
     persisted_rope::install(&receiver_rope)?;
+    let mut receiver_sidecar_watermark = SidecarWatermark::default();
 
     let mut root = None;
     let (initial_root, mut final_payload_bytes) = (input.next_edit)(&writer_rope, root, 0)?;
@@ -4358,7 +4359,11 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
         map1("body_root", json!(root.unwrap_or_default().to_string())),
     )?;
     receiver.apply_bundle(&writer.export_table_history("documents")?)?;
-    copy_rope_sidecar(&writer_rope, &receiver_rope)?;
+    copy_rope_sidecar_incremental(
+        &writer_rope,
+        &receiver_rope,
+        &mut receiver_sidecar_watermark,
+    )?;
     let mut subscription = receiver.subscribe_rows("documents")?;
 
     let started = Instant::now();
@@ -4382,7 +4387,11 @@ fn run_jazz_rope_text_case(mut input: JazzRopeTextCaseInput) -> BenchResult<Deep
             let receive_started = Instant::now();
             let bundle = writer.export_table_history("documents")?;
             receiver.profile_apply_bundle(&bundle)?;
-            copy_rope_sidecar(&writer_rope, &receiver_rope)?;
+            copy_rope_sidecar_incremental(
+                &writer_rope,
+                &receiver_rope,
+                &mut receiver_sidecar_watermark,
+            )?;
             let diffs = receiver.poll_subscription(&mut subscription)?;
             if diffs.is_empty() {
                 return Err("jazz rope text listener did not observe sampled edit".into());
@@ -4523,6 +4532,7 @@ fn run_jazz_rope_position_case(
     let receiver_rope = Connection::open(&receiver_rope_path)?;
     persisted_rope::install(&writer_rope)?;
     persisted_rope::install(&receiver_rope)?;
+    let mut receiver_sidecar_watermark = SidecarWatermark::default();
 
     let mut root = None;
     root = persisted_rope::append_position(&writer_rope, root, input.positions[0])?;
@@ -4532,7 +4542,11 @@ fn run_jazz_rope_position_case(
         map1("position_root", json!(root.unwrap().to_string())),
     )?;
     receiver.apply_bundle(&writer.export_table_history("canvas_objects")?)?;
-    copy_rope_sidecar(&writer_rope, &receiver_rope)?;
+    copy_rope_sidecar_incremental(
+        &writer_rope,
+        &receiver_rope,
+        &mut receiver_sidecar_watermark,
+    )?;
     let mut subscription = receiver.subscribe_rows("canvas_objects")?;
 
     let started = Instant::now();
@@ -4556,7 +4570,11 @@ fn run_jazz_rope_position_case(
             let receive_started = Instant::now();
             let bundle = writer.export_table_history("canvas_objects")?;
             receiver.profile_apply_bundle(&bundle)?;
-            copy_rope_sidecar(&writer_rope, &receiver_rope)?;
+            copy_rope_sidecar_incremental(
+                &writer_rope,
+                &receiver_rope,
+                &mut receiver_sidecar_watermark,
+            )?;
             let diffs = receiver.poll_subscription(&mut subscription)?;
             if diffs.is_empty() {
                 return Err("jazz rope listener did not observe sampled position edit".into());
@@ -4676,6 +4694,118 @@ fn row_root_id(rows: &[mini_jazz_sqlite::RowView], field: &str) -> BenchResult<i
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "missing rope root field".into())
         .and_then(|value| value.parse::<i64>().map_err(Into::into))
+}
+
+#[derive(Default)]
+struct SidecarWatermark {
+    node_id: i64,
+    text_segment_id: i64,
+    position_segment_id: i64,
+}
+
+fn copy_rope_sidecar_incremental(
+    source: &Connection,
+    target: &Connection,
+    watermark: &mut SidecarWatermark,
+) -> BenchResult<usize> {
+    let mut bytes = 0usize;
+
+    let mut text_stmt = source.prepare(
+        "SELECT segment_id, text
+         FROM jazz_rope_segment
+         WHERE segment_id > ?
+         ORDER BY segment_id",
+    )?;
+    let text_after = watermark.text_segment_id.saturating_sub(1);
+    let text_rows = text_stmt.query_map(params![text_after], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in text_rows {
+        let (segment_id, text) = row?;
+        bytes += text.len();
+        target.execute(
+            "INSERT OR REPLACE INTO jazz_rope_segment (segment_id, text) VALUES (?, ?)",
+            params![segment_id, text],
+        )?;
+        watermark.text_segment_id = watermark.text_segment_id.max(segment_id);
+    }
+
+    let mut position_stmt = source.prepare(
+        "SELECT segment_id, base_x, base_y, last_x, last_y, sample_count, deltas
+         FROM jazz_rope_position_segment
+         WHERE segment_id > ?
+         ORDER BY segment_id",
+    )?;
+    let position_after = watermark.position_segment_id.saturating_sub(1);
+    let position_rows = position_stmt.query_map(params![position_after], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
+        ))
+    })?;
+    for row in position_rows {
+        let (segment_id, base_x, base_y, last_x, last_y, sample_count, deltas) = row?;
+        bytes += 32 + deltas.len();
+        target.execute(
+            "INSERT OR REPLACE INTO jazz_rope_position_segment
+             (segment_id, base_x, base_y, last_x, last_y, sample_count, deltas)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                segment_id,
+                base_x,
+                base_y,
+                last_x,
+                last_y,
+                sample_count,
+                deltas
+            ],
+        )?;
+        watermark.position_segment_id = watermark.position_segment_id.max(segment_id);
+    }
+
+    let mut node_stmt = source.prepare(
+        "SELECT node_id, kind, byte_len, left_node_id, right_node_id, segment_id, segment_start
+         FROM jazz_rope_node
+         WHERE node_id > ?
+         ORDER BY node_id",
+    )?;
+    let node_rows = node_stmt.query_map(params![watermark.node_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+        ))
+    })?;
+    for row in node_rows {
+        let (node_id, kind, byte_len, left, right, segment_id, segment_start) = row?;
+        bytes += 56;
+        target.execute(
+            "INSERT INTO jazz_rope_node
+             (node_id, kind, byte_len, left_node_id, right_node_id, segment_id, segment_start)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                node_id,
+                kind,
+                byte_len,
+                left,
+                right,
+                segment_id,
+                segment_start
+            ],
+        )?;
+        watermark.node_id = watermark.node_id.max(node_id);
+    }
+
+    Ok(bytes)
 }
 
 fn copy_rope_sidecar(source: &Connection, target: &Connection) -> BenchResult<()> {

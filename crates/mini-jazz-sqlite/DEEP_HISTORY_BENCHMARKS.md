@@ -263,3 +263,64 @@ current reads tiny for presence-like positions. The remaining obvious problem is
 sync/cold-load: every sampled receive and cold load currently copies the full
 sidecar snapshot and exports full Jazz row history. The next experiment should
 make sidecar sync incremental across text and position codecs.
+
+## Experiment: Incremental Sidecar Sync
+
+Date: 2026-05-27
+
+Shape:
+
+- Sampled live receive copies only new sidecar nodes and new or still-active
+  segments, tracked by sidecar id watermarks.
+- Cold load and final bundle-size accounting still use full sidecar snapshots.
+- Jazz row-history export is still full table history in these probes.
+
+### Append Stream, Incremental Sidecar
+
+Input: `2225` token-like appends
+
+| Metric                | Full sidecar snapshot | Incremental sidecar |
+| --------------------- | --------------------: | ------------------: |
+| total loop            |            7986.40 ms |          6438.34 ms |
+| write only            |            2050.71 ms |          2516.18 ms |
+| sampled receive total |            5933.25 ms |          3919.78 ms |
+| live receive average  |             988.87 ms |           653.30 ms |
+| live receive p95      |            2191.56 ms |          1377.11 ms |
+| cold load             |            1853.95 ms |          1800.99 ms |
+| current read          |              52.78 ms |            50.82 ms |
+
+### Automerge Paper, Incremental Sidecar
+
+Input: first `2900` edits from `automerge-paper.json.gz`
+
+| Metric                | Full sidecar snapshot | Incremental sidecar |
+| --------------------- | --------------------: | ------------------: |
+| total loop            |          29,510.70 ms |        23,861.41 ms |
+| write only            |            6562.95 ms |        13,016.09 ms |
+| sampled receive total |          22,944.71 ms |        10,842.13 ms |
+| live receive average  |            3824.12 ms |          1807.02 ms |
+| live receive p95      |            9865.29 ms |          3436.79 ms |
+| cold load             |          10,879.55 ms |        12,275.93 ms |
+| current read          |              40.48 ms |            40.24 ms |
+
+### Canvas Positions, Incremental Sidecar
+
+Input: `3900` frames
+
+| Metric                | Full sidecar snapshot | Incremental sidecar |
+| --------------------- | --------------------: | ------------------: |
+| total loop            |          16,495.76 ms |        17,353.74 ms |
+| write only            |            3681.13 ms |          6686.90 ms |
+| sampled receive total |          12,810.41 ms |        10,662.75 ms |
+| live receive average  |            2135.07 ms |          1777.12 ms |
+| live receive p95      |            5595.58 ms |          3341.81 ms |
+| cold load             |            8541.08 ms |          3745.26 ms |
+| current read          |               0.21 ms |             0.17 ms |
+
+### Takeaway
+
+Incremental sidecar copying helps sampled live receive across all three shapes,
+but the remaining cost is still large because every sampled receive also exports
+and applies full Jazz row history. The next likely target is incremental Jazz
+history export for root-ref rows, or a sequence-aware subscription path that can
+avoid re-sending every historical root ref.
