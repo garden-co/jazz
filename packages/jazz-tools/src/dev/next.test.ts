@@ -93,8 +93,9 @@ describe("withJazz", () => {
 
     expect(resolved.poweredByHeader).toBe(false);
     expect(resolved.serverExternalPackages).toEqual(
-      expect.arrayContaining(["better-sqlite3", "jazz-tools", "jazz-napi"]),
+      expect.arrayContaining(["better-sqlite3", "jazz-napi"]),
     );
+    expect(resolved.serverExternalPackages).not.toContain("jazz-tools");
   });
 
   it("does not inject Jazz env vars outside the development phase", async () => {
