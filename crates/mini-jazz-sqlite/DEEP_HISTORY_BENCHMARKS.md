@@ -25,9 +25,23 @@ input size. A full result includes:
 
 `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all` runs append, Automerge, and canvas
 without running the broader perf suite. Use it for smoke checks or when all
-three scenarios intentionally share the same env caps.
+three scenarios should run together. Scenario-specific sample intervals override
+the shared `MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY`.
 
 Current canonical inputs use scenario-specific sample intervals:
+
+```bash
+MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all \
+MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS=2225 \
+MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY=445 \
+MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_UPDATES=2900 \
+MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY=580 \
+MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES=3900 \
+MINI_JAZZ_DEEP_HISTORY_CANVAS_SAMPLE_EVERY=780 \
+target/debug/examples/perf_scenarios
+```
+
+Or run one scenario at a time:
 
 ```bash
 MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=append \

@@ -4157,7 +4157,8 @@ fn run_all_deep_history_probes() -> BenchResult<Vec<DeepHistoryReport>> {
 fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 100_000);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
-    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
+    let sample_every =
+        deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY", 1_000);
     let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
     let mut state = String::new();
     run_naive_deep_history_case(DeepHistoryCaseInput {
@@ -4187,7 +4188,7 @@ fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
 fn run_append_stream_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 2_225);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
-    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 445).max(1);
+    let sample_every = deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY", 445);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
     let max_rows_per_block = deep_history_max_rows_per_block();
     let reclaim_after_compact = env_bool("MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT", false);
@@ -4229,7 +4230,8 @@ fn run_automerge_paper_probe() -> BenchResult<DeepHistoryCaseReport> {
         .unwrap_or(trace.txns.len())
         .min(trace.txns.len());
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
-    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
+    let sample_every =
+        deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY", 1_000);
     let mut state = trace.start_content;
     let txns = trace.txns;
     let available_txns = txns.len();
@@ -4269,7 +4271,8 @@ fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseRepo
         .unwrap_or(2_900)
         .min(trace.txns.len());
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
-    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 580).max(1);
+    let sample_every =
+        deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY", 580);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
     let max_rows_per_block = deep_history_max_rows_per_block();
     let reclaim_after_compact = env_bool("MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT", false);
@@ -4306,7 +4309,7 @@ fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseRepo
 
 fn run_append_stream_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS", 2_225);
-    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 445).max(1);
+    let sample_every = deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY", 445);
     let token = env::var("MINI_JAZZ_DEEP_HISTORY_APPEND_TOKEN").unwrap_or_else(|_| " token".into());
     let mut state_len = 0usize;
     run_jazz_rope_text_case(JazzRopeTextCaseInput {
@@ -4332,7 +4335,8 @@ fn run_automerge_paper_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_optional_usize("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_UPDATES")
         .unwrap_or(2_900)
         .min(trace.txns.len());
-    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 580).max(1);
+    let sample_every =
+        deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY", 580);
     let mut materialized = trace.start_content;
     let txns = trace.txns;
     let available_txns = txns.len();
@@ -4360,7 +4364,8 @@ fn run_automerge_paper_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
 fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES", 60 * 60 * 60);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
-    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 1_000).max(1);
+    let sample_every =
+        deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_CANVAS_SAMPLE_EVERY", 1_000);
     let mut all_positions = Vec::with_capacity(target_updates);
     for frame in 0..target_updates {
         all_positions.push(canvas_position_json(frame));
@@ -4394,7 +4399,7 @@ fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
 fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES", 3_900);
     let max_seconds = env_usize("MINI_JAZZ_DEEP_HISTORY_MAX_SECONDS", 120) as u64;
-    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 780).max(1);
+    let sample_every = deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_CANVAS_SAMPLE_EVERY", 780);
     let hot_tail = env_usize("MINI_JAZZ_DEEP_HISTORY_COMPACT_HOT_TAIL", sample_every);
     let max_rows_per_block = deep_history_max_rows_per_block();
     let reclaim_after_compact = env_bool("MINI_JAZZ_DEEP_HISTORY_RECLAIM_AFTER_COMPACT", false);
@@ -4431,7 +4436,7 @@ fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseRep
 
 fn run_canvas_positions_jazz_rope_probe() -> BenchResult<DeepHistoryCaseReport> {
     let target_updates = env_usize("MINI_JAZZ_DEEP_HISTORY_CANVAS_FRAMES", 3_900);
-    let sample_every = env_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY", 780).max(1);
+    let sample_every = deep_history_sample_every("MINI_JAZZ_DEEP_HISTORY_CANVAS_SAMPLE_EVERY", 780);
     let mut all_positions = Vec::with_capacity(target_updates);
     for frame in 0..target_updates {
         all_positions.push(canvas_position(frame));
@@ -5767,6 +5772,13 @@ fn env_usize(name: &str, default: usize) -> usize {
 
 fn env_optional_usize(name: &str) -> Option<usize> {
     env::var(name).ok().and_then(|value| value.parse().ok())
+}
+
+fn deep_history_sample_every(specific_name: &str, default: usize) -> usize {
+    env_optional_usize(specific_name)
+        .or_else(|| env_optional_usize("MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY"))
+        .unwrap_or(default)
+        .max(1)
 }
 
 fn deep_history_write_batch_size() -> Option<usize> {

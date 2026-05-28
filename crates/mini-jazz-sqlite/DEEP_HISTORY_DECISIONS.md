@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:47:01 PDT 2026
+
+Decision: add scenario-specific deep-history sample interval env vars.
+
+Why: `MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all` is most useful when append, Automerge, and canvas can run together while preserving their canonical sample cadence. A single shared `MINI_JAZZ_DEEP_HISTORY_SAMPLE_EVERY` forces an awkward compromise.
+
+Scope impact: append, Automerge, and canvas now accept `MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY`, `MINI_JAZZ_DEEP_HISTORY_AUTOMERGE_SAMPLE_EVERY`, and `MINI_JAZZ_DEEP_HISTORY_CANVAS_SAMPLE_EVERY`, falling back to the existing shared env var and then each scenario default. A tiny `all` smoke run verified the override path.
+
 ## Thu May 28 03:44:57 PDT 2026
 
 Decision: pin batched-write rollback semantics with an integration test.
