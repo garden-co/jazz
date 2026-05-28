@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:33:34 PDT 2026
+
+Decision: widen the batched-write prototype from update-only to batched upserts.
+
+Why: imports and fast streams often include a create phase followed by updates. Requiring callers to split creates from updates makes the benchmark hook less representative of the stretch-goal write policy.
+
+Scope impact: `upsert_rows_batched` chooses create vs update per row inside the shared SQLite transaction while preserving one public Jazz tx id, read set, write set, and history row per logical write.
+
 ## Thu May 28 03:30:21 PDT 2026
 
 Decision: cover branch-scoped block filtering through table and all-table history deltas, not only query deltas.

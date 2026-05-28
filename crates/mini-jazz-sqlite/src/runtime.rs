@@ -66,6 +66,12 @@ struct BatchedQueryScopeItem {
     extra_row_ids: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum BatchedWriteMode {
+    Update,
+    Upsert,
+}
+
 type PredicateRefreshKey = (String, String, String, String);
 type PredicateRefreshValue = (JsonValue, Vec<String>);
 type RecursiveRefreshKey = (String, String, String);
@@ -327,14 +333,41 @@ impl Runtime {
         table_name: &str,
         updates: Vec<(String, BTreeMap<String, JsonValue>)>,
     ) -> Result<Vec<String>> {
+        self.write_rows_batched(table_name, updates, BatchedWriteMode::Update)
+    }
+
+    pub fn upsert_rows_batched(
+        &mut self,
+        table_name: &str,
+        writes: Vec<(String, BTreeMap<String, JsonValue>)>,
+    ) -> Result<Vec<String>> {
+        self.write_rows_batched(table_name, writes, BatchedWriteMode::Upsert)
+    }
+
+    fn write_rows_batched(
+        &mut self,
+        table_name: &str,
+        writes: Vec<(String, BTreeMap<String, JsonValue>)>,
+        mode: BatchedWriteMode,
+    ) -> Result<Vec<String>> {
         let table = self.schema.table_def(table_name)?.clone();
         let user = self.attribution_user().to_owned();
         let bypass_policy = self.bypasses_policy();
         let db = self.conn.transaction()?;
-        let mut tx_ids = Vec::with_capacity(updates.len());
-        for (id, values) in updates {
+        let mut tx_ids = Vec::with_capacity(writes.len());
+        for (id, values) in writes {
             let now = now_ms();
             let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
+            let op = match mode {
+                BatchedWriteMode::Update => 2,
+                BatchedWriteMode::Upsert => {
+                    if row_has_current_branch_value(&db, table_name, &id, self.branch_num)? {
+                        2
+                    } else {
+                        1
+                    }
+                }
+            };
             let allowed = insert_row_in_tx(InsertRowInTx {
                 db: &db,
                 schema: &self.schema,
@@ -346,7 +379,7 @@ impl Runtime {
                 now,
                 user: &user,
                 bypass_policy,
-                op: 2,
+                op,
             })?;
             let row_num = row_num(&db, &id)?;
             if !allowed {
@@ -5834,20 +5867,7 @@ impl Runtime {
 
     fn row_has_current_branch_value(&self, table_name: &str, id: &str) -> Result<bool> {
         self.schema.table_def(table_name)?;
-        let Ok(row_num) = row_num(&self.conn, id) else {
-            return Ok(false);
-        };
-        let count: i64 = self.conn.query_row(
-            &format!(
-                "SELECT COUNT(*)
-                 FROM {}
-                 WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
-                crate::schema::current_table(table_name)
-            ),
-            params![row_num, self.branch_num],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
+        row_has_current_branch_value(&self.conn, table_name, id, self.branch_num)
     }
 
     fn conflict_candidate_row_ids(&self, table_name: &str) -> Result<Vec<String>> {
@@ -6185,6 +6205,28 @@ fn validate_write_fields(
         }
     }
     Ok(())
+}
+
+fn row_has_current_branch_value(
+    conn: &Connection,
+    table_name: &str,
+    id: &str,
+    branch_num: i64,
+) -> Result<bool> {
+    let Ok(row_num) = row_num(conn, id) else {
+        return Ok(false);
+    };
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {}
+             WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 struct LocalWriteCheck<'a> {

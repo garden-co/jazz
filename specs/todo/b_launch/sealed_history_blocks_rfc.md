@@ -643,7 +643,8 @@ Implemented in the current spike:
 - branch-base anchor preservation in `history_open`
 - branch export and branch query export guards for sealed main history
 - canonical benchmark metrics for Base/Base1/Base2/Base3/Block/Incr
-- a narrow batched-update API and benchmark switch for grouped SQLite commits
+- narrow batched-update/upsert APIs and benchmark switch for grouped SQLite
+  commits
 
 Still deliberately partial:
 
@@ -651,7 +652,7 @@ Still deliberately partial:
 - the block payload is JSON inside lz4, not the final compact binary format
 - branch reads rely on open branch-base anchors rather than arbitrary sealed
   snapshot reads
-- the write-batching API is a benchmark/prototype hook, not a scheduler
+- the write-batching APIs are benchmark/prototype hooks, not a scheduler
 - segment-tree value storage and sealed history blocks are both present in the
   spike, but a final production policy for when to use each is not settled
 - block compaction scheduling is manual/policy-driven, not automatic by age or

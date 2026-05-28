@@ -1850,6 +1850,63 @@ fn batched_updates_keep_distinct_jazz_transactions_but_commit_together() {
 }
 
 #[test]
+fn batched_upserts_can_mix_creates_and_updates() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx_ids = alice
+        .upsert_rows_batched(
+            "notes",
+            vec![
+                (
+                    "note-1".to_owned(),
+                    BTreeMap::from([("body".to_owned(), json!("v2"))]),
+                ),
+                (
+                    "note-2".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("created in batch")),
+                        ("pinned".to_owned(), json!(true)),
+                    ]),
+                ),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(tx_ids, vec!["tx-alice-node-2", "tx-alice-node-3"]);
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter().find(|row| row.id == "note-1").unwrap().values["body"],
+        json!("v2")
+    );
+    assert_eq!(
+        rows.iter().find(|row| row.id == "note-2").unwrap().values["body"],
+        json!("created in batch")
+    );
+    assert_eq!(
+        alice.export_table_history("notes").unwrap().history.len(),
+        3
+    );
+
+    bob.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    assert_eq!(bob.read_rows("notes").unwrap().len(), 2);
+}
+
+#[test]
 fn delete_is_history_not_removal() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
