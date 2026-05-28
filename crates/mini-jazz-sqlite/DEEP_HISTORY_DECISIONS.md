@@ -3,6 +3,14 @@
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Thu May 28 03:35:18 PDT 2026
+
+Decision: cover recursive-reference branch history deltas with the same future-block omission invariant.
+
+Why: recursive sync uses a separate block attachment path and can matter for tree-shaped documents or canvases. It must not import accepted main history newer than the branch base just because a descendant row has compacted history.
+
+Scope impact: recursive branch deltas now have a regression that compacts a future main descendant update, exports from the branch, and verifies the receiver sees only the pinned base descendant without receiving the future sealed block.
+
 ## Thu May 28 03:33:34 PDT 2026
 
 Decision: widen the batched-write prototype from update-only to batched upserts.

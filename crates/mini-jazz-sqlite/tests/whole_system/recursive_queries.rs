@@ -1169,6 +1169,76 @@ fn recursive_query_scope_sync_preserves_branch_base_and_overlay() {
 }
 
 #[test]
+fn recursive_branch_history_delta_with_compaction_omits_future_main_blocks() {
+    let schema = SchemaDef::new().table("folders", |table| {
+        table.text("name");
+        table.ref_("parent", "folders");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let root_tx = alice
+        .insert_row(
+            "folders",
+            "root",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Root")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&root_tx, 1).unwrap();
+    let child_tx = alice
+        .insert_row(
+            "folders",
+            "child",
+            BTreeMap::from([
+                ("name".to_owned(), json!("Base child")),
+                ("parent".to_owned(), json!("root")),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&child_tx, 2).unwrap();
+    alice.create_branch("draft", Some(2)).unwrap();
+
+    let update_tx = alice
+        .update_row(
+            "folders",
+            "child",
+            BTreeMap::from([("name".to_owned(), json!("Main after branch"))]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&update_tx, 3).unwrap();
+    alice
+        .compact_accepted_history("folders", "child", 0)
+        .unwrap();
+
+    alice.checkout_branch("draft").unwrap();
+    let delta = alice
+        .export_recursive_refs_history_delta("folders", "root", "parent", &[])
+        .unwrap();
+    assert!(delta.blocks.is_empty());
+    assert!(delta
+        .bundle
+        .history
+        .iter()
+        .any(|record| record.row_id == "child" && record.values["name"] == json!("Base child")));
+    assert!(!delta.bundle.history.iter().any(|record| {
+        record.row_id == "child" && record.values["name"] == json!("Main after branch")
+    }));
+
+    bob.apply_history_delta(&delta.bundle, &delta.blocks)
+        .unwrap();
+    bob.checkout_branch("draft").unwrap();
+    let rows = bob
+        .read_recursive_refs("folders", "root", "parent")
+        .unwrap();
+    let child = rows.iter().find(|row| row.id == "child").unwrap();
+    assert_eq!(child.values["name"], json!("Base child"));
+}
+
+#[test]
 fn recursive_branch_query_export_includes_tombstone_for_deleted_base_descendant() {
     let schema = SchemaDef::new().table("folders", |table| {
         table.text("name");
