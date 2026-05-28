@@ -255,10 +255,10 @@ Block workload (`2225` updates, sample every `445`) with v9 columnar lz4 blocks.
 | max rows/block | blocks | historical read avg | block-native import | block payload bytes | database bytes |
 | -------------: | -----: | ------------------: | ------------------: | ------------------: | -------------: |
 |          unset |      1 |            79.22 ms |           182.35 ms |              70,162 |     18,726,912 |
-|           1000 |      2 |            76.55 ms |           186.12 ms |              59,999 |     18,681,856 |
-|            500 |      4 |            66.96 ms |           194.06 ms |              61,130 |     18,673,664 |
-|            250 |      8 |            59.30 ms |           188.32 ms |              64,717 |     18,673,664 |
-|            100 |     18 |            43.49 ms |           187.11 ms |              73,303 |     18,673,664 |
+|           1000 |      2 |            77.89 ms |           188.70 ms |              56,837 |     18,677,760 |
+|            500 |      4 |            57.41 ms |           190.59 ms |              58,388 |     18,673,664 |
+|            250 |      8 |            47.75 ms |           189.39 ms |              62,046 |     18,673,664 |
+|            100 |     18 |            43.72 ms |           188.90 ms |              71,037 |     18,673,664 |
 
 Interpretation: one huge per-row block is not automatically best. Smaller
 blocks reduce point-read decode units and the compressed payload stayed close
