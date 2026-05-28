@@ -103,6 +103,13 @@ current result rows is insufficient. If a row previously matched `done = false`
 and now has `done = true`, the refresh must send the row's new visible version.
 If the row was deleted, the refresh must send the tombstone. This is ordinary
 history, not an authoritative result snapshot.
+If a row leaves a predicate and later re-enters with newer content, stale
+leave-scope refreshes must not regress a receiver that already applied the
+newer re-entry refresh. Refresh application is history/fate ordered; the latest
+visible semantic row wins after rerun.
+Refreshing one active descriptor repairs that descriptor's semantic result; it
+does not eagerly evict unrelated rows learned through other active or historical
+descriptors. Cache eviction is a separate asynchronous policy.
 
 The v0 prototype repair strategy for equality predicates is:
 
@@ -125,6 +132,25 @@ tiers/edges learn active interest by downstream replay. Data received for a
 query may remain cached after it leaves that query's active result set. Evicting
 uninteresting cached data is an asynchronous cache-management concern, not
 eager query-scope contraction.
+Prototype note: removing durable query descriptors by changing storage alone is
+not correct. If retained local facts remain after restart but the active query
+descriptor/result scope is forgotten, a later resubscribe with an empty current
+result cannot distinguish stale cached facts from the authoritative current
+result. The replacement needs an explicit resubscribe/query-settlement protocol
+that separates retained cache state from active query truth.
+
+When an upstream peer refreshes active query descriptors for one downstream
+peer, it should plan compatible descriptors together before assembling bundles.
+Compatibility is descriptor-family specific, but generally means same branch
+view, table, field/path, operator, ordering, limit, include shape, and policy
+context, with only bound values/root ids differing. The implementation may still
+evaluate each descriptor separately internally, but bundle assembly should dedupe
+shared history, read-set facts, transaction metadata, branch/source records, and
+policy dependencies before encoding. Descriptor families proven batchable in the
+prototype include ordinary predicates, ordered pages, and recursive ref roots.
+Duplicate overlapping refreshes for different descriptors that include the same
+row must dedupe concrete history and transaction records while preserving one
+logical descriptor per active query.
 
 Example: querying open todos includes:
 

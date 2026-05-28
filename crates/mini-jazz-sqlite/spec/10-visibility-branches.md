@@ -182,9 +182,11 @@ local row as their base.
 
 Branch source lists are mutable authoritative snapshots, not grow-only sets.
 Incoming branch records must be replay-ordered, for example by a monotone source
-version, so stale sync cannot re-add removed sources. Even a query refresh with
-no row history may need to carry branch metadata if the checked-out branch's
-source list changed while disconnected.
+version, so stale sync cannot re-add removed sources or drop re-added sources.
+If a source is removed and later re-added, applying the re-addition before an
+older removal refresh must keep the source visible and preserve the current
+source list. Even a query refresh with no row history may need to carry branch
+metadata if the checked-out branch's source list changed while disconnected.
 
 Baseline branch features:
 

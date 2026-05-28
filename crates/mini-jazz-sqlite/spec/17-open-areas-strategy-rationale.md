@@ -9,10 +9,13 @@ The following areas remain intentionally underspecified:
 - local-to-global vector upgrade broadcast
 - predicate/range scope closure
 - query-scope repair candidate bounding
+- query descriptor non-persistence plus explicit resubscribe/query-settlement
+  protocol
 - full hop/gather query lowering and product constraints
 - active query-descriptor replay across reconnects and upstream restarts
 - retained-data cache eviction for rows no longer covered by active queries
 - authority validation over large read sets
+- exclusive upsert semantics over existing rows
 - multi-base branch conflict semantics
 - branch provenance encoding
 - policy language and recursive policy bounds
@@ -193,6 +196,12 @@ bundle assembly. Dashboards often contain many similar page queries that share
 table, policy, branch, ordering, and dependency structure. Batching at export
 time can avoid repeated dependency, read-set, transaction, and branch
 collection that cannot be recovered by merging already-assembled bundles.
+The current prototype batches compatible ordinary predicates, ordered page
+descriptors, and recursive ref descriptors into one refresh bundle per
+compatible group. Ordered page reads over the main-branch current projection
+also lower compatible bound values into one SQL statement using a values table
+and per-value window ranking. Branch overlays currently keep the conservative
+per-value read path because sparse-overlay precedence is more subtle.
 
 ### 33.3 Recursive Scopes
 
@@ -497,6 +506,20 @@ Implementation lessons from the prototype:
   historical snapshot depending on the operation.
 - Query-scoped sync needs repair semantics from the beginning. A bundle cannot
   merely export current result rows and hope the receiver removes stale rows.
+- Fate and receipt merge semantics must be monotonic under duplicate/stale
+  direct acceptance and sync replay; otherwise old bundles can move a
+  transaction backward after the authority has enriched it.
+- Observable ordering must be semantic. Physical SQLite row numbers are useful
+  locally, but leaking them into default query order creates cross-replica
+  divergence when bundles are applied in different orders.
+- Query descriptor lifetime is a protocol concern. The prototype showed that
+  simply making descriptor tables temporary breaks reconnect repair when stale
+  cached facts survive restart. The durable product contract should be active
+  descriptor replay plus settled-query repair, not persisted query interest as
+  user data.
+- Create/update intent should be explicit at the API boundary. Treating
+  `insert` as an accidental update hid important product semantics; the current
+  shape is create-only `insert`, explicit `update`, and explicit `upsert`.
 - Read/write sets are becoming the bridge between policy, validation,
   replayability, causality, and future conflict explanation.
 - Whole-system tests are more valuable than narrow helper tests for this design:
@@ -519,7 +542,13 @@ Known implementation tensions:
   but product branch backing-row permissions and merge APIs remain incomplete.
 - Active query descriptors now drive reconnect refresh and subscription
   recovery in the prototype. They should be replayed by downstream clients
-  rather than persisted as durable query state.
+  rather than persisted as durable query state. A storage-only switch to
+  connection-local descriptors is not enough, because retained cache facts and
+  active query truth need an explicit settlement/resubscribe boundary.
+- Mergeable upsert is now product-shaped for create, update, sync, and
+  restore-after-delete. Exclusive upsert over an existing row is still a real
+  semantic gap: it needs either expected-version/read-set requirements or a
+  deliberately specified globally ordered update rule.
 - Lenses are currently field-level storage-name mappings for text/ref renames.
   There is no schema-versioned catalogue, inverse lens graph, compatibility
   graph, or copy-forward storage yet; physical table names are still
