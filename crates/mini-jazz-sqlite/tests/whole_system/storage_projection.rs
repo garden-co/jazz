@@ -480,6 +480,61 @@ fn query_history_delta_syncs_open_rows_and_matching_blocks() {
 }
 
 #[test]
+fn contains_query_history_delta_syncs_matching_blocks() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("alpha v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    for idx in 2..=5 {
+        alice
+            .update_row(
+                "notes",
+                "note-1",
+                BTreeMap::from([("body".to_owned(), json!(format!("alpha v{idx}")))]),
+            )
+            .unwrap();
+    }
+    alice
+        .insert_row(
+            "notes",
+            "note-2",
+            BTreeMap::from([
+                ("body".to_owned(), json!("beta")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice
+        .compact_accepted_history("notes", "note-1", 1)
+        .unwrap();
+
+    let (bundle, blocks) = alice
+        .export_query_where_contains_history_delta("notes", "body", "alpha", &[])
+        .unwrap();
+    assert_eq!(bundle.history.len(), 1);
+    assert_eq!(blocks.len(), 1);
+
+    bob.apply_history_delta(&bundle, &blocks).unwrap();
+    let rows = bob
+        .read_rows_where_contains("notes", "body", "alpha")
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-1");
+    assert_eq!(rows[0].values["body"], json!("alpha v5"));
+}
+
+#[test]
 fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
     let schema = SchemaDef::new()
         .table("docs", |table| {

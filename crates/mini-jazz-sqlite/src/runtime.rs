@@ -3623,6 +3623,60 @@ impl Runtime {
         )
     }
 
+    pub fn export_query_where_contains_history_delta(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        needle: &str,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+        let rows = self.read_rows_where_contains(table_name, field_name, needle)?;
+        self.export_query_scope_history_delta(
+            table_name,
+            field_name,
+            "contains",
+            JsonValue::String(needle.to_owned()),
+            rows,
+            remote_block_manifests,
+        )
+    }
+
+    pub fn export_query_where_in_history_delta(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<JsonValue>,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+        let rows = self.read_rows_where_in(table_name, field_name, values.clone())?;
+        self.export_query_scope_history_delta(
+            table_name,
+            field_name,
+            "in",
+            JsonValue::Array(values),
+            rows,
+            remote_block_manifests,
+        )
+    }
+
+    pub fn export_query_where_ne_history_delta(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<(Bundle, Vec<HistoryBlockExport>)> {
+        let rows = self.read_rows_where_ne(table_name, field_name, value.clone())?;
+        self.export_query_scope_history_delta(
+            table_name,
+            field_name,
+            "ne",
+            value,
+            rows,
+            remote_block_manifests,
+        )
+    }
+
     pub fn export_query_where_eq_with_ref_include(
         &self,
         table_name: &str,

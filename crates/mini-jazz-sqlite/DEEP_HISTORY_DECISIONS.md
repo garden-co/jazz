@@ -285,3 +285,9 @@ Scope impact: query-scoped sync no longer has to be all-or-nothing table delta i
 Decision: Add `apply_history_delta(bundle, blocks)` as the receiver-side API for block-native deltas.
 
 Scope impact: table, all-table, and equality-query deltas now share one receiver call shape: import any missing sealed blocks, then apply the hot/open bundle. This reduces call-site footguns while keeping the operation semantics explicit.
+
+## Thu May 28 01:23:54 PDT 2026 - Simple Predicate Block Deltas
+
+Decision: Extend query-scoped history deltas from equality to `contains`, `in`, and `ne` predicates using the same open-bundle plus missing-block transfer shape.
+
+Scope impact: the first query-scoped block-native sync family now covers the simple predicate operators used by ordinary observed query refreshes. Top-N/page operators still need their own planning because they carry boundary/previous-observed state.
