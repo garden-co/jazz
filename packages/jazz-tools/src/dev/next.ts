@@ -72,7 +72,7 @@ async function copyWasmToPublic(appRoot: string): Promise<void> {
 }
 
 function mergeServerExternalPackages(existing: string[] | undefined): string[] {
-  return Array.from(new Set([...(existing ?? []), "jazz-tools", "jazz-napi"]));
+  return Array.from(new Set([...(existing ?? []), "jazz-napi"]));
 }
 
 async function resolveConfig(
