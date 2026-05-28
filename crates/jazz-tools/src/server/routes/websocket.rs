@@ -30,7 +30,7 @@ const MAX_HANDSHAKE_DECOMPRESSED_BYTES: usize = 1024 * 1024;
 /// frame after the WS upgrade completes. Closes the slowloris pattern
 /// where an attacker pins server-side state by opening upgrades and never
 /// sending the first frame. See jaz0-a803.
-const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Maximum size of an inbound WebSocket message (the compressed bytes on the
 /// wire). This is axum's existing default, set explicitly so the limit is
@@ -278,6 +278,9 @@ async fn send_ws_error(socket: &mut WebSocket, message: &str) {
 }
 
 /// Send a `ServerEvent::Error` frame on the socket, best-effort.
+///
+/// Uses JSON encoding so a not-yet-authenticated peer (which doesn't know
+/// the post-handshake binary wire format yet) can still decode the error.
 async fn send_ws_error_with_code(
     socket: &mut WebSocket,
     code: crate::jazz_transport::ErrorCode,
@@ -293,11 +296,40 @@ async fn send_ws_error_with_code(
     }
 }
 
+/// Send a `ServerEvent::Error` frame using the post-handshake binary
+/// wire format. Use this from any path that runs after the
+/// `ConnectedResponse` has been sent — clients post-handshake parse
+/// frames via `ServerEvent::decode_payload`, not JSON.
+async fn send_ws_error_binary(
+    socket: &mut WebSocket,
+    code: crate::jazz_transport::ErrorCode,
+    message: &str,
+) {
+    let event = crate::jazz_transport::ServerEvent::Error {
+        message: message.to_string(),
+        code,
+    };
+    if let Ok(bytes) = event.encode_payload() {
+        let frame = crate::transport_manager::frame_encode(&bytes);
+        let _ = socket.send(Message::Binary(frame)).await;
+    }
+}
+
 async fn close_ws_with_protocol_reason(socket: &mut WebSocket, reason: &str) {
     let reason = reason.chars().take(123).collect::<String>();
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code: close_code::PROTOCOL,
+            reason: reason.into(),
+        })))
+        .await;
+}
+
+async fn close_ws_with_policy_reason(socket: &mut WebSocket, reason: &str) {
+    let reason = reason.chars().take(123).collect::<String>();
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: close_code::POLICY,
             reason: reason.into(),
         })))
         .await;
@@ -347,7 +379,7 @@ async fn handle_ws_connection(
             return;
         }
         _ = tokio::time::sleep(HANDSHAKE_READ_TIMEOUT) => {
-            close_ws_with_protocol_reason(&mut socket, "handshake timeout").await;
+            close_ws_with_policy_reason(&mut socket, "handshake timeout").await;
             return;
         }
     };
@@ -430,7 +462,11 @@ async fn handle_ws_connection(
     let connection_id = state
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let (next_sync_seq, mut sync_rx) = state
+    let crate::server::ConnectionRegistration {
+        next_sync_seq,
+        receiver: mut sync_rx,
+        evicted: evicted_flag,
+    } = state
         .connection_event_hub
         .register_connection(connection_id, client_id);
     {
@@ -537,7 +573,25 @@ async fn handle_ws_connection(
                 _ => continue,
             },
             update = sync_rx.recv() => {
-                let Some(u) = update else { break };
+                let Some(u) = update else {
+                    // Distinguish per-client-cap eviction from a normal
+                    // disconnect, so the evicted client gets a programmatic
+                    // signal instead of an unexplained TCP close.
+                    if evicted_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        send_ws_error_binary(
+                            &mut socket,
+                            crate::jazz_transport::ErrorCode::RateLimited,
+                            "per-client connection cap exceeded",
+                        )
+                        .await;
+                        close_ws_with_policy_reason(
+                            &mut socket,
+                            "per-client connection cap exceeded",
+                        )
+                        .await;
+                    }
+                    break;
+                };
                 let mut updates = Vec::with_capacity(MAX_WS_SYNC_UPDATES_PER_FRAME);
                 updates.push(crate::jazz_transport::SequencedSyncPayload {
                     seq: Some(u.seq),
