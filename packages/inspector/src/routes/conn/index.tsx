@@ -1,20 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 
-import {
-  redirectToDataExplorerTarget,
-  resolveActiveStoredInspectorNavigationTarget,
-} from "#lib/navigation/inspectorNavigation.ts";
+import { ConnectionManager } from "../../components/connection-manager/connectionManager";
 
 export const Route = createFileRoute("/conn/")({
-  loader: async () => {
-    const target = await resolveActiveStoredInspectorNavigationTarget();
-    if (target !== null) {
-      redirectToDataExplorerTarget(target);
-    }
-  },
   component: ConnectionsIndexRoute,
 });
 
-function ConnectionsIndexRoute(): React.ReactElement | null {
-  return null;
+function ConnectionsIndexRoute(): React.ReactElement {
+  return <ConnectionManager />;
 }

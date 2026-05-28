@@ -8,289 +8,311 @@
 // You should NOT make any changes in this file as it will be overwritten.
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
-import { Route as rootRouteImport } from "./routes/__root";
-import { Route as ConnRouteImport } from "./routes/conn";
-import { Route as IndexRouteImport } from "./routes/index";
-import { Route as ConnIndexRouteImport } from "./routes/conn/index";
-import { Route as ConnNewRouteImport } from "./routes/conn/new";
-import { Route as ConnConnectionIdIndexRouteImport } from "./routes/conn/$connectionId/index";
-import { Route as ConnConnectionIdBranchIndexRouteImport } from "./routes/conn/$connectionId/$branch/index";
-import { Route as ConnConnectionIdBranchSchemaHashIndexRouteImport } from "./routes/conn/$connectionId/$branch/$schemaHash/index";
-import { Route as ConnConnectionIdBranchSchemaHashLiveQueryRouteImport } from "./routes/conn/$connectionId/$branch/$schemaHash/live-query";
-import { Route as ConnConnectionIdBranchSchemaHashDataExplorerRouteImport } from "./routes/conn/$connectionId/$branch/$schemaHash/data-explorer";
-import { Route as ConnConnectionIdBranchSchemaHashLiveQueryIndexRouteImport } from "./routes/conn/$connectionId/$branch/$schemaHash/live-query/index";
-import { Route as ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRouteImport } from "./routes/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/index";
-import { Route as ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRouteImport } from "./routes/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema";
-import { Route as ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRouteImport } from "./routes/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data";
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as ConnRouteImport } from './routes/conn'
+import { Route as IndexRouteImport } from './routes/index'
+import { Route as ConnIndexRouteImport } from './routes/conn/index'
+import { Route as ConnNewRouteImport } from './routes/conn/new'
+import { Route as ConnConnectionIdIndexRouteImport } from './routes/conn/$connectionId/index'
+import { Route as ConnEditConnectionIdRouteImport } from './routes/conn/edit/$connectionId'
+import { Route as ConnConnectionIdBranchIndexRouteImport } from './routes/conn/$connectionId/$branch/index'
+import { Route as ConnConnectionIdBranchSchemaHashIndexRouteImport } from './routes/conn/$connectionId/$branch/$schemaHash/index'
+import { Route as ConnConnectionIdBranchSchemaHashLiveQueryRouteImport } from './routes/conn/$connectionId/$branch/$schemaHash/live-query'
+import { Route as ConnConnectionIdBranchSchemaHashDataExplorerRouteImport } from './routes/conn/$connectionId/$branch/$schemaHash/data-explorer'
+import { Route as ConnConnectionIdBranchSchemaHashLiveQueryIndexRouteImport } from './routes/conn/$connectionId/$branch/$schemaHash/live-query/index'
+import { Route as ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRouteImport } from './routes/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/index'
+import { Route as ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRouteImport } from './routes/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema'
+import { Route as ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRouteImport } from './routes/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data'
 
 const ConnRoute = ConnRouteImport.update({
-  id: "/conn",
-  path: "/conn",
+  id: '/conn',
+  path: '/conn',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const IndexRoute = IndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const ConnIndexRoute = ConnIndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => ConnRoute,
-} as any);
+} as any)
 const ConnNewRoute = ConnNewRouteImport.update({
-  id: "/new",
-  path: "/new",
+  id: '/new',
+  path: '/new',
   getParentRoute: () => ConnRoute,
-} as any);
+} as any)
 const ConnConnectionIdIndexRoute = ConnConnectionIdIndexRouteImport.update({
-  id: "/$connectionId/",
-  path: "/$connectionId/",
+  id: '/$connectionId/',
+  path: '/$connectionId/',
   getParentRoute: () => ConnRoute,
-} as any);
-const ConnConnectionIdBranchIndexRoute = ConnConnectionIdBranchIndexRouteImport.update({
-  id: "/$connectionId/$branch/",
-  path: "/$connectionId/$branch/",
+} as any)
+const ConnEditConnectionIdRoute = ConnEditConnectionIdRouteImport.update({
+  id: '/edit/$connectionId',
+  path: '/edit/$connectionId',
   getParentRoute: () => ConnRoute,
-} as any);
+} as any)
+const ConnConnectionIdBranchIndexRoute =
+  ConnConnectionIdBranchIndexRouteImport.update({
+    id: '/$connectionId/$branch/',
+    path: '/$connectionId/$branch/',
+    getParentRoute: () => ConnRoute,
+  } as any)
 const ConnConnectionIdBranchSchemaHashIndexRoute =
   ConnConnectionIdBranchSchemaHashIndexRouteImport.update({
-    id: "/$connectionId/$branch/$schemaHash/",
-    path: "/$connectionId/$branch/$schemaHash/",
+    id: '/$connectionId/$branch/$schemaHash/',
+    path: '/$connectionId/$branch/$schemaHash/',
     getParentRoute: () => ConnRoute,
-  } as any);
+  } as any)
 const ConnConnectionIdBranchSchemaHashLiveQueryRoute =
   ConnConnectionIdBranchSchemaHashLiveQueryRouteImport.update({
-    id: "/$connectionId/$branch/$schemaHash/live-query",
-    path: "/$connectionId/$branch/$schemaHash/live-query",
+    id: '/$connectionId/$branch/$schemaHash/live-query',
+    path: '/$connectionId/$branch/$schemaHash/live-query',
     getParentRoute: () => ConnRoute,
-  } as any);
+  } as any)
 const ConnConnectionIdBranchSchemaHashDataExplorerRoute =
   ConnConnectionIdBranchSchemaHashDataExplorerRouteImport.update({
-    id: "/$connectionId/$branch/$schemaHash/data-explorer",
-    path: "/$connectionId/$branch/$schemaHash/data-explorer",
+    id: '/$connectionId/$branch/$schemaHash/data-explorer',
+    path: '/$connectionId/$branch/$schemaHash/data-explorer',
     getParentRoute: () => ConnRoute,
-  } as any);
+  } as any)
 const ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute =
   ConnConnectionIdBranchSchemaHashLiveQueryIndexRouteImport.update({
-    id: "/",
-    path: "/",
+    id: '/',
+    path: '/',
     getParentRoute: () => ConnConnectionIdBranchSchemaHashLiveQueryRoute,
-  } as any);
+  } as any)
 const ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute =
   ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRouteImport.update({
-    id: "/$tableName/",
-    path: "/$tableName/",
+    id: '/$tableName/',
+    path: '/$tableName/',
     getParentRoute: () => ConnConnectionIdBranchSchemaHashDataExplorerRoute,
-  } as any);
+  } as any)
 const ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute =
-  ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRouteImport.update({
-    id: "/$tableName/schema",
-    path: "/$tableName/schema",
-    getParentRoute: () => ConnConnectionIdBranchSchemaHashDataExplorerRoute,
-  } as any);
+  ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRouteImport.update(
+    {
+      id: '/$tableName/schema',
+      path: '/$tableName/schema',
+      getParentRoute: () => ConnConnectionIdBranchSchemaHashDataExplorerRoute,
+    } as any,
+  )
 const ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute =
   ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRouteImport.update({
-    id: "/$tableName/data",
-    path: "/$tableName/data",
+    id: '/$tableName/data',
+    path: '/$tableName/data',
     getParentRoute: () => ConnConnectionIdBranchSchemaHashDataExplorerRoute,
-  } as any);
+  } as any)
 
 export interface FileRoutesByFullPath {
-  "/": typeof IndexRoute;
-  "/conn": typeof ConnRouteWithChildren;
-  "/conn/new": typeof ConnNewRoute;
-  "/conn/": typeof ConnIndexRoute;
-  "/conn/$connectionId/": typeof ConnConnectionIdIndexRoute;
-  "/conn/$connectionId/$branch/": typeof ConnConnectionIdBranchIndexRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer": typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren;
-  "/conn/$connectionId/$branch/$schemaHash/live-query": typeof ConnConnectionIdBranchSchemaHashLiveQueryRouteWithChildren;
-  "/conn/$connectionId/$branch/$schemaHash/": typeof ConnConnectionIdBranchSchemaHashIndexRoute;
-  "/conn/$connectionId/$branch/$schemaHash/live-query/": typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data": typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema": typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/": typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute;
+  '/': typeof IndexRoute
+  '/conn': typeof ConnRouteWithChildren
+  '/conn/new': typeof ConnNewRoute
+  '/conn/': typeof ConnIndexRoute
+  '/conn/edit/$connectionId': typeof ConnEditConnectionIdRoute
+  '/conn/$connectionId/': typeof ConnConnectionIdIndexRoute
+  '/conn/$connectionId/$branch/': typeof ConnConnectionIdBranchIndexRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer': typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren
+  '/conn/$connectionId/$branch/$schemaHash/live-query': typeof ConnConnectionIdBranchSchemaHashLiveQueryRouteWithChildren
+  '/conn/$connectionId/$branch/$schemaHash/': typeof ConnConnectionIdBranchSchemaHashIndexRoute
+  '/conn/$connectionId/$branch/$schemaHash/live-query/': typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data': typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema': typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/': typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute
 }
 export interface FileRoutesByTo {
-  "/": typeof IndexRoute;
-  "/conn/new": typeof ConnNewRoute;
-  "/conn": typeof ConnIndexRoute;
-  "/conn/$connectionId": typeof ConnConnectionIdIndexRoute;
-  "/conn/$connectionId/$branch": typeof ConnConnectionIdBranchIndexRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer": typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren;
-  "/conn/$connectionId/$branch/$schemaHash": typeof ConnConnectionIdBranchSchemaHashIndexRoute;
-  "/conn/$connectionId/$branch/$schemaHash/live-query": typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data": typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema": typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName": typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute;
+  '/': typeof IndexRoute
+  '/conn/new': typeof ConnNewRoute
+  '/conn': typeof ConnIndexRoute
+  '/conn/edit/$connectionId': typeof ConnEditConnectionIdRoute
+  '/conn/$connectionId': typeof ConnConnectionIdIndexRoute
+  '/conn/$connectionId/$branch': typeof ConnConnectionIdBranchIndexRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer': typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren
+  '/conn/$connectionId/$branch/$schemaHash': typeof ConnConnectionIdBranchSchemaHashIndexRoute
+  '/conn/$connectionId/$branch/$schemaHash/live-query': typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data': typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema': typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName': typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute
 }
 export interface FileRoutesById {
-  __root__: typeof rootRouteImport;
-  "/": typeof IndexRoute;
-  "/conn": typeof ConnRouteWithChildren;
-  "/conn/new": typeof ConnNewRoute;
-  "/conn/": typeof ConnIndexRoute;
-  "/conn/$connectionId/": typeof ConnConnectionIdIndexRoute;
-  "/conn/$connectionId/$branch/": typeof ConnConnectionIdBranchIndexRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer": typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren;
-  "/conn/$connectionId/$branch/$schemaHash/live-query": typeof ConnConnectionIdBranchSchemaHashLiveQueryRouteWithChildren;
-  "/conn/$connectionId/$branch/$schemaHash/": typeof ConnConnectionIdBranchSchemaHashIndexRoute;
-  "/conn/$connectionId/$branch/$schemaHash/live-query/": typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data": typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema": typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute;
-  "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/": typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute;
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+  '/conn': typeof ConnRouteWithChildren
+  '/conn/new': typeof ConnNewRoute
+  '/conn/': typeof ConnIndexRoute
+  '/conn/edit/$connectionId': typeof ConnEditConnectionIdRoute
+  '/conn/$connectionId/': typeof ConnConnectionIdIndexRoute
+  '/conn/$connectionId/$branch/': typeof ConnConnectionIdBranchIndexRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer': typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren
+  '/conn/$connectionId/$branch/$schemaHash/live-query': typeof ConnConnectionIdBranchSchemaHashLiveQueryRouteWithChildren
+  '/conn/$connectionId/$branch/$schemaHash/': typeof ConnConnectionIdBranchSchemaHashIndexRoute
+  '/conn/$connectionId/$branch/$schemaHash/live-query/': typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data': typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema': typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute
+  '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/': typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute
 }
 export interface FileRouteTypes {
-  fileRoutesByFullPath: FileRoutesByFullPath;
+  fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | "/"
-    | "/conn"
-    | "/conn/new"
-    | "/conn/"
-    | "/conn/$connectionId/"
-    | "/conn/$connectionId/$branch/"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer"
-    | "/conn/$connectionId/$branch/$schemaHash/live-query"
-    | "/conn/$connectionId/$branch/$schemaHash/"
-    | "/conn/$connectionId/$branch/$schemaHash/live-query/"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/";
-  fileRoutesByTo: FileRoutesByTo;
+    | '/'
+    | '/conn'
+    | '/conn/new'
+    | '/conn/'
+    | '/conn/edit/$connectionId'
+    | '/conn/$connectionId/'
+    | '/conn/$connectionId/$branch/'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer'
+    | '/conn/$connectionId/$branch/$schemaHash/live-query'
+    | '/conn/$connectionId/$branch/$schemaHash/'
+    | '/conn/$connectionId/$branch/$schemaHash/live-query/'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/'
+  fileRoutesByTo: FileRoutesByTo
   to:
-    | "/"
-    | "/conn/new"
-    | "/conn"
-    | "/conn/$connectionId"
-    | "/conn/$connectionId/$branch"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer"
-    | "/conn/$connectionId/$branch/$schemaHash"
-    | "/conn/$connectionId/$branch/$schemaHash/live-query"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName";
+    | '/'
+    | '/conn/new'
+    | '/conn'
+    | '/conn/edit/$connectionId'
+    | '/conn/$connectionId'
+    | '/conn/$connectionId/$branch'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer'
+    | '/conn/$connectionId/$branch/$schemaHash'
+    | '/conn/$connectionId/$branch/$schemaHash/live-query'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName'
   id:
-    | "__root__"
-    | "/"
-    | "/conn"
-    | "/conn/new"
-    | "/conn/"
-    | "/conn/$connectionId/"
-    | "/conn/$connectionId/$branch/"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer"
-    | "/conn/$connectionId/$branch/$schemaHash/live-query"
-    | "/conn/$connectionId/$branch/$schemaHash/"
-    | "/conn/$connectionId/$branch/$schemaHash/live-query/"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema"
-    | "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/";
-  fileRoutesById: FileRoutesById;
+    | '__root__'
+    | '/'
+    | '/conn'
+    | '/conn/new'
+    | '/conn/'
+    | '/conn/edit/$connectionId'
+    | '/conn/$connectionId/'
+    | '/conn/$connectionId/$branch/'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer'
+    | '/conn/$connectionId/$branch/$schemaHash/live-query'
+    | '/conn/$connectionId/$branch/$schemaHash/'
+    | '/conn/$connectionId/$branch/$schemaHash/live-query/'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema'
+    | '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/'
+  fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute;
-  ConnRoute: typeof ConnRouteWithChildren;
+  IndexRoute: typeof IndexRoute
+  ConnRoute: typeof ConnRouteWithChildren
 }
 
-declare module "@tanstack/react-router" {
+declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    "/conn": {
-      id: "/conn";
-      path: "/conn";
-      fullPath: "/conn";
-      preLoaderRoute: typeof ConnRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/": {
-      id: "/";
-      path: "/";
-      fullPath: "/";
-      preLoaderRoute: typeof IndexRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/conn/": {
-      id: "/conn/";
-      path: "/";
-      fullPath: "/conn/";
-      preLoaderRoute: typeof ConnIndexRouteImport;
-      parentRoute: typeof ConnRoute;
-    };
-    "/conn/new": {
-      id: "/conn/new";
-      path: "/new";
-      fullPath: "/conn/new";
-      preLoaderRoute: typeof ConnNewRouteImport;
-      parentRoute: typeof ConnRoute;
-    };
-    "/conn/$connectionId/": {
-      id: "/conn/$connectionId/";
-      path: "/$connectionId";
-      fullPath: "/conn/$connectionId/";
-      preLoaderRoute: typeof ConnConnectionIdIndexRouteImport;
-      parentRoute: typeof ConnRoute;
-    };
-    "/conn/$connectionId/$branch/": {
-      id: "/conn/$connectionId/$branch/";
-      path: "/$connectionId/$branch";
-      fullPath: "/conn/$connectionId/$branch/";
-      preLoaderRoute: typeof ConnConnectionIdBranchIndexRouteImport;
-      parentRoute: typeof ConnRoute;
-    };
-    "/conn/$connectionId/$branch/$schemaHash/": {
-      id: "/conn/$connectionId/$branch/$schemaHash/";
-      path: "/$connectionId/$branch/$schemaHash";
-      fullPath: "/conn/$connectionId/$branch/$schemaHash/";
-      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashIndexRouteImport;
-      parentRoute: typeof ConnRoute;
-    };
-    "/conn/$connectionId/$branch/$schemaHash/live-query": {
-      id: "/conn/$connectionId/$branch/$schemaHash/live-query";
-      path: "/$connectionId/$branch/$schemaHash/live-query";
-      fullPath: "/conn/$connectionId/$branch/$schemaHash/live-query";
-      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryRouteImport;
-      parentRoute: typeof ConnRoute;
-    };
-    "/conn/$connectionId/$branch/$schemaHash/data-explorer": {
-      id: "/conn/$connectionId/$branch/$schemaHash/data-explorer";
-      path: "/$connectionId/$branch/$schemaHash/data-explorer";
-      fullPath: "/conn/$connectionId/$branch/$schemaHash/data-explorer";
-      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteImport;
-      parentRoute: typeof ConnRoute;
-    };
-    "/conn/$connectionId/$branch/$schemaHash/live-query/": {
-      id: "/conn/$connectionId/$branch/$schemaHash/live-query/";
-      path: "/";
-      fullPath: "/conn/$connectionId/$branch/$schemaHash/live-query/";
-      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRouteImport;
-      parentRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryRoute;
-    };
-    "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/": {
-      id: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/";
-      path: "/$tableName";
-      fullPath: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/";
-      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRouteImport;
-      parentRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRoute;
-    };
-    "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema": {
-      id: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema";
-      path: "/$tableName/schema";
-      fullPath: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema";
-      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRouteImport;
-      parentRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRoute;
-    };
-    "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data": {
-      id: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data";
-      path: "/$tableName/data";
-      fullPath: "/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data";
-      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRouteImport;
-      parentRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRoute;
-    };
+    '/conn': {
+      id: '/conn'
+      path: '/conn'
+      fullPath: '/conn'
+      preLoaderRoute: typeof ConnRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/conn/': {
+      id: '/conn/'
+      path: '/'
+      fullPath: '/conn/'
+      preLoaderRoute: typeof ConnIndexRouteImport
+      parentRoute: typeof ConnRoute
+    }
+    '/conn/new': {
+      id: '/conn/new'
+      path: '/new'
+      fullPath: '/conn/new'
+      preLoaderRoute: typeof ConnNewRouteImport
+      parentRoute: typeof ConnRoute
+    }
+    '/conn/$connectionId/': {
+      id: '/conn/$connectionId/'
+      path: '/$connectionId'
+      fullPath: '/conn/$connectionId/'
+      preLoaderRoute: typeof ConnConnectionIdIndexRouteImport
+      parentRoute: typeof ConnRoute
+    }
+    '/conn/edit/$connectionId': {
+      id: '/conn/edit/$connectionId'
+      path: '/edit/$connectionId'
+      fullPath: '/conn/edit/$connectionId'
+      preLoaderRoute: typeof ConnEditConnectionIdRouteImport
+      parentRoute: typeof ConnRoute
+    }
+    '/conn/$connectionId/$branch/': {
+      id: '/conn/$connectionId/$branch/'
+      path: '/$connectionId/$branch'
+      fullPath: '/conn/$connectionId/$branch/'
+      preLoaderRoute: typeof ConnConnectionIdBranchIndexRouteImport
+      parentRoute: typeof ConnRoute
+    }
+    '/conn/$connectionId/$branch/$schemaHash/': {
+      id: '/conn/$connectionId/$branch/$schemaHash/'
+      path: '/$connectionId/$branch/$schemaHash'
+      fullPath: '/conn/$connectionId/$branch/$schemaHash/'
+      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashIndexRouteImport
+      parentRoute: typeof ConnRoute
+    }
+    '/conn/$connectionId/$branch/$schemaHash/live-query': {
+      id: '/conn/$connectionId/$branch/$schemaHash/live-query'
+      path: '/$connectionId/$branch/$schemaHash/live-query'
+      fullPath: '/conn/$connectionId/$branch/$schemaHash/live-query'
+      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryRouteImport
+      parentRoute: typeof ConnRoute
+    }
+    '/conn/$connectionId/$branch/$schemaHash/data-explorer': {
+      id: '/conn/$connectionId/$branch/$schemaHash/data-explorer'
+      path: '/$connectionId/$branch/$schemaHash/data-explorer'
+      fullPath: '/conn/$connectionId/$branch/$schemaHash/data-explorer'
+      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteImport
+      parentRoute: typeof ConnRoute
+    }
+    '/conn/$connectionId/$branch/$schemaHash/live-query/': {
+      id: '/conn/$connectionId/$branch/$schemaHash/live-query/'
+      path: '/'
+      fullPath: '/conn/$connectionId/$branch/$schemaHash/live-query/'
+      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRouteImport
+      parentRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryRoute
+    }
+    '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/': {
+      id: '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/'
+      path: '/$tableName'
+      fullPath: '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/'
+      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRouteImport
+      parentRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRoute
+    }
+    '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema': {
+      id: '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema'
+      path: '/$tableName/schema'
+      fullPath: '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/schema'
+      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRouteImport
+      parentRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRoute
+    }
+    '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data': {
+      id: '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data'
+      path: '/$tableName/data'
+      fullPath: '/conn/$connectionId/$branch/$schemaHash/data-explorer/$tableName/data'
+      preLoaderRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRouteImport
+      parentRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRoute
+    }
   }
 }
 
 interface ConnConnectionIdBranchSchemaHashDataExplorerRouteChildren {
-  ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute;
-  ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute;
-  ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute;
+  ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameDataRoute
+  ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute
+  ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute
 }
 
 const ConnConnectionIdBranchSchemaHashDataExplorerRouteChildren: ConnConnectionIdBranchSchemaHashDataExplorerRouteChildren =
@@ -301,56 +323,59 @@ const ConnConnectionIdBranchSchemaHashDataExplorerRouteChildren: ConnConnectionI
       ConnConnectionIdBranchSchemaHashDataExplorerTableNameSchemaRoute,
     ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute:
       ConnConnectionIdBranchSchemaHashDataExplorerTableNameIndexRoute,
-  };
+  }
 
 const ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren =
   ConnConnectionIdBranchSchemaHashDataExplorerRoute._addFileChildren(
     ConnConnectionIdBranchSchemaHashDataExplorerRouteChildren,
-  );
+  )
 
 interface ConnConnectionIdBranchSchemaHashLiveQueryRouteChildren {
-  ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute;
+  ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute
 }
 
 const ConnConnectionIdBranchSchemaHashLiveQueryRouteChildren: ConnConnectionIdBranchSchemaHashLiveQueryRouteChildren =
   {
     ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute:
       ConnConnectionIdBranchSchemaHashLiveQueryIndexRoute,
-  };
+  }
 
 const ConnConnectionIdBranchSchemaHashLiveQueryRouteWithChildren =
   ConnConnectionIdBranchSchemaHashLiveQueryRoute._addFileChildren(
     ConnConnectionIdBranchSchemaHashLiveQueryRouteChildren,
-  );
+  )
 
 interface ConnRouteChildren {
-  ConnNewRoute: typeof ConnNewRoute;
-  ConnIndexRoute: typeof ConnIndexRoute;
-  ConnConnectionIdIndexRoute: typeof ConnConnectionIdIndexRoute;
-  ConnConnectionIdBranchIndexRoute: typeof ConnConnectionIdBranchIndexRoute;
-  ConnConnectionIdBranchSchemaHashDataExplorerRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren;
-  ConnConnectionIdBranchSchemaHashLiveQueryRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryRouteWithChildren;
-  ConnConnectionIdBranchSchemaHashIndexRoute: typeof ConnConnectionIdBranchSchemaHashIndexRoute;
+  ConnNewRoute: typeof ConnNewRoute
+  ConnIndexRoute: typeof ConnIndexRoute
+  ConnEditConnectionIdRoute: typeof ConnEditConnectionIdRoute
+  ConnConnectionIdIndexRoute: typeof ConnConnectionIdIndexRoute
+  ConnConnectionIdBranchIndexRoute: typeof ConnConnectionIdBranchIndexRoute
+  ConnConnectionIdBranchSchemaHashDataExplorerRoute: typeof ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren
+  ConnConnectionIdBranchSchemaHashLiveQueryRoute: typeof ConnConnectionIdBranchSchemaHashLiveQueryRouteWithChildren
+  ConnConnectionIdBranchSchemaHashIndexRoute: typeof ConnConnectionIdBranchSchemaHashIndexRoute
 }
 
 const ConnRouteChildren: ConnRouteChildren = {
   ConnNewRoute: ConnNewRoute,
   ConnIndexRoute: ConnIndexRoute,
+  ConnEditConnectionIdRoute: ConnEditConnectionIdRoute,
   ConnConnectionIdIndexRoute: ConnConnectionIdIndexRoute,
   ConnConnectionIdBranchIndexRoute: ConnConnectionIdBranchIndexRoute,
   ConnConnectionIdBranchSchemaHashDataExplorerRoute:
     ConnConnectionIdBranchSchemaHashDataExplorerRouteWithChildren,
   ConnConnectionIdBranchSchemaHashLiveQueryRoute:
     ConnConnectionIdBranchSchemaHashLiveQueryRouteWithChildren,
-  ConnConnectionIdBranchSchemaHashIndexRoute: ConnConnectionIdBranchSchemaHashIndexRoute,
-};
+  ConnConnectionIdBranchSchemaHashIndexRoute:
+    ConnConnectionIdBranchSchemaHashIndexRoute,
+}
 
-const ConnRouteWithChildren = ConnRoute._addFileChildren(ConnRouteChildren);
+const ConnRouteWithChildren = ConnRoute._addFileChildren(ConnRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ConnRoute: ConnRouteWithChildren,
-};
+}
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
-  ._addFileTypes<FileRouteTypes>();
+  ._addFileTypes<FileRouteTypes>()

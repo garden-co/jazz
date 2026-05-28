@@ -9,7 +9,9 @@ export default defineConfig(({ mode }) => {
   return {
     resolve: {
       alias: {
+        "#contexts": resolve(__dirname, "src/contexts"),
         "#data-explorer": resolve(__dirname, "src/components/data-explorer"),
+        "#db-config-form": resolve(__dirname, "src/components/db-config-form"),
         "#inspector-layout": resolve(__dirname, "src/components/inspector-layout"),
         "#lib": resolve(__dirname, "src/lib"),
         "#pages": resolve(__dirname, "src/pages"),
