@@ -1700,7 +1700,7 @@ impl Runtime {
         let history_exists = history_record_exists(context.db, &record.table, row_num, tx_num)?;
         if history_exists
             && current_visible_tx_num(context.db, &record.table, row_num, branch_num)?
-                .is_none_or(|current_tx_num| current_tx_num == tx_num)
+                .is_some_and(|current_tx_num| current_tx_num == tx_num)
         {
             return Ok(());
         }

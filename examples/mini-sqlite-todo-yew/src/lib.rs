@@ -624,6 +624,121 @@ mod tests {
     }
 
     #[test]
+    fn synced_pagination_survives_filter_and_page_changes() {
+        let mut worker = Runtime::open_with_schema(
+            Storage::Memory,
+            "worker-filter-pagination-sync",
+            "alice",
+            todo_schema(),
+        )
+        .unwrap();
+        let mut main = Runtime::open_with_schema(
+            Storage::Memory,
+            "main-filter-pagination-sync",
+            "alice",
+            todo_schema(),
+        )
+        .unwrap();
+
+        let default_page = TodoQueryState::default();
+        for index in 0..12 {
+            let id = format!("todo-{index:02}");
+            main.insert_row(
+                "todos",
+                &id,
+                BTreeMap::from([
+                    ("title".to_owned(), json!(format!("sync page {index:02}"))),
+                    ("done".to_owned(), json!(false)),
+                    ("project".to_owned(), json!("todo-list")),
+                ]),
+            )
+            .unwrap();
+            let changed_id = QueryBuilder::table("todos")
+                .in_values("id", json!([id]))
+                .build();
+            worker
+                .apply_bundle(&main.export_query(changed_id).unwrap())
+                .unwrap();
+            for query in [
+                default_page.page_query(),
+                default_page.next_page_probe_query(),
+            ] {
+                main.apply_bundle(&worker.export_query(query).unwrap())
+                    .unwrap();
+            }
+        }
+
+        let filtered_page_one = TodoQueryState {
+            title_search: "sync page".to_owned(),
+            sort_field: TodoSortField::Title,
+            sort_direction: TodoSortDirection::Asc,
+            page: 0,
+            ..TodoQueryState::default()
+        };
+        let worker_all_ids = worker
+            .query(
+                QueryBuilder::table("todos")
+                    .contains("title", "sync page")
+                    .order_by("title", QueryDirection::Asc)
+                    .build(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            worker_all_ids,
+            (0..12)
+                .map(|index| format!("todo-{index:02}"))
+                .collect::<Vec<_>>()
+        );
+        main.apply_bundle(
+            &worker
+                .export_query(filtered_page_one.page_hydration_query())
+                .unwrap(),
+        )
+        .unwrap();
+
+        let page_one_ids = main
+            .query(filtered_page_one.page_query())
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            page_one_ids,
+            (0..10)
+                .map(|index| format!("todo-{index:02}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            main.query(filtered_page_one.next_page_probe_query())
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let filtered_page_two = TodoQueryState {
+            page: 1,
+            ..filtered_page_one
+        };
+        main.apply_bundle(
+            &worker
+                .export_query(filtered_page_two.page_hydration_query())
+                .unwrap(),
+        )
+        .unwrap();
+
+        let page_two_ids = main
+            .query(filtered_page_two.page_query())
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert_eq!(page_two_ids, vec!["todo-10", "todo-11"]);
+    }
+
+    #[test]
     fn todo_query_state_builds_search_done_and_page_query() {
         let state = TodoQueryState {
             title_search: "  needle  ".to_owned(),
