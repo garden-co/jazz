@@ -7602,6 +7602,9 @@ fn branch_base_anchor_tx_nums(
         )?
         .query_map([], |row| row.get::<_, i64>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    if base_epochs.is_empty() {
+        return Ok(BTreeSet::new());
+    }
     let mut anchors = BTreeSet::new();
     let sql = format!(
         "SELECT h.tx_num
