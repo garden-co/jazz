@@ -7,6 +7,16 @@
     "module": "ESNext",
     "types": ["vite/client"],
     "skipLibCheck": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "#/*": ["./src/components/*"],
+      "#data-explorer/*": ["./src/components/data-explorer/*"],
+      "#db-config-form/*": ["./src/components/db-config-form/*"],
+      "#inspector-layout/*": ["./src/components/inspector-layout/*"],
+      "#contexts/*": ["./src/contexts/*"],
+      "#lib/*": ["./src/lib/*"],
+      "#pages/*": ["./src/pages/*"]
+    },
 
     /* Bundler mode */
     "moduleResolution": "bundler",

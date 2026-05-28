@@ -7,6 +7,9 @@ export default defineConfig(({ mode }) => {
   const isExtensionBuild = mode === "extension";
 
   return {
+    resolve: {
+      tsconfigPaths: true,
+    },
     plugins: [
       tanstackRouter({
         target: "react",
