@@ -10698,6 +10698,38 @@ mod tests {
     }
 
     #[test]
+    fn columnar_history_block_payload_dictionary_codes_repeated_strings() {
+        let mut bundle = sample_block_bundle();
+        let mut tx = bundle.txs[0].clone();
+        tx.tx_id = "tx-node-2".to_owned();
+        tx.local_epoch = 2;
+        bundle.txs.push(tx);
+        let mut read = bundle.reads[0].clone();
+        read.tx_id = "tx-node-2".to_owned();
+        bundle.reads.push(read);
+        let mut history = bundle.history[0].clone();
+        history.tx_id = "tx-node-2".to_owned();
+        history.values = BTreeMap::from([("body".to_owned(), json!("hello again"))]);
+        bundle.history.push(history);
+
+        let payload = ColumnarHistoryBlockPayload::from_bundle(&bundle);
+
+        assert!(matches!(
+            &payload.txs.node_id,
+            ColumnarStringColumn::Dictionary { .. }
+        ));
+        assert!(matches!(
+            &payload.history.table,
+            ColumnarStringColumn::Dictionary { .. }
+        ));
+        assert!(matches!(
+            &payload.history.created_by,
+            ColumnarStringColumn::Dictionary { .. }
+        ));
+        assert_eq!(payload.into_bundle().unwrap().history, bundle.history);
+    }
+
+    #[test]
     fn columnar_history_block_payload_packs_json_xy_strings() {
         let mut bundle = sample_block_bundle();
         bundle.history[0]
