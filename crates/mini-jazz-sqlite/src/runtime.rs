@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HISTORY_BLOCK_FORMAT_VERSION: i64 = 5;
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 6;
 const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
 const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
 const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
@@ -8559,10 +8559,14 @@ impl ColumnarHistoryRecords {
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum ColumnarValueColumn {
-    Json(Vec<JsonValue>),
+    JsonDictionary {
+        json_value_dict: Vec<JsonValue>,
+        json_value_refs: Vec<usize>,
+    },
     JsonObjectXYStrings {
         json_object_xy_strings: ColumnarXYStrings,
     },
+    Json(Vec<JsonValue>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -8574,6 +8578,9 @@ struct ColumnarXYStrings {
 impl ColumnarValueColumn {
     fn len(&self) -> usize {
         match self {
+            Self::JsonDictionary {
+                json_value_refs, ..
+            } => json_value_refs.len(),
             Self::Json(values) => values.len(),
             Self::JsonObjectXYStrings {
                 json_object_xy_strings,
@@ -8583,6 +8590,10 @@ impl ColumnarValueColumn {
 
     fn value(&self, idx: usize) -> JsonValue {
         match self {
+            Self::JsonDictionary {
+                json_value_dict,
+                json_value_refs,
+            } => json_value_dict[json_value_refs[idx]].clone(),
             Self::Json(values) => values[idx].clone(),
             Self::JsonObjectXYStrings {
                 json_object_xy_strings,
@@ -8602,13 +8613,41 @@ fn encode_columnar_value_column(values: Vec<JsonValue>) -> ColumnarValueColumn {
     let mut y = Vec::with_capacity(values.len());
     for value in &values {
         let Some((next_x, next_y)) = json_xy_string(value) else {
-            return ColumnarValueColumn::Json(values);
+            return encode_json_value_dictionary(values);
         };
         x.push(next_x);
         y.push(next_y);
     }
     ColumnarValueColumn::JsonObjectXYStrings {
         json_object_xy_strings: ColumnarXYStrings { x, y },
+    }
+}
+
+fn encode_json_value_dictionary(values: Vec<JsonValue>) -> ColumnarValueColumn {
+    let mut dict = Vec::new();
+    let mut indexes = BTreeMap::<String, usize>::new();
+    let mut refs = Vec::with_capacity(values.len());
+    for value in values {
+        let key = serde_json::to_string(&value).expect("serde_json::Value is serializable");
+        let next = indexes.get(&key).copied().unwrap_or_else(|| {
+            let index = dict.len();
+            dict.push(value);
+            indexes.insert(key, index);
+            index
+        });
+        refs.push(next);
+    }
+    if dict.len() < refs.len() {
+        ColumnarValueColumn::JsonDictionary {
+            json_value_dict: dict,
+            json_value_refs: refs,
+        }
+    } else {
+        ColumnarValueColumn::Json(
+            refs.into_iter()
+                .map(|idx| dict[idx].clone())
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -10812,6 +10851,42 @@ mod tests {
         assert!(matches!(
             &payload.history.created_by,
             ColumnarStringColumn::Dictionary { .. }
+        ));
+        assert_eq!(payload.into_bundle().unwrap().history, bundle.history);
+    }
+
+    #[test]
+    fn columnar_history_block_payload_dictionary_codes_repeated_user_values() {
+        let mut bundle = sample_block_bundle();
+        for epoch in 2..=4 {
+            let mut tx = bundle.txs[0].clone();
+            tx.tx_id = format!("tx-node-{epoch}");
+            tx.local_epoch = epoch;
+            bundle.txs.push(tx);
+
+            let mut history = bundle.history[0].clone();
+            history.tx_id = format!("tx-node-{epoch}");
+            history.values = BTreeMap::from([
+                ("body".to_owned(), json!(format!("body version {epoch}"))),
+                ("status".to_owned(), json!("draft")),
+            ]);
+            bundle.history.push(history);
+        }
+        bundle.history[0]
+            .values
+            .insert("status".to_owned(), json!("draft"));
+
+        let payload = ColumnarHistoryBlockPayload::from_bundle(&bundle);
+        let status_idx = payload
+            .history
+            .value_keys
+            .iter()
+            .position(|key| key == "status")
+            .unwrap();
+
+        assert!(matches!(
+            &payload.history.value_columns[status_idx],
+            ColumnarValueColumn::JsonDictionary { .. }
         ));
         assert_eq!(payload.into_bundle().unwrap().history, bundle.history);
     }

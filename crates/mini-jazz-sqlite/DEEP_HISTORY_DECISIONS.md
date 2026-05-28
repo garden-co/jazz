@@ -419,3 +419,11 @@ Decision: expose `MINI_JAZZ_DEEP_HISTORY_MAX_ROWS_PER_BLOCK` in the deep-history
 Why: one huge block is the best-case compression point but the worst-case first cold point-read unit. We need to be able to measure smaller block sizes against the same canonical write workloads before choosing a production default or adaptive policy.
 
 Scope impact: the default Block column remains one block per compacted row history. Setting the env var routes benchmark compaction through `HistoryCompactionPolicy` and records the row cap in the benchmark notes.
+
+## Thu May 28 02:26:31 PDT 2026 - User Value Dictionaries
+
+Decision: bump newly sealed columnar blocks to v6 and dictionary-code repeated user column values.
+
+Why: the whole-row thesis depends on compressing unchanged columns, not just large edited text blobs or repeated Jazz metadata. In a wide row, many columns can remain byte-identical across a deep edit history, and those should become one dictionary value plus small refs inside the sealed block.
+
+Scope impact: non-coordinate user value columns now choose a JSON-value dictionary when values repeat. The decoder remains compatible with v3 through v5 columnar blocks and v1 bundle-json blocks.

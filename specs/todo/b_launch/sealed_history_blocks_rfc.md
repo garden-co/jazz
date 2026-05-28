@@ -394,17 +394,20 @@ The first implementation can use a simpler binary format if needed, but the
 target is columnar enough that unchanged columns and repeated metadata become
 near-free.
 
-Prototype note: newly sealed blocks now use a v5 `columnar-json-lz4` payload.
+Prototype note: newly sealed blocks now use a v6 `columnar-json-lz4` payload.
 It stores tx, read, history metadata, and user values as parallel arrays and
 decodes back to the same logical `Bundle`. This is still a stepping stone rather
 than the final binary/delta-varint format, but it removes repeated per-record
 JSON object keys and repeated per-row user value keys from the sealed block
-body. The v5 payload dictionary-codes repeated string columns such as table ids,
+body. The v6 payload dictionary-codes repeated string columns such as table ids,
 row ids, branch ids, node ids, and user ids. It also retains the v4 behavior that
 recognizes text values shaped as JSON `{x, y}` numeric objects and stores those
 as numeric `x[]`/`y[]` streams before reconstructing the same text value on
-decode. The decoder still accepts the earlier `bundle-json-lz4` v1 blocks and v3
-/ v4 columnar blocks for compatibility within the spike.
+decode. Repeated user column values, including unchanged ordinary scalar or JSON
+columns, are dictionary-coded as well; this is the first whole-row block codec
+step aimed at unchanged columns rather than only large edited values. The
+decoder still accepts the earlier `bundle-json-lz4` v1 blocks and v3 / v4 / v5
+columnar blocks for compatibility within the spike.
 
 For segment-tree-backed columns, a sealed block should not blindly store one
 full materialized value per version. Acceptable first encodings include:
