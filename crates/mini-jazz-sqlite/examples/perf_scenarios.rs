@@ -4154,6 +4154,7 @@ fn run_append_stream_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: None,
+        write_batch_size: deep_history_write_batch_size(),
         notes: vec!["Naive baseline: one full-row text update per token-like append.".to_owned()],
     })
 }
@@ -4182,6 +4183,7 @@ fn run_append_stream_history_blocks_probe() -> BenchResult<DeepHistoryCaseReport
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: Some(hot_tail),
+        write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             "History blocks: naive full-row writes, then seal old accepted history into lz4 blocks."
                 .to_owned(),
@@ -4219,6 +4221,7 @@ fn run_automerge_paper_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: None,
+        write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
             "Naive baseline: apply trace patch locally, then write whole document body.".to_owned(),
@@ -4257,6 +4260,7 @@ fn run_automerge_paper_history_blocks_probe() -> BenchResult<DeepHistoryCaseRepo
         final_reference_json: None,
         compare_to_final_payload: true,
         compact_hot_tail: Some(hot_tail),
+        write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
             "History blocks: naive full-row writes, then seal old accepted history into lz4 blocks."
@@ -4342,6 +4346,7 @@ fn run_canvas_positions_probe() -> BenchResult<DeepHistoryCaseReport> {
         final_reference_json: Some(reference_json),
         compare_to_final_payload: false,
         compact_hot_tail: None,
+        write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             "Naive baseline: one full-row position JSON text update per 60 FPS frame.".to_owned(),
             "Final-payload ratios are not meaningful for presence-like coordinates and are emitted as null.".to_owned(),
@@ -4374,6 +4379,7 @@ fn run_canvas_positions_history_blocks_probe() -> BenchResult<DeepHistoryCaseRep
         final_reference_json: Some(reference_json),
         compare_to_final_payload: false,
         compact_hot_tail: Some(hot_tail),
+        write_batch_size: deep_history_write_batch_size(),
         notes: vec![
             "History blocks: naive full-row writes, then seal old accepted history into lz4 blocks."
                 .to_owned(),
@@ -4423,6 +4429,7 @@ struct DeepHistoryCaseInput {
     final_reference_json: Option<String>,
     compare_to_final_payload: bool,
     compact_hot_tail: Option<usize>,
+    write_batch_size: Option<usize>,
     notes: Vec<String>,
 }
 
@@ -5107,22 +5114,53 @@ fn run_naive_deep_history_case(
     let mut last_value = String::new();
     let mut stopped_early = false;
     let mut stop_reason = None;
+    let mut notes = input.notes;
+    let write_batch_size = input.write_batch_size.unwrap_or(1).max(1);
+    let mut pending_updates = Vec::new();
+    if write_batch_size > 1 {
+        notes.push(format!(
+            "SQLite write batching enabled: up to {write_batch_size} logical Jazz txs per SQLite commit."
+        ));
+    }
 
     for index in 0..input.target_updates {
         if Instant::now() >= deadline {
+            if !pending_updates.is_empty() {
+                let write_started = Instant::now();
+                writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+                write_only_ms += ms(write_started.elapsed());
+            }
             stopped_early = true;
             stop_reason = Some(format!("stopped after {} seconds", input.max_seconds));
             break;
         }
-        let write_started = Instant::now();
         let value = (input.next_value)(index)?;
         last_value = value.clone();
-        writer.update_row(input.table, input.row_id, map1(input.field, json!(value)))?;
-        write_only_ms += ms(write_started.elapsed());
         completed_updates += 1;
+        if write_batch_size == 1 {
+            let write_started = Instant::now();
+            writer.update_row(input.table, input.row_id, map1(input.field, json!(value)))?;
+            write_only_ms += ms(write_started.elapsed());
+        } else {
+            pending_updates.push((input.row_id.to_owned(), map1(input.field, json!(value))));
+            let should_flush = pending_updates.len() >= write_batch_size
+                || index == 0
+                || (index + 1) % input.sample_every == 0
+                || index + 1 == input.target_updates;
+            if should_flush {
+                let write_started = Instant::now();
+                writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+                write_only_ms += ms(write_started.elapsed());
+            }
+        }
 
         if index == 0 || (index + 1) % input.sample_every == 0 || index + 1 == input.target_updates
         {
+            if !pending_updates.is_empty() {
+                let write_started = Instant::now();
+                writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+                write_only_ms += ms(write_started.elapsed());
+            }
             let receive_started = Instant::now();
             let bundle = writer.export_table_history(input.table)?;
             receiver.profile_apply_bundle(&bundle)?;
@@ -5135,9 +5173,13 @@ fn run_naive_deep_history_case(
             receive_samples.push(receive_ms);
         }
     }
+    if !pending_updates.is_empty() {
+        let write_started = Instant::now();
+        writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+        write_only_ms += ms(write_started.elapsed());
+    }
 
     let total_loop_ms = ms(started.elapsed());
-    let mut notes = input.notes;
     if let Some(hot_tail) = input.compact_hot_tail {
         let compaction_started = Instant::now();
         let compaction = writer.compact_table_accepted_history(input.table, hot_tail, hot_tail)?;
@@ -5505,6 +5547,10 @@ fn env_usize(name: &str, default: usize) -> usize {
 
 fn env_optional_usize(name: &str) -> Option<usize> {
     env::var(name).ok().and_then(|value| value.parse().ok())
+}
+
+fn deep_history_write_batch_size() -> Option<usize> {
+    env_optional_usize("MINI_JAZZ_DEEP_HISTORY_WRITE_BATCH_SIZE").filter(|size| *size > 1)
 }
 
 fn env_bool(name: &str, default: bool) -> bool {

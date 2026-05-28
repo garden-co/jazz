@@ -106,3 +106,11 @@ Decision: prototype batched writes as "many logical Jazz transactions inside one
 Why: this tests the stretch-goal premise without changing transaction identity or visibility semantics. Each logical update still receives its own tx id, history row, read set, write set, and sync representation; only the durable SQLite commit boundary is shared.
 
 Scope impact: `update_rows_batched` is intentionally narrow and does not yet provide scheduler/count/time policies. It is enough to benchmark whether reducing commit count matters for append/edit streams before designing the production API.
+
+## Wed May 27 23:30:59 PDT 2026
+
+Decision: expose batched logical updates in the deep-history benchmark behind `MINI_JAZZ_DEEP_HISTORY_WRITE_BATCH_SIZE`.
+
+Why: batching is a write-throughput optimization, not a storage compaction optimization. The benchmark should let us turn it on independently for Base, Block, and future experiments so we can tell whether wins come from fewer SQLite commits or fewer persisted bytes.
+
+Scope impact: benchmark sampling flushes any pending batch before listener/export measurement. This preserves end-to-end listener correctness while allowing normal non-sampled writes to share SQLite commits.
