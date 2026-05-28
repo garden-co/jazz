@@ -8,7 +8,7 @@ import {
   type MutationFormMode,
   parseMutationFieldValue,
 } from "./row-mutation-form.js";
-import { buildRelationFilterSearch } from "./relation-navigation.js";
+import { buildRelationFilterSearch } from "./tableSearchParams.js";
 import styles from "./RowMutationSidebar.module.css";
 
 interface FieldState {

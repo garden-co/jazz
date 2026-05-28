@@ -179,7 +179,7 @@ describe("TableDataGrid", () => {
 
     const url = new URL(href!, "https://inspector.test");
     expect(url.pathname).toBe("/conn/connection/main/schema/data-explorer/users/data");
-    expect(JSON.parse(JSON.parse(url.searchParams.get("filters") ?? '"[]"'))).toMatchObject([
+    expect(JSON.parse(url.searchParams.get("filters") ?? "[]")).toMatchObject([
       {
         column: "id",
         operator: "eq",
