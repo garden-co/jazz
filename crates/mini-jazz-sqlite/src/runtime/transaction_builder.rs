@@ -284,7 +284,7 @@ impl TransactionBuilder<'_> {
                         now,
                         user: &user,
                         bypass_policy,
-                        record_row_read: true,
+                        read_set: DeleteReadSetMode::RecordPreviousRow,
                     })?;
                 }
             }

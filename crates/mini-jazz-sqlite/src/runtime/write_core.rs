@@ -47,7 +47,13 @@ pub(super) struct StageDeleteInTx<'a> {
     pub(super) now: i64,
     pub(super) user: &'a str,
     pub(super) bypass_policy: bool,
-    pub(super) record_row_read: bool,
+    pub(super) read_set: DeleteReadSetMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DeleteReadSetMode {
+    AlreadyCoveredByWriteCall,
+    RecordPreviousRow,
 }
 
 struct EffectiveWriteValues<'a> {
@@ -245,7 +251,7 @@ pub(super) fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
 pub(super) fn stage_delete_row_in_tx(args: StageDeleteInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     let row_num = row_num(args.db, args.id)?;
-    if args.record_row_read {
+    if matches!(args.read_set, DeleteReadSetMode::RecordPreviousRow) {
         read_set::record_tx_read(
             args.db,
             args.tx_num,

@@ -669,3 +669,10 @@ regress.
 - Added `WriteOp` at the shared write-core boundary and converted simple writes, batched writes, explicit transactions, deletes, and write-set recording through it.
 - This keeps numeric encoding at the SQLite/protocol edge while giving future write-pipeline work a typed vocabulary.
 - Focused storage/projection and transaction tests pass.
+
+## 2026-05-29 02:50 PDT - Named delete read-set behavior instead of passing a boolean
+
+- `stage_delete_row_in_tx` no longer accepts `record_row_read: bool`; it takes `DeleteReadSetMode`.
+- Simple delete calls now state that their read-set shape is already covered by write-call semantics, while explicit transaction deletes state that they record the previous row.
+- This preserves current behavior but removes another ambiguous write-core flag from the API future work will copy.
+- Focused delete-related tests pass.

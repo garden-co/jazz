@@ -113,7 +113,7 @@ impl Runtime {
             now,
             user: &user,
             bypass_policy,
-            record_row_read: false,
+            read_set: DeleteReadSetMode::AlreadyCoveredByWriteCall,
         })?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
