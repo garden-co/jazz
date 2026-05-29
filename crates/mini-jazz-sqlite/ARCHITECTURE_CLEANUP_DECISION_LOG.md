@@ -877,23 +877,6 @@ regress.
 - PR #973 moved again to `0f579fe6014a11fcd87d43ec342a28c20ee6463f` and is still draft.
 - Nico's #945 has not moved; this branch has ported the isolation tests/semantics rather than his WIP implementation.
 
-## 2026-05-29 04:11 PDT - Perf PR continues to move
-
-- Rechecked open PRs against `codex/mini-jazz-sqlite-spec`.
-- PR #973 has moved again to `e1fe2689ad7b86a91cfbd12f6e08d9eb8e94b69c` and is still draft.
-- The set of open stacked PRs remains #974, #973, and #945.
-
-## 2026-05-29 04:12 PDT - Full validation passes after shared reconstruction move
-
-- Ran `cargo test -p mini-jazz-sqlite` after moving `history_records_for_tx` to `history_export` and fixing the JS todo demo constructor call.
-- Result: 440 passed, 18 ignored placeholders, 0 failed.
-
-## 2026-05-29 04:13 PDT - Perf PR newest commits are deep-history shaped
-
-- Fetched PR #973 latest head for inspection.
-- The newest commits are mostly sealed-history/deep-text API and block-delta work (`Document deep text runtime API`, `Expose text delta watermark at runtime boundary`, `Hide raw text sidecar internals`, delta-block repair/filtering).
-- Nothing in the newest tail looks like a small architecture-boundary port for this PR; keep treating #973 as a separate feature/perf lane.
-
 ## 2026-05-29 04:03 PDT - Full validation passes after final boundary/name cleanup
 
 - Ran `cargo test -p mini-jazz-sqlite` after removing runtime-root helper re-export indirection and renaming the WASM todo constructors.
@@ -921,3 +904,20 @@ regress.
 - Moved `history_records_for_tx` from `sync_apply` to `history_export`, since both exclusive forwarding export and awaiting-dependency revalidation need it.
 - This removes the remaining concrete dependency from sync export into sync apply and makes the export/apply boundary less leaky.
 - `cargo check -p mini-jazz-sqlite` is green. Focused exclusive-forwarding and awaiting-dependency tests also pass.
+
+## 2026-05-29 04:11 PDT - Perf PR continues to move
+
+- Rechecked open PRs against `codex/mini-jazz-sqlite-spec`.
+- PR #973 has moved again to `e1fe2689ad7b86a91cfbd12f6e08d9eb8e94b69c` and is still draft.
+- The set of open stacked PRs remains #974, #973, and #945.
+
+## 2026-05-29 04:12 PDT - Full validation passes after shared reconstruction move
+
+- Ran `cargo test -p mini-jazz-sqlite` after moving `history_records_for_tx` to `history_export` and fixing the JS todo demo constructor call.
+- Result: 440 passed, 18 ignored placeholders, 0 failed.
+
+## 2026-05-29 04:13 PDT - Perf PR newest commits are deep-history shaped
+
+- Fetched PR #973 latest head for inspection.
+- The newest commits are mostly sealed-history/deep-text API and block-delta work (`Document deep text runtime API`, `Expose text delta watermark at runtime boundary`, `Hide raw text sidecar internals`, delta-block repair/filtering).
+- Nothing in the newest tail looks like a small architecture-boundary port for this PR; keep treating #973 as a separate feature/perf lane.
