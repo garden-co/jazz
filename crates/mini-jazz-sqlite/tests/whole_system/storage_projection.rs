@@ -127,7 +127,7 @@ fn system_user_metadata_is_interned_but_app_user_fields_stay_text() {
         .unwrap();
 
     assert_eq!(created_by_type, "INTEGER");
-    assert_eq!(owner_type, "TEXT");
+    assert_eq!(owner_type, "BLOB");
     assert_eq!(stored_user_id, "alice");
     assert_eq!(stored_owner_id, "user-visible-owner");
 }

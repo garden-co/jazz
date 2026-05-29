@@ -121,7 +121,7 @@ CREATE TABLE todos_v1_current (
   visible_tx_num INTEGER NOT NULL,
   is_deleted INTEGER NOT NULL,
 
-  title TEXT,
+  title BLOB,
   done INTEGER,
   project_row_num INTEGER,
 
@@ -147,6 +147,12 @@ serve hot reads, policy filters, subscriptions, explicit indexes, and common
 query plans. Generated or side indexes over history payloads should be added
 only when measurements show a hot historical query, conflict lookup, or
 authority-validation path needs them.
+
+Semantic text columns should use a no-affinity SQLite storage type in layouts
+that support implicit promoted-text storage. Inline text values still store as
+SQLite text, but promoted values can store compact integer roots without SQLite
+coercing them to string literals. Public APIs and query results continue to see
+ordinary text either way.
 
 Storage compression should target logical history ranges, not individual row
 payloads. Per-row history payload compression has too little compression window

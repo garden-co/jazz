@@ -56,9 +56,10 @@ roots, while the runtime owns a text operation log, periodic snapshots,
 content-addressed snapshot chunks, sidecar deltas, and historical
 materialization. Product APIs may expose efficient append and range-edit
 operations, but callers are not required to manufacture or observe text roots.
-The prototype currently uses an explicit `deep_text` field declaration to force
-this lowering in benchmarks; the intended product contract is automatic or
-planner-driven promotion behind the ordinary text type.
+The prototype still has an explicit `deep_text` field declaration to force this
+lowering in benchmarks, and also supports implicit promotion for ordinary text
+fields edited through the incremental text APIs. The intended product contract
+is automatic or planner-driven promotion behind the ordinary text type.
 
 Physical storage layouts are not created for every catalogue/schema version.
 The engine should create a new physical layout only when structural storage

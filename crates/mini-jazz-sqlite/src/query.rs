@@ -63,7 +63,7 @@ impl QueryContext<'_> {
             .iter()
             .find(|field| field.name == field_name)
             .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
-        if matches!(field.kind, FieldKind::DeepText) {
+        if matches!(field.kind, FieldKind::Text | FieldKind::DeepText) {
             return Ok(self
                 .read_rows(table_name)?
                 .into_iter()
@@ -145,7 +145,7 @@ impl QueryContext<'_> {
             .iter()
             .find(|field| field.name == field_name)
             .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
-        if matches!(field.kind, FieldKind::DeepText) {
+        if matches!(field.kind, FieldKind::Text | FieldKind::DeepText) {
             return Ok(self
                 .read_rows(table_name)?
                 .into_iter()
@@ -234,7 +234,7 @@ impl QueryContext<'_> {
             .iter()
             .find(|field| field.name == field_name)
             .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
-        if matches!(field.kind, FieldKind::DeepText) {
+        if matches!(field.kind, FieldKind::Text | FieldKind::DeepText) {
             let created_at_by_id = current_created_at_by_row_id(self.conn, table_name)?;
             return values
                 .iter()
@@ -395,8 +395,8 @@ impl QueryContext<'_> {
                     "unknown order field {table_name}.{order_field_name}"
                 ))
             })?;
-        if matches!(field.kind, FieldKind::DeepText)
-            || matches!(order_field.kind, FieldKind::DeepText)
+        if matches!(field.kind, FieldKind::Text | FieldKind::DeepText)
+            || matches!(order_field.kind, FieldKind::Text | FieldKind::DeepText)
         {
             let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
             rows.sort_by(|left, right| {
@@ -515,8 +515,8 @@ impl QueryContext<'_> {
                     "unknown order field {table_name}.{order_field_name}"
                 ))
             })?;
-        if matches!(field.kind, FieldKind::DeepText)
-            || matches!(order_field.kind, FieldKind::DeepText)
+        if matches!(field.kind, FieldKind::Text | FieldKind::DeepText)
+            || matches!(order_field.kind, FieldKind::Text | FieldKind::DeepText)
         {
             return values
                 .iter()
@@ -955,7 +955,7 @@ impl QueryContext<'_> {
             .iter()
             .find(|field| field.name == field_name)
             .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
-        if matches!(field.kind, FieldKind::DeepText) {
+        if matches!(field.kind, FieldKind::Text | FieldKind::DeepText) {
             return Ok(self
                 .read_rows(table_name)?
                 .into_iter()
@@ -2153,6 +2153,9 @@ pub(crate) fn sql_value_to_json(
         (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
             Ok(JsonValue::String(value.clone()))
         }
+        (FieldKind::Text, rusqlite::types::Value::Integer(value)) => {
+            Ok(JsonValue::TextRoot(*value))
+        }
         (FieldKind::DeepText, rusqlite::types::Value::Integer(value)) => Ok(JsonValue::Number(
             serde_json::Number::from(u64::try_from(*value).map_err(|_| {
                 crate::Error::new(format!("invalid deep text root for {}", field.name))
@@ -2181,6 +2184,12 @@ fn sql_value_to_public_json(
 ) -> Result<JsonValue> {
     match (&field.kind, value) {
         (FieldKind::DeepText, rusqlite::types::Value::Integer(value)) => {
+            let root = if *value == 0 { None } else { Some(*value) };
+            Ok(JsonValue::String(crate::persisted_text_ops::materialize(
+                conn, root,
+            )?))
+        }
+        (FieldKind::Text, rusqlite::types::Value::Integer(value)) => {
             let root = if *value == 0 { None } else { Some(*value) };
             Ok(JsonValue::String(crate::persisted_text_ops::materialize(
                 conn, root,

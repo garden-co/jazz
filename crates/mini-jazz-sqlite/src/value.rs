@@ -11,6 +11,7 @@ pub enum Value {
     Array(Vec<Value>),
     Object(BTreeMap<String, Value>),
     Bytes(Vec<u8>),
+    TextRoot(i64),
 }
 
 impl Eq for Value {}
@@ -26,6 +27,7 @@ pub(crate) enum WireValue {
     Array(Vec<WireValue>),
     Object(Vec<(String, WireValue)>),
     Bytes(Vec<u8>),
+    TextRoot(i64),
 }
 
 impl Serialize for Value {
@@ -79,6 +81,7 @@ impl From<&Value> for WireValue {
                     .collect(),
             ),
             Value::Bytes(value) => Self::Bytes(value.clone()),
+            Value::TextRoot(value) => Self::TextRoot(*value),
         }
     }
 }
@@ -102,6 +105,7 @@ impl From<WireValue> for Value {
                     .collect(),
             ),
             WireValue::Bytes(value) => Self::Bytes(value),
+            WireValue::TextRoot(value) => Self::TextRoot(value),
         }
     }
 }
@@ -153,6 +157,7 @@ impl Value {
                     .collect(),
             ),
             Self::Bytes(value) => serde_json::json!({ "$bytes": bytes_to_hex(&value) }),
+            Self::TextRoot(value) => serde_json::json!({ "$textRoot": value }),
         }
     }
 
@@ -188,6 +193,7 @@ impl Value {
     pub fn as_u64(&self) -> Option<u64> {
         match self {
             Self::Number(value) => value.as_u64(),
+            Self::TextRoot(value) if *value >= 0 => Some(*value as u64),
             _ => None,
         }
     }

@@ -448,8 +448,9 @@ Implemented slices so far:
 - system-column prefix escaping
 - sealed history blocks for compacted accepted and rejected history
 - block-native history deltas with receiver block manifests
-- promoted text prototype via an explicit `deep_text` field kind, text-op
-  sidecar, current sidecar watermarks, and `HistoryDelta` integration
+- promoted text prototype via an explicit `deep_text` field kind, implicit
+  ordinary-text promotion through incremental edit APIs, text-op sidecar,
+  current sidecar watermarks, and `HistoryDelta` integration
 
 Tests should be product-shaped integration tests using projects, todos, Alice,
 Bob, and a core authority.
@@ -535,9 +536,11 @@ Known implementation tensions:
 
 - Query-scope repair currently uses local history that ever matched a supported
   equality predicate. This is correct for the prototype but can over-export.
-- The prototype exposes promoted text through an explicit `deep_text` schema
-  kind. The intended product direction is implicit promotion behind ordinary
-  text once edit pressure justifies the sidecar lowering.
+- The prototype still exposes promoted text through an explicit `deep_text`
+  schema kind for benchmarks, and now also supports implicit promotion of
+  ordinary text when callers use the incremental edit APIs. The remaining
+  product gap is automatic promotion based on observed edit pressure without
+  requiring the caller to choose an edit-specific API.
 - The prototype currently uses a global text sidecar watermark. The intended
   protocol direction is to derive sidecar possession from known row versions
   and sealed blocks instead, making text sidecar bytes dependency closure for

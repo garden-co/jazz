@@ -497,6 +497,12 @@ impl Runtime {
         }
         self.validate_deep_text_field(table_name, field_name)?;
         let table = self.schema.table_def(table_name)?.clone();
+        let field_kind = table
+            .fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .map(|field| field.kind.clone())
+            .ok_or_else(|| crate::Error::new(format!("unknown field {field_name}")))?;
         let user = self.attribution_user().to_owned();
         let bypass_policy = self.bypasses_policy();
         let write_sql = AppWriteSql::new(&table);
@@ -551,7 +557,12 @@ impl Runtime {
                     text_depth_since_snapshot.as_mut(),
                 )?;
                 add_write_phase(|stats| &mut stats.deep_text_edit_ms, deep_text_edit_started);
-                let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
+                let root_value = if matches!(field_kind, FieldKind::DeepText) {
+                    deep_text_root_value(root)
+                } else {
+                    promoted_text_root_value(root)
+                };
+                let values = BTreeMap::from([(field_name.to_owned(), root_value)]);
                 let outcome = insert_row_in_tx_with_local_tx_stmt(
                     InsertRowInTx {
                         db: &db,
@@ -728,7 +739,7 @@ impl Runtime {
             table
                 .fields
                 .iter()
-                .any(|field| matches!(field.kind, FieldKind::DeepText))
+                .any(|field| matches!(field.kind, FieldKind::Text | FieldKind::DeepText))
         })
     }
 
@@ -750,13 +761,11 @@ impl Runtime {
 
     fn validate_deep_text_field(&self, table_name: &str, field_name: &str) -> Result<()> {
         let table = self.schema.table_def(table_name)?;
-        if !table
-            .fields
-            .iter()
-            .any(|field| field.name == field_name && matches!(field.kind, FieldKind::DeepText))
-        {
+        if !table.fields.iter().any(|field| {
+            field.name == field_name && matches!(field.kind, FieldKind::Text | FieldKind::DeepText)
+        }) {
             return Err(crate::Error::new(format!(
-                "{field_name} is not a deep_text field"
+                "{field_name} is not a text field"
             )));
         }
         Ok(())
@@ -4716,14 +4725,17 @@ impl Runtime {
     ) -> Result<BTreeMap<String, JsonValue>> {
         let table = self.schema.table_def(table_name)?;
         for field in &table.fields {
-            if !matches!(field.kind, FieldKind::DeepText) {
+            if !matches!(field.kind, FieldKind::Text | FieldKind::DeepText) {
                 continue;
             }
             let root = values
                 .get(&field.name)
-                .and_then(JsonValue::as_u64)
+                .and_then(text_root_value)
                 .map(|root| root as i64)
                 .filter(|root| *root != 0);
+            if root.is_none() && matches!(values.get(&field.name), Some(JsonValue::String(_))) {
+                continue;
+            }
             values.insert(
                 field.name.clone(),
                 JsonValue::String(crate::persisted_text_ops::materialize(&self.conn, root)?),
@@ -7829,11 +7841,10 @@ fn validate_history_deep_text_root(
     field: &FieldDef,
     value: &JsonValue,
 ) -> Result<()> {
-    if !matches!(field.kind, FieldKind::DeepText) {
+    if !matches!(field.kind, FieldKind::Text | FieldKind::DeepText) {
         return Ok(());
     }
-    let Some(root) = value
-        .as_u64()
+    let Some(root) = text_root_value(value)
         .map(|root| root as i64)
         .filter(|root| *root != 0)
     else {
@@ -7852,6 +7863,18 @@ fn deep_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue 
     JsonValue::Number(serde_json::Number::from(root.unwrap_or(0) as u64))
 }
 
+fn promoted_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue {
+    JsonValue::TextRoot(root.unwrap_or(0))
+}
+
+fn text_root_value(value: &JsonValue) -> Option<u64> {
+    match value {
+        JsonValue::TextRoot(root) if *root >= 0 => Some(*root as u64),
+        JsonValue::Number(number) => number.as_u64(),
+        _ => None,
+    }
+}
+
 fn deep_text_roots_for_bundle(
     schema: &SchemaDef,
     bundle: &Bundle,
@@ -7860,10 +7883,10 @@ fn deep_text_roots_for_bundle(
     for record in &bundle.history {
         let table = schema.table_def(&record.table)?;
         for field in &table.fields {
-            if !matches!(field.kind, FieldKind::DeepText) {
+            if !matches!(field.kind, FieldKind::Text | FieldKind::DeepText) {
                 continue;
             }
-            let Some(root) = record.values.get(&field.name).and_then(JsonValue::as_u64) else {
+            let Some(root) = record.values.get(&field.name).and_then(text_root_value) else {
                 continue;
             };
             if root > 0 {
@@ -7970,9 +7993,9 @@ fn current_deep_text_root_in_tx(
         .iter()
         .find(|field| field.name == field_name)
         .ok_or_else(|| crate::Error::new(format!("unknown field {field_name}")))?;
-    if !matches!(field.kind, FieldKind::DeepText) {
+    if !matches!(field.kind, FieldKind::Text | FieldKind::DeepText) {
         return Err(crate::Error::new(format!(
-            "{field_name} is not a deep_text field"
+            "{field_name} is not a text field"
         )));
     }
     let row_num = row_num(conn, id)?;
@@ -7987,12 +8010,19 @@ fn current_deep_text_root_in_tx(
             crate::schema::current_table(table_name)
         ),
         params![row_num, branch_num],
-        |row| row.get::<_, i64>(0),
+        |row| row.get::<_, rusqlite::types::Value>(0),
     )?;
-    if value == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(value))
+    match value {
+        rusqlite::types::Value::Integer(0) => Ok(None),
+        rusqlite::types::Value::Integer(value) => Ok(Some(value)),
+        rusqlite::types::Value::Text(text) => {
+            crate::persisted_text_ops::replace_range_known_len(conn, None, 0, 0, 0, &text, 256)
+        }
+        rusqlite::types::Value::Null if field.nullable => Ok(None),
+        _ => Err(crate::Error::new(format!(
+            "unexpected stored text value for {}",
+            field.name
+        ))),
     }
 }
 
@@ -13246,6 +13276,9 @@ fn sql_value_to_json_cached(
         (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
             Ok(JsonValue::String(value.clone()))
         }
+        (FieldKind::Text, rusqlite::types::Value::Integer(value)) => {
+            Ok(JsonValue::TextRoot(*value))
+        }
         (FieldKind::DeepText, rusqlite::types::Value::Integer(value)) => Ok(JsonValue::Number(
             serde_json::Number::from(u64::try_from(*value).map_err(|_| {
                 crate::Error::new(format!("invalid deep text root for {}", field.name))
@@ -13831,6 +13864,59 @@ mod tests {
         );
         let row = alice.read_rows("docs").unwrap().remove(0);
         assert_eq!(row.values["body"], JsonValue::from("hello Ada"));
+    }
+
+    #[test]
+    fn ordinary_text_field_promotes_to_sidecar_after_incremental_edits() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from("hello"))]),
+            )
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", " promoted")
+            .unwrap();
+
+        assert_eq!(
+            alice.read_rows("docs").unwrap()[0].values["body"],
+            JsonValue::from("hello promoted")
+        );
+        assert_eq!(
+            alice
+                .read_rows_where_contains("docs", "body", "promoted")
+                .unwrap()[0]
+                .values["body"],
+            JsonValue::from("hello promoted")
+        );
+        let stored = alice
+            .conn
+            .query_row(
+                "SELECT typeof(body), body FROM docs__schema_v1_current WHERE row_num = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, "integer");
+        assert!(stored.1 > 0);
+
+        let delta = alice.export_all_history_delta(&[]).unwrap();
+        assert!(!delta.text_ops_delta.is_empty());
+        bob.apply_history_delta(&delta).unwrap();
+        assert_eq!(
+            bob.read_rows("docs").unwrap()[0].values["body"],
+            JsonValue::from("hello promoted")
+        );
     }
 
     #[test]

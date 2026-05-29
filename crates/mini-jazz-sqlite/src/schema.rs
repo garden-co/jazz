@@ -724,12 +724,16 @@ pub(crate) fn field_sql_value(
         )));
     }
     Ok(match &field.kind {
-        FieldKind::Text => rusqlite::types::Value::Text(
-            value
-                .as_str()
-                .ok_or_else(|| crate::Error::new(format!("expected text for {}", field.name)))?
-                .to_owned(),
-        ),
+        FieldKind::Text => match value {
+            JsonValue::String(value) => rusqlite::types::Value::Text(value.clone()),
+            JsonValue::TextRoot(root) => rusqlite::types::Value::Integer(*root),
+            _ => {
+                return Err(crate::Error::new(format!(
+                    "expected text for {}",
+                    field.name
+                )));
+            }
+        },
         FieldKind::DeepText => {
             let root = value.as_u64().ok_or_else(|| {
                 crate::Error::new(format!("expected deep text root for {}", field.name))
@@ -778,7 +782,7 @@ fn user_storage_name(name: &str) -> String {
 
 fn sql_type(kind: &FieldKind) -> &'static str {
     match kind {
-        FieldKind::Text => "TEXT",
+        FieldKind::Text => "BLOB",
         FieldKind::DeepText => "INTEGER",
         FieldKind::Bytes => "BLOB",
         FieldKind::Ref { table } => {
