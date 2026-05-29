@@ -165,6 +165,8 @@ bookkeeping.
 
 - `write only`: edit generation plus durable write/version insert work only
 - `sampled receive`: sum of sampled live receive/listener checks
+- `sampled live wire bytes`: wire bytes carried by sampled incremental receive
+  deltas; this is reported in JSON and summarized separately below
 - `total loop`: write loop wall time, including sampled receive checks
 - `avg loop/update`: `total loop / completed updates`
 - `avg write/update`: `write only / completed updates`
@@ -237,6 +239,18 @@ count; point reads and `transaction_info` stay as absolute per-call latencies.
 | native import / update        |    0.58 ms |  0.08 ms |   0.08 ms |    0.04 ms |    0.02 ms |    0.01 ms |    0.01 ms |    0.01 ms |    0.01 ms |    0.01 ms |    0.01 ms |     0.01 ms |     0.01 ms |     0.01 ms |     0.02 ms |     0.02 ms |    0.015 ms |
 | native sync bytes             |    858,561 |  337,476 |   337,476 |    337,111 |    199,193 |    198,883 |    198,905 |    199,146 |    198,902 |    198,505 |    198,476 |     198,461 |     186,875 |     186,874 |     186,854 |     186,848 |     186,850 |
 | live database / position gzip |      8.61x |    5.11x |     5.11x |      5.11x |      4.96x |      4.96x |      4.96x |      5.42x |      5.48x |      5.48x |      5.48x |       5.27x |       5.16x |       5.16x |       5.16x |       5.16x |       5.16x |
+
+### Latest Live Incremental Wire Bytes
+
+These are sampled live sync deltas from the latest receiver-state run. They are
+separate from `native sync bytes`, which measures each setup's cold/final native
+payload shape.
+
+| Scenario  | sampled total bytes | avg bytes/sample | last sample bytes |
+| --------- | ------------------: | ---------------: | ----------------: |
+| Append    |              33,279 |            5,546 |             6,871 |
+| Automerge |              48,498 |            8,083 |             9,719 |
+| Canvas    |             182,055 |           30,342 |            36,611 |
 
 ## Notes
 

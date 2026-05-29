@@ -1342,3 +1342,11 @@ Decision: benchmark reports now include sampled live receive wire bytes: total s
 Why: cold native sync bytes are useful, but write-path realism depends on the incremental deltas carried during live sync. Receiver-state export made those deltas more honest; the report should expose their size directly instead of forcing us to infer from timing.
 
 Scope impact: JSON report shape expands for all three deep-history scenarios. Existing overview tables remain unchanged until we decide which byte metric belongs there.
+
+## Fri May 29 02:58:20 PDT 2026 - Summarize Live Incremental Wire Bytes
+
+Decision: add a latest live incremental wire-byte summary to the benchmark overview, separate from the main cold/native sync byte row.
+
+Why: the new JSON fields are easy to miss. Keeping a compact summary makes realtime sync payload size visible without widening every historical comparison column.
+
+Scope impact: latest receiver-state sample shows sampled live totals of about 33 KB append, 48 KB Automerge, and 182 KB canvas across the canonical sample points.
