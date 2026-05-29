@@ -4138,6 +4138,16 @@ fn decode_native_bundle(bytes: &[u8]) -> BenchResult<Bundle> {
     Ok(decode_bundle(bytes)?)
 }
 
+fn max_local_epoch_for_node(bundle: &Bundle, node_id: &str) -> i64 {
+    bundle
+        .txs
+        .iter()
+        .filter(|tx| tx.node_id == node_id)
+        .map(|tx| tx.local_epoch)
+        .max()
+        .unwrap_or(0)
+}
+
 fn gzip_json_bytes(bundle: &Bundle) -> BenchResult<Option<usize>> {
     let mut child = match Command::new("gzip")
         .arg("-c")
@@ -4685,6 +4695,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let initial_bundle = writer.export_table_history("documents")?;
     let initial_wire = encode_native_bundle(&initial_bundle)?;
     let initial_bundle = decode_native_bundle(&initial_wire)?;
+    let mut live_sync_writer_epoch = max_local_epoch_for_node(&initial_bundle, "writer-node");
     receiver.apply_bundle(&initial_bundle)?;
     apply_inline_text_ops_from_bundle(
         &initial_bundle,
@@ -4760,7 +4771,17 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         if should_sample {
             let receive_started = Instant::now();
             let export_started = Instant::now();
-            let bundle = writer.export_table_history("documents")?;
+            let bundle = if env_bool("MINI_JAZZ_DEEP_HISTORY_INCREMENTAL_LIVE_FILTER", false) {
+                writer.export_table_history_since_node_epoch(
+                    "documents",
+                    "writer-node",
+                    live_sync_writer_epoch,
+                )?
+            } else {
+                writer.export_table_history("documents")?
+            };
+            live_sync_writer_epoch =
+                live_sync_writer_epoch.max(max_local_epoch_for_node(&bundle, "writer-node"));
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
             let encode_decode_started = Instant::now();
             let wire = encode_native_bundle(&bundle)?;
@@ -5126,7 +5147,9 @@ fn run_naive_deep_history_case(
         map1(input.field, json!(input.initial_value)),
     )?;
     let mut written_tx_ids = vec![initial_tx];
-    receiver.apply_bundle(&writer.export_table_history(input.table)?)?;
+    let initial_bundle = writer.export_table_history(input.table)?;
+    let mut live_sync_writer_epoch = max_local_epoch_for_node(&initial_bundle, "writer-node");
+    receiver.apply_bundle(&initial_bundle)?;
     let mut subscription = receiver.subscribe_rows(input.table)?;
 
     let started = Instant::now();
@@ -5244,7 +5267,17 @@ fn run_naive_deep_history_case(
             }
             let receive_started = Instant::now();
             let export_started = Instant::now();
-            let bundle = writer.export_table_history(input.table)?;
+            let bundle = if env_bool("MINI_JAZZ_DEEP_HISTORY_INCREMENTAL_LIVE_FILTER", false) {
+                writer.export_table_history_since_node_epoch(
+                    input.table,
+                    "writer-node",
+                    live_sync_writer_epoch,
+                )?
+            } else {
+                writer.export_table_history(input.table)?
+            };
+            live_sync_writer_epoch =
+                live_sync_writer_epoch.max(max_local_epoch_for_node(&bundle, "writer-node"));
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
             let apply_started = Instant::now();
             let profile = receiver.profile_apply_bundle(&bundle)?;

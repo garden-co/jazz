@@ -706,6 +706,40 @@ impl Runtime {
         ))
     }
 
+    pub fn export_table_history_since_node_epoch(
+        &self,
+        table_name: &str,
+        node_id: &str,
+        after_local_epoch: i64,
+    ) -> Result<Bundle> {
+        self.schema.table_def(table_name)?;
+        let user = self.policy_user();
+        let bypass_policy = self.bypasses_policy();
+        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
+        let history = export_visible_table_history_since_node_epoch(
+            &self.conn,
+            &self.schema,
+            table_name,
+            user,
+            bypass_policy,
+            &branch_nums,
+            node_id,
+            after_local_epoch,
+        )?;
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let txs = export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &[])?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        Ok(make_bundle(
+            &self.schema,
+            branches,
+            txs,
+            reads,
+            Vec::new(),
+            history,
+        ))
+    }
+
     pub fn export_table_history_delta(
         &self,
         table_name: &str,
@@ -10931,6 +10965,102 @@ fn export_visible_table_history(
         Some(row_nums) => stmt.query(params_from_iter(row_nums.iter()))?,
         None => stmt.query([])?,
     };
+    let mut public_row_id_cache = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let row = (0..row_width)
+            .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut values = BTreeMap::new();
+        for (idx, field) in table.fields.iter().enumerate() {
+            values.insert(
+                field.name.clone(),
+                sql_value_to_json_cached(conn, field, &row[idx + 4], &mut public_row_id_cache)?,
+            );
+        }
+        let sys = 4 + table.fields.len();
+        records.push(HistoryRecord {
+            table: table_name.to_owned(),
+            row_id: text_value(&row[0], "row_id")?,
+            branch_id: text_value(&row[1], "branch_id")?,
+            tx_id: text_value(&row[2], "tx_id")?,
+            op: integer_value(&row[3], "op")?,
+            values,
+            created_at: integer_value(&row[sys], "j_created_at")?,
+            updated_at: integer_value(&row[sys + 1], "j_updated_at")?,
+            created_by: text_value(&row[sys + 2], "j_created_by")?,
+            updated_by: text_value(&row[sys + 3], "j_updated_by")?,
+        });
+    }
+    Ok(records)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_visible_table_history_since_node_epoch(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table_name: &str,
+    user: &str,
+    bypass_policy: bool,
+    branch_nums: &[i64],
+    node_id: &str,
+    after_local_epoch: i64,
+) -> Result<Vec<HistoryRecord>> {
+    let table = schema.table_def(table_name)?;
+    let policy_sql = export_read_policy_sql(schema, table, user, bypass_policy)?;
+    let field_columns = table
+        .fields
+        .iter()
+        .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+        .collect::<Vec<_>>();
+    let mut select_columns = vec![
+        "ids.row_id".to_owned(),
+        "branch.branch_id".to_owned(),
+        "tx.tx_id".to_owned(),
+        "h.op".to_owned(),
+    ];
+    select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+    select_columns.extend([
+        "h.j_created_at".to_owned(),
+        "h.j_updated_at".to_owned(),
+        format!(
+            "{} AS j_created_by",
+            users::user_id_expr("h", "j_created_by")
+        ),
+        format!(
+            "{} AS j_updated_by",
+            users::user_id_expr("h", "j_updated_by")
+        ),
+    ]);
+    let sql = format!(
+        "SELECT {}
+         FROM {} h
+         JOIN jazz_row_id ids ON ids.row_num = h.row_num
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
+         JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
+         WHERE tx.node_id = ?
+           AND tx.local_epoch > ?
+           AND EXISTS (
+           SELECT 1
+           FROM {} current
+           JOIN jazz_tx_public current_tx ON current_tx.tx_num = current.visible_tx_num
+           WHERE current.row_num = h.row_num
+             AND current.j_branch_num = h.j_branch_num
+             AND current.is_deleted = 0
+             AND {}
+             AND current_tx.outcome != {}
+             AND {policy_sql}
+         )
+         ORDER BY h.row_num, h.tx_num",
+        select_columns.join(", "),
+        crate::schema::history_table(table_name),
+        crate::schema::current_table(table_name),
+        branch_filter_sql("current", branch_nums),
+        tx::OUTCOME_REJECTED,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row_width = 4 + table.fields.len() + 4;
+    let mut records = Vec::new();
+    let mut rows = stmt.query(params![node_id, after_local_epoch])?;
     let mut public_row_id_cache = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let row = (0..row_width)

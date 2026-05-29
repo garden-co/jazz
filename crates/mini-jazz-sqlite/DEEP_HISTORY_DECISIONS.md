@@ -803,3 +803,11 @@ Decision: add a runtime-local exact applied-tx cache for `apply_bundle`.
 Why: the canonical live receive benchmark currently applies cumulative table-history bundles. After `Block+Ops3`, live apply dominated total loop time. Exact txs that this runtime has already fully applied can skip repeated tx upsert, read tuple append, and history/current work on later overlapping bundles. The cache is intentionally conservative: it only marks a tx after a bundle carried history for that tx, and it only reuses the cache when outcome, conflict mode, global epoch, and awaiting-dependency state still match. This preserves fate-before-history and policy-dependency cases, which the whole-system tests caught during the first too-eager attempt.
 
 Scope impact: canonical `all-block-ops` receive/update moved from roughly `0.289 -> 0.201` ms for append, `0.281 -> 0.196` ms for Automerge, and `0.223 -> 0.136` ms for canvas. `cargo test -q -p mini-jazz-sqlite` passes.
+
+## Thu May 28 21:24:19 PDT 2026 - Prototype Incremental Open-History Live Export
+
+Decision: add an experimental single-writer open-history export path, gated in the deep-history benchmark by `MINI_JAZZ_DEEP_HISTORY_INCREMENTAL_LIVE_FILTER=1`.
+
+Why: after exact receive idempotency caching, live export and encode/decode became comparable to live apply. Filtering after full export proved smaller bundles help, but export still paid the full scan cost. The new path exports visible open history for one writer node after a known local epoch directly in SQL, then includes the corresponding reads, txs, and branch metadata. This is intentionally narrower than a complete sync protocol: it does not yet cover deleted rows, sealed blocks, multi-node watermarks, or policy dependency expansion.
+
+Scope impact: with the env flag enabled on canonical `all-block-ops`, receive/update moved from roughly `0.201 -> 0.135` ms for append, `0.196 -> 0.130` ms for Automerge, and `0.136 -> 0.103` ms for canvas. Default behavior is unchanged. `cargo test -q -p mini-jazz-sqlite` passes.
