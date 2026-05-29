@@ -982,3 +982,9 @@ regress.
 - Moved built-query repair-scope classification, offset keep-query construction, and current-row contraction from `history_export.rs` into `sync_apply.rs`.
 - Kept shared history/export helpers in `history_export`, but removed helpers that only made sense while applying query-scope refreshes.
 - Validation: `cargo check -p mini-jazz-sqlite`; `cargo test -p mini-jazz-sqlite sync_fate -- --nocapture` passed 65 focused sync tests.
+
+## 2026-05-29 13:29 PDT - Simplified invariant test support
+
+- Moved refresh-application helpers, row-id set projection, and deterministic replay schedule generation into shared test support.
+- Split future placeholder invariants out of `invariant_coverage.rs` so the active invariant file is less mixed with product backlog markers.
+- Validation: `cargo test -p mini-jazz-sqlite invariant_coverage -- --nocapture` passed 90 focused invariant tests with 2 ignored underspecified cases.

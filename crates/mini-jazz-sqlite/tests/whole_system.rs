@@ -8,9 +8,14 @@ use tempfile::tempdir;
 
 mod support;
 use support::todo_app::FixtureRuntimeExt;
+use support::{
+    apply_refreshes_batched, apply_refreshes_individually, row_ids, seeded_bundle_schedule,
+};
 
 #[path = "whole_system/branches.rs"]
 mod branches;
+#[path = "whole_system/future_invariants.rs"]
+mod future_invariants;
 #[path = "whole_system/generic_schema.rs"]
 mod generic_schema;
 #[path = "whole_system/invariant_coverage.rs"]

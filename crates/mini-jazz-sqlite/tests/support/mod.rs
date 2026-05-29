@@ -1,8 +1,8 @@
 use mini_jazz_sqlite::sync::{Bundle, QueryReadRecord};
-use mini_jazz_sqlite::{BuiltQuery, Result, Runtime, SchemaDef, Storage};
+use mini_jazz_sqlite::{BuiltQuery, Result, RowView, Runtime, SchemaDef, Storage};
 use serde_json::json;
 use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -250,6 +250,45 @@ pub fn refresh_query_reads(
         target.apply_bundle(&refresh)?;
     }
     Ok(())
+}
+
+pub fn apply_refreshes_individually(
+    upstream: &Runtime,
+    peer: &mut Runtime,
+    reads: &[QueryReadRecord],
+) {
+    for read in reads {
+        let refreshes = upstream
+            .export_query_read_refreshes(std::slice::from_ref(read))
+            .unwrap();
+        assert_eq!(refreshes.len(), 1);
+        peer.apply_bundle(&refreshes[0]).unwrap();
+    }
+}
+
+pub fn apply_refreshes_batched(upstream: &Runtime, peer: &mut Runtime, reads: &[QueryReadRecord]) {
+    for refresh in upstream.export_query_read_refreshes(reads).unwrap() {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+}
+
+pub fn row_ids(rows: Vec<RowView>) -> BTreeSet<String> {
+    rows.into_iter().map(|row| row.id).collect()
+}
+
+pub fn seeded_bundle_schedule(bundle_count: usize, seed: u64) -> Vec<usize> {
+    let mut state = seed;
+    let mut schedule = (0..bundle_count).collect::<Vec<_>>();
+    for _ in 0..(bundle_count * 3) {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        schedule.push((state as usize) % bundle_count);
+    }
+    for idx in 0..schedule.len() {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let swap_idx = (state as usize) % schedule.len();
+        schedule.swap(idx, swap_idx);
+    }
+    schedule
 }
 
 pub struct TrustedEdgeTopology {
