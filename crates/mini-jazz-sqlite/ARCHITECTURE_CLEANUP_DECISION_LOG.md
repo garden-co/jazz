@@ -636,3 +636,9 @@ regress.
 - Replaced `use super::*` with explicit imports in the newly touched `runtime::session`, `runtime::branches`, and `runtime::storage_admin` modules.
 - This is intentionally incremental: the large modules still use broad imports, but new/modified boundary modules should show future agents the desired direction.
 - Focused restore and storage/projection tests pass.
+
+## 2026-05-29 02:37 PDT - Rechecked moving deep-history perf PR
+
+- PR #973 head is now `f54c83c1d9ada44cf1bae407cac801462217b25f`, updated 02:33 PDT.
+- It is still a draft spike centered on sealed history blocks, text op sidecars, block codecs/caches, and deep-history benchmark docs.
+- Decision: continue avoiding wholesale merge into this architecture cleanup branch. The generic slices that fit this PR have already been ported; the remaining work should stay in the perf lane until its abstractions stabilize.
