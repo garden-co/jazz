@@ -796,3 +796,8 @@ regress.
 - Routed refresh planning, single refresh export, and observed-query subscriptions through the typed decoder instead of each surface reparsing string ops and JSON payloads independently.
 - This does not solve the long-term descriptor identity/schema question, but it makes unsupported/query-shape handling more exhaustive and harder to grow ad hoc.
 - Focused subscription, query-read, and sync-fate tests pass, and `cargo check -p mini-jazz-sqlite` is green.
+
+## 2026-05-29 03:38 PDT - Full validation passes after observed-query/admin cleanup
+
+- Ran `cargo test -p mini-jazz-sqlite` after grouping storage-admin APIs and centralizing observed-query decoding.
+- Result: 439 passed, 18 ignored placeholders, 0 failed.
