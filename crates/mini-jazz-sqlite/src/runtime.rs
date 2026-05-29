@@ -525,6 +525,10 @@ impl Runtime {
         } else {
             None
         };
+        let mut text_depth_since_snapshot = materialized_text
+            .as_ref()
+            .map(|_| crate::persisted_text_ops::current_depth_since_snapshot(&db, root))
+            .transpose()?;
         let mut tx_ids = Vec::with_capacity(edits.len());
         let last_edit_index = edits.len().saturating_sub(1);
         let mut last_created_tx_num = None;
@@ -534,7 +538,13 @@ impl Runtime {
                 db.prepare(tx::local_single_row_read_write_insert_sql())?;
             for (index, edit) in edits.iter().enumerate() {
                 let deep_text_edit_started = Instant::now();
-                root = apply_deep_text_edit(&db, root, edit, materialized_text.as_mut())?;
+                root = apply_deep_text_edit(
+                    &db,
+                    root,
+                    edit,
+                    materialized_text.as_mut(),
+                    text_depth_since_snapshot.as_mut(),
+                )?;
                 add_write_phase(|stats| &mut stats.deep_text_edit_ms, deep_text_edit_started);
                 let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
                 let outcome = insert_row_in_tx_with_local_tx_stmt(
@@ -7802,19 +7812,39 @@ fn apply_deep_text_edit(
     root: crate::persisted_text_ops::TextRoot,
     edit: &DeepTextEdit,
     materialized_text: Option<&mut String>,
+    mut depth_since_snapshot: Option<&mut i64>,
 ) -> Result<crate::persisted_text_ops::TextRoot> {
+    const SNAPSHOT_EVERY: usize = 256;
     match edit {
         DeepTextEdit::Append(text) => {
             if let Some(materialized_text) = materialized_text {
-                crate::persisted_text_ops::append_with_materialized(
-                    conn,
-                    root,
-                    materialized_text,
-                    text,
-                    256,
-                )
+                if let Some(depth_since_snapshot) = depth_since_snapshot.as_deref_mut() {
+                    let next_depth = *depth_since_snapshot + 1;
+                    let root = crate::persisted_text_ops::append_with_materialized_at_depth(
+                        conn,
+                        root,
+                        materialized_text,
+                        text,
+                        SNAPSHOT_EVERY,
+                        next_depth,
+                    )?;
+                    *depth_since_snapshot = if next_depth >= SNAPSHOT_EVERY as i64 {
+                        0
+                    } else {
+                        next_depth
+                    };
+                    Ok(root)
+                } else {
+                    crate::persisted_text_ops::append_with_materialized(
+                        conn,
+                        root,
+                        materialized_text,
+                        text,
+                        SNAPSHOT_EVERY,
+                    )
+                }
             } else {
-                crate::persisted_text_ops::append(conn, root, text, 256)
+                crate::persisted_text_ops::append(conn, root, text, SNAPSHOT_EVERY)
             }
         }
         DeepTextEdit::ReplaceRanges(patches) => {
@@ -7823,15 +7853,36 @@ fn apply_deep_text_edit(
                 crate::Error::new("replace range edits require materialized text cache")
             })?;
             for (start_byte, delete_bytes, insert) in patches {
-                root = crate::persisted_text_ops::replace_range_with_materialized(
-                    conn,
-                    root,
-                    materialized_text,
-                    *start_byte,
-                    *delete_bytes,
-                    insert,
-                    256,
-                )?;
+                if let Some(depth_since_snapshot) = depth_since_snapshot.as_deref_mut() {
+                    let next_depth = *depth_since_snapshot + 1;
+                    root = crate::persisted_text_ops::replace_range_with_materialized_at_depth(
+                        conn,
+                        root,
+                        materialized_text,
+                        crate::persisted_text_ops::TextRangeEdit {
+                            start_byte: *start_byte,
+                            delete_bytes: *delete_bytes,
+                            insert,
+                        },
+                        SNAPSHOT_EVERY,
+                        next_depth,
+                    )?;
+                    *depth_since_snapshot = if next_depth >= SNAPSHOT_EVERY as i64 {
+                        0
+                    } else {
+                        next_depth
+                    };
+                } else {
+                    root = crate::persisted_text_ops::replace_range_with_materialized(
+                        conn,
+                        root,
+                        materialized_text,
+                        *start_byte,
+                        *delete_bytes,
+                        insert,
+                        SNAPSHOT_EVERY,
+                    )?;
+                }
             }
             Ok(root)
         }

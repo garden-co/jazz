@@ -1438,3 +1438,11 @@ Decision: keep the existing JSON text encoder for receive-side transaction tuple
 Why: a fast path using `jsonb_array(jsonb_array(...))` for one-write/no-read tuples looked cleaner but measured slower across the canonical receive samples. The extra CTE columns and SQLite constructor calls cost more than parsing the tiny JSON string.
 
 Scope impact: the uncommitted code experiment was reverted.
+
+## Fri May 29 03:31:18 PDT 2026 - Carry Text Snapshot Depth Through Batches
+
+Decision: batched deep-text writes now load the current depth-since-snapshot once and update that counter in memory as each text op is inserted.
+
+Why: append/document batches are linear by construction, so querying the parent op and snapshot table on every edit duplicated work the batch already knows. This keeps the same op rows and snapshot cadence while making the sidecar behave more like a real runtime append/edit stream.
+
+Scope impact: standalone text-op APIs still compute depth from storage. Canonical append/document write time improved materially in the first sample; canvas is unaffected except for ordinary run noise.

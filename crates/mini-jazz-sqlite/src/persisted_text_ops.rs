@@ -94,11 +94,29 @@ pub(crate) fn append_with_materialized(
     text: &str,
     snapshot_every: usize,
 ) -> Result<TextRoot> {
+    let depth_since_snapshot = next_depth_since_snapshot(conn, root)?;
+    append_with_materialized_at_depth(
+        conn,
+        root,
+        materialized_text,
+        text,
+        snapshot_every,
+        depth_since_snapshot,
+    )
+}
+
+pub(crate) fn append_with_materialized_at_depth(
+    conn: &Connection,
+    root: TextRoot,
+    materialized_text: &mut String,
+    text: &str,
+    snapshot_every: usize,
+    depth_since_snapshot: i64,
+) -> Result<TextRoot> {
     if text.is_empty() {
         return Ok(root);
     }
     let start_byte = materialized_text.len();
-    let depth_since_snapshot = next_depth_since_snapshot(conn, root)?;
     conn.prepare_cached(
         "INSERT INTO jazz_text_op
            (parent_op_id, start_byte, delete_bytes, insert_text, resulting_len, depth_since_snapshot)
@@ -128,6 +146,34 @@ pub(crate) fn replace_range_with_materialized(
     insert: &str,
     snapshot_every: usize,
 ) -> Result<TextRoot> {
+    let depth_since_snapshot = next_depth_since_snapshot(conn, root)?;
+    replace_range_with_materialized_at_depth(
+        conn,
+        root,
+        materialized_text,
+        TextRangeEdit {
+            start_byte,
+            delete_bytes,
+            insert,
+        },
+        snapshot_every,
+        depth_since_snapshot,
+    )
+}
+
+pub(crate) fn replace_range_with_materialized_at_depth(
+    conn: &Connection,
+    root: TextRoot,
+    materialized_text: &mut String,
+    range: TextRangeEdit<'_>,
+    snapshot_every: usize,
+    depth_since_snapshot: i64,
+) -> Result<TextRoot> {
+    let TextRangeEdit {
+        start_byte,
+        delete_bytes,
+        insert,
+    } = range;
     if start_byte > materialized_text.len() || start_byte + delete_bytes > materialized_text.len() {
         return Err(Error::new("text op replace range out of bounds"));
     }
@@ -138,7 +184,6 @@ pub(crate) fn replace_range_with_materialized(
             "text op replace range must use UTF-8 boundaries",
         ));
     }
-    let depth_since_snapshot = next_depth_since_snapshot(conn, root)?;
     conn.prepare_cached(
         "INSERT INTO jazz_text_op
            (parent_op_id, start_byte, delete_bytes, insert_text, resulting_len, depth_since_snapshot)
@@ -158,6 +203,25 @@ pub(crate) fn replace_range_with_materialized(
         snapshot_known_text(conn, Some(op_id), materialized_text)?;
     }
     Ok(Some(op_id))
+}
+
+pub(crate) struct TextRangeEdit<'a> {
+    pub(crate) start_byte: usize,
+    pub(crate) delete_bytes: usize,
+    pub(crate) insert: &'a str,
+}
+
+pub(crate) fn current_depth_since_snapshot(conn: &Connection, root: TextRoot) -> Result<i64> {
+    let Some(root_op_id) = root else {
+        return Ok(0);
+    };
+    if snapshot_exists(conn, root_op_id)? {
+        return Ok(0);
+    }
+    conn.prepare_cached("SELECT depth_since_snapshot FROM jazz_text_op WHERE op_id = ?")?
+        .query_row(params![root_op_id], |row| row.get::<_, i64>(0))
+        .optional()?
+        .ok_or_else(|| Error::new("unknown text op root"))
 }
 
 pub fn replace_range(
